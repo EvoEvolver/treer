@@ -35,11 +35,31 @@ curl -fsSL 'http://PROXY_HOST:8787/install.sh?workspace=default' | sh
 ```
 
 The script detects the target platform, installs both binaries to
-`~/.local/bin`, and starts the agent server in the background using the current
-directory as its workspace root. Override `TREER_WORKSPACE_ROOT`,
-`TREER_INSTALL_DIR`, `TREER_STATE_DIR`, or `TREER_AGENT_SERVER_LISTEN` when
-needed. Logs and the daemon PID are stored under `~/.local/state/treer` by
-default.
+`~/.local/bin/treer` and `~/.local/libexec/treer/treer-agent-server`, then
+registers and starts a host service using the current directory as its workspace
+root. Linux uses a systemd user service with restart and linger enabled; macOS
+uses a per-user LaunchAgent with `KeepAlive`. Override `TREER_WORKSPACE_ROOT`,
+`TREER_INSTALL_DIR`, `TREER_AGENT_SERVER_INSTALL_DIR`, `TREER_STATE_DIR`, or
+`TREER_AGENT_SERVER_LISTEN` when needed.
+
+The host administrator manages the service through the agent-server binary, not
+the agent-facing `treer` command:
+
+```bash
+server="$HOME/.local/libexec/treer/treer-agent-server"
+"$server" service status
+"$server" service logs --follow
+"$server" service stop
+"$server" service start
+"$server" service restart
+"$server" service uninstall
+```
+
+Add `--workspace WORKSPACE_ID` after `service` when managing a workspace other
+than `default`. On Linux, installation prints an actionable warning if systemd
+linger cannot be enabled automatically. On macOS, a LaunchAgent starts at user
+login; an always-on pre-login LaunchDaemon would require a separate privileged
+installation flow.
 
 ## Users and invitations
 

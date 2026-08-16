@@ -249,6 +249,7 @@ artifact_base={artifact_base}
 workspace={workspace}
 workspace_root=${{TREER_WORKSPACE_ROOT:-$(pwd)}}
 install_dir=${{TREER_INSTALL_DIR:-"${{HOME:?HOME is required}}/.local/bin"}}
+server_dir=${{TREER_AGENT_SERVER_INSTALL_DIR:-"${{HOME}}/.local/libexec/treer"}}
 state_dir=${{TREER_STATE_DIR:-"${{HOME}}/.local/state/treer"}}
 listen=${{TREER_AGENT_SERVER_LISTEN:-127.0.0.1:8790}}
 
@@ -269,7 +270,7 @@ else
   exit 1
 fi
 
-mkdir -p "$install_dir" "$state_dir"
+mkdir -p "$install_dir" "$server_dir" "$state_dir"
 tmp_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/treer-install.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
@@ -278,39 +279,39 @@ fetch "$artifact_base/$platform/treer" "$tmp_dir/treer"
 fetch "$artifact_base/$platform/treer-agent-server" "$tmp_dir/treer-agent-server"
 chmod 755 "$tmp_dir/treer" "$tmp_dir/treer-agent-server"
 mv "$tmp_dir/treer" "$install_dir/treer"
-mv "$tmp_dir/treer-agent-server" "$install_dir/treer-agent-server"
+mv "$tmp_dir/treer-agent-server" "$server_dir/treer-agent-server"
 
 workspace_key=$(printf '%s' "$workspace" | tr -c 'A-Za-z0-9_.-' '_')
 pid_file="$state_dir/agent-server-$workspace_key.pid"
-log_file="$state_dir/agent-server-$workspace_key.log"
 if [ -f "$pid_file" ]; then
   old_pid=$(cat "$pid_file" 2>/dev/null || true)
   if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "treer: agent server is already running (pid $old_pid)"
-    echo "treer: log $log_file"
-    exit 0
+    old_command=$(ps -p "$old_pid" -o command= 2>/dev/null || true)
+    case "$old_command" in
+      *treer-agent-server*)
+        echo "treer: stopping legacy agent server (pid $old_pid)"
+        kill "$old_pid" 2>/dev/null || true
+        sleep 1
+        if kill -0 "$old_pid" 2>/dev/null; then
+          echo "treer: legacy agent server did not stop (pid $old_pid)" >&2
+          exit 1
+        fi
+        ;;
+      *) echo "treer: ignoring stale agent server pid $old_pid" ;;
+    esac
   fi
+  rm -f "$pid_file"
 fi
 
-nohup "$install_dir/treer-agent-server" \
+TREER_STATE_DIR="$state_dir" "$server_dir/treer-agent-server" \
+  service --workspace "$workspace" install \
   --proxy "$proxy_url" \
-  --workspace "$workspace" \
   --root "$workspace_root" \
-  --listen "$listen" \
-  >"$log_file" 2>&1 </dev/null &
-agent_pid=$!
-printf '%s\n' "$agent_pid" >"$pid_file"
-sleep 1
-if ! kill -0 "$agent_pid" 2>/dev/null; then
-  echo "treer: agent server failed to start" >&2
-  tail -n 20 "$log_file" >&2 || true
-  exit 1
-fi
+  --listen "$listen"
 
-echo "treer: agent server started (pid $agent_pid)"
 echo "treer: workspace $workspace at $workspace_root"
-echo "treer: log $log_file"
 echo "treer: add $install_dir to PATH to use the treer command"
+echo "treer: manage the host service with $server_dir/treer-agent-server service --workspace $workspace <status|stop|start|restart|logs|uninstall>"
 "#,
         proxy_url = shell_quote(public_url.as_str()),
         artifact_base = shell_quote(artifact_base.as_str().trim_end_matches('/')),
@@ -691,9 +692,12 @@ mod tests {
         let script = render_install_script(&config.public_url, "default");
         assert!(script.starts_with("#!/bin/sh\nset -eu\n"));
         assert!(script.contains("platform=linux-aarch64"));
+        assert!(script.contains(".local/libexec/treer"));
+        assert!(script.contains("service --workspace \"$workspace\" install"));
         assert!(script.contains("--proxy \"$proxy_url\""));
         assert!(script.contains("workspace='default'"));
         assert!(script.contains("https://treer.example/artifacts"));
+        assert!(!script.contains("nohup"));
     }
 
     #[test]

@@ -1,11 +1,12 @@
 mod local_api;
 mod proxy;
+mod service;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use tracing::info;
 use treer_agent_runtime::AgentRuntime;
 use url::Url;
@@ -14,6 +15,70 @@ use uuid::Uuid;
 #[derive(Debug, Parser)]
 #[command(name = "treer-agent-server", about = "Treer machine agent runtime")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    server: ServerArgs,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    #[command(hide = true, about = "Run from a saved service configuration")]
+    Run {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    #[command(about = "Manage the host agent-server service")]
+    Service(ServiceArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+struct ServiceArgs {
+    #[arg(long, default_value = "default", global = true)]
+    workspace: String,
+    #[command(subcommand)]
+    command: ServiceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    #[command(about = "Install and start the service")]
+    Install(ServiceInstallArgs),
+    #[command(about = "Start the installed service")]
+    Start,
+    #[command(about = "Stop the installed service")]
+    Stop,
+    #[command(about = "Restart the installed service")]
+    Restart,
+    #[command(about = "Show service-manager status")]
+    Status,
+    #[command(about = "Show service logs")]
+    Logs {
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+        #[arg(long)]
+        follow: bool,
+    },
+    #[command(about = "Stop and remove the installed service")]
+    Uninstall,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ServiceInstallArgs {
+    #[arg(long, env = "TREER_PROXY_URL", default_value = "http://127.0.0.1:8787")]
+    proxy: Url,
+    #[arg(long, env = "TREER_WORKSPACE_ROOT", default_value = ".")]
+    root: PathBuf,
+    #[arg(
+        long,
+        env = "TREER_AGENT_SERVER_LISTEN",
+        default_value = "127.0.0.1:8790"
+    )]
+    listen: SocketAddr,
+}
+
+#[derive(Debug, Clone, ClapArgs)]
+struct ServerArgs {
     #[arg(long, env = "TREER_PROXY_URL", default_value = "http://127.0.0.1:8787")]
     proxy: Url,
     #[arg(long, env = "TREER_WORKSPACE_ID", default_value = "default")]
@@ -39,6 +104,30 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
+    match args.command {
+        None => run_server(args.server).await,
+        Some(Command::Run { config }) => {
+            let config = service::ServiceConfig::load(&config)?;
+            run_server(ServerArgs {
+                proxy: Url::parse(&config.proxy).context("invalid proxy URL in service config")?,
+                workspace: config.workspace,
+                server_id: None,
+                root: config.root,
+                listen: config
+                    .listen
+                    .parse()
+                    .context("invalid listen address in service config")?,
+            })
+            .await
+        }
+        Some(Command::Service(service_args)) => {
+            run_service_command(service_args)?;
+            Ok(())
+        }
+    }
+}
+
+async fn run_server(args: ServerArgs) -> Result<()> {
     let root = std::fs::canonicalize(&args.root)
         .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
     let server_id = match args.server_id {
@@ -84,6 +173,24 @@ async fn main() -> Result<()> {
     let result = axum::serve(listener, app).await.context("local API failed");
     proxy_task.abort();
     result
+}
+
+fn run_service_command(args: ServiceArgs) -> Result<()> {
+    match args.command {
+        ServiceCommand::Install(install) => service::install(service::ServiceConfig {
+            proxy: install.proxy.to_string(),
+            workspace: args.workspace,
+            root: std::fs::canonicalize(&install.root)
+                .with_context(|| format!("invalid workspace root {}", install.root.display()))?,
+            listen: install.listen.to_string(),
+        }),
+        ServiceCommand::Start => service::start(&args.workspace),
+        ServiceCommand::Stop => service::stop(&args.workspace),
+        ServiceCommand::Restart => service::restart(&args.workspace),
+        ServiceCommand::Status => service::status(&args.workspace),
+        ServiceCommand::Logs { lines, follow } => service::logs(&args.workspace, lines, follow),
+        ServiceCommand::Uninstall => service::uninstall(&args.workspace),
+    }
 }
 
 fn normalize_http_url(mut url: Url) -> Result<Url> {
@@ -136,7 +243,19 @@ fn load_or_create_server_id(root: &Path) -> Result<String> {
 }
 
 fn sibling_treer_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("TREER_BIN").map(PathBuf::from) {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
     let executable = std::env::current_exe().ok()?;
     let candidate = executable.with_file_name(format!("treer{}", std::env::consts::EXE_SUFFIX));
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    let local_dir = executable.parent()?.parent()?.parent()?;
+    let candidate = local_dir
+        .join("bin")
+        .join(format!("treer{}", std::env::consts::EXE_SUFFIX));
     candidate.is_file().then_some(candidate)
 }
