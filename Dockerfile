@@ -5,9 +5,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY skills ./skills
 COPY web ./web
-RUN --mount=type=cache,id=treer-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=treer-target,target=/app/target \
-    set -eu; \
+RUN set -eu; \
     cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
     case "$(uname -m)" in \
       x86_64|amd64) platform=linux-x86_64 ;; \
