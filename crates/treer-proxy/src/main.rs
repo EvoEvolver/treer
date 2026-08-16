@@ -34,7 +34,14 @@ struct Args {
     )]
     artifacts_dir: PathBuf,
     #[arg(long, env = "ADMIN_PASSWORD")]
-    admin_password: String,
+    admin_password: Option<String>,
+    #[arg(
+        long,
+        env = "TREER_DISABLE_AUTH",
+        default_value_t = false,
+        help = "Disable login and use a local administrator session"
+    )]
+    disable_auth: bool,
     #[arg(long, env = "TREER_DATABASE_PATH")]
     database_path: Option<PathBuf>,
     #[arg(long, env = "RAILWAY_PUBLIC_DOMAIN", hide = true)]
@@ -52,9 +59,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
-    if args.admin_password.is_empty() {
-        anyhow::bail!("ADMIN_PASSWORD must not be empty");
-    }
+    let admin_password = resolve_admin_password(args.admin_password, args.disable_auth)?;
     let listen = listen_address(args.listen, args.port);
     let public_url = public_url(
         args.public_url,
@@ -63,19 +68,32 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let database_path = database_path(args.database_path, args.railway_volume_mount_path);
     let bootstrap = api::BootstrapConfig::new(public_url.clone(), args.artifacts_dir);
-    let auth = auth::AuthStore::open(&database_path, args.admin_password, public_url.clone())
-        .await
-        .with_context(|| format!("failed to open database at {}", database_path.display()))?;
+    let auth = auth::AuthStore::open(
+        &database_path,
+        admin_password,
+        public_url.clone(),
+        args.disable_auth,
+    )
+    .await
+    .with_context(|| format!("failed to open database at {}", database_path.display()))?;
     let state = AppState::new();
     state.ensure_workspace("default", "Default").await;
     let app = api::router(state, bootstrap, auth).layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
-    info!(address = %listen, %public_url, database = %database_path.display(), "treer proxy listening");
+    info!(address = %listen, %public_url, database = %database_path.display(), auth_disabled = args.disable_auth, "treer proxy listening");
     axum::serve(listener, app)
         .await
         .context("proxy server failed")
+}
+
+fn resolve_admin_password(configured: Option<String>, auth_disabled: bool) -> Result<String> {
+    match configured {
+        Some(password) if !password.is_empty() => Ok(password),
+        _ if auth_disabled => Ok(String::new()),
+        _ => anyhow::bail!("ADMIN_PASSWORD must not be empty unless --disable-auth is set"),
+    }
 }
 
 fn listen_address(configured: Option<SocketAddr>, port: Option<u16>) -> SocketAddr {
@@ -168,5 +186,15 @@ mod tests {
         )
         .expect("public URL");
         assert_eq!(url.as_str(), "https://treer-production.up.railway.app/");
+    }
+
+    #[test]
+    fn local_auth_bypass_does_not_require_an_admin_password() {
+        assert_eq!(
+            resolve_admin_password(None, true).expect("local bypass"),
+            ""
+        );
+        assert!(resolve_admin_password(None, false).is_err());
+        assert!(resolve_admin_password(Some(String::new()), false).is_err());
     }
 }

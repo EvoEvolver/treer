@@ -25,6 +25,7 @@ pub struct AuthStore {
     pool: SqlitePool,
     admin_password: Arc<str>,
     public_url: Url,
+    disabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +53,7 @@ impl AuthStore {
         path: &Path,
         admin_password: String,
         public_url: Url,
+        disabled: bool,
     ) -> anyhow::Result<Self> {
         if let Some(parent) = path
             .parent()
@@ -73,6 +75,7 @@ impl AuthStore {
             pool,
             admin_password: admin_password.into(),
             public_url,
+            disabled,
         };
         store.migrate().await?;
         Ok(store)
@@ -89,6 +92,7 @@ impl AuthStore {
             pool,
             admin_password: admin_password.to_string().into(),
             public_url: Url::parse("https://treer.example/").expect("valid URL"),
+            disabled: false,
         };
         store.migrate().await.expect("database migration");
         store
@@ -330,6 +334,13 @@ async fn authenticate_request(
     auth: &AuthStore,
     headers: &HeaderMap,
 ) -> Result<CurrentSession, AuthFailure> {
+    if auth.disabled {
+        return Ok(CurrentSession {
+            token: "local".to_string(),
+            username: "local".to_string(),
+            is_admin: true,
+        });
+    }
     let token = cookie_value(headers, SESSION_COOKIE).ok_or_else(|| {
         AuthFailure::unauthorized("authentication_required", "authentication required")
     })?;
@@ -568,5 +579,16 @@ mod tests {
             cookie_value(&headers, SESSION_COOKIE).as_deref(),
             Some("abc123")
         );
+    }
+
+    #[tokio::test]
+    async fn disabled_auth_injects_a_local_administrator() {
+        let mut store = AuthStore::in_memory("owner-password").await;
+        store.disabled = true;
+        let session = authenticate_request(&store, &HeaderMap::new())
+            .await
+            .expect("local session");
+        assert_eq!(session.username, "local");
+        assert!(session.is_admin);
     }
 }

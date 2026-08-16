@@ -16,10 +16,15 @@ Start the proxy and web control plane:
 
 ```bash
 just stage-artifacts
-ADMIN_PASSWORD='choose-a-password' cargo run -p treer-proxy -- \
+cargo run -p treer-proxy -- \
+  --disable-auth \
   --listen 0.0.0.0:8787 \
   --public-url http://PROXY_HOST:8787
 ```
+
+`--disable-auth` is intended for local testing. It skips the login screen and
+uses a local administrator identity. Omit it and set `ADMIN_PASSWORD` for shared
+or deployed servers.
 
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
 places the current platform's `treer-agent-host`, `treer-agent-server`, and
