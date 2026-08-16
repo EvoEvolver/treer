@@ -5,8 +5,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY skills ./skills
 COPY web ./web
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,id=treer-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=treer-target,target=/app/target \
     set -eu; \
     cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
     case "$(uname -m)" in \
@@ -32,7 +32,6 @@ COPY --from=builder /out/dist /app/dist
 
 ENV TREER_ARTIFACTS_DIR=/app/dist
 ENV TREER_DATABASE_PATH=/data/treer.db
-VOLUME ["/data"]
 EXPOSE 8080
 
 ENTRYPOINT ["treer-proxy"]
