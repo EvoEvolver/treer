@@ -1,3 +1,5 @@
+mod controller;
+mod host_client;
 mod local_api;
 mod proxy;
 mod service;
@@ -8,9 +10,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use tracing::info;
-use treer_agent_runtime::AgentRuntime;
 use url::Url;
 use uuid::Uuid;
+
+use controller::ControllerRuntime;
+use host_client::HostClient;
 
 #[derive(Debug, Parser)]
 #[command(name = "treer-agent-server", about = "Treer machine agent runtime")]
@@ -50,6 +54,8 @@ enum ServiceCommand {
     Stop,
     #[command(about = "Restart the installed service")]
     Restart,
+    #[command(about = "Hot restart only the replaceable Controller")]
+    RestartController,
     #[command(about = "Show service-manager status")]
     Status,
     #[command(about = "Show service logs")]
@@ -93,6 +99,8 @@ struct ServerArgs {
         default_value = "127.0.0.1:8790"
     )]
     listen: SocketAddr,
+    #[arg(long, env = "TREER_HOST_SOCKET", default_value = ".treer/host.sock")]
+    host_socket: PathBuf,
 }
 
 #[tokio::main]
@@ -117,6 +125,7 @@ async fn main() -> Result<()> {
                     .listen
                     .parse()
                     .context("invalid listen address in service config")?,
+                host_socket: config.host_socket,
             })
             .await
         }
@@ -138,14 +147,18 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| server_id.clone());
     let agent_server_url = format!("http://127.0.0.1:{}", args.listen.port());
-    let runtime = AgentRuntime::new(
-        &args.workspace,
-        &server_id,
+    let (host, host_events) = HostClient::connect(&args.host_socket).await?;
+    let sync = host.sync(std::collections::BTreeMap::new()).await?;
+    let (runtime, mut host_disconnected) = ControllerRuntime::from_sync(
+        host,
+        sync,
+        host_events,
+        args.workspace.clone(),
+        server_id.clone(),
         agent_server_url,
         sibling_treer_binary(),
-        &root,
     )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    .map_err(|error| anyhow::anyhow!(error.message))?;
     let proxy_http = normalize_http_url(args.proxy.clone())?;
     let proxy_ws = agent_websocket_url(args.proxy)?;
     let server = proxy::server_info(
@@ -170,23 +183,35 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         root = %root.display(),
         "treer agent server listening"
     );
-    let result = axum::serve(listener, app).await.context("local API failed");
+    let result = tokio::select! {
+        result = axum::serve(listener, app) => result.context("local API failed"),
+        changed = host_disconnected.changed() => {
+            changed.context("host disconnect watcher closed")?;
+            anyhow::bail!("host connection closed")
+        }
+    };
     proxy_task.abort();
     result
 }
 
 fn run_service_command(args: ServiceArgs) -> Result<()> {
     match args.command {
-        ServiceCommand::Install(install) => service::install(service::ServiceConfig {
-            proxy: install.proxy.to_string(),
-            workspace: args.workspace,
-            root: std::fs::canonicalize(&install.root)
-                .with_context(|| format!("invalid workspace root {}", install.root.display()))?,
-            listen: install.listen.to_string(),
-        }),
+        ServiceCommand::Install(install) => {
+            let host_socket = service::host_socket_path(&args.workspace)?;
+            service::install(service::ServiceConfig {
+                proxy: install.proxy.to_string(),
+                workspace: args.workspace,
+                root: std::fs::canonicalize(&install.root).with_context(|| {
+                    format!("invalid workspace root {}", install.root.display())
+                })?,
+                listen: install.listen.to_string(),
+                host_socket,
+            })
+        }
         ServiceCommand::Start => service::start(&args.workspace),
         ServiceCommand::Stop => service::stop(&args.workspace),
         ServiceCommand::Restart => service::restart(&args.workspace),
+        ServiceCommand::RestartController => service::restart_controller(&args.workspace),
         ServiceCommand::Status => service::status(&args.workspace),
         ServiceCommand::Logs { lines, follow } => service::logs(&args.workspace, lines, follow),
         ServiceCommand::Uninstall => service::uninstall(&args.workspace),

@@ -1,21 +1,20 @@
 [package]
-name = "treer-agent-runtime"
+name = "treer-agent-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-base64.workspace = true
-chrono.workspace = true
-portable-pty.workspace = true
-thiserror.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+treer-agent-runtime = { path = "../treer-agent-runtime" }
 treer-host-protocol = { path = "../treer-host-protocol" }
 uuid.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

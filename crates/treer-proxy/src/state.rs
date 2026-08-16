@@ -22,7 +22,7 @@ pub struct AppState {
 struct Inner {
     workspaces: RwLock<HashMap<String, WorkspaceState>>,
     connections: RwLock<HashMap<ServerKey, ServerConnection>>,
-    pending: Mutex<HashMap<String, oneshot::Sender<CommandResult>>>,
+    pending: Mutex<HashMap<String, PendingCommand>>,
     terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
     events: broadcast::Sender<WorkspaceEvent>,
 }
@@ -37,6 +37,12 @@ struct ServerKey {
 struct ServerConnection {
     connection_id: Uuid,
     outgoing: mpsc::UnboundedSender<String>,
+}
+
+struct PendingCommand {
+    server: ServerKey,
+    encoded: String,
+    result: oneshot::Sender<CommandResult>,
 }
 
 struct TerminalSession {
@@ -228,6 +234,8 @@ impl AppState {
             },
         )
         .await?;
+        self.resend_pending(&workspace_id, &event_server.server_id)
+            .await;
         Ok(())
     }
 
@@ -373,11 +381,14 @@ impl AppState {
                 ProtocolError::new("encode_error", format!("failed to encode command: {err}"))
             })?;
         let (result_tx, result_rx) = oneshot::channel();
-        self.inner
-            .pending
-            .lock()
-            .await
-            .insert(command_id.clone(), result_tx);
+        self.inner.pending.lock().await.insert(
+            command_id.clone(),
+            PendingCommand {
+                server: key,
+                encoded: encoded.clone(),
+                result: result_tx,
+            },
+        );
         if outgoing.send(encoded).is_err() {
             self.inner.pending.lock().await.remove(&command_id);
             return Err(ProtocolError::new("server_offline", server_id));
@@ -408,8 +419,37 @@ impl AppState {
     }
 
     pub async fn complete_command(&self, result: CommandResult) {
-        if let Some(sender) = self.inner.pending.lock().await.remove(&result.command_id) {
-            let _ = sender.send(result);
+        if let Some(pending) = self.inner.pending.lock().await.remove(&result.command_id) {
+            let _ = pending.result.send(result);
+        }
+    }
+
+    async fn resend_pending(&self, workspace_id: &str, server_id: &str) {
+        let key = ServerKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        };
+        let Some(outgoing) = self
+            .inner
+            .connections
+            .read()
+            .await
+            .get(&key)
+            .map(|connection| connection.outgoing.clone())
+        else {
+            return;
+        };
+        let commands = self
+            .inner
+            .pending
+            .lock()
+            .await
+            .values()
+            .filter(|pending| pending.server == key)
+            .map(|pending| pending.encoded.clone())
+            .collect::<Vec<_>>();
+        for command in commands {
+            let _ = outgoing.send(command);
         }
     }
 
@@ -766,6 +806,20 @@ mod tests {
     use super::*;
     use treer_protocol::AgentStatus;
 
+    fn test_server() -> ServerInfo {
+        let now = Utc::now();
+        ServerInfo {
+            server_id: "server".to_string(),
+            workspace_id: "alpha".to_string(),
+            hostname: "test-host".to_string(),
+            root: "/tmp".to_string(),
+            labels: Default::default(),
+            status: ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        }
+    }
+
     fn test_agent(agent_id: &str, name: &str) -> AgentInfo {
         let now = Utc::now();
         AgentInfo {
@@ -849,5 +903,89 @@ mod tests {
             .await
             .expect_err("duplicate names must fail");
         assert_eq!(error.code, "agent_ambiguous");
+    }
+
+    #[tokio::test]
+    async fn pending_command_is_resent_after_controller_snapshot() {
+        let state = AppState::new();
+        let server = test_server();
+        let first_connection = Uuid::new_v4();
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), first_connection, first_tx)
+            .await
+            .expect("register first controller");
+
+        let waiting_state = state.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_state
+                .send_command(
+                    "alpha",
+                    "server",
+                    AgentCommand::Read {
+                        agent_id: "agent-1".to_string(),
+                        lines: None,
+                    },
+                )
+                .await
+        });
+        let first: ProxyMessage =
+            serde_json::from_str(&first_rx.recv().await.expect("first command should be sent"))
+                .expect("decode first command");
+        let ProxyMessage::Command {
+            envelope: first_envelope,
+        } = first
+        else {
+            panic!("expected command message");
+        };
+
+        state
+            .disconnect_server("alpha", "server", first_connection)
+            .await;
+        let second_connection = Uuid::new_v4();
+        let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), second_connection, second_tx)
+            .await
+            .expect("register replacement controller");
+        state
+            .apply_snapshot(
+                second_connection,
+                AgentServerSnapshot {
+                    server,
+                    agents: Vec::new(),
+                },
+            )
+            .await
+            .expect("apply replacement snapshot");
+
+        let second: ProxyMessage = serde_json::from_str(
+            &second_rx
+                .recv()
+                .await
+                .expect("pending command should be resent"),
+        )
+        .expect("decode resent command");
+        let ProxyMessage::Command {
+            envelope: second_envelope,
+        } = second
+        else {
+            panic!("expected resent command message");
+        };
+        assert_eq!(first_envelope.command_id, second_envelope.command_id);
+
+        state
+            .complete_command(CommandResult::success(
+                second_envelope.command_id,
+                serde_json::json!({"replayed": true}),
+            ))
+            .await;
+        assert_eq!(
+            waiting
+                .await
+                .expect("join command task")
+                .expect("command result"),
+            serde_json::json!({"replayed": true})
+        );
     }
 }

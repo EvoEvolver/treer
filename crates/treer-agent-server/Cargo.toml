@@ -14,12 +14,14 @@ futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+strip-ansi-escapes.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 treer-agent-runtime = { path = "../treer-agent-runtime" }
+treer-host-protocol = { path = "../treer-host-protocol" }
 treer-protocol = { path = "../treer-protocol" }
 url.workspace = true
 uuid.workspace = true

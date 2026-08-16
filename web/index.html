@@ -154,7 +154,7 @@
   <script src="/assets/addon-fit.js"></script>
   <script>
     const state = { workspace: 'default', snapshot: null, selected: null, socket: null, user: null };
-    const terminalState = { agentId: null, terminal: null, fit: null, socket: null, input: null, observer: null, resizeTimer: null };
+    const terminalState = { agentId: null, terminal: null, fit: null, socket: null, input: null, observer: null, resizeTimer: null, reconnectTimer: null };
     const $ = id => document.getElementById(id);
     const api = async (path, options) => {
       const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options });
@@ -229,9 +229,9 @@
       terminalState.socket = null;
       if (socket) socket.close();
       terminalState.input?.dispose(); terminalState.observer?.disconnect();
-      clearTimeout(terminalState.resizeTimer);
+      clearTimeout(terminalState.resizeTimer); clearTimeout(terminalState.reconnectTimer);
       terminalState.terminal?.dispose();
-      Object.assign(terminalState, { agentId: null, terminal: null, fit: null, input: null, observer: null, resizeTimer: null });
+      Object.assign(terminalState, { agentId: null, terminal: null, fit: null, input: null, observer: null, resizeTimer: null, reconnectTimer: null });
       $('terminalHost').replaceChildren();
     }
     function openTerminal(agentId) {
@@ -267,6 +267,7 @@
     }
     function connectTerminalSocket(agentId) {
       if (terminalState.agentId !== agentId) return;
+      clearTimeout(terminalState.reconnectTimer);
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
       const terminal = terminalState.terminal;
       const socket = new WebSocket(`${scheme}://${location.host}/api/workspaces/${encodeURIComponent(state.workspace)}/agents/${encodeURIComponent(agentId)}/terminal?cols=${terminal.cols}&rows=${terminal.rows}`);
@@ -275,20 +276,27 @@
         if (terminalState.socket !== socket) return;
         const message = JSON.parse(event.data);
         if (message.type === 'ready') {
+          terminal.reset();
           if (message.replay) terminal.write(decodeBase64(message.replay));
           $('terminalStatus').textContent = 'live'; terminal.focus();
         } else if (message.type === 'output') {
           terminal.write(decodeBase64(message.data));
         } else if (message.type === 'closed') {
-          $('terminalStatus').textContent = 'closed';
-          if (message.reason) terminal.writeln(`\r\n\x1b[31m[treer] ${message.reason}\x1b[0m`);
+          $('terminalStatus').textContent = message.reason === 'agent server disconnected' ? 'reconnecting' : 'closed';
+          if (message.reason && message.reason !== 'agent server disconnected') terminal.writeln(`\r\n\x1b[31m[treer] ${message.reason}\x1b[0m`);
         } else if (message.type === 'error') {
           $('terminalStatus').textContent = 'error';
           terminal.writeln(`\r\n\x1b[31m[treer] ${message.error?.message || 'terminal error'}\x1b[0m`);
         }
       };
       socket.onerror = () => { if (terminalState.socket === socket) $('terminalStatus').textContent = 'error'; };
-      socket.onclose = () => { if (terminalState.socket === socket && $('terminalStatus').textContent !== 'closed') $('terminalStatus').textContent = 'disconnected'; };
+      socket.onclose = () => {
+        if (terminalState.socket !== socket || terminalState.agentId !== agentId) return;
+        const agent = state.snapshot?.agents.find(item => item.agent_id === agentId);
+        if (!agent || ['exited', 'failed'].includes(agent.status)) { $('terminalStatus').textContent = 'closed'; return; }
+        $('terminalStatus').textContent = 'reconnecting';
+        terminalState.reconnectTimer = setTimeout(() => connectTerminalSocket(agentId), 700);
+      };
     }
     function sendTerminalResize() {
       const socket = terminalState.socket; const terminal = terminalState.terminal;

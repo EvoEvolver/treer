@@ -2,7 +2,9 @@
 members = [
   "crates/treer-agent-runtime",
   "crates/treer-agent-server",
+  "crates/treer-agent-host",
   "crates/treer-cli",
+  "crates/treer-host-protocol",
   "crates/treer-protocol",
   "crates/treer-proxy",
 ]

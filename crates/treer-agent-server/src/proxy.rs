@@ -10,12 +10,13 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
-use treer_agent_runtime::AgentRuntime;
 use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
     ProtocolError, ProxyMessage, ServerInfo, ServerStatus, PROTOCOL_VERSION,
 };
 use url::Url;
+
+use crate::controller::ControllerRuntime;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const RESULT_CACHE_LIMIT: usize = 256;
@@ -24,12 +25,12 @@ const RESULT_CACHE_LIMIT: usize = 256;
 pub struct ProxyClient {
     pub proxy_ws: Url,
     pub server: ServerInfo,
-    pub runtime: AgentRuntime,
+    pub runtime: ControllerRuntime,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
 }
 
 impl ProxyClient {
-    pub fn new(proxy_ws: Url, server: ServerInfo, runtime: AgentRuntime) -> Self {
+    pub fn new(proxy_ws: Url, server: ServerInfo, runtime: ControllerRuntime) -> Self {
         Self {
             proxy_ws,
             server,
@@ -137,38 +138,52 @@ impl ProxyClient {
                         ProxyMessage::Registered { .. } => {}
                         ProxyMessage::Error { error } => warn!(code = %error.code, message = %error.message, "proxy rejected a message"),
                         ProxyMessage::Command { envelope } => {
-                            let result = self.execute(envelope);
+                            let result = self.execute(envelope).await;
                             send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
                         }
                         ProxyMessage::TerminalAttach { session_id, agent_id, cols, rows } => {
-                            match self.runtime.terminal_snapshot(&agent_id).and_then(|replay| {
-                                self.runtime.resize(&agent_id, cols, rows)?;
-                                Ok(replay)
-                            }) {
+                            let operation_id = format!("{session_id}:attach");
+                            match self.runtime.terminal_snapshot(&agent_id).await {
                                 Ok(replay) => {
-                                    terminal_sessions.insert(session_id.clone(), agent_id);
-                                    send(&mut outgoing, &AgentServerMessage::TerminalReady {
-                                        session_id,
-                                        replay: BASE64.encode(replay),
-                                    }).await?;
+                                    match self.runtime.resize(&operation_id, &agent_id, cols, rows).await {
+                                        Ok(()) => {
+                                            terminal_sessions.insert(session_id.clone(), agent_id);
+                                            send(&mut outgoing, &AgentServerMessage::TerminalReady {
+                                                session_id,
+                                                replay: BASE64.encode(replay),
+                                            }).await?;
+                                        }
+                                        Err(error) => {
+                                            send(&mut outgoing, &AgentServerMessage::TerminalClosed {
+                                                session_id,
+                                                reason: Some(error.message),
+                                            }).await?;
+                                        }
+                                    }
                                 }
                                 Err(error) => {
                                     send(&mut outgoing, &AgentServerMessage::TerminalClosed {
                                         session_id,
-                                        reason: Some(error.to_string()),
+                                        reason: Some(error.message),
                                     }).await?;
                                 }
                             }
                         }
                         ProxyMessage::TerminalInput { session_id, data } => {
-                            let result = terminal_sessions
-                                .get(&session_id)
-                                .ok_or_else(|| anyhow!("unknown terminal session {session_id}"))
-                                .and_then(|agent_id| {
-                                    let data = BASE64.decode(data).context("invalid terminal input encoding")?;
-                                    self.runtime.write_raw(agent_id, &data).map_err(anyhow::Error::from)?;
-                                    Ok(())
-                                });
+                            let result = match terminal_sessions.get(&session_id) {
+                                Some(agent_id) => match BASE64.decode(data).context("invalid terminal input encoding") {
+                                    Ok(data) => {
+                                        let operation_id = format!("{session_id}:input:{}", uuid::Uuid::new_v4().simple());
+                                        self.runtime
+                                            .write_raw(&operation_id, agent_id, &data)
+                                            .await
+                                            .map(|_| ())
+                                            .map_err(|error| anyhow!(error.message))
+                                    }
+                                    Err(error) => Err(error),
+                                },
+                                None => Err(anyhow!("unknown terminal session {session_id}")),
+                            };
                             if let Err(error) = result {
                                 terminal_sessions.remove(&session_id);
                                 send(&mut outgoing, &AgentServerMessage::TerminalClosed {
@@ -179,11 +194,12 @@ impl ProxyClient {
                         }
                         ProxyMessage::TerminalResize { session_id, cols, rows } => {
                             if let Some(agent_id) = terminal_sessions.get(&session_id) {
-                                if let Err(error) = self.runtime.resize(agent_id, cols, rows) {
+                                let operation_id = format!("{session_id}:resize:{}", uuid::Uuid::new_v4().simple());
+                                if let Err(error) = self.runtime.resize(&operation_id, agent_id, cols, rows).await {
                                     terminal_sessions.remove(&session_id);
                                     send(&mut outgoing, &AgentServerMessage::TerminalClosed {
                                         session_id,
-                                        reason: Some(error.to_string()),
+                                        reason: Some(error.message),
                                     }).await?;
                                 }
                             }
@@ -197,7 +213,7 @@ impl ProxyClient {
         }
     }
 
-    fn execute(&self, envelope: CommandEnvelope) -> CommandResult {
+    async fn execute(&self, envelope: CommandEnvelope) -> CommandResult {
         if envelope.workspace_id != self.server.workspace_id {
             return CommandResult::failure(
                 envelope.command_id,
@@ -216,42 +232,39 @@ impl ProxyClient {
         let result = match envelope.command {
             AgentCommand::Create { agent_id, request } => self
                 .runtime
-                .create(agent_id, request)
+                .create(&command_id, agent_id, request)
+                .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
-                .unwrap_or_else(|err| {
-                    CommandResult::failure(command_id.clone(), err.protocol_error())
-                }),
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
             AgentCommand::Prompt { agent_id, text } => self
                 .runtime
-                .prompt(&agent_id, &text)
+                .prompt(&command_id, &agent_id, &text)
+                .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
-                .unwrap_or_else(|err| {
-                    CommandResult::failure(command_id.clone(), err.protocol_error())
-                }),
-            AgentCommand::Input { agent_id, data } => BASE64
-                .decode(data)
-                .map_err(|error| ProtocolError::new("invalid_input_encoding", error.to_string()))
-                .and_then(|data| {
-                    self.runtime
-                        .write_raw(&agent_id, &data)
-                        .map_err(|error| error.protocol_error())
-                })
-                .map(|agent| CommandResult::success(command_id.clone(), agent))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::Input { agent_id, data } => match BASE64.decode(data) {
+                Ok(data) => self
+                    .runtime
+                    .write_raw(&command_id, &agent_id, &data)
+                    .await
+                    .map(|agent| CommandResult::success(command_id.clone(), agent))
+                    .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+                Err(error) => CommandResult::failure(
+                    command_id.clone(),
+                    ProtocolError::new("invalid_input_encoding", error.to_string()),
+                ),
+            },
             AgentCommand::Read { agent_id, lines } => self
                 .runtime
                 .read(&agent_id, lines)
                 .map(|read| CommandResult::success(command_id.clone(), read))
-                .unwrap_or_else(|err| {
-                    CommandResult::failure(command_id.clone(), err.protocol_error())
-                }),
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
             AgentCommand::Stop { agent_id } => self
                 .runtime
-                .stop(&agent_id)
+                .stop(&command_id, &agent_id)
+                .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
-                .unwrap_or_else(|err| {
-                    CommandResult::failure(command_id.clone(), err.protocol_error())
-                }),
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
         };
         if let Ok(mut cache) = self.command_cache.lock() {
             if cache.len() >= RESULT_CACHE_LIMIT {

@@ -195,7 +195,10 @@ async fn download_artifact(
     Path((platform, binary)): Path<(String, String)>,
 ) -> Result<Response, ApiFailure> {
     if !valid_artifact_component(&platform)
-        || !matches!(binary.as_str(), "treer" | "treer-agent-server")
+        || !matches!(
+            binary.as_str(),
+            "treer" | "treer-agent-host" | "treer-agent-server"
+        )
     {
         return Err(ApiFailure::not_found(
             "artifact_not_found",
@@ -276,9 +279,11 @@ trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
 echo "treer: downloading $platform binaries"
 fetch "$artifact_base/$platform/treer" "$tmp_dir/treer"
+fetch "$artifact_base/$platform/treer-agent-host" "$tmp_dir/treer-agent-host"
 fetch "$artifact_base/$platform/treer-agent-server" "$tmp_dir/treer-agent-server"
-chmod 755 "$tmp_dir/treer" "$tmp_dir/treer-agent-server"
+chmod 755 "$tmp_dir/treer" "$tmp_dir/treer-agent-host" "$tmp_dir/treer-agent-server"
 mv "$tmp_dir/treer" "$install_dir/treer"
+mv "$tmp_dir/treer-agent-host" "$server_dir/treer-agent-host"
 mv "$tmp_dir/treer-agent-server" "$server_dir/treer-agent-server"
 
 workspace_key=$(printf '%s' "$workspace" | tr -c 'A-Za-z0-9_.-' '_')
@@ -693,6 +698,7 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\nset -eu\n"));
         assert!(script.contains("platform=linux-aarch64"));
         assert!(script.contains(".local/libexec/treer"));
+        assert!(script.contains("treer-agent-host"));
         assert!(script.contains("service --workspace \"$workspace\" install"));
         assert!(script.contains("--proxy \"$proxy_url\""));
         assert!(script.contains("workspace='default'"));

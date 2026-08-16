@@ -6,6 +6,7 @@ use std::process::{Command, ExitStatus};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use treer_host_protocol::HostDaemonConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -13,6 +14,7 @@ pub struct ServiceConfig {
     pub workspace: String,
     pub root: PathBuf,
     pub listen: String,
+    pub host_socket: PathBuf,
 }
 
 impl ServiceConfig {
@@ -40,14 +42,40 @@ pub fn install(config: ServiceConfig) -> Result<()> {
     fs::create_dir_all(&paths.state_dir)
         .with_context(|| format!("failed to create {}", paths.state_dir.display()))?;
     config.save(&paths.config)?;
-    platform::install(&paths, &config.workspace)?;
-    println!("treer: agent server service installed and started");
+    let host_config = HostDaemonConfig {
+        socket_path: config.host_socket.clone(),
+        controller_path: paths.executable.clone(),
+        controller_config_path: paths.config.clone(),
+        root: config.root.clone(),
+    };
+    save_json(&host_config, &paths.host_config)?;
+    if !paths.host_executable.is_file() {
+        bail!(
+            "treer-agent-host was not found next to {}",
+            paths.executable.display()
+        );
+    }
+    let host_running = std::os::unix::net::UnixStream::connect(&config.host_socket).is_ok();
+    platform::install(&paths, &config.workspace, !host_running)?;
+    if host_running {
+        restart_controller_at(&paths, &config.host_socket)?;
+        println!("treer: Controller updated without restarting the Host");
+    } else {
+        println!("treer: agent Host service installed and started");
+    }
     println!(
         "treer: status: \"{}\" service --workspace {} status",
         paths.executable.display(),
         config.workspace,
     );
     Ok(())
+}
+
+pub fn host_socket_path(workspace: &str) -> Result<PathBuf> {
+    validate_workspace(workspace)?;
+    Ok(ServicePaths::new(workspace)?
+        .state_dir
+        .join(format!("host-{}.sock", workspace_key(workspace))))
 }
 
 pub fn start(workspace: &str) -> Result<()> {
@@ -65,6 +93,13 @@ pub fn restart(workspace: &str) -> Result<()> {
     platform::restart(&ServicePaths::new(workspace)?, workspace)
 }
 
+pub fn restart_controller(workspace: &str) -> Result<()> {
+    validate_workspace(workspace)?;
+    let paths = ServicePaths::new(workspace)?;
+    let config = ServiceConfig::load(&paths.config)?;
+    restart_controller_at(&paths, &config.host_socket)
+}
+
 pub fn status(workspace: &str) -> Result<()> {
     validate_workspace(workspace)?;
     platform::status(&ServicePaths::new(workspace)?, workspace)
@@ -80,6 +115,7 @@ pub fn uninstall(workspace: &str) -> Result<()> {
     let paths = ServicePaths::new(workspace)?;
     platform::uninstall(&paths, workspace)?;
     remove_if_exists(&paths.config)?;
+    remove_if_exists(&paths.host_config)?;
     println!("treer: agent server service uninstalled");
     Ok(())
 }
@@ -87,7 +123,9 @@ pub fn uninstall(workspace: &str) -> Result<()> {
 #[derive(Debug)]
 struct ServicePaths {
     executable: PathBuf,
+    host_executable: PathBuf,
     config: PathBuf,
+    host_config: PathBuf,
     state_dir: PathBuf,
 }
 
@@ -106,11 +144,14 @@ impl ServicePaths {
             .context("failed to find the treer-agent-server executable")?
             .canonicalize()
             .context("failed to resolve the treer-agent-server executable")?;
+        let host_executable =
+            executable.with_file_name(format!("treer-agent-host{}", std::env::consts::EXE_SUFFIX));
+        let config_dir = config_home.join("treer/agent-servers");
         Ok(Self {
             executable,
-            config: config_home
-                .join("treer/agent-servers")
-                .join(format!("{key}.json")),
+            host_executable,
+            config: config_dir.join(format!("{key}-controller.json")),
+            host_config: config_dir.join(format!("{key}-host.json")),
             state_dir,
         })
     }
@@ -147,6 +188,25 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::write(&temporary, bytes)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
     fs::rename(&temporary, path).with_context(|| format!("failed to replace {}", path.display()))
+}
+
+fn save_json(value: &impl Serialize, path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("configuration path has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let bytes = serde_json::to_vec_pretty(value).context("failed to encode configuration")?;
+    write_atomic(path, &bytes)
+}
+
+fn restart_controller_at(paths: &ServicePaths, socket: &Path) -> Result<()> {
+    run_checked(
+        Command::new(&paths.host_executable)
+            .arg("restart-controller")
+            .arg("--socket")
+            .arg(socket),
+        "treer-agent-host restart-controller",
+    )
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {
@@ -260,7 +320,7 @@ mod platform {
         Ok(config_home.join("systemd/user").join(unit_name(workspace)))
     }
 
-    pub fn install(paths: &ServicePaths, workspace: &str) -> Result<()> {
+    pub fn install(paths: &ServicePaths, workspace: &str, start_host: bool) -> Result<()> {
         let unit_path = unit_path(workspace)?;
         let parent = unit_path
             .parent()
@@ -269,7 +329,7 @@ mod platform {
             .with_context(|| format!("failed to create {}", parent.display()))?;
         write_atomic(
             &unit_path,
-            systemd_unit(&paths.executable, &paths.config, workspace).as_bytes(),
+            systemd_unit(&paths.host_executable, &paths.host_config, workspace).as_bytes(),
         )?;
         run_checked(
             Command::new("systemctl").args(["--user", "daemon-reload"]),
@@ -280,11 +340,13 @@ mod platform {
             Command::new("systemctl").args(["--user", "enable", unit.as_str()]),
             "systemctl --user enable",
         )?;
-        run_checked(
-            Command::new("systemctl").args(["--user", "restart", unit.as_str()]),
-            "systemctl --user restart",
-        )?;
-        enable_linger();
+        if start_host {
+            run_checked(
+                Command::new("systemctl").args(["--user", "restart", unit.as_str()]),
+                "systemctl --user restart",
+            )?;
+            enable_linger();
+        }
         Ok(())
     }
 
@@ -400,7 +462,7 @@ mod platform {
         Ok(format!("{}/{}", domain()?, label(workspace)))
     }
 
-    pub fn install(paths: &ServicePaths, workspace: &str) -> Result<()> {
+    pub fn install(paths: &ServicePaths, workspace: &str, start_host: bool) -> Result<()> {
         let plist_path = plist_path(workspace)?;
         let parent = plist_path
             .parent()
@@ -413,27 +475,30 @@ mod platform {
         write_atomic(
             &plist_path,
             launchd_plist(
-                &paths.executable,
-                &paths.config,
+                &paths.host_executable,
+                &paths.host_config,
                 &label(workspace),
                 &log_path,
                 &log_path,
             )
             .as_bytes(),
         )?;
-        let domain = domain()?;
-        let target = service_target(workspace)?;
-        let _ = Command::new("launchctl")
-            .args(["bootout", target.as_str()])
-            .status();
-        run_checked(
-            Command::new("launchctl").args([
-                "bootstrap",
-                domain.as_str(),
-                plist_path.to_string_lossy().as_ref(),
-            ]),
-            "launchctl bootstrap",
-        )
+        if start_host {
+            let domain = domain()?;
+            let target = service_target(workspace)?;
+            let _ = Command::new("launchctl")
+                .args(["bootout", target.as_str()])
+                .status();
+            run_checked(
+                Command::new("launchctl").args([
+                    "bootstrap",
+                    domain.as_str(),
+                    plist_path.to_string_lossy().as_ref(),
+                ]),
+                "launchctl bootstrap",
+            )?;
+        }
+        Ok(())
     }
 
     pub fn start(_paths: &ServicePaths, workspace: &str) -> Result<()> {
@@ -516,7 +581,7 @@ mod platform {
         bail!("service management is currently supported on Linux and macOS")
     }
 
-    pub fn install(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn install(_paths: &ServicePaths, _workspace: &str, _start_host: bool) -> Result<()> {
         unsupported()
     }
 

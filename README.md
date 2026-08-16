@@ -2,10 +2,10 @@
 
 Treer is a distributed runtime and control plane for coding agents.
 
-Each machine runs a Treer agent server that owns local agent processes and
-terminal sessions. A central proxy server groups machines into logical
-workspaces, aggregates agent state, and routes discovery and control commands
-between them.
+Each machine runs a stable Treer Host that owns local agent processes, PTYs, and
+terminal history. A hot-updatable Controller connects that Host to the central
+Proxy, which groups machines into logical workspaces and routes discovery and
+control commands between them.
 
 The first prototype is intentionally trusted-network only. See [PLAN.md](PLAN.md)
 for scope, architecture, protocol, and delivery milestones.
@@ -22,10 +22,10 @@ ADMIN_PASSWORD='choose-a-password' cargo run -p treer-proxy -- \
 ```
 
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
-places the current platform's `treer-agent-server` and `treer` binaries under
-`dist/<platform>` for the proxy to serve. Release deployments should stage all
-required Linux and macOS platform directories or set `--artifacts-dir` to an
-equivalent artifact tree.
+places the current platform's `treer-agent-host`, `treer-agent-server`, and
+`treer` binaries under `dist/<platform>` for the proxy to serve. Release
+deployments should stage all required Linux and macOS platform directories or
+set `--artifacts-dir` to an equivalent artifact tree.
 
 Open the web UI, select a workspace, and choose **Add machine** to copy its
 bootstrap command:
@@ -34,13 +34,18 @@ bootstrap command:
 curl -fsSL 'http://PROXY_HOST:8787/install.sh?workspace=default' | sh
 ```
 
-The script detects the target platform, installs both binaries to
-`~/.local/bin/treer` and `~/.local/libexec/treer/treer-agent-server`, then
-registers and starts a host service using the current directory as its workspace
-root. Linux uses a systemd user service with restart and linger enabled; macOS
-uses a per-user LaunchAgent with `KeepAlive`. Override `TREER_WORKSPACE_ROOT`,
+The script detects the target platform, installs `treer` to `~/.local/bin` and
+the Host and Controller binaries to `~/.local/libexec/treer`, then registers and
+starts the Host using the current directory as its workspace root. Linux uses a
+systemd user service with restart and linger enabled; macOS uses a per-user
+LaunchAgent with `KeepAlive`. Override `TREER_WORKSPACE_ROOT`,
 `TREER_INSTALL_DIR`, `TREER_AGENT_SERVER_INSTALL_DIR`, `TREER_STATE_DIR`, or
 `TREER_AGENT_SERVER_LISTEN` when needed.
+
+Running the bootstrap command again replaces the installed binaries on disk and
+asks the existing Host process to restart only the Controller. The updated Host
+binary takes effect on the next full service restart. Existing agents, PTYs, and
+buffered terminal output stay alive while the browser reconnects.
 
 The host administrator manages the service through the agent-server binary, not
 the agent-facing `treer` command:
@@ -49,11 +54,16 @@ the agent-facing `treer` command:
 server="$HOME/.local/libexec/treer/treer-agent-server"
 "$server" service status
 "$server" service logs --follow
+"$server" service restart-controller
 "$server" service stop
 "$server" service start
 "$server" service restart
 "$server" service uninstall
 ```
+
+`restart-controller` is the normal hot-update operation and preserves running
+agents. `restart` restarts the long-lived Host itself and therefore terminates
+the agents and PTYs owned by that Host.
 
 Add `--workspace WORKSPACE_ID` after `service` when managing a workspace other
 than `default`. On Linux, installation prints an actionable warning if systemd
@@ -91,17 +101,6 @@ Set `TREER_PROXY_PUBLIC_URL` only when overriding the Railway-generated domain,
 and set `TREER_DATABASE_PATH` only when using a volume mount other than
 `/data`.
 
-For development, an agent server can still be started directly. The workspace
-root is the filesystem boundary for agents launched by that server.
-
-```bash
-cargo run -p treer-agent-server -- \
-  --proxy http://PROXY_HOST:8787 \
-  --workspace default \
-  --root /path/to/workspace \
-  --listen 127.0.0.1:8790
-```
-
 Open `http://PROXY_HOST:8787` to discover servers, create agents, and attach to
 their live terminals. The browser terminal supports ANSI colors, alternate
 screens, cursor movement, per-keystroke input, paste, and dynamic resize.
@@ -109,6 +108,17 @@ Agents inherit `TREER_WORKSPACE_ID`,
 `TREER_SERVER_ID`, `TREER_AGENT_ID`, and `TREER_AGENT_SERVER_URL`; they can use
 the local agent server API to discover or control other agents in the same
 workspace.
+
+## Host and Controller
+
+`treer-agent-host` is the stable process boundary. It understands only raw
+process commands, PTY input/output, resize, stop, and revisioned output replay.
+It does not understand agent kinds, prompts, workspaces, or the Proxy protocol.
+
+`treer-agent-server` is the replaceable Controller. It translates Proxy
+commands, detects agent status, exposes the local API, and rebuilds its full
+snapshot from the Host after every restart. Mutating Host commands carry stable
+operation IDs so a reconnect or retry cannot spawn or stop an agent twice.
 
 ## Agent collaboration
 

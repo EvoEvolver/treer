@@ -5,8 +5,9 @@
 Build an independent distributed coding-agent runtime with these properties:
 
 1. A central proxy server maintains logical workspaces and routes commands.
-2. Every participating machine runs a Treer agent server that directly owns
-   local agent processes, PTYs, output buffers, and lifecycle state.
+2. Every participating machine runs a stable Host that owns local processes,
+   PTYs, output buffers, and lifecycle state, plus a replaceable Controller that
+   speaks the Proxy protocol.
 3. Agent servers and agents can discover the other servers and agents in the
    same Treer workspace, but cannot see resources in another workspace.
 4. A user or agent can create, prompt, inspect, wait for, and stop an agent on
@@ -25,7 +26,7 @@ synchronization, and remote agent creation.
 - Migrating a running PTY or agent process between machines.
 - A shared cross-machine filesystem.
 - Durable exactly-once delivery.
-- Surviving an agent-server restart without restarting its child agents.
+- Surviving a Host process or machine restart without restarting child agents.
 - Automatic load balancing beyond explicit or first-online server selection.
 - Container, VM, or filesystem sandboxing.
 - Migrating an attached terminal session between proxy instances.
@@ -44,16 +45,17 @@ Browser / treer CLI / coding agent
         | state projection |
         +------------------+
            /       |       \
-          WS       WS       WS       agent servers initiate connections
+          WS       WS       WS       Controllers initiate connections
          /         |         \
- +-----------+ +-----------+ +-----------+
- | agent srv | | agent srv | | agent srv |
- | machine A | | machine B | | machine C |
- +-----------+ +-----------+ +-----------+
-       |             |             |
+ +------------+ +------------+ +------------+
+ | Controller | | Controller | | Controller |
+ +------------+ +------------+ +------------+
+       | Unix socket   |              |
+ +------------+ +------------+ +------------+
+ |    Host    | |    Host    | |    Host    |
+ +------------+ +------------+ +------------+
+       |             |              |
   PTY/processes  PTY/processes  PTY/processes
-       |             |             |
-  local agents   local agents   local agents
 ```
 
 Runtime ownership stays on the machine that launches the agent. The proxy stores
@@ -77,42 +79,53 @@ Responsibilities:
 Prototype storage is in memory. Agent servers send a full snapshot after every
 connect, so restarting the proxy reconstructs live state as machines reconnect.
 
-### 4.2 `treer-agent-server`
+### 4.2 `treer-agent-host`
 
-One process runs on each machine and acts as that machine's runtime. It should:
+The Host is the long-lived process boundary on each machine. It should:
+
+- Own PTY masters, child handles, input queues, terminal geometry, and bounded
+  revisioned output buffers.
+- Expose only `sync`, `spawn`, `read`, `write`, `resize`, and `stop` over a
+  versioned Unix-socket protocol.
+- Treat command, arguments, environment, cwd, and metadata as opaque process
+  data; it does not understand Codex, Claude, prompts, workspaces, or Proxy
+  messages.
+- Cache mutation results by `operation_id`, including failures, so retries do
+  not execute twice.
+- Supervise the Controller and replace only that child on a hot restart.
+
+The Host is authoritative for local process and terminal state. If the Host
+exits, its child agents are terminated.
+
+### 4.3 `treer-agent-server`
+
+`treer-agent-server` is the hot-updatable Controller. It should:
 
 - Load or generate a stable `server_id`.
 - Connect outbound to the proxy and reconnect with bounded backoff.
 - Join one configured Treer workspace in v0.
-- Own a workspace-local root directory.
-- Start coding-agent commands inside PTYs.
-- Track process identity, terminal size, status, exit code, and output revision.
-- Maintain bounded recent plain-text and ANSI output buffers.
-- Accept input, prompt, resize, read, wait, and stop operations.
+- Translate agent kinds, prompts, and Proxy commands into Host operations.
+- Detect agent state from replayed and live terminal output.
+- Rebuild its complete state from Host `sync` after every restart.
 - Publish full snapshots and incremental lifecycle events to the proxy.
 - Expose a localhost API used by agents and the local `treer` CLI.
 
-The agent server is the authoritative source for all agents it owns. If the
-agent server exits in v0, its child agents are terminated and the proxy marks
-their last projection offline.
+Controller replacement may briefly disconnect Proxy and browser terminal
+streams, but it does not interrupt the underlying agents or PTYs.
 
-### 4.3 `treer-agent-runtime`
+### 4.4 `treer-agent-runtime`
 
-This library provides the local runtime used by the agent server:
+This library provides the low-level runtime used only by the Host:
 
-- Agent definition registry: kind, executable, base arguments, environment, and
-  status-detection rules.
 - PTY creation, process spawning, input writing, resize, and termination.
-- Terminal byte parsing and bounded output snapshots.
+- Bounded raw terminal chunks with stream epochs and monotonic revisions.
 - Output-activity and process-exit observation.
-- Agent-specific idle, working, and blocked detection.
 - Stable local handles independent from OS process IDs.
 
-Initial supported kinds should be deliberately small: `codex`, `claude`, and a
-`command` kind used by deterministic tests. New kinds are data-driven definitions
-plus focused detector rules instead of branches throughout the server.
+Agent definitions and idle/working/blocked detection live in the Controller so
+they can change without updating the Host.
 
-### 4.4 `treer-cli`
+### 4.5 `treer-cli`
 
 The CLI is both a human tool and the first agent-facing interface:
 
@@ -140,7 +153,7 @@ TREER_AGENT_SERVER_URL
 The local server forwards remote operations over its existing proxy connection.
 An agent therefore does not need the proxy URL or another machine's address.
 
-### 4.5 `treer-web`
+### 4.6 `treer-web`
 
 The web UI combines the operational dashboard with a streamed browser terminal:
 
@@ -238,12 +251,12 @@ is not a separate process state.
 
 ### 6.3 PTY and output
 
-The runtime starts every interactive agent in a PTY so it behaves like it does
-in a terminal. It maintains:
+The Host starts every interactive agent in a PTY so it behaves like it does in
+a terminal. Host and Controller together maintain:
 
-- Raw ANSI ring buffer with a configurable byte limit.
-- Parsed recent-screen text for status detection and API reads.
-- Monotonic `output_revision` incremented when terminal content changes.
+- A bounded raw ANSI chunk ring with a stream epoch and monotonic revision.
+- Replay from a supplied cursor, including explicit gap detection.
+- Controller-owned recent plain text for status detection and API reads.
 - One serialized input queue per agent.
 - Initial terminal geometry followed by live browser-driven resize updates.
 
@@ -266,7 +279,7 @@ command = "sh"
 ```
 
 Definitions may provide argument construction and detector manifests. The
-runtime validates that the executable exists before accepting a create request.
+Controller resolves them to opaque Host spawn requests.
 
 ## 7. Proxy-Agent Server Protocol
 
@@ -299,9 +312,10 @@ The proxy assigns one monotonically increasing projection revision per
 workspace. Browser clients receive an initial workspace snapshot followed by
 revisioned events. On a gap or reconnect, the browser requests a new snapshot.
 
-The agent server keeps a bounded cache of recent `command_id -> result` values.
-Receiving the same command again returns the cached result instead of launching
-a duplicate agent.
+The Proxy retains in-flight envelopes and resends them with the same
+`command_id` after a Controller reconnect. The Host keeps a bounded cache of
+recent mutation results keyed by that ID. Receiving the same command again
+returns the cached success or failure instead of repeating the operation.
 
 ## 8. Treer API
 
@@ -343,11 +357,11 @@ The proxy and target agent server execute `agent.create` as follows:
 1. The proxy validates workspace membership and allocates `agent_id` and
    `command_id`.
 2. The proxy routes the request to the selected online server.
-3. The server resolves the relative cwd under its workspace root.
-4. The runtime loads the requested agent definition and validates the command.
-5. The runtime creates a PTY, injects Treer context variables, and spawns the
-   process.
-6. The server registers the runtime record and publishes `agent.created`.
+3. The Controller resolves the agent definition and builds an opaque Host spawn
+   request with the Treer context variables.
+4. The Host resolves the relative cwd under its configured root.
+5. The Host creates a PTY, spawns the process, and records the initial revision.
+6. The Controller projects the Host record and publishes `agent.created`.
 7. Startup detection moves the agent to `idle`, `blocked`, `unknown`, or
    `failed` and returns the current record.
 8. Later terminal and process changes publish revisioned events.
@@ -393,9 +407,11 @@ treer/
   Cargo.toml
   crates/
     treer-protocol/       shared wire/API models
+    treer-host-protocol/  stable Controller-to-Host socket contract
     treer-proxy/          central HTTP/WebSocket server
-    treer-agent-runtime/  PTY, process, output, and state detection
-    treer-agent-server/   machine daemon and proxy connection
+    treer-agent-runtime/  low-level PTY, process, and output ownership
+    treer-agent-host/     stable daemon and Controller supervisor
+    treer-agent-server/   replaceable Controller and proxy connection
     treer-cli/            human and agent-facing CLI
   skills/treer/           bundled agent collaboration skill
   web/                    small browser dashboard
@@ -415,8 +431,9 @@ Recommended initial libraries:
 - `portable-pty` or an equivalent established PTY library.
 - An established terminal parser for screen snapshots and ANSI handling.
 
-Keep PTY, process, and detector implementation inside `treer-agent-runtime`.
-The proxy and web UI should depend only on Treer resource models.
+Keep PTY and process implementation inside `treer-agent-runtime`. Keep agent
+definitions and detection inside the Controller. The proxy and web UI should
+depend only on Treer resource models.
 
 ## 12. Delivery Milestones
 
@@ -481,6 +498,20 @@ change state and while one agent server disconnects and reconnects.
 Acceptance: the initiating agent completes the workflow using only Treer commands
 and never receives the proxy address or remote machine address.
 
+### Milestone 6: Hot-updatable machine Controller
+
+- Split stable PTY/process ownership into `treer-agent-host`.
+- Add the versioned Unix-socket Host protocol and revisioned replay.
+- Make `treer-agent-server` rebuild state from Host snapshots.
+- Resend in-flight Proxy commands with stable IDs after Controller reconnect.
+- Make the installer update binaries and restart only the Controller when the
+  Host is already online.
+- Reattach browser terminals and replace their screen from Host replay.
+
+Acceptance: restart the Controller while a command and continuous terminal
+output are in flight; the agent PID is unchanged, the command executes once,
+and terminal output resumes from the Host buffer.
+
 ## 13. Prototype Test Matrix
 
 Required automated scenarios:
@@ -492,6 +523,8 @@ Required automated scenarios:
 - Agent-server disconnect marks its projection offline without deleting it.
 - A routed command returns success, timeout, target-offline, and spawn error.
 - Repeated `command_id` returns the cached result instead of creating two agents.
+- A pending Proxy command is resent with the same ID after Controller reconnect.
+- Controller restart preserves the agent PID and replays output without a gap.
 - Runtime output buffers remain bounded under continuous output.
 - Concurrent input to one agent is serialized in arrival order.
 - Process exit produces one terminal lifecycle event with the exit code.

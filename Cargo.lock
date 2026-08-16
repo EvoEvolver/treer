@@ -2061,17 +2061,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "treer-agent-runtime"
+name = "treer-agent-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
+ "futures-util",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "treer-agent-runtime",
+ "treer-host-protocol",
+ "uuid",
+]
+
+[[package]]
+name = "treer-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64",
  "chrono",
  "portable-pty",
- "strip-ansi-escapes",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "treer-protocol",
+ "treer-host-protocol",
+ "uuid",
 ]
 
 [[package]]
@@ -2087,12 +2104,14 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "strip-ansi-escapes",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "treer-agent-runtime",
+ "treer-host-protocol",
  "treer-protocol",
  "url",
  "uuid",
@@ -2112,6 +2131,15 @@ dependencies = [
  "tokio",
  "treer-protocol",
  "url",
+]
+
+[[package]]
+name = "treer-host-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

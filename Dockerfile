@@ -8,7 +8,7 @@ COPY web ./web
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     set -eu; \
-    cargo build --locked --release -p treer-proxy -p treer-agent-server -p treer-cli; \
+    cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
     case "$(uname -m)" in \
       x86_64|amd64) platform=linux-x86_64 ;; \
       aarch64|arm64) platform=linux-aarch64 ;; \
@@ -18,6 +18,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     mkdir -p "/out/dist/$platform"; \
     cp target/release/treer-proxy /out/bin/treer-proxy; \
     cp target/release/treer "/out/dist/$platform/treer"; \
+    cp target/release/treer-agent-host "/out/dist/$platform/treer-agent-host"; \
     cp target/release/treer-agent-server "/out/dist/$platform/treer-agent-server"
 
 FROM debian:bookworm-slim

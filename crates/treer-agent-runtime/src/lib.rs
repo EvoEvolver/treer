@@ -1,163 +1,161 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use chrono::Utc;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::warn;
-use treer_protocol::{
-    AgentInfo, AgentStatus, CreateAgentRequest, ProtocolError, ReadAgentOutputResponse,
+use treer_host_protocol::{
+    HostOutputChunk, HostOutputReplay, HostProcessInfo, HostSpawnRequest, HostWrite, OutputCursor,
 };
+use uuid::Uuid;
 
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
-const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
-const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const BRACKETED_PASTE_ENABLE: &[u8] = b"\x1b[?2004h";
 const BRACKETED_PASTE_DISABLE: &[u8] = b"\x1b[?2004l";
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error("agent {0} already exists")]
-    AgentExists(String),
-    #[error("agent {0} was not found")]
-    AgentNotFound(String),
-    #[error("agent {0} is no longer running")]
-    AgentNotRunning(String),
+    #[error("process {0} already exists")]
+    ProcessExists(String),
+    #[error("process {0} was not found")]
+    ProcessNotFound(String),
+    #[error("process {0} is no longer running")]
+    ProcessNotRunning(String),
     #[error("invalid working directory: {0}")]
     InvalidCwd(String),
-    #[error("invalid agent request: {0}")]
+    #[error("invalid process request: {0}")]
     InvalidRequest(String),
-    #[error("failed to start agent: {0}")]
+    #[error("failed to start process: {0}")]
     Spawn(String),
     #[error("terminal operation failed: {0}")]
     Terminal(String),
 }
 
 impl RuntimeError {
-    pub fn protocol_error(&self) -> ProtocolError {
-        let code = match self {
-            Self::AgentExists(_) => "agent_exists",
-            Self::AgentNotFound(_) => "agent_not_found",
-            Self::AgentNotRunning(_) => "agent_not_running",
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ProcessExists(_) => "process_exists",
+            Self::ProcessNotFound(_) => "process_not_found",
+            Self::ProcessNotRunning(_) => "process_not_running",
             Self::InvalidCwd(_) => "invalid_cwd",
             Self::InvalidRequest(_) => "invalid_request",
             Self::Spawn(_) => "spawn_failed",
             Self::Terminal(_) => "terminal_error",
-        };
-        ProtocolError::new(code, self.to_string())
+        }
     }
 }
 
 #[derive(Clone)]
-pub struct AgentRuntime {
+pub struct HostRuntime {
     inner: Arc<RuntimeInner>,
 }
 
 struct RuntimeInner {
-    workspace_id: String,
-    server_id: String,
-    agent_server_url: String,
-    treer_binary: Option<PathBuf>,
+    host_epoch: String,
     root: PathBuf,
-    agents: RwLock<HashMap<String, Arc<AgentProcess>>>,
-    events: broadcast::Sender<AgentInfo>,
-    terminal_events: broadcast::Sender<TerminalOutput>,
+    processes: RwLock<HashMap<String, Arc<HostProcess>>>,
+    process_events: broadcast::Sender<HostProcessInfo>,
+    output_events: broadcast::Sender<HostOutputChunk>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalOutput {
-    pub agent_id: String,
-    pub data: Vec<u8>,
-}
-
-struct AgentProcess {
-    info: Mutex<AgentInfo>,
+struct HostProcess {
+    info: Mutex<HostProcessInfo>,
     input: std_mpsc::Sender<InputWrite>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     output: Mutex<OutputBuffer>,
-    last_output: Mutex<Instant>,
-    last_metadata_event: Mutex<Instant>,
-    bracketed_paste: AtomicBool,
     stopping: AtomicBool,
 }
 
 struct InputWrite {
     data: Vec<u8>,
     delay: Duration,
-    result: Option<std_mpsc::SyncSender<Result<(), String>>>,
+    result: std_mpsc::SyncSender<Result<(), String>>,
 }
 
 struct OutputBuffer {
-    text: String,
-    raw: Vec<u8>,
+    stream_epoch: String,
+    chunks: VecDeque<HostOutputChunk>,
+    byte_len: usize,
+    next_revision: u64,
     mode_tail: Vec<u8>,
     bracketed_paste: bool,
-    truncated: bool,
 }
 
 impl OutputBuffer {
     fn new() -> Self {
         Self {
-            text: String::new(),
-            raw: Vec::new(),
+            stream_epoch: format!("stream_{}", Uuid::new_v4().simple()),
+            chunks: VecDeque::new(),
+            byte_len: 0,
+            next_revision: 1,
             mode_tail: Vec::new(),
             bracketed_paste: false,
-            truncated: false,
         }
     }
 
-    fn push(&mut self, bytes: &[u8]) {
+    fn push(&mut self, process_id: &str, bytes: &[u8]) -> HostOutputChunk {
         self.update_terminal_modes(bytes);
-        self.raw.extend_from_slice(bytes);
-        if self.raw.len() > OUTPUT_LIMIT_BYTES {
-            let split = self.raw.len().saturating_sub(OUTPUT_LIMIT_BYTES);
-            self.raw.drain(..split);
-            self.truncated = true;
+        let chunk = HostOutputChunk {
+            process_id: process_id.to_string(),
+            stream_epoch: self.stream_epoch.clone(),
+            revision: self.next_revision,
+            data: BASE64.encode(bytes),
+            bracketed_paste: self.bracketed_paste,
+            emitted_at: Utc::now(),
+        };
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.byte_len = self.byte_len.saturating_add(bytes.len());
+        self.chunks.push_back(chunk.clone());
+        while self.byte_len > OUTPUT_LIMIT_BYTES {
+            let Some(removed) = self.chunks.pop_front() else {
+                break;
+            };
+            self.byte_len = self
+                .byte_len
+                .saturating_sub(BASE64.decode(removed.data).map_or(0, |data| data.len()));
         }
-        let plain = strip_ansi_escapes::strip(bytes);
-        self.text.push_str(&String::from_utf8_lossy(&plain));
-        if self.text.len() <= OUTPUT_LIMIT_BYTES {
-            return;
-        }
-        let mut split = self.text.len().saturating_sub(OUTPUT_LIMIT_BYTES);
-        while split < self.text.len() && !self.text.is_char_boundary(split) {
-            split += 1;
-        }
-        self.text.drain(..split);
-        self.truncated = true;
+        chunk
     }
 
-    fn read(&self, lines: Option<usize>) -> (String, bool) {
-        let Some(lines) = lines else {
-            return (self.text.clone(), self.truncated);
-        };
-        if lines == 0 {
-            return (String::new(), self.truncated || !self.text.is_empty());
-        }
-        let line_count = self.text.lines().count();
-        let text = if line_count <= lines {
-            self.text.clone()
-        } else {
-            self.text
-                .lines()
-                .skip(line_count - lines)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        (text, self.truncated || line_count > lines)
+    fn first_revision(&self) -> u64 {
+        self.chunks
+            .front()
+            .map_or(self.next_revision, |chunk| chunk.revision)
     }
 
-    fn raw_snapshot(&self) -> Vec<u8> {
-        self.raw.clone()
+    fn replay(&self, process_id: &str, cursor: Option<&OutputCursor>) -> HostOutputReplay {
+        let first = self.first_revision();
+        let matching_revision = cursor
+            .filter(|cursor| cursor.stream_epoch == self.stream_epoch)
+            .map_or(0, |cursor| cursor.revision);
+        let gap = cursor.is_some_and(|cursor| {
+            cursor.stream_epoch != self.stream_epoch || cursor.revision.saturating_add(1) < first
+        });
+        let chunks = self
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.revision > matching_revision)
+            .cloned()
+            .collect();
+        HostOutputReplay {
+            process_id: process_id.to_string(),
+            stream_epoch: self.stream_epoch.clone(),
+            first_available_revision: first,
+            next_revision: self.next_revision,
+            gap,
+            chunks,
+        }
     }
 
     fn update_terminal_modes(&mut self, bytes: &[u8]) {
@@ -183,83 +181,71 @@ impl OutputBuffer {
     }
 }
 
-impl AgentRuntime {
-    pub fn new(
-        workspace_id: impl Into<String>,
-        server_id: impl Into<String>,
-        agent_server_url: impl Into<String>,
-        treer_binary: Option<PathBuf>,
-        root: impl AsRef<Path>,
-    ) -> Result<Self, RuntimeError> {
+impl HostRuntime {
+    pub fn new(root: impl AsRef<Path>) -> Result<Self, RuntimeError> {
         let root = std::fs::canonicalize(root.as_ref())
-            .map_err(|err| RuntimeError::InvalidCwd(err.to_string()))?;
+            .map_err(|error| RuntimeError::InvalidCwd(error.to_string()))?;
         if !root.is_dir() {
             return Err(RuntimeError::InvalidCwd(format!(
                 "{} is not a directory",
                 root.display()
             )));
         }
-        let (events, _) = broadcast::channel(512);
-        let (terminal_events, _) = broadcast::channel(2048);
+        let (process_events, _) = broadcast::channel(512);
+        let (output_events, _) = broadcast::channel(2048);
         Ok(Self {
             inner: Arc::new(RuntimeInner {
-                workspace_id: workspace_id.into(),
-                server_id: server_id.into(),
-                agent_server_url: agent_server_url.into(),
-                treer_binary,
+                host_epoch: format!("host_{}", Uuid::new_v4().simple()),
                 root,
-                agents: RwLock::new(HashMap::new()),
-                events,
-                terminal_events,
+                processes: RwLock::new(HashMap::new()),
+                process_events,
+                output_events,
             }),
         })
+    }
+
+    pub fn host_epoch(&self) -> &str {
+        &self.inner.host_epoch
     }
 
     pub fn root(&self) -> &Path {
         &self.inner.root
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<AgentInfo> {
-        self.inner.events.subscribe()
+    pub fn subscribe_processes(&self) -> broadcast::Receiver<HostProcessInfo> {
+        self.inner.process_events.subscribe()
     }
 
-    pub fn subscribe_terminal(&self) -> broadcast::Receiver<TerminalOutput> {
-        self.inner.terminal_events.subscribe()
+    pub fn subscribe_output(&self) -> broadcast::Receiver<HostOutputChunk> {
+        self.inner.output_events.subscribe()
     }
 
-    pub fn list(&self) -> Vec<AgentInfo> {
-        let Ok(agents) = self.inner.agents.read() else {
+    pub fn list(&self) -> Vec<HostProcessInfo> {
+        let Ok(processes) = self.inner.processes.read() else {
             return Vec::new();
         };
-        let mut result: Vec<_> = agents
+        let mut result: Vec<_> = processes
             .values()
-            .filter_map(|agent| agent.info.lock().ok().map(|info| info.clone()))
+            .filter_map(|process| process.info.lock().ok().map(|info| info.clone()))
             .collect();
-        result.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        result.sort_by(|left, right| left.process_id.cmp(&right.process_id));
         result
     }
 
-    pub fn create(
-        &self,
-        agent_id: String,
-        request: CreateAgentRequest,
-    ) -> Result<AgentInfo, RuntimeError> {
-        if request.name.trim().is_empty() {
+    pub fn spawn(&self, request: HostSpawnRequest) -> Result<HostProcessInfo, RuntimeError> {
+        if request.process_id.trim().is_empty() || request.command.trim().is_empty() {
             return Err(RuntimeError::InvalidRequest(
-                "agent name cannot be empty".to_string(),
+                "process_id and command must not be empty".to_string(),
             ));
         }
-        if self
-            .inner
-            .agents
-            .read()
-            .ok()
-            .is_some_and(|agents| agents.contains_key(&agent_id))
-        {
-            return Err(RuntimeError::AgentExists(agent_id));
+        let mut processes =
+            self.inner.processes.write().map_err(|_| {
+                RuntimeError::Terminal("process registry lock poisoned".to_string())
+            })?;
+        if processes.contains_key(&request.process_id) {
+            return Err(RuntimeError::ProcessExists(request.process_id));
         }
         let cwd = self.resolve_cwd(&request.cwd)?;
-        let (command, args) = resolve_command(&request)?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -268,205 +254,119 @@ impl AgentRuntime {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|err| RuntimeError::Terminal(err.to_string()))?;
-        let mut builder = CommandBuilder::new(command);
-        builder.args(args);
+            .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
+        let mut builder = CommandBuilder::new(request.command);
+        builder.args(request.args);
         builder.cwd(&cwd);
-        builder.env("TREER_WORKSPACE_ID", &self.inner.workspace_id);
-        builder.env("TREER_SERVER_ID", &self.inner.server_id);
-        builder.env("TREER_AGENT_ID", &agent_id);
-        builder.env("TREER_AGENT_SERVER_URL", &self.inner.agent_server_url);
-        if let Some(treer_binary) = &self.inner.treer_binary {
-            builder.env("TREER_BIN", treer_binary);
-            if let Some(bin_dir) = treer_binary.parent() {
-                let mut paths = vec![bin_dir.to_path_buf()];
-                if let Some(current_path) = std::env::var_os("PATH") {
-                    paths.extend(std::env::split_paths(&current_path));
-                }
-                if let Ok(path) = std::env::join_paths(paths) {
-                    builder.env("PATH", path);
-                }
-            }
+        for (key, value) in request.env {
+            builder.env(key, value);
         }
         let child = pair
             .slave
             .spawn_command(builder)
-            .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+            .map_err(|error| RuntimeError::Spawn(error.to_string()))?;
         drop(pair.slave);
         let pid = child.process_id();
         let reader = pair
             .master
             .try_clone_reader()
-            .map_err(|err| RuntimeError::Terminal(err.to_string()))?;
+            .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
         let writer = pair
             .master
             .take_writer()
-            .map_err(|err| RuntimeError::Terminal(err.to_string()))?;
+            .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
         let (input, input_rx) = std_mpsc::channel();
         spawn_input_writer(writer, input_rx);
+        let output = OutputBuffer::new();
         let now = Utc::now();
-        let info = AgentInfo {
-            agent_id: agent_id.clone(),
-            workspace_id: self.inner.workspace_id.clone(),
-            server_id: self.inner.server_id.clone(),
-            kind: request.kind,
-            name: request.name,
-            cwd: relative_display(&self.inner.root, &cwd),
-            status: AgentStatus::Starting,
+        let info = HostProcessInfo {
+            process_id: request.process_id.clone(),
             pid,
+            cwd: relative_display(&self.inner.root, &cwd),
+            running: true,
             started_at: now,
-            updated_at: now,
+            last_output_at: now,
             exited_at: None,
             exit_code: None,
-            output_revision: 0,
+            stream_epoch: output.stream_epoch.clone(),
+            first_revision: output.first_revision(),
+            next_revision: output.next_revision,
+            bracketed_paste: false,
+            metadata: request.metadata,
         };
-        let process = Arc::new(AgentProcess {
+        let process = Arc::new(HostProcess {
             info: Mutex::new(info.clone()),
             input,
             child: Mutex::new(child),
             master: Mutex::new(pair.master),
-            output: Mutex::new(OutputBuffer::new()),
-            last_output: Mutex::new(Instant::now()),
-            last_metadata_event: Mutex::new(Instant::now()),
-            bracketed_paste: AtomicBool::new(false),
+            output: Mutex::new(output),
             stopping: AtomicBool::new(false),
         });
-        self.inner
-            .agents
-            .write()
-            .map_err(|_| RuntimeError::Terminal("agent registry lock poisoned".to_string()))?
-            .insert(agent_id, Arc::clone(&process));
-        let _ = self.inner.events.send(info.clone());
+        processes.insert(request.process_id, Arc::clone(&process));
+        drop(processes);
+        let _ = self.inner.process_events.send(info.clone());
         spawn_output_reader(Arc::downgrade(&self.inner), Arc::clone(&process), reader);
         spawn_process_monitor(Arc::downgrade(&self.inner), process);
         Ok(info)
     }
 
-    pub fn prompt(&self, agent_id: &str, text: &str) -> Result<AgentInfo, RuntimeError> {
-        if text.is_empty() {
+    pub fn read(
+        &self,
+        process_id: &str,
+        cursor: Option<&OutputCursor>,
+    ) -> Result<HostOutputReplay, RuntimeError> {
+        let process = self.get(process_id)?;
+        process
+            .output
+            .lock()
+            .map_err(|_| RuntimeError::Terminal("output lock poisoned".to_string()))
+            .map(|output| output.replay(process_id, cursor))
+    }
+
+    pub fn write(
+        &self,
+        process_id: &str,
+        writes: &[HostWrite],
+    ) -> Result<HostProcessInfo, RuntimeError> {
+        if writes.is_empty() {
             return Err(RuntimeError::InvalidRequest(
-                "agent prompt cannot be empty".to_string(),
+                "writes must not be empty".to_string(),
             ));
         }
-        let process = self.get_running(agent_id)?;
-        let bracketed = process.bracketed_paste.load(Ordering::Acquire);
-        self.queue_input(
-            &process,
-            encode_prompt_text(text, bracketed),
-            Duration::ZERO,
-            true,
-        )?;
-        self.queue_input(&process, vec![b'\r'], PROMPT_SUBMIT_DELAY, false)?;
-        self.mark_working(&process)
-    }
-
-    pub fn write_raw(&self, agent_id: &str, data: &[u8]) -> Result<AgentInfo, RuntimeError> {
-        let process = self.get_running(agent_id)?;
-        self.queue_input(&process, data.to_vec(), Duration::ZERO, true)?;
-        self.mark_working(&process)
-    }
-
-    fn get_running(&self, agent_id: &str) -> Result<Arc<AgentProcess>, RuntimeError> {
-        let process = self.get(agent_id)?;
-        let is_terminal = process
-            .info
-            .lock()
-            .map_err(|_| RuntimeError::Terminal("agent state lock poisoned".to_string()))?
-            .status
-            .is_terminal();
-        if is_terminal {
-            return Err(RuntimeError::AgentNotRunning(agent_id.to_string()));
-        }
-        Ok(process)
-    }
-
-    fn queue_input(
-        &self,
-        process: &AgentProcess,
-        data: Vec<u8>,
-        delay: Duration,
-        wait_for_result: bool,
-    ) -> Result<(), RuntimeError> {
-        let (result, result_rx) = if wait_for_result {
-            let (sender, receiver) = std_mpsc::sync_channel(1);
-            (Some(sender), Some(receiver))
-        } else {
-            (None, None)
-        };
-        process
-            .input
-            .send(InputWrite {
-                data,
-                delay,
-                result,
-            })
-            .map_err(|_| RuntimeError::Terminal("terminal input queue closed".to_string()))?;
-        if let Some(result_rx) = result_rx {
+        let process = self.get_running(process_id)?;
+        for write in writes {
+            let data = BASE64.decode(&write.data).map_err(|error| {
+                RuntimeError::InvalidRequest(format!("invalid input encoding: {error}"))
+            })?;
+            let (result, result_rx) = std_mpsc::sync_channel(1);
+            process
+                .input
+                .send(InputWrite {
+                    data,
+                    delay: Duration::from_millis(write.delay_ms),
+                    result,
+                })
+                .map_err(|_| RuntimeError::Terminal("terminal input queue closed".to_string()))?;
             result_rx
                 .recv()
                 .map_err(|_| RuntimeError::Terminal("terminal input writer stopped".to_string()))?
                 .map_err(RuntimeError::Terminal)?;
         }
-        Ok(())
-    }
-
-    fn mark_working(&self, process: &AgentProcess) -> Result<AgentInfo, RuntimeError> {
-        self.inner
-            .update_agent(process, |info| info.status = AgentStatus::Working)
-            .ok_or_else(|| RuntimeError::Terminal("agent state lock poisoned".to_string()))
-    }
-
-    pub fn read(
-        &self,
-        agent_id: &str,
-        lines: Option<usize>,
-    ) -> Result<ReadAgentOutputResponse, RuntimeError> {
-        let process = self.get(agent_id)?;
-        let revision = process
+        process
             .info
             .lock()
-            .map_err(|_| RuntimeError::Terminal("agent state lock poisoned".to_string()))?
-            .output_revision;
-        let (text, truncated) = process
-            .output
-            .lock()
-            .map_err(|_| RuntimeError::Terminal("output lock poisoned".to_string()))?
-            .read(lines);
-        Ok(ReadAgentOutputResponse {
-            agent_id: agent_id.to_string(),
-            revision,
-            text,
-            truncated,
-        })
+            .map_err(|_| RuntimeError::Terminal("process state lock poisoned".to_string()))
+            .map(|info| info.clone())
     }
 
-    pub fn terminal_snapshot(&self, agent_id: &str) -> Result<Vec<u8>, RuntimeError> {
-        let process = self.get(agent_id)?;
-        let snapshot = process
-            .output
-            .lock()
-            .map_err(|_| RuntimeError::Terminal("output lock poisoned".to_string()))?
-            .raw_snapshot();
-        Ok(snapshot)
-    }
-
-    pub fn stop(&self, agent_id: &str) -> Result<AgentInfo, RuntimeError> {
-        let process = self.get(agent_id)?;
-        process.stopping.store(true, Ordering::Release);
+    pub fn resize(
+        &self,
+        process_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<HostProcessInfo, RuntimeError> {
+        let process = self.get(process_id)?;
         process
-            .child
-            .lock()
-            .map_err(|_| RuntimeError::Terminal("child lock poisoned".to_string()))?
-            .kill()
-            .map_err(|err| RuntimeError::Terminal(err.to_string()))?;
-        self.inner
-            .update_agent(&process, |info| info.status = AgentStatus::Exited)
-            .ok_or_else(|| RuntimeError::Terminal("agent state lock poisoned".to_string()))
-    }
-
-    pub fn resize(&self, agent_id: &str, cols: u16, rows: u16) -> Result<(), RuntimeError> {
-        let process = self.get(agent_id)?;
-        let result = process
             .master
             .lock()
             .map_err(|_| RuntimeError::Terminal("terminal lock poisoned".to_string()))?
@@ -476,17 +376,52 @@ impl AgentRuntime {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|err| RuntimeError::Terminal(err.to_string()));
-        result
+            .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
+        process
+            .info
+            .lock()
+            .map_err(|_| RuntimeError::Terminal("process state lock poisoned".to_string()))
+            .map(|info| info.clone())
     }
 
-    fn get(&self, agent_id: &str) -> Result<Arc<AgentProcess>, RuntimeError> {
+    pub fn stop(&self, process_id: &str) -> Result<HostProcessInfo, RuntimeError> {
+        let process = self.get_running(process_id)?;
+        process.stopping.store(true, Ordering::Release);
+        process
+            .child
+            .lock()
+            .map_err(|_| RuntimeError::Terminal("child lock poisoned".to_string()))?
+            .kill()
+            .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
         self.inner
-            .agents
+            .update_process(&process, |info| {
+                info.running = false;
+                info.exited_at = Some(Utc::now());
+            })
+            .ok_or_else(|| RuntimeError::Terminal("process state lock poisoned".to_string()))
+    }
+
+    fn get(&self, process_id: &str) -> Result<Arc<HostProcess>, RuntimeError> {
+        self.inner
+            .processes
             .read()
             .ok()
-            .and_then(|agents| agents.get(agent_id).cloned())
-            .ok_or_else(|| RuntimeError::AgentNotFound(agent_id.to_string()))
+            .and_then(|processes| processes.get(process_id).cloned())
+            .ok_or_else(|| RuntimeError::ProcessNotFound(process_id.to_string()))
+    }
+
+    fn get_running(&self, process_id: &str) -> Result<Arc<HostProcess>, RuntimeError> {
+        let process = self.get(process_id)?;
+        let running = process
+            .info
+            .lock()
+            .map_err(|_| RuntimeError::Terminal("process state lock poisoned".to_string()))?
+            .running;
+        if running {
+            Ok(process)
+        } else {
+            Err(RuntimeError::ProcessNotRunning(process_id.to_string()))
+        }
     }
 
     fn resolve_cwd(&self, requested: &str) -> Result<PathBuf, RuntimeError> {
@@ -497,29 +432,49 @@ impl AgentRuntime {
         };
         if requested.is_absolute() {
             return Err(RuntimeError::InvalidCwd(
-                "cwd must be relative to the workspace root".to_string(),
+                "cwd must be relative to the host root".to_string(),
             ));
         }
         let cwd = std::fs::canonicalize(self.inner.root.join(requested))
-            .map_err(|err| RuntimeError::InvalidCwd(err.to_string()))?;
+            .map_err(|error| RuntimeError::InvalidCwd(error.to_string()))?;
         if !cwd.starts_with(&self.inner.root) {
             return Err(RuntimeError::InvalidCwd(
-                "cwd resolves outside the workspace root".to_string(),
+                "cwd resolves outside the host root".to_string(),
             ));
         }
         Ok(cwd)
     }
 }
 
-fn encode_prompt_text(text: &str, bracketed_paste: bool) -> Vec<u8> {
-    if !bracketed_paste {
-        return text.as_bytes().to_vec();
+impl RuntimeInner {
+    fn update_process(
+        &self,
+        process: &HostProcess,
+        mutation: impl FnOnce(&mut HostProcessInfo),
+    ) -> Option<HostProcessInfo> {
+        let mut info = process.info.lock().ok()?;
+        mutation(&mut info);
+        let snapshot = info.clone();
+        drop(info);
+        let _ = self.process_events.send(snapshot.clone());
+        Some(snapshot)
     }
-    let mut encoded = Vec::with_capacity(text.len() + 12);
-    encoded.extend_from_slice(b"\x1b[200~");
-    encoded.extend_from_slice(text.as_bytes());
-    encoded.extend_from_slice(b"\x1b[201~");
-    encoded
+}
+
+impl Drop for RuntimeInner {
+    fn drop(&mut self) {
+        let Ok(processes) = self.processes.read() else {
+            return;
+        };
+        for process in processes.values() {
+            process.stopping.store(true, Ordering::Release);
+            if let Ok(mut child) = process.child.lock() {
+                if let Err(error) = child.kill() {
+                    warn!(%error, "failed to stop child while dropping host runtime");
+                }
+            }
+        }
+    }
 }
 
 fn spawn_input_writer(mut writer: Box<dyn Write + Send>, input: std_mpsc::Receiver<InputWrite>) {
@@ -533,11 +488,7 @@ fn spawn_input_writer(mut writer: Box<dyn Write + Send>, input: std_mpsc::Receiv
                 .and_then(|_| writer.flush())
                 .map_err(|error| error.to_string());
             let failed = result.is_err();
-            if let Some(sender) = write.result {
-                let _ = sender.send(result);
-            } else if let Err(error) = result {
-                warn!(%error, "delayed terminal input failed");
-            }
+            let _ = write.result.send(result);
             if failed {
                 break;
             }
@@ -545,73 +496,9 @@ fn spawn_input_writer(mut writer: Box<dyn Write + Send>, input: std_mpsc::Receiv
     });
 }
 
-impl RuntimeInner {
-    fn update_agent(
-        &self,
-        process: &AgentProcess,
-        mutation: impl FnOnce(&mut AgentInfo),
-    ) -> Option<AgentInfo> {
-        let mut info = process.info.lock().ok()?;
-        mutation(&mut info);
-        info.updated_at = Utc::now();
-        let snapshot = info.clone();
-        drop(info);
-        if let Ok(mut last_event) = process.last_metadata_event.lock() {
-            *last_event = Instant::now();
-        }
-        let _ = self.events.send(snapshot.clone());
-        Some(snapshot)
-    }
-
-    fn update_from_output(&self, process: &AgentProcess, detected: AgentStatus) {
-        let Some((snapshot, status_changed)) = process.info.lock().ok().map(|mut info| {
-            let previous_status = info.status;
-            info.output_revision = info.output_revision.saturating_add(1);
-            if !info.status.is_terminal() {
-                info.status = detected;
-            }
-            info.updated_at = Utc::now();
-            (info.clone(), info.status != previous_status)
-        }) else {
-            return;
-        };
-        let should_emit = process
-            .last_metadata_event
-            .lock()
-            .ok()
-            .is_some_and(|mut last_event| {
-                if status_changed || last_event.elapsed() >= OUTPUT_METADATA_INTERVAL {
-                    *last_event = Instant::now();
-                    true
-                } else {
-                    false
-                }
-            });
-        if should_emit {
-            let _ = self.events.send(snapshot);
-        }
-    }
-}
-
-impl Drop for RuntimeInner {
-    fn drop(&mut self) {
-        let Ok(agents) = self.agents.read() else {
-            return;
-        };
-        for process in agents.values() {
-            process.stopping.store(true, Ordering::Release);
-            if let Ok(mut child) = process.child.lock() {
-                if let Err(err) = child.kill() {
-                    warn!(%err, "failed to stop child while dropping runtime");
-                }
-            }
-        }
-    }
-}
-
 fn spawn_output_reader(
     runtime: Weak<RuntimeInner>,
-    process: Arc<AgentProcess>,
+    process: Arc<HostProcess>,
     mut reader: Box<dyn Read + Send>,
 ) {
     std::thread::spawn(move || {
@@ -620,46 +507,45 @@ fn spawn_output_reader(
             let count = match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => count,
-                Err(err) => {
+                Err(error) => {
                     if !process.stopping.load(Ordering::Acquire) {
-                        warn!(%err, "agent PTY reader failed");
+                        warn!(%error, "process PTY reader failed");
                     }
                     break;
                 }
             };
-            let chunk = &buffer[..count];
-            if let Ok(mut output) = process.output.lock() {
-                output.push(chunk);
-                process
-                    .bracketed_paste
-                    .store(output.bracketed_paste, Ordering::Release);
-            }
-            if let Ok(mut last_output) = process.last_output.lock() {
-                *last_output = Instant::now();
-            }
             let Some(runtime) = runtime.upgrade() else {
                 break;
             };
-            let agent_id = process.info.lock().ok().map(|info| info.agent_id.clone());
-            if let Some(agent_id) = agent_id {
-                let _ = runtime.terminal_events.send(TerminalOutput {
-                    agent_id,
-                    data: chunk.to_vec(),
-                });
+            let process_id = process.info.lock().ok().map(|info| info.process_id.clone());
+            let Some(process_id) = process_id else {
+                continue;
+            };
+            let chunk_and_bounds = process.output.lock().ok().map(|mut output| {
+                let chunk = output.push(&process_id, &buffer[..count]);
+                (
+                    chunk,
+                    output.first_revision(),
+                    output.next_revision,
+                    output.bracketed_paste,
+                )
+            });
+            let Some((chunk, first_revision, next_revision, bracketed_paste)) = chunk_and_bounds
+            else {
+                continue;
+            };
+            if let Ok(mut info) = process.info.lock() {
+                info.last_output_at = chunk.emitted_at;
+                info.first_revision = first_revision;
+                info.next_revision = next_revision;
+                info.bracketed_paste = bracketed_paste;
             }
-            let recent = process
-                .output
-                .lock()
-                .ok()
-                .map(|output| output.read(Some(20)).0)
-                .unwrap_or_default();
-            let detected = detect_status(&recent).unwrap_or(AgentStatus::Working);
-            runtime.update_from_output(&process, detected);
+            let _ = runtime.output_events.send(chunk);
         }
     });
 }
 
-fn spawn_process_monitor(runtime: Weak<RuntimeInner>, process: Arc<AgentProcess>) {
+fn spawn_process_monitor(runtime: Weak<RuntimeInner>, process: Arc<HostProcess>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(PROCESS_POLL_INTERVAL);
         let Some(runtime) = runtime.upgrade() else {
@@ -672,78 +558,14 @@ fn spawn_process_monitor(runtime: Weak<RuntimeInner>, process: Arc<AgentProcess>
             .and_then(|mut child| child.try_wait().ok().flatten());
         if let Some(exit) = exit {
             let exit_code = i32::try_from(exit.exit_code()).ok();
-            runtime.update_agent(&process, |info| {
-                info.status = AgentStatus::Exited;
+            runtime.update_process(&process, |info| {
+                info.running = false;
                 info.exit_code = exit_code;
                 info.exited_at = Some(Utc::now());
             });
             break;
         }
-
-        let quiet = process
-            .last_output
-            .lock()
-            .ok()
-            .is_some_and(|last| last.elapsed() >= QUIET_IDLE_AFTER);
-        if quiet {
-            let should_idle = process.info.lock().ok().is_some_and(|info| {
-                matches!(info.status, AgentStatus::Starting | AgentStatus::Working)
-            });
-            if should_idle {
-                runtime.update_agent(&process, |info| info.status = AgentStatus::Idle);
-            }
-        }
     });
-}
-
-fn detect_status(text: &str) -> Option<AgentStatus> {
-    let lower = text.to_lowercase();
-    let blocked = [
-        "allow command?",
-        "do you want to proceed",
-        "press enter to confirm",
-        "enter to submit answer",
-        "[y/n]",
-        "action required",
-    ];
-    if blocked.iter().any(|pattern| lower.contains(pattern)) {
-        return Some(AgentStatus::Blocked);
-    }
-    let working = [
-        "esc to interrupt",
-        "working (",
-        "thinking (",
-        "running tool",
-    ];
-    if working.iter().any(|pattern| lower.contains(pattern)) {
-        return Some(AgentStatus::Working);
-    }
-    let last = text.lines().next_back().unwrap_or_default().trim_end();
-    if last.ends_with('❯') || last.ends_with('›') || last.ends_with('$') || last.ends_with('#')
-    {
-        return Some(AgentStatus::Idle);
-    }
-    None
-}
-
-fn resolve_command(request: &CreateAgentRequest) -> Result<(String, Vec<String>), RuntimeError> {
-    match request.kind.as_str() {
-        "codex" => Ok(("codex".to_string(), request.args.clone())),
-        "claude" => Ok(("claude".to_string(), request.args.clone())),
-        "command" => {
-            if let Some((command, args)) = request.args.split_first() {
-                Ok((command.clone(), args.to_vec()))
-            } else {
-                Ok((
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-                    Vec::new(),
-                ))
-            }
-        }
-        other => Err(RuntimeError::InvalidRequest(format!(
-            "unsupported agent kind {other}"
-        ))),
-    }
 }
 
 fn relative_display(root: &Path, cwd: &Path) -> String {
@@ -757,93 +579,71 @@ fn relative_display(root: &Path, cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::time::Instant;
 
     #[test]
-    fn status_detector_prefers_blockers() {
-        assert_eq!(
-            detect_status("Working (esc to interrupt)\nAllow command?"),
-            Some(AgentStatus::Blocked)
+    fn output_replay_reports_gaps() {
+        let mut output = OutputBuffer::new();
+        output.push("p1", &vec![b'x'; OUTPUT_LIMIT_BYTES]);
+        let first = output.push("p1", b"new");
+        let replay = output.replay(
+            "p1",
+            Some(&OutputCursor {
+                stream_epoch: output.stream_epoch.clone(),
+                revision: 0,
+            }),
         );
+        assert!(replay.gap);
+        assert_eq!(replay.chunks, vec![first]);
     }
 
     #[test]
-    fn output_buffer_is_bounded() {
+    fn tracks_bracketed_paste_across_chunks() {
         let mut output = OutputBuffer::new();
-        output.push(&vec![b'x'; OUTPUT_LIMIT_BYTES + 128]);
-        assert!(output.text.len() <= OUTPUT_LIMIT_BYTES);
-        assert!(output.raw.len() <= OUTPUT_LIMIT_BYTES);
-        assert!(output.truncated);
-    }
-
-    #[test]
-    fn tracks_bracketed_paste_across_output_chunks() {
-        let mut output = OutputBuffer::new();
-        output.push(b"before\x1b[?20");
+        output.push("p1", b"before\x1b[?20");
         assert!(!output.bracketed_paste);
-        output.push(b"04hafter");
+        output.push("p1", b"04hafter");
         assert!(output.bracketed_paste);
-        output.push(b"\x1b[?2004l");
+        output.push("p1", b"\x1b[?2004l");
         assert!(!output.bracketed_paste);
     }
 
     #[test]
-    fn prompt_text_uses_bracketed_paste_when_enabled() {
-        assert_eq!(encode_prompt_text("hello", false), b"hello");
-        assert_eq!(
-            encode_prompt_text("hello", true),
-            b"\x1b[200~hello\x1b[201~"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn creates_prompts_and_reads_a_real_pty() {
-        let runtime = AgentRuntime::new(
-            "test-workspace",
-            "test-server",
-            "http://127.0.0.1:8790",
-            None,
-            env!("CARGO_MANIFEST_DIR"),
-        )
-        .expect("runtime should initialize");
+    fn spawns_and_reads_a_real_pty() {
+        let temporary = std::env::temp_dir().join(format!(
+            "treer-host-runtime-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temporary).expect("create temporary directory");
+        let runtime = HostRuntime::new(&temporary).expect("create runtime");
         runtime
-            .create(
-                "test-agent".to_string(),
-                CreateAgentRequest {
-                    server_id: None,
-                    kind: "command".to_string(),
-                    name: "test shell".to_string(),
-                    cwd: ".".to_string(),
-                    args: vec!["/bin/sh".to_string()],
-                    cols: 80,
-                    rows: 24,
-                },
-            )
-            .expect("shell should start");
-        let submitted_at = Instant::now();
-        runtime
-            .prompt(
-                "test-agent",
-                "printf 'TREER_E2E:%s:%s\\n' \"$TREER_WORKSPACE_ID\" \"$TREER_AGENT_SERVER_URL\"",
-            )
-            .expect("prompt should be written");
-
-        let deadline = Instant::now() + Duration::from_secs(3);
+            .spawn(HostSpawnRequest {
+                process_id: "p1".to_string(),
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "printf host-runtime-ok".to_string()],
+                cwd: ".".to_string(),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                metadata: json!({"opaque": true}),
+            })
+            .expect("spawn process");
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let output = runtime
-                .read("test-agent", None)
-                .expect("output should be readable");
-            if output
-                .text
-                .contains("TREER_E2E:test-workspace:http://127.0.0.1:8790")
-            {
-                assert!(submitted_at.elapsed() >= PROMPT_SUBMIT_DELAY);
+            let replay = runtime.read("p1", None).expect("read output");
+            let decoded = replay
+                .chunks
+                .iter()
+                .filter_map(|chunk| BASE64.decode(&chunk.data).ok())
+                .flatten()
+                .collect::<Vec<_>>();
+            if String::from_utf8_lossy(&decoded).contains("host-runtime-ok") {
                 break;
             }
-            assert!(Instant::now() < deadline, "agent output: {}", output.text);
-            std::thread::sleep(Duration::from_millis(25));
+            assert!(Instant::now() < deadline, "process output did not arrive");
+            std::thread::sleep(Duration::from_millis(20));
         }
-
-        runtime.stop("test-agent").expect("shell should stop");
     }
 }
