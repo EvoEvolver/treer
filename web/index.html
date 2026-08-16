@@ -375,7 +375,7 @@
     }
     async function showInstall() {
       try {
-        const data = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/bootstrap`);
+        const data = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/bootstrap`, { method: 'POST', body: '{}' });
         $('installCommand').value = data.command;
         $('copyInstall').textContent = 'Copy';
         $('installDialog').showModal();

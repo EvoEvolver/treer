@@ -73,6 +73,10 @@ enum ServiceCommand {
 struct ServiceInstallArgs {
     #[arg(long, env = "TREER_PROXY_URL", default_value = "http://127.0.0.1:8787")]
     proxy: Url,
+    #[arg(long, env = "TREER_SERVER_ID")]
+    server_id: String,
+    #[arg(long, env = "TREER_MACHINE_TOKEN")]
+    machine_token: String,
     #[arg(long, env = "TREER_WORKSPACE_ROOT", default_value = ".")]
     root: PathBuf,
     #[arg(
@@ -91,6 +95,8 @@ struct ServerArgs {
     workspace: String,
     #[arg(long, env = "TREER_SERVER_ID")]
     server_id: Option<String>,
+    #[arg(long, env = "TREER_MACHINE_TOKEN")]
+    machine_token: Option<String>,
     #[arg(long, env = "TREER_WORKSPACE_ROOT", default_value = ".")]
     root: PathBuf,
     #[arg(
@@ -119,7 +125,8 @@ async fn main() -> Result<()> {
             run_server(ServerArgs {
                 proxy: Url::parse(&config.proxy).context("invalid proxy URL in service config")?,
                 workspace: config.workspace,
-                server_id: None,
+                server_id: Some(config.server_id),
+                machine_token: Some(config.machine_token),
                 root: config.root,
                 listen: config
                     .listen
@@ -137,6 +144,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_server(args: ServerArgs) -> Result<()> {
+    require_loopback_listen(args.listen)?;
     let root = std::fs::canonicalize(&args.root)
         .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
     let server_id = match args.server_id {
@@ -168,10 +176,12 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         root.display().to_string(),
     );
 
-    let proxy_client = proxy::ProxyClient::new(proxy_ws, server, runtime);
+    let proxy_client =
+        proxy::ProxyClient::new(proxy_ws, args.machine_token.clone(), server, runtime);
     let proxy_task = tokio::spawn(proxy_client.run_forever());
 
-    let local_state = local_api::LocalApiState::new(proxy_http, args.workspace.clone());
+    let local_state =
+        local_api::LocalApiState::new(proxy_http, args.workspace.clone(), args.machine_token);
     let app = local_api::router(local_state);
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
@@ -197,10 +207,13 @@ async fn run_server(args: ServerArgs) -> Result<()> {
 fn run_service_command(args: ServiceArgs) -> Result<()> {
     match args.command {
         ServiceCommand::Install(install) => {
+            require_loopback_listen(install.listen)?;
             let host_socket = service::host_socket_path(&args.workspace)?;
             service::install(service::ServiceConfig {
                 proxy: install.proxy.to_string(),
                 workspace: args.workspace,
+                server_id: install.server_id,
+                machine_token: install.machine_token,
                 root: std::fs::canonicalize(&install.root).with_context(|| {
                     format!("invalid workspace root {}", install.root.display())
                 })?,
@@ -216,6 +229,15 @@ fn run_service_command(args: ServiceArgs) -> Result<()> {
         ServiceCommand::Logs { lines, follow } => service::logs(&args.workspace, lines, follow),
         ServiceCommand::Uninstall => service::uninstall(&args.workspace),
     }
+}
+
+fn require_loopback_listen(listen: SocketAddr) -> Result<()> {
+    if !listen.ip().is_loopback() {
+        anyhow::bail!(
+            "the unauthenticated local agent API must listen on a loopback address, got {listen}"
+        );
+    }
+    Ok(())
 }
 
 fn normalize_http_url(mut url: Url) -> Result<Url> {
@@ -283,4 +305,19 @@ fn sibling_treer_binary() -> Option<PathBuf> {
         .join("bin")
         .join(format!("treer{}", std::env::consts::EXE_SUFFIX));
     candidate.is_file().then_some(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_agent_api_only_accepts_loopback_addresses() {
+        assert!(require_loopback_listen("127.0.0.1:8790".parse().expect("IPv4 loopback")).is_ok());
+        assert!(require_loopback_listen("[::1]:8790".parse().expect("IPv6 loopback")).is_ok());
+        assert!(require_loopback_listen("0.0.0.0:8790".parse().expect("unspecified")).is_err());
+        assert!(
+            require_loopback_listen("192.0.2.1:8790".parse().expect("public address")).is_err()
+        );
+    }
 }

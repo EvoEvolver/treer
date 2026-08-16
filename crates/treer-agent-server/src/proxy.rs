@@ -6,6 +6,9 @@ use anyhow::{anyhow, Context};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use tokio::time::MissedTickBehavior;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 use treer_protocol::{
@@ -28,15 +31,22 @@ struct TerminalRelay {
 #[derive(Clone)]
 pub struct ProxyClient {
     pub proxy_ws: Url,
+    pub machine_token: Option<String>,
     pub server: ServerInfo,
     pub runtime: ControllerRuntime,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
 }
 
 impl ProxyClient {
-    pub fn new(proxy_ws: Url, server: ServerInfo, runtime: ControllerRuntime) -> Self {
+    pub fn new(
+        proxy_ws: Url,
+        machine_token: Option<String>,
+        server: ServerInfo,
+        runtime: ControllerRuntime,
+    ) -> Self {
         Self {
             proxy_ws,
+            machine_token,
             server,
             runtime,
             command_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -56,7 +66,19 @@ impl ProxyClient {
     }
 
     async fn run_connection(&self) -> anyhow::Result<()> {
-        let (socket, _) = tokio_tungstenite::connect_async(self.proxy_ws.as_str())
+        let mut request = self
+            .proxy_ws
+            .as_str()
+            .into_client_request()
+            .context("failed to create proxy websocket request")?;
+        if let Some(token) = &self.machine_token {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .context("invalid machine token")?,
+            );
+        }
+        let (socket, _) = tokio_tungstenite::connect_async(request)
             .await
             .with_context(|| format!("failed to connect to {}", self.proxy_ws))?;
         let (mut outgoing, mut incoming) = socket.split();

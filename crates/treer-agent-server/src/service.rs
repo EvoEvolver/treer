@@ -12,6 +12,8 @@ use treer_host_protocol::HostDaemonConfig;
 pub struct ServiceConfig {
     pub proxy: String,
     pub workspace: String,
+    pub server_id: String,
+    pub machine_token: String,
     pub root: PathBuf,
     pub listen: String,
     pub host_socket: PathBuf,
@@ -36,11 +38,15 @@ impl ServiceConfig {
     }
 }
 
-pub fn install(config: ServiceConfig) -> Result<()> {
+pub fn install(mut config: ServiceConfig) -> Result<()> {
     validate_workspace(&config.workspace)?;
     let paths = ServicePaths::new(&config.workspace)?;
     fs::create_dir_all(&paths.state_dir)
         .with_context(|| format!("failed to create {}", paths.state_dir.display()))?;
+    if paths.config.is_file() {
+        let installed = ServiceConfig::load(&paths.config)?;
+        preserve_installed_machine_identity(&mut config, &installed);
+    }
     config.save(&paths.config)?;
     let host_config = HostDaemonConfig {
         socket_path: config.host_socket.clone(),
@@ -69,6 +75,14 @@ pub fn install(config: ServiceConfig) -> Result<()> {
         config.workspace,
     );
     Ok(())
+}
+
+fn preserve_installed_machine_identity(config: &mut ServiceConfig, installed: &ServiceConfig) {
+    let same_proxy = config.proxy.trim_end_matches('/') == installed.proxy.trim_end_matches('/');
+    if same_proxy && config.workspace == installed.workspace {
+        config.server_id.clone_from(&installed.server_id);
+        config.machine_token.clone_from(&installed.machine_token);
+    }
 }
 
 pub fn host_socket_path(workspace: &str) -> Result<PathBuf> {
@@ -185,8 +199,21 @@ fn workspace_key(workspace: &str) -> String {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
+    use std::io::Write;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", temporary.display()))?;
     fs::rename(&temporary, path).with_context(|| format!("failed to replace {}", path.display()))
 }
 
@@ -626,6 +653,56 @@ mod tests {
     }
 
     #[test]
+    fn reinstall_keeps_machine_identity_for_the_same_proxy_and_workspace() {
+        let installed = test_config(
+            "https://treer.example",
+            "default",
+            "old-server",
+            "old-token",
+        );
+        let mut requested = test_config(
+            "https://treer.example/",
+            "default",
+            "new-server",
+            "new-token",
+        );
+
+        preserve_installed_machine_identity(&mut requested, &installed);
+
+        assert_eq!(requested.server_id, "old-server");
+        assert_eq!(requested.machine_token, "old-token");
+    }
+
+    #[test]
+    fn moving_to_another_proxy_uses_the_new_machine_identity() {
+        let installed = test_config("https://old.example", "default", "old-server", "old-token");
+        let mut requested =
+            test_config("https://new.example", "default", "new-server", "new-token");
+
+        preserve_installed_machine_identity(&mut requested, &installed);
+
+        assert_eq!(requested.server_id, "new-server");
+        assert_eq!(requested.machine_token, "new-token");
+    }
+
+    fn test_config(
+        proxy: &str,
+        workspace: &str,
+        server_id: &str,
+        machine_token: &str,
+    ) -> ServiceConfig {
+        ServiceConfig {
+            proxy: proxy.to_owned(),
+            workspace: workspace.to_owned(),
+            server_id: server_id.to_owned(),
+            machine_token: machine_token.to_owned(),
+            root: PathBuf::from("/tmp"),
+            listen: "127.0.0.1:8791".to_owned(),
+            host_socket: PathBuf::from("/tmp/treer.sock"),
+        }
+    }
+
+    #[test]
     fn systemd_unit_quotes_paths_and_restarts() {
         let unit = systemd_unit(
             Path::new("/home/test user/bin/treer-agent-server"),
@@ -649,5 +726,24 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("/Users/a&amp;b/treer-agent-server"));
         assert!(plist.contains("<string>run</string>"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "treer-config-permissions-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        write_atomic(&path, b"secret").expect("write configuration");
+        let mode = std::fs::metadata(&path)
+            .expect("configuration metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        std::fs::remove_file(&path).expect("remove test configuration");
+        assert_eq!(mode, 0o600);
     }
 }

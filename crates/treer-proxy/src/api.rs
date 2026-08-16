@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, Path, Query, State, WebSocketUpgrade};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -20,7 +20,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::agent_socket;
-use crate::auth::{self, AuthStore};
+use crate::auth::{self, AuthStore, CurrentSession};
 use crate::state::{AppState, SocketFrame};
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
@@ -72,11 +72,15 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/stop",
             post(stop_agent),
-        );
+        )
+        .route_layer(middleware::from_fn_with_state(
+            auth_store.clone(),
+            auth::require_machine,
+        ));
     let authenticated = Router::new()
         .route(
             "/api/workspaces/{workspace_id}/bootstrap",
-            get(bootstrap_info),
+            post(bootstrap_info),
         )
         .route(
             "/api/workspaces",
@@ -133,7 +137,7 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         ));
     Router::new()
         .route("/", get(index))
-        .route("/install.sh", get(install_script))
+        .route("/install.sh", post(install_script))
         .route("/artifacts/{platform}/{binary}", get(download_artifact))
         .route("/assets/xterm.js", get(xterm_js))
         .route("/assets/xterm.css", get(xterm_css))
@@ -179,37 +183,42 @@ async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "service": "treer-proxy" }))
 }
 
-#[derive(Debug, Deserialize)]
-struct InstallQuery {
-    #[serde(default = "default_workspace")]
-    workspace: String,
-}
-
-fn default_workspace() -> String {
-    "default".to_string()
-}
-
 async fn bootstrap_info(
     State(state): State<AppState>,
     Extension(config): Extension<BootstrapConfig>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
     state.snapshot(&workspace_id).await?;
-    let script_url = install_script_url(&config.public_url, &workspace_id);
+    let enrollment = auth
+        .create_machine_enrollment(&workspace_id, &session.username)
+        .await?;
+    let script_url = install_script_url(&config.public_url);
+    let authorization = format!("Authorization: Bearer {enrollment}");
     Ok(Json(json!({
-        "command": format!("curl -fsSL {} | sh", shell_quote(script_url.as_str())),
+        "command": format!(
+            "curl -fsSL -X POST -H {} {} | sh",
+            shell_quote(&authorization),
+            shell_quote(script_url.as_str()),
+        ),
         "script_url": script_url.as_str(),
         "workspace_id": workspace_id,
     })))
 }
 
 async fn install_script(
-    State(state): State<AppState>,
     Extension(config): Extension<BootstrapConfig>,
-    Query(query): Query<InstallQuery>,
+    Extension(auth): Extension<AuthStore>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiFailure> {
-    state.snapshot(&query.workspace).await?;
-    let script = render_install_script(&config.public_url, &query.workspace);
+    let enrollment = auth.claim_machine_enrollment_from_headers(&headers).await?;
+    let script = render_install_script(
+        &config.public_url,
+        &enrollment.workspace_id,
+        &enrollment.server_id,
+        &enrollment.machine_token,
+    );
     Ok((
         [
             (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
@@ -250,12 +259,10 @@ async fn download_artifact(
         .into_response())
 }
 
-fn install_script_url(public_url: &Url, workspace_id: &str) -> Url {
+fn install_script_url(public_url: &Url) -> Url {
     let mut url = public_url.clone();
     url.set_path("/install.sh");
-    url.query_pairs_mut()
-        .clear()
-        .append_pair("workspace", workspace_id);
+    url.set_query(None);
     url
 }
 
@@ -270,7 +277,12 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn render_install_script(public_url: &Url, workspace_id: &str) -> String {
+fn render_install_script(
+    public_url: &Url,
+    workspace_id: &str,
+    server_id: &str,
+    machine_token: &str,
+) -> String {
     let mut artifact_base = public_url.clone();
     artifact_base.set_path("/artifacts/");
     format!(
@@ -280,6 +292,8 @@ set -eu
 proxy_url={proxy_url}
 artifact_base={artifact_base}
 workspace={workspace}
+server_id={server_id}
+machine_token={machine_token}
 workspace_root=${{TREER_WORKSPACE_ROOT:-$(pwd)}}
 install_dir=${{TREER_INSTALL_DIR:-"${{HOME:?HOME is required}}/.local/bin"}}
 server_dir=${{TREER_AGENT_SERVER_INSTALL_DIR:-"${{HOME}}/.local/libexec/treer"}}
@@ -338,9 +352,11 @@ if [ -f "$pid_file" ]; then
   rm -f "$pid_file"
 fi
 
-TREER_STATE_DIR="$state_dir" "$server_dir/treer-agent-server" \
+TREER_STATE_DIR="$state_dir" TREER_MACHINE_TOKEN="$machine_token" \
+  "$server_dir/treer-agent-server" \
   service --workspace "$workspace" install \
   --proxy "$proxy_url" \
+  --server-id "$server_id" \
   --root "$workspace_root" \
   --listen "$listen"
 
@@ -351,6 +367,8 @@ echo "treer: manage the host service with $server_dir/treer-agent-server service
         proxy_url = shell_quote(public_url.as_str()),
         artifact_base = shell_quote(artifact_base.as_str().trim_end_matches('/')),
         workspace = shell_quote(workspace_id),
+        server_id = shell_quote(server_id),
+        machine_token = shell_quote(machine_token),
     )
 }
 
@@ -683,6 +701,13 @@ impl From<ProtocolError> for ApiFailure {
     }
 }
 
+impl From<auth::AuthFailure> for ApiFailure {
+    fn from(error: auth::AuthFailure) -> Self {
+        let (status, error) = error.into_parts();
+        Self { status, error }
+    }
+}
+
 impl From<serde_json::Error> for ApiFailure {
     fn from(error: serde_json::Error) -> Self {
         Self {
@@ -710,29 +735,26 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_command_encodes_the_workspace() {
+    fn bootstrap_command_keeps_enrollment_tokens_out_of_the_url() {
         let config = test_config();
-        let url = install_script_url(&config.public_url, "team one/alpha");
-        assert_eq!(
-            url.as_str(),
-            "https://treer.example/install.sh?workspace=team+one%2Falpha"
-        );
-        assert_eq!(
-            format!("curl -fsSL {} | sh", shell_quote(url.as_str())),
-            "curl -fsSL 'https://treer.example/install.sh?workspace=team+one%2Falpha' | sh"
-        );
+        let url = install_script_url(&config.public_url);
+        assert_eq!(url.as_str(), "https://treer.example/install.sh");
+        assert!(url.query().is_none());
     }
 
     #[test]
     fn installer_is_posix_shell_and_contains_runtime_configuration() {
         let config = test_config();
-        let script = render_install_script(&config.public_url, "default");
+        let script =
+            render_install_script(&config.public_url, "default", "srv_test", "srv_test.secret");
         assert!(script.starts_with("#!/bin/sh\nset -eu\n"));
         assert!(script.contains("platform=linux-aarch64"));
         assert!(script.contains(".local/libexec/treer"));
         assert!(script.contains("treer-agent-host"));
         assert!(script.contains("service --workspace \"$workspace\" install"));
         assert!(script.contains("--proxy \"$proxy_url\""));
+        assert!(script.contains("--server-id \"$server_id\""));
+        assert!(script.contains("TREER_MACHINE_TOKEN=\"$machine_token\""));
         assert!(script.contains("workspace='default'"));
         assert!(script.contains("https://treer.example/artifacts"));
         assert!(!script.contains("nohup"));

@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "treer_session";
 const SESSION_TTL_DAYS: i64 = 30;
+const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
 
 #[derive(Clone)]
 pub struct AuthStore {
@@ -33,6 +34,35 @@ pub struct CurrentSession {
     pub token: String,
     pub username: String,
     pub is_admin: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineSession {
+    pub server_id: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
+impl MachineSession {
+    pub fn allows_workspace(&self, workspace_id: &str) -> bool {
+        self.workspace_id
+            .as_ref()
+            .is_none_or(|expected| expected == workspace_id)
+    }
+
+    pub fn allows_server(&self, workspace_id: &str, server_id: &str) -> bool {
+        self.allows_workspace(workspace_id)
+            && self
+                .server_id
+                .as_ref()
+                .is_none_or(|expected| expected == server_id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineEnrollmentClaim {
+    pub workspace_id: String,
+    pub server_id: String,
+    pub machine_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,7 +161,160 @@ impl AuthStore {
         sqlx::query("CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at)")
             .execute(&self.pool)
             .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS machine_enrollments (\
+             enrollment_id TEXT PRIMARY KEY, \
+             workspace_id TEXT NOT NULL, \
+             secret_hash TEXT NOT NULL, \
+             created_at TEXT NOT NULL, \
+             expires_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL, \
+             used_at TEXT, \
+             server_id TEXT)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS machines (\
+             server_id TEXT PRIMARY KEY, \
+             workspace_id TEXT NOT NULL, \
+             secret_hash TEXT NOT NULL, \
+             created_at TEXT NOT NULL, \
+             enrolled_by TEXT NOT NULL, \
+             revoked_at TEXT)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    pub async fn create_machine_enrollment(
+        &self,
+        workspace_id: &str,
+        created_by: &str,
+    ) -> Result<String, AuthFailure> {
+        let enrollment_id = format!("enr_{}", Uuid::new_v4().simple());
+        let secret = random_secret();
+        let secret_hash = hash_password(&secret)?;
+        let now = Utc::now();
+        let expires_at = now + Duration::minutes(MACHINE_ENROLLMENT_TTL_MINUTES);
+        sqlx::query(
+            "INSERT INTO machine_enrollments(\
+             enrollment_id, workspace_id, secret_hash, created_at, expires_at, created_by) \
+             VALUES(?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&enrollment_id)
+        .bind(workspace_id)
+        .bind(secret_hash)
+        .bind(now.to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .bind(created_by)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(format!("{enrollment_id}.{secret}"))
+    }
+
+    pub async fn claim_machine_enrollment(
+        &self,
+        token: &str,
+    ) -> Result<MachineEnrollmentClaim, AuthFailure> {
+        let (enrollment_id, secret) =
+            parse_credential(token, "enr_").map_err(|_| invalid_machine_enrollment())?;
+        let now = Utc::now();
+        let row = sqlx::query(
+            "SELECT workspace_id, secret_hash, created_by \
+             FROM machine_enrollments \
+             WHERE enrollment_id = ? AND used_at IS NULL AND expires_at > ?",
+        )
+        .bind(enrollment_id)
+        .bind(now.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(invalid_machine_enrollment)?;
+        let secret_hash: String = row.get("secret_hash");
+        if !verify_password(secret, &secret_hash) {
+            return Err(invalid_machine_enrollment());
+        }
+        let workspace_id: String = row.get("workspace_id");
+        let created_by: String = row.get("created_by");
+        let server_id = format!("srv_{}", Uuid::new_v4().simple());
+        let machine_secret = random_secret();
+        let machine_secret_hash = hash_password(&machine_secret)?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let update = sqlx::query(
+            "UPDATE machine_enrollments SET used_at = ?, server_id = ? \
+             WHERE enrollment_id = ? AND used_at IS NULL AND expires_at > ?",
+        )
+        .bind(now.to_rfc3339())
+        .bind(&server_id)
+        .bind(enrollment_id)
+        .bind(now.to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if update.rows_affected() != 1 {
+            return Err(invalid_machine_enrollment());
+        }
+        sqlx::query(
+            "INSERT INTO machines(\
+             server_id, workspace_id, secret_hash, created_at, enrolled_by) \
+             VALUES(?, ?, ?, ?, ?)",
+        )
+        .bind(&server_id)
+        .bind(&workspace_id)
+        .bind(machine_secret_hash)
+        .bind(now.to_rfc3339())
+        .bind(created_by)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(MachineEnrollmentClaim {
+            workspace_id,
+            machine_token: format!("{server_id}.{machine_secret}"),
+            server_id,
+        })
+    }
+
+    pub async fn claim_machine_enrollment_from_headers(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<MachineEnrollmentClaim, AuthFailure> {
+        let token = bearer_token(headers).ok_or_else(invalid_machine_enrollment)?;
+        self.claim_machine_enrollment(token).await
+    }
+
+    pub async fn authenticate_machine(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<MachineSession, AuthFailure> {
+        if self.disabled {
+            return Ok(MachineSession {
+                server_id: None,
+                workspace_id: None,
+            });
+        }
+        let token = bearer_token(headers).ok_or_else(machine_auth_required)?;
+        let (server_id, secret) = parse_credential(token, "srv_")?;
+        let row = sqlx::query(
+            "SELECT workspace_id, secret_hash FROM machines \
+             WHERE server_id = ? AND revoked_at IS NULL",
+        )
+        .bind(server_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(machine_auth_required)?;
+        let secret_hash: String = row.get("secret_hash");
+        if !verify_password(secret, &secret_hash) {
+            return Err(machine_auth_required());
+        }
+        Ok(MachineSession {
+            server_id: Some(server_id.to_string()),
+            workspace_id: Some(row.get("workspace_id")),
+        })
     }
 
     async fn login(&self, username: &str, password: &str) -> Result<CurrentSession, AuthFailure> {
@@ -330,6 +513,25 @@ pub async fn require_admin(
     }
 }
 
+pub async fn require_machine(
+    State(auth): State<AuthStore>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    match auth.authenticate_machine(request.headers()).await {
+        Ok(session) if machine_workspace_matches(&session, request.uri().path()) => {
+            request.extensions_mut().insert(session);
+            next.run(request).await
+        }
+        Ok(_) => AuthFailure::forbidden(
+            "machine_workspace_mismatch",
+            "machine credentials do not grant access to this workspace",
+        )
+        .into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn authenticate_request(
     auth: &AuthStore,
     headers: &HeaderMap,
@@ -377,7 +579,7 @@ pub async fn logout(
 ) -> Result<Response, AuthFailure> {
     auth.logout(&session.token).await?;
     let cookie = format!(
-        "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+        "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
         secure_cookie_suffix(&auth)
     );
     Ok((
@@ -400,7 +602,7 @@ pub async fn create_invitation(
 
 fn session_response(auth: &AuthStore, session: &CurrentSession) -> Response {
     let cookie = format!(
-        "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
+        "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
         session.token,
         SESSION_TTL_DAYS * 24 * 60 * 60,
         secure_cookie_suffix(auth)
@@ -428,6 +630,56 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .split(';')
         .filter_map(|item| item.trim().split_once('='))
         .find_map(|(key, value)| (key == name).then(|| value.to_string()))
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
+}
+
+fn machine_workspace_matches(session: &MachineSession, path: &str) -> bool {
+    let Some(encoded_workspace) = path
+        .strip_prefix("/agent/workspaces/")
+        .and_then(|rest| rest.split('/').next())
+    else {
+        return false;
+    };
+    percent_encoding::percent_decode_str(encoded_workspace)
+        .decode_utf8()
+        .is_ok_and(|workspace| session.allows_workspace(&workspace))
+}
+
+fn random_secret() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn parse_credential<'a>(
+    token: &'a str,
+    expected_prefix: &str,
+) -> Result<(&'a str, &'a str), AuthFailure> {
+    let (identifier, secret) = token.split_once('.').ok_or_else(machine_auth_required)?;
+    if !identifier.starts_with(expected_prefix) || secret.len() != 64 {
+        return Err(machine_auth_required());
+    }
+    Ok((identifier, secret))
+}
+
+fn machine_auth_required() -> AuthFailure {
+    AuthFailure::unauthorized(
+        "machine_authentication_required",
+        "valid machine credentials are required",
+    )
+}
+
+fn invalid_machine_enrollment() -> AuthFailure {
+    AuthFailure::unauthorized(
+        "invalid_machine_enrollment",
+        "machine enrollment token is invalid, expired, or already used",
+    )
 }
 
 fn validate_username(username: &str) -> Result<String, AuthFailure> {
@@ -505,6 +757,10 @@ impl AuthFailure {
             status,
             error: ProtocolError::new(code, message),
         }
+    }
+
+    pub fn into_parts(self) -> (StatusCode, ProtocolError) {
+        (self.status, self.error)
     }
 }
 
@@ -590,5 +846,57 @@ mod tests {
             .expect("local session");
         assert_eq!(session.username, "local");
         assert!(session.is_admin);
+    }
+
+    #[tokio::test]
+    async fn machine_enrollment_is_single_use_and_binds_identity() {
+        let store = AuthStore::in_memory("owner-password").await;
+        let enrollment = store
+            .create_machine_enrollment("workspace-a", "admin")
+            .await
+            .expect("create enrollment");
+        let claim = store
+            .claim_machine_enrollment(&enrollment)
+            .await
+            .expect("claim enrollment");
+        assert_eq!(claim.workspace_id, "workspace-a");
+        assert!(claim.server_id.starts_with("srv_"));
+        assert!(store.claim_machine_enrollment(&enrollment).await.is_err());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", claim.machine_token))
+                .expect("authorization header"),
+        );
+        let machine = store
+            .authenticate_machine(&headers)
+            .await
+            .expect("authenticate machine");
+        assert!(machine.allows_server("workspace-a", &claim.server_id));
+        assert!(!machine.allows_server("workspace-b", &claim.server_id));
+        assert!(!machine.allows_server("workspace-a", "srv_other"));
+    }
+
+    #[tokio::test]
+    async fn machine_authentication_rejects_missing_credentials() {
+        let store = AuthStore::in_memory("owner-password").await;
+        assert!(store.authenticate_machine(&HeaderMap::new()).await.is_err());
+    }
+
+    #[test]
+    fn machine_route_is_limited_to_credential_workspace() {
+        let machine = MachineSession {
+            server_id: Some("srv_test".to_string()),
+            workspace_id: Some("team one".to_string()),
+        };
+        assert!(machine_workspace_matches(
+            &machine,
+            "/agent/workspaces/team%20one/agents"
+        ));
+        assert!(!machine_workspace_matches(
+            &machine,
+            "/agent/workspaces/other/agents"
+        ));
     }
 }

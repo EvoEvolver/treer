@@ -1,6 +1,7 @@
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::Response;
+use axum::extract::{Extension, State, WebSocketUpgrade};
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -10,13 +11,22 @@ use treer_protocol::{
 };
 use uuid::Uuid;
 
+use crate::auth::{AuthStore, MachineSession};
 use crate::state::{AppState, SocketFrame};
 
-pub async fn upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle(socket, state))
+pub async fn upgrade(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    match auth.authenticate_machine(&headers).await {
+        Ok(machine) => ws.on_upgrade(move |socket| handle(socket, state, machine)),
+        Err(error) => error.into_response(),
+    }
 }
 
-async fn handle(socket: WebSocket, state: AppState) {
+async fn handle(socket: WebSocket, state: AppState, machine: MachineSession) {
     let connection_id = Uuid::new_v4();
     let (mut socket_tx, mut socket_rx) = socket.split();
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<SocketFrame>();
@@ -115,6 +125,16 @@ async fn handle(socket: WebSocket, state: AppState) {
                     );
                     break;
                 }
+                if !machine.allows_server(&server.workspace_id, &server.server_id) {
+                    send_error(
+                        &outgoing_tx,
+                        ProtocolError::new(
+                            "machine_identity_mismatch",
+                            "registered workspace or server ID does not match machine credentials",
+                        ),
+                    );
+                    break;
+                }
                 if identity.is_some() {
                     send_error(
                         &outgoing_tx,
@@ -207,7 +227,8 @@ async fn handle(socket: WebSocket, state: AppState) {
             .await;
         debug!(%workspace_id, %server_id, "agent server disconnected");
     }
-    writer.abort();
+    drop(outgoing_tx);
+    let _ = writer.await;
 }
 
 fn identity_matches(identity: &Option<(String, String)>, workspace: &str, server: &str) -> bool {

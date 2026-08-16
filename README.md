@@ -7,8 +7,10 @@ terminal history. A hot-updatable Controller connects that Host to the central
 Proxy, which groups machines into logical workspaces and routes discovery and
 control commands between them.
 
-The first prototype is intentionally trusted-network only. See [PLAN.md](PLAN.md)
-for scope, architecture, protocol, and delivery milestones.
+The Proxy is designed to be internet-facing. Browser users authenticate with
+sessions, while machines enroll with short-lived one-time links and then use a
+workspace-bound machine credential. See [PLAN.md](PLAN.md) for architecture,
+protocol, and delivery milestones.
 
 ## Run the prototype
 
@@ -32,11 +34,12 @@ places the current platform's `treer-agent-host`, `treer-agent-server`, and
 deployments should stage all required Linux and macOS platform directories or
 set `--artifacts-dir` to an equivalent artifact tree.
 
-Open the web UI, select a workspace, and choose **Add machine** to copy its
-bootstrap command:
+Open the web UI, select a workspace, and choose **Add machine** to generate a
+10-minute, single-use bootstrap command. It has this shape:
 
 ```bash
-curl -fsSL 'http://PROXY_HOST:8787/install.sh?workspace=default' | sh
+curl -fsSL -X POST -H 'Authorization: Bearer enr_...' \
+  'https://PROXY_HOST/install.sh' | sh
 ```
 
 The script detects the target platform, installs `treer` to `~/.local/bin` and
@@ -51,6 +54,12 @@ Running the bootstrap command again replaces the installed binaries on disk and
 asks the existing Host process to restart only the Controller. The updated Host
 binary takes effect on the next full service restart. Existing agents, PTYs, and
 buffered terminal output stay alive while the browser reconnects.
+
+The enrollment token can be used once. During enrollment the Proxy creates a
+stable server ID and a long-lived credential bound to that server and workspace.
+The credential is stored in the Controller configuration with owner-only file
+permissions and is required for both the Controller WebSocket and agent-facing
+Proxy API. Production mode requires an HTTPS public URL.
 
 The host administrator manages the service through the agent-server binary, not
 the agent-facing `treer` command:

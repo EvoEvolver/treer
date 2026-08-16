@@ -6,7 +6,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
 use treer_protocol::{
     ApiError, CreateAgentRequest, InputAgentRequest, PromptAgentRequest, ProtocolError,
 };
@@ -17,14 +16,16 @@ pub struct LocalApiState {
     client: reqwest::Client,
     proxy_http: Url,
     workspace_id: String,
+    machine_token: Option<String>,
 }
 
 impl LocalApiState {
-    pub fn new(proxy_http: Url, workspace_id: String) -> Self {
+    pub fn new(proxy_http: Url, workspace_id: String, machine_token: Option<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             proxy_http,
             workspace_id,
+            machine_token,
         }
     }
 
@@ -38,9 +39,11 @@ impl LocalApiState {
     }
 
     async fn get(&self, suffix: &str) -> Result<Value, LocalApiError> {
-        let response = self
-            .client
-            .get(self.proxy_url(suffix)?)
+        let mut request = self.client.get(self.proxy_url(suffix)?);
+        if let Some(token) = &self.machine_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
             .send()
             .await
             .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
@@ -48,10 +51,11 @@ impl LocalApiState {
     }
 
     async fn post(&self, suffix: &str, body: &Value) -> Result<Value, LocalApiError> {
-        let response = self
-            .client
-            .post(self.proxy_url(suffix)?)
-            .json(body)
+        let mut request = self.client.post(self.proxy_url(suffix)?).json(body);
+        if let Some(token) = &self.machine_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
             .send()
             .await
             .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
@@ -69,7 +73,6 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
         .route("/api/agents/{agent_id}/stop", post(stop_agent))
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

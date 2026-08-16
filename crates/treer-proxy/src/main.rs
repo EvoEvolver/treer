@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
         args.railway_public_domain.as_deref(),
         listen,
     )?;
+    require_secure_public_url(&public_url, args.disable_auth)?;
     let database_path = database_path(args.database_path, args.railway_volume_mount_path);
     let bootstrap = api::BootstrapConfig::new(public_url.clone(), args.artifacts_dir);
     let auth = auth::AuthStore::open(
@@ -94,6 +95,13 @@ fn resolve_admin_password(configured: Option<String>, auth_disabled: bool) -> Re
         _ if auth_disabled => Ok(String::new()),
         _ => anyhow::bail!("ADMIN_PASSWORD must not be empty unless --disable-auth is set"),
     }
+}
+
+fn require_secure_public_url(public_url: &Url, auth_disabled: bool) -> Result<()> {
+    if !auth_disabled && public_url.scheme() != "https" {
+        anyhow::bail!("authenticated proxies require an https public URL");
+    }
+    Ok(())
 }
 
 fn listen_address(configured: Option<SocketAddr>, port: Option<u16>) -> SocketAddr {
@@ -196,5 +204,14 @@ mod tests {
         );
         assert!(resolve_admin_password(None, false).is_err());
         assert!(resolve_admin_password(Some(String::new()), false).is_err());
+    }
+
+    #[test]
+    fn authenticated_proxy_requires_https() {
+        let http = Url::parse("http://treer.example/").expect("http URL");
+        let https = Url::parse("https://treer.example/").expect("https URL");
+        assert!(require_secure_public_url(&http, false).is_err());
+        assert!(require_secure_public_url(&http, true).is_ok());
+        assert!(require_secure_public_url(&https, false).is_ok());
     }
 }

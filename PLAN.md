@@ -16,12 +16,12 @@ Build an independent distributed coding-agent runtime with these properties:
    operations.
 
 Treer does not depend on another terminal manager or agent runtime. The first
-prototype should prove routing, discovery, local process ownership, lifecycle
-synchronization, and remote agent creation.
+prototype should prove routing, discovery, authenticated machine enrollment,
+local process ownership, lifecycle synchronization, and remote agent creation.
 
 ## 2. Non-goals for the Prototype
 
-- Authentication, authorization, TLS, certificates, or untrusted multi-tenancy.
+- Mutual TLS and externally managed identity providers.
 - Direct peer-to-peer connections between machines.
 - Migrating a running PTY or agent process between machines.
 - A shared cross-machine filesystem.
@@ -75,9 +75,13 @@ Responsibilities:
 - Route commands to a selected agent server and correlate responses.
 - Broadcast workspace-scoped changes to browser and CLI clients.
 - Serve the prototype REST API, WebSocket event stream, and static web UI.
+- Issue short-lived, single-use machine enrollment tokens and validate
+  workspace-bound machine credentials from SQLite.
 
-Prototype storage is in memory. Agent servers send a full snapshot after every
-connect, so restarting the proxy reconstructs live state as machines reconnect.
+Runtime projections remain in memory. Users, sessions, invitations, machine
+enrollments, and machine credentials are stored in SQLite. Agent servers send a
+full snapshot after every connect, so restarting the proxy reconstructs live
+state as authenticated machines reconnect.
 
 ### 4.2 `treer-agent-host`
 
@@ -101,8 +105,8 @@ exits, its child agents are terminated.
 
 `treer-agent-server` is the hot-updatable Controller. It should:
 
-- Load or generate a stable `server_id`.
-- Connect outbound to the proxy and reconnect with bounded backoff.
+- Load the Proxy-assigned stable `server_id` and machine credential.
+- Connect outbound with a Bearer credential and reconnect with bounded backoff.
 - Join one configured Treer workspace in v0.
 - Translate agent kinds, prompts, and Proxy commands into Host operations.
 - Detect agent state from replayed and live terminal output.
@@ -153,7 +157,9 @@ TREER_AGENT_SERVER_URL
 The local server forwards remote operations through the Proxy's machine control
 API. An agent therefore does not need the proxy URL or another machine's
 address. Its local API uses routes under `/agent/workspaces`; browser and
-administrator APIs remain under the authenticated `/api` routes.
+administrator APIs remain under the session-authenticated `/api` routes. The
+Controller attaches its machine credential to these requests, and the Proxy
+limits them to the credential's workspace.
 
 ### 4.6 `treer-web`
 
@@ -293,6 +299,14 @@ Controller resolves them to opaque Host spawn requests.
 
 Use one persistent WebSocket per Controller. Registration, snapshots, commands,
 resize, lifecycle, and errors use JSON text frames:
+
+Before this connection is allowed, a logged-in user creates a 10-minute,
+single-use enrollment token. Exchanging it returns an installer containing a
+new Proxy-assigned server ID and long-lived machine credential. The Controller
+sends that credential as an `Authorization: Bearer` header. The Proxy verifies
+its Argon2 hash and rejects any registration whose workspace or server ID does
+not match the credential. Enrollment and machine secrets are never stored in
+plaintext by the Proxy.
 
 ```json
 {
