@@ -6,99 +6,160 @@
   <title>Treer</title>
   <link rel="stylesheet" href="/assets/xterm.css">
   <style>
-    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; background: #f4f5f7; color: #17212b; }
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f7f8;
+      color: #18211f;
+      --ink: #18211f;
+      --muted: #697572;
+      --subtle: #8c9693;
+      --line: #dde3e1;
+      --line-strong: #cdd5d2;
+      --surface: #ffffff;
+      --surface-subtle: #f7f9f8;
+      --accent: #087a61;
+      --accent-hover: #05664f;
+      --accent-soft: #e7f5f0;
+      --nav: #17201f;
+      --terminal: #0d1413;
+      --danger: #b33a3a;
+      --shadow-lg: 0 24px 70px rgba(16, 28, 25, .18), 0 3px 12px rgba(16, 28, 25, .08);
+    }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     html, body { height: 100%; }
-    body { margin: 0; min-width: 320px; overflow: hidden; }
+    body { margin: 0; min-width: 320px; overflow: hidden; background: #f5f7f8; -webkit-font-smoothing: antialiased; }
+    ::selection { background: #bde5d9; color: #10241f; }
     button, input, select, textarea { font: inherit; letter-spacing: 0; }
-    button { border: 1px solid #b8c0ca; background: #fff; color: #17212b; height: 34px; padding: 0 12px; border-radius: 5px; cursor: pointer; }
-    button:hover { background: #eef1f4; }
+    button { border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); height: 34px; padding: 0 13px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease, box-shadow .16s ease; }
+    button:hover { background: #f3f6f5; border-color: #aeb9b5; }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid rgba(8, 122, 97, .16); outline-offset: 1px; border-color: var(--accent); }
     button:disabled { cursor: default; opacity: .5; }
-    button.primary { background: #176b4d; border-color: #176b4d; color: #fff; }
-    button.danger { color: #a52c2c; }
-    input, select, textarea { width: 100%; border: 1px solid #c6cdd5; border-radius: 4px; background: #fff; padding: 7px 8px; }
-    header { height: 52px; background: #17212b; color: #fff; display: flex; align-items: center; gap: 18px; padding: 0 18px; }
-    header strong { font-size: 18px; }
-    header select { width: 210px; border-color: #45515d; background: #25313c; color: #fff; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(5, 74, 58, .18); }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    button.danger { color: var(--danger); }
+    input, select, textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; color: var(--ink); padding: 8px 10px; transition: border-color .16s ease, box-shadow .16s ease; }
+    select { cursor: pointer; }
+    #app { height: 100%; }
+    header { height: 60px; background: var(--nav); color: #fff; display: flex; align-items: center; gap: 24px; padding: 0 20px; border-bottom: 1px solid #2a3533; }
+    .brand { display: flex; align-items: center; gap: 10px; flex: none; }
+    .brand-mark { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 6px; background: #22a381; color: #fff; font-size: 15px; font-weight: 800; }
+    .brand strong { font-size: 16px; font-weight: 700; }
+    .workspace-control { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .workspace-label { color: #8f9c99; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    header select { width: 200px; height: 34px; border-color: #3b4745; background: #222d2b; color: #eff5f3; padding-block: 0; }
     .account { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-    #currentUser, #connection { font-size: 12px; color: #afbac4; }
-    header button { height: 30px; padding: 0 9px; background: #25313c; border-color: #45515d; color: #fff; }
-    main { display: grid; grid-template-columns: 220px minmax(0, 1fr); height: calc(100vh - 52px); min-height: 0; }
-    aside { min-width: 0; border-right: 1px solid #d7dce2; background: #fff; overflow: auto; }
-    .pane-title { height: 42px; display: flex; align-items: center; padding: 0 14px; border-bottom: 1px solid #d7dce2; font-size: 12px; font-weight: 700; text-transform: uppercase; color: #596673; }
+    .user { display: flex; align-items: center; gap: 8px; margin-right: 4px; }
+    .avatar { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: #34413e; color: #c7d0cd; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    #currentUser { font-size: 12px; color: #d5dddb; }
+    #connection { display: inline-flex; align-items: center; gap: 6px; min-width: 80px; color: #96a29f; font-size: 11px; text-transform: capitalize; }
+    #connection::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #d39a46; box-shadow: 0 0 0 3px rgba(211, 154, 70, .1); }
+    #connection.live::before { background: #37bb8b; box-shadow: 0 0 0 3px rgba(55, 187, 139, .11); }
+    header button { height: 30px; padding: 0 10px; background: transparent; border-color: #3b4745; color: #d5dddb; font-size: 12px; }
+    header button:hover { background: #26312f; border-color: #52605d; }
+    main { display: grid; grid-template-columns: 252px minmax(0, 1fr); height: calc(100vh - 60px); min-height: 0; }
+    aside { min-width: 0; border-right: 1px solid var(--line); background: #f9fbfa; overflow: auto; }
+    .pane-title { height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 700; color: #4c5956; }
+    .count { min-width: 24px; padding: 2px 7px; border-radius: 10px; background: #e8edeb; color: #65716e; font-size: 11px; text-align: center; }
     #servers { padding: 8px; }
-    .server { padding: 9px 7px; border-bottom: 1px solid #edf0f3; }
-    .server-name { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
-    .meta { color: #74808c; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
-    .dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: #9ca5ad; flex: none; }
-    .dot.online { background: #1f9d68; }
-    #workspacePane { display: grid; grid-template-rows: 44px minmax(96px, 20vh) 42px minmax(0, 1fr); min-width: 0; min-height: 0; }
-    .toolbar, .terminal-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 12px; background: #fff; border-bottom: 1px solid #d7dce2; }
-    .toolbar-actions { display: flex; align-items: center; gap: 7px; }
-    #agentTable { min-height: 0; overflow: auto; background: #fff; border-bottom: 1px solid #cbd2d9; }
+    .server { position: relative; padding: 11px 12px; margin-bottom: 3px; border: 1px solid transparent; border-radius: 6px; }
+    .server:hover { background: #fff; border-color: var(--line); }
+    .server-name { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 650; }
+    .meta { color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.45; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #aab3b0; flex: none; }
+    .dot.online { background: #20a777; box-shadow: 0 0 0 3px rgba(32, 167, 119, .1); }
+    #workspacePane { display: grid; grid-template-rows: 54px minmax(112px, 24vh) 44px minmax(0, 1fr); min-width: 0; min-height: 0; background: var(--surface); }
+    .toolbar, .terminal-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; background: #fff; border-bottom: 1px solid var(--line); }
+    .section-title { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+    .section-title strong { font-size: 14px; }
+    #revision { color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+    .toolbar-actions { display: flex; align-items: center; gap: 8px; }
+    #agentTable { min-height: 0; overflow: auto; background: #fff; border-bottom: 1px solid var(--line-strong); scrollbar-color: #c0cac6 #f7f9f8; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4e8ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
-    th { color: #65727e; font-size: 11px; text-transform: uppercase; background: #fafbfc; position: sticky; top: 0; }
+    th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid #e9edeb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+    th { height: 34px; color: #84908c; font-size: 10px; font-weight: 700; text-transform: uppercase; background: #f8faf9; position: sticky; top: 0; z-index: 1; }
     tbody tr { cursor: pointer; }
-    tbody tr:hover, tbody tr.selected { background: #edf6f2; }
-    .status { display: inline-flex; align-items: center; min-width: 68px; font-weight: 600; }
-    .status.blocked { color: #a55b00; }
-    .status.working, .status.starting { color: #176b8d; }
-    .status.failed, .status.exited { color: #a52c2c; }
-    .terminal-bar { background: #111922; color: #d6dee6; border-color: #2d3945; }
+    tbody tr:hover { background: #f5f9f7; }
+    tbody tr.selected { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+    tbody td:first-child { font-weight: 650; color: #23302d; }
+    .kind { color: #596662; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .status { display: inline-flex; align-items: center; gap: 6px; min-width: 74px; color: #64716d; font-size: 11px; font-weight: 650; text-transform: capitalize; }
+    .status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .7; }
+    .status.blocked { color: #a76b12; }
+    .status.working, .status.starting { color: #16769a; }
+    .status.idle { color: #218561; }
+    .status.failed, .status.exited { color: var(--danger); }
+    .terminal-bar { background: #151e1c; color: #d8e0de; border-color: #2b3533; }
     .terminal-identity { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
     #terminalName { font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #terminalMeta { color: #8f9ba6; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #terminalMeta { color: #7f8d89; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .terminal-actions { display: flex; align-items: center; gap: 7px; flex: none; }
-    .terminal-actions button { height: 28px; padding: 0 9px; color: #d6dee6; background: #1d2833; border-color: #3b4855; font-size: 12px; }
-    .terminal-actions button.danger { color: #ffb1aa; }
-    #terminalStatus { color: #8f9ba6; font-size: 11px; min-width: 74px; text-align: right; }
-    #terminalHost { min-width: 0; min-height: 0; height: 100%; padding: 8px 7px; background: #0b1117; overflow: hidden; }
+    .terminal-actions button { height: 28px; padding: 0 9px; color: #cfd8d5; background: #202a28; border-color: #384441; font-size: 11px; }
+    .terminal-actions button:hover { background: #293532; border-color: #53605d; }
+    .terminal-actions button.danger { color: #ffaaa4; }
+    #terminalStatus { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; color: #84938f; font-size: 10px; min-width: 82px; text-align: right; text-transform: uppercase; }
+    #terminalStatus::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    #terminalHost { min-width: 0; min-height: 0; height: 100%; padding: 11px 10px; background: var(--terminal); overflow: hidden; }
     #terminalHost .xterm { height: 100%; }
     #terminalHost .xterm-viewport { scrollbar-color: #465360 #0b1117; }
-    .terminal-empty { height: 100%; display: grid; place-items: center; color: #7f8d99; font-size: 13px; }
-    .field { margin-top: 12px; }
-    .field label { display: block; font-size: 12px; font-weight: 600; color: #5b6772; margin-bottom: 5px; }
-    .actions { display: flex; gap: 7px; margin-top: 10px; }
-    dialog { width: min(520px, calc(100vw - 28px)); border: 1px solid #aeb7c1; border-radius: 6px; padding: 0; }
-    dialog::backdrop { background: rgba(20, 28, 35, .35); }
-    dialog form { padding: 16px; }
-    dialog h2 { font-size: 17px; margin: 0 0 14px; }
+    .terminal-empty { height: 100%; display: grid; place-items: center; color: #66736f; font-size: 12px; }
+    .field { margin-top: 15px; }
+    .field label { display: block; font-size: 11px; font-weight: 650; color: #55615e; margin-bottom: 6px; }
+    .actions { display: flex; gap: 8px; margin-top: 18px; }
+    dialog { width: min(520px, calc(100vw - 28px)); border: 1px solid rgba(206, 215, 212, .9); border-radius: 8px; padding: 0; color: var(--ink); background: #fff; box-shadow: var(--shadow-lg); }
+    dialog::backdrop { background: rgba(16, 26, 23, .48); backdrop-filter: blur(3px); }
+    dialog form { padding: 24px; }
+    dialog h2 { font-size: 18px; line-height: 1.25; margin: 0 0 18px; }
     dialog .actions { justify-content: flex-end; }
     #installCommand { min-height: 88px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
     #inviteUrl { min-height: 74px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
-    #authDialog { width: min(390px, calc(100vw - 28px)); }
-    #authDialog::backdrop { background: #17212b; }
-    .form-error { min-height: 18px; margin-top: 10px; color: #a52c2c; font-size: 12px; }
-    .auth-switch { margin-right: auto; border: 0; padding: 0; color: #176b4d; }
-    #empty { color: #7b8792; padding: 24px 12px; text-align: center; }
-    @media (max-width: 700px) {
+    #authDialog { width: min(400px, calc(100vw - 28px)); }
+    #authDialog::backdrop { background: #17201f; }
+    #authDialog h2::before { content: 'T'; display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 22px; border-radius: 7px; background: var(--accent); color: #fff; font-size: 18px; }
+    .form-error { min-height: 18px; margin-top: 10px; color: var(--danger); font-size: 12px; }
+    .auth-switch { margin-right: auto; border: 0; padding: 0; color: var(--accent); background: transparent; box-shadow: none; }
+    #empty { color: #87928f; padding: 28px 12px; text-align: center; font-size: 12px; }
+    @media (max-width: 760px) {
       body { overflow: auto; }
-      header { gap: 7px; padding: 0 10px; }
-      header select { width: 112px; }
+      header { height: 56px; gap: 10px; padding: 0 12px; }
+      .brand strong, .workspace-label { display: none; }
+      .brand { gap: 0; }
+      header select { width: min(32vw, 150px); }
       .account { gap: 5px; }
-      #currentUser, #connection { display: none; }
+      .user, #connection { display: none; }
+      header button { padding: 0 8px; }
       main { display: block; height: auto; }
-      aside { border-right: 0; border-bottom: 1px solid #d7dce2; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .pane-title { height: 44px; }
       #servers { display: flex; overflow-x: auto; }
-      .server { min-width: 170px; border-right: 1px solid #edf0f3; }
-      #workspacePane { display: grid; grid-template-rows: 44px 142px 42px 58vh; min-height: 610px; }
+      .server { min-width: 190px; margin: 0 4px 0 0; }
+      #workspacePane { display: grid; grid-template-rows: 52px 150px 44px 58vh; min-height: 650px; }
+      .toolbar { padding: 0 10px; }
+      .toolbar-actions { gap: 5px; }
+      .toolbar-actions button { padding: 0 9px; }
       th:nth-child(3), td:nth-child(3) { display: none; }
-      .terminal-identity { max-width: 42vw; }
+      th, td { padding-inline: 10px; }
+      .terminal-identity { max-width: 36vw; }
       #terminalMeta { display: none; }
       #terminalStatus { display: none; }
       #terminalHost { padding: 6px 4px; }
+      dialog form { padding: 20px; }
     }
   </style>
 </head>
 <body>
   <div id="app" hidden>
-  <header><strong>treer</strong><select id="workspace"></select><div class="account"><span id="currentUser"></span><button id="inviteButton" hidden>Invite</button><button id="logoutButton">Log out</button><span id="connection">connecting</span></div></header>
+  <header>
+    <div class="brand"><span class="brand-mark">T</span><strong>treer</strong></div>
+    <div class="workspace-control"><span class="workspace-label">Workspace</span><select id="workspace" aria-label="Workspace"></select></div>
+    <div class="account"><div class="user"><span class="avatar" id="userAvatar"></span><span id="currentUser"></span></div><button id="inviteButton" hidden>Invite</button><button id="logoutButton">Log out</button><span id="connection">connecting</span></div>
+  </header>
   <main>
-    <aside><div class="pane-title">Machines</div><div id="servers"></div></aside>
+    <aside><div class="pane-title"><span>Machines</span><span class="count" id="serverCount">0</span></div><div id="servers"></div></aside>
     <section id="workspacePane">
-      <div class="toolbar"><span><strong>Agents</strong> <small id="revision"></small></span><div class="toolbar-actions"><button id="installButton">Add machine</button><button class="primary" id="createButton">New agent</button></div></div>
+      <div class="toolbar"><span class="section-title"><strong>Agents</strong><span class="count" id="agentCount">0</span><small id="revision"></small></span><div class="toolbar-actions"><button id="installButton">Add machine</button><button class="primary" id="createButton">New agent</button></div></div>
       <div id="agentTable"></div>
       <div class="terminal-bar">
         <div class="terminal-identity"><span id="terminalName">Terminal</span><span id="terminalMeta"></span></div>
@@ -183,6 +244,7 @@
       if ($('authDialog').open) $('authDialog').close();
       $('app').hidden = false;
       $('currentUser').textContent = state.user.username;
+      $('userAvatar').textContent = state.user.username.slice(0, 1);
       $('inviteButton').hidden = !state.user.is_admin;
       history.replaceState(null, '', location.pathname);
       await loadWorkspaces();
@@ -204,12 +266,14 @@
     function render() {
       const snapshot = state.snapshot; if (!snapshot) return;
       $('revision').textContent = `rev ${snapshot.revision}`;
+      $('serverCount').textContent = snapshot.servers.length;
+      $('agentCount').textContent = snapshot.agents.length;
       $('servers').innerHTML = snapshot.servers.length ? snapshot.servers.map(server => `
-        <div class="server"><div class="server-name"><span>${escapeHtml(server.hostname || server.server_id)}</span><span class="dot ${server.status}"></span></div>
+        <div class="server"><div class="server-name"><span>${escapeHtml(server.hostname || server.server_id)}</span><span class="dot ${server.status}" title="${escapeHtml(server.status)}"></span></div>
         <div class="meta">${escapeHtml(server.server_id)}</div><div class="meta">${escapeHtml(server.root)}</div></div>`).join('') : '<div id="empty">No machines connected</div>';
       $('createServer').innerHTML = snapshot.servers.filter(s => s.status === 'online').map(s => `<option value="${escapeHtml(s.server_id)}">${escapeHtml(s.hostname)} · ${escapeHtml(s.server_id)}</option>`).join('');
       $('agentTable').innerHTML = snapshot.agents.length ? `<table><thead><tr><th style="width:28%">Name</th><th style="width:18%">Status</th><th style="width:20%">Kind</th><th>Machine</th></tr></thead><tbody>${snapshot.agents.map(agent => `
-        <tr data-agent="${escapeHtml(agent.agent_id)}" class="${state.selected === agent.agent_id ? 'selected' : ''}"><td>${escapeHtml(agent.name)}</td><td><span class="status ${agent.status}">${escapeHtml(agent.status)}</span></td><td>${escapeHtml(agent.kind)}</td><td>${escapeHtml(agent.server_id)}</td></tr>`).join('')}</tbody></table>` : '<div id="empty">No agents in this workspace</div>';
+        <tr data-agent="${escapeHtml(agent.agent_id)}" class="${state.selected === agent.agent_id ? 'selected' : ''}" aria-selected="${state.selected === agent.agent_id}"><td>${escapeHtml(agent.name)}</td><td><span class="status ${agent.status}">${escapeHtml(agent.status)}</span></td><td><span class="kind">${escapeHtml(agent.kind)}</span></td><td>${escapeHtml(agent.server_id)}</td></tr>`).join('')}</tbody></table>` : '<div id="empty">No agents in this workspace</div>';
       document.querySelectorAll('[data-agent]').forEach(row => row.onclick = () => selectAgent(row.dataset.agent));
       renderTerminalBar();
     }
@@ -345,8 +409,8 @@
       state.socket?.close();
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
       const socket = new WebSocket(`${scheme}://${location.host}/api/workspaces/${encodeURIComponent(state.workspace)}/events`); state.socket = socket;
-      socket.onopen = () => $('connection').textContent = 'live';
-      socket.onclose = () => { $('connection').textContent = 'reconnecting'; if (state.socket === socket) setTimeout(connectEvents, 1200); };
+      socket.onopen = () => { $('connection').textContent = 'live'; $('connection').classList.add('live'); };
+      socket.onclose = () => { $('connection').textContent = 'reconnecting'; $('connection').classList.remove('live'); if (state.socket === socket) setTimeout(connectEvents, 1200); };
       socket.onmessage = event => { const message = JSON.parse(event.data); if (message.event === 'workspace.snapshot') { state.snapshot = message.data; render(); } else { refresh(); } };
     }
     $('workspace').onchange = async event => { disposeTerminal(); state.workspace = event.target.value; state.selected = null; await refresh(); connectEvents(); };
