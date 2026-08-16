@@ -3,9 +3,26 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 pub const HOST_PROTOCOL_VERSION: u32 = 1;
+pub const MAX_HOST_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+pub fn encode_message<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    bincode::serde::encode_to_vec(value, bincode::config::standard())
+        .map_err(|error| error.to_string())
+}
+
+pub fn decode_message<T>(encoded: &[u8]) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let (value, consumed) = bincode::serde::decode_from_slice(encoded, bincode::config::standard())
+        .map_err(|error| error.to_string())?;
+    if consumed != encoded.len() {
+        return Err("host frame contains trailing bytes".to_string());
+    }
+    Ok(value)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostProcessInfo {
@@ -13,18 +30,21 @@ pub struct HostProcessInfo {
     pub pid: Option<u32>,
     pub cwd: String,
     pub running: bool,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
     pub started_at: DateTime<Utc>,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
     pub last_output_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[serde(with = "chrono::serde::ts_milliseconds_option")]
     pub exited_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exit_code: Option<i32>,
     pub stream_epoch: String,
     pub first_revision: u64,
     pub next_revision: u64,
     pub bracketed_paste: bool,
     #[serde(default)]
-    pub metadata: Value,
+    pub metadata: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,8 +52,9 @@ pub struct HostOutputChunk {
     pub process_id: String,
     pub stream_epoch: String,
     pub revision: u64,
-    pub data: String,
+    pub data: Vec<u8>,
     pub bracketed_paste: bool,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
     pub emitted_at: DateTime<Utc>,
 }
 
@@ -66,18 +87,17 @@ pub struct HostSpawnRequest {
     pub cols: u16,
     pub rows: u16,
     #[serde(default)]
-    pub metadata: Value,
+    pub metadata: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostWrite {
-    pub data: String,
+    pub data: Vec<u8>,
     #[serde(default)]
     pub delay_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
 pub enum HostCommand {
     Sync {
         #[serde(default)]
@@ -88,7 +108,7 @@ pub enum HostCommand {
     },
     Read {
         process_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         cursor: Option<OutputCursor>,
     },
     Write {
@@ -123,13 +143,12 @@ impl HostCommand {
 pub struct HostRequest {
     pub protocol: u32,
     pub request_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub operation_id: Option<String>,
     pub command: HostCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostResponse {
     Synced {
         host_epoch: String,
@@ -161,13 +180,12 @@ impl HostError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostMessage {
     Response {
         request_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         response: Option<HostResponse>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         error: Option<HostError>,
     },
     Output {
@@ -203,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_shape_is_stable() {
+    fn request_round_trips_through_binary_codec() {
         let request = HostRequest {
             protocol: HOST_PROTOCOL_VERSION,
             request_id: "req_1".to_string(),
@@ -214,8 +232,47 @@ mod tests {
                 rows: 40,
             },
         };
-        let json = serde_json::to_value(request).expect("serialize host request");
-        assert_eq!(json["command"]["action"], "resize");
-        assert_eq!(json["operation_id"], "cmd_1");
+        let encoded = encode_message(&request).expect("encode host request");
+        assert_eq!(decode_message::<HostRequest>(&encoded), Ok(request));
+    }
+
+    #[test]
+    fn optional_fields_are_encoded_in_binary_frames() {
+        let request = HostRequest {
+            protocol: HOST_PROTOCOL_VERSION,
+            request_id: "req_sync".to_string(),
+            operation_id: None,
+            command: HostCommand::Sync {
+                cursors: BTreeMap::new(),
+            },
+        };
+        let encoded = encode_message(&request).expect("encode sync request");
+        assert_eq!(decode_message::<HostRequest>(&encoded), Ok(request));
+
+        let message = HostMessage::Response {
+            request_id: "req_sync".to_string(),
+            response: Some(HostResponse::Ack),
+            error: None,
+        };
+        let encoded = encode_message(&message).expect("encode host response");
+        assert_eq!(decode_message::<HostMessage>(&encoded), Ok(message));
+    }
+
+    #[test]
+    fn binary_message_round_trips_raw_pty_bytes() {
+        let emitted_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("valid current timestamp");
+        let message = HostMessage::Output {
+            chunk: HostOutputChunk {
+                process_id: "p1".to_string(),
+                stream_epoch: "stream_1".to_string(),
+                revision: 9,
+                data: vec![0, 1, 0xff],
+                bracketed_paste: false,
+                emitted_at,
+            },
+        };
+        let encoded = encode_message(&message).expect("encode host message");
+        assert_eq!(decode_message::<HostMessage>(&encoded), Ok(message));
     }
 }

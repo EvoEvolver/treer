@@ -1,8 +1,6 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Method;
@@ -323,9 +321,7 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
                 .value(
                     Method::POST,
                     &format!("api/agents/{}/input", path_segment(&target)),
-                    Some(serde_json::to_value(InputAgentRequest {
-                        data: BASE64.encode(data),
-                    })?),
+                    Some(serde_json::to_value(InputAgentRequest { data })?),
                 )
                 .await
         }

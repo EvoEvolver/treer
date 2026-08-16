@@ -30,7 +30,10 @@ impl LocalApiState {
 
     fn proxy_url(&self, suffix: &str) -> Result<Url, LocalApiError> {
         self.proxy_http
-            .join(&format!("/api/workspaces/{}/{}", self.workspace_id, suffix))
+            .join(&format!(
+                "/agent/workspaces/{}/{}",
+                self.workspace_id, suffix
+            ))
             .map_err(|err| LocalApiError::bad_gateway(err.to_string()))
     }
 

@@ -4,10 +4,13 @@ use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
-use treer_protocol::{AgentServerMessage, ProtocolError, ProxyMessage, PROTOCOL_VERSION};
+use treer_protocol::{
+    AgentServerMessage, ProtocolError, ProxyMessage, TerminalBinaryFrame, TerminalBinaryKind,
+    PROTOCOL_VERSION,
+};
 use uuid::Uuid;
 
-use crate::state::AppState;
+use crate::state::{AppState, SocketFrame};
 
 pub async fn upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| handle(socket, state))
@@ -16,10 +19,14 @@ pub async fn upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Res
 async fn handle(socket: WebSocket, state: AppState) {
     let connection_id = Uuid::new_v4();
     let (mut socket_tx, mut socket_rx) = socket.split();
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<String>();
+    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<SocketFrame>();
     let writer = tokio::spawn(async move {
-        while let Some(encoded) = outgoing_rx.recv().await {
-            if socket_tx.send(Message::Text(encoded.into())).await.is_err() {
+        while let Some(frame) = outgoing_rx.recv().await {
+            let message = match frame {
+                SocketFrame::Text(encoded) => Message::Text(encoded.into()),
+                SocketFrame::Binary(encoded) => Message::Binary(encoded.into()),
+            };
+            if socket_tx.send(message).await.is_err() {
                 break;
             }
         }
@@ -31,8 +38,55 @@ async fn handle(socket: WebSocket, state: AppState) {
             break;
         };
         let Message::Text(text) = message else {
-            if matches!(message, Message::Close(_)) {
-                break;
+            match message {
+                Message::Binary(encoded) => {
+                    let frame = match TerminalBinaryFrame::decode(&encoded) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            send_error(&outgoing_tx, error);
+                            continue;
+                        }
+                    };
+                    let Some((workspace_id, server_id)) = identity.as_ref() else {
+                        send_error(&outgoing_tx, identity_error());
+                        continue;
+                    };
+                    let result = match frame.kind {
+                        TerminalBinaryKind::Ready => {
+                            state
+                                .terminal_ready(
+                                    workspace_id,
+                                    server_id,
+                                    connection_id,
+                                    &frame.session_id,
+                                    frame.revision,
+                                    frame.payload,
+                                )
+                                .await
+                        }
+                        TerminalBinaryKind::Output => {
+                            state
+                                .terminal_output(
+                                    workspace_id,
+                                    server_id,
+                                    connection_id,
+                                    &frame.session_id,
+                                    frame.revision,
+                                    frame.payload,
+                                )
+                                .await
+                        }
+                        TerminalBinaryKind::Input => Err(ProtocolError::new(
+                            "invalid_terminal_frame",
+                            "agent server cannot send terminal input frames",
+                        )),
+                    };
+                    if let Err(error) = result {
+                        send_error(&outgoing_tx, error);
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
             }
             continue;
         };
@@ -126,30 +180,6 @@ async fn handle(socket: WebSocket, state: AppState) {
                     send_error(&outgoing_tx, identity_error());
                 }
             }
-            AgentServerMessage::TerminalReady { session_id, replay } => {
-                if let Some((workspace_id, server_id)) = identity.as_ref() {
-                    if let Err(error) = state
-                        .terminal_ready(workspace_id, server_id, connection_id, &session_id, replay)
-                        .await
-                    {
-                        send_error(&outgoing_tx, error);
-                    }
-                } else {
-                    send_error(&outgoing_tx, identity_error());
-                }
-            }
-            AgentServerMessage::TerminalOutput { session_id, data } => {
-                if let Some((workspace_id, server_id)) = identity.as_ref() {
-                    if let Err(error) = state
-                        .terminal_output(workspace_id, server_id, connection_id, &session_id, data)
-                        .await
-                    {
-                        send_error(&outgoing_tx, error);
-                    }
-                } else {
-                    send_error(&outgoing_tx, identity_error());
-                }
-            }
             AgentServerMessage::TerminalClosed { session_id, reason } => {
                 if let Some((workspace_id, server_id)) = identity.as_ref() {
                     if let Err(error) = state
@@ -195,14 +225,14 @@ fn identity_error() -> ProtocolError {
     )
 }
 
-fn send_error(outgoing: &mpsc::UnboundedSender<String>, error: ProtocolError) {
+fn send_error(outgoing: &mpsc::UnboundedSender<SocketFrame>, error: ProtocolError) {
     send_message(outgoing, &ProxyMessage::Error { error });
 }
 
-fn send_message(outgoing: &mpsc::UnboundedSender<String>, message: &ProxyMessage) {
+fn send_message(outgoing: &mpsc::UnboundedSender<SocketFrame>, message: &ProxyMessage) {
     match serde_json::to_string(message) {
         Ok(encoded) => {
-            let _ = outgoing.send(encoded);
+            let _ = outgoing.send(SocketFrame::Text(encoded));
         }
         Err(err) => warn!(%err, "failed to encode proxy message"),
     }

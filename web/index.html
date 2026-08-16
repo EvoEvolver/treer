@@ -254,7 +254,7 @@
       requestAnimationFrame(() => { fit.fit(); connectTerminalSocket(agentId); });
       terminalState.input = terminal.onData(data => {
         const socket = terminalState.socket;
-        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: encodeBase64(data) }));
+        if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
       });
       terminalState.observer = new ResizeObserver(() => {
         clearTimeout(terminalState.resizeTimer);
@@ -271,16 +271,18 @@
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
       const terminal = terminalState.terminal;
       const socket = new WebSocket(`${scheme}://${location.host}/api/workspaces/${encodeURIComponent(state.workspace)}/agents/${encodeURIComponent(agentId)}/terminal?cols=${terminal.cols}&rows=${terminal.rows}`);
+      socket.binaryType = 'arraybuffer';
       terminalState.socket = socket;
       socket.onmessage = event => {
         if (terminalState.socket !== socket) return;
+        if (event.data instanceof ArrayBuffer) {
+          terminal.write(new Uint8Array(event.data));
+          return;
+        }
         const message = JSON.parse(event.data);
         if (message.type === 'ready') {
           terminal.reset();
-          if (message.replay) terminal.write(decodeBase64(message.replay));
           $('terminalStatus').textContent = 'live'; terminal.focus();
-        } else if (message.type === 'output') {
-          terminal.write(decodeBase64(message.data));
         } else if (message.type === 'closed') {
           $('terminalStatus').textContent = message.reason === 'agent server disconnected' ? 'reconnecting' : 'closed';
           if (message.reason && message.reason !== 'agent server disconnected') terminal.writeln(`\r\n\x1b[31m[treer] ${message.reason}\x1b[0m`);
@@ -346,16 +348,6 @@
       socket.onopen = () => $('connection').textContent = 'live';
       socket.onclose = () => { $('connection').textContent = 'reconnecting'; if (state.socket === socket) setTimeout(connectEvents, 1200); };
       socket.onmessage = event => { const message = JSON.parse(event.data); if (message.event === 'workspace.snapshot') { state.snapshot = message.data; render(); } else { refresh(); } };
-    }
-    function encodeBase64(value) {
-      const bytes = new TextEncoder().encode(value); let binary = '';
-      for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-      return btoa(binary);
-    }
-    function decodeBase64(value) {
-      const binary = atob(value); const bytes = new Uint8Array(binary.length);
-      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-      return bytes;
     }
     $('workspace').onchange = async event => { disposeTerminal(); state.workspace = event.target.value; state.selected = null; await refresh(); connectEvents(); };
     $('authDialog').oncancel = event => event.preventDefault();

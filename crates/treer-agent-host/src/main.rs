@@ -6,15 +6,17 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use treer_agent_runtime::{HostRuntime, RuntimeError};
 use treer_host_protocol::{
-    HostCommand, HostDaemonConfig, HostError, HostMessage, HostRequest, HostResponse, OutputCursor,
-    HOST_PROTOCOL_VERSION,
+    decode_message, encode_message, HostCommand, HostDaemonConfig, HostError, HostMessage,
+    HostRequest, HostResponse, OutputCursor, HOST_PROTOCOL_VERSION, MAX_HOST_FRAME_BYTES,
 };
 use uuid::Uuid;
 
@@ -124,6 +126,8 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
     );
 
     let mut controller = spawn_controller(&config).await?;
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             result = controller.wait() => {
@@ -145,7 +149,7 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
                 let _ = controller.wait().await;
                 controller = spawn_controller(&config).await?;
             }
-            signal = shutdown_signal() => {
+            signal = &mut shutdown => {
                 signal?;
                 let _ = controller.kill().await;
                 let _ = controller.wait().await;
@@ -209,20 +213,12 @@ async fn serve(listener: UnixListener, state: Arc<HostState>) -> Result<()> {
 async fn handle_connection(stream: UnixStream, state: Arc<HostState>) -> Result<()> {
     let mut output_events = state.runtime.subscribe_output();
     let mut process_events = state.runtime.subscribe_processes();
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
+    let (mut reader, mut writer) = stream.into_split();
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<HostMessage>();
     let writer_task = tokio::spawn(async move {
         while let Some(message) = outgoing_rx.recv().await {
-            let mut encoded = match serde_json::to_vec(&message) {
-                Ok(encoded) => encoded,
-                Err(error) => {
-                    warn!(%error, "failed to encode host message");
-                    continue;
-                }
-            };
-            encoded.push(b'\n');
-            if writer.write_all(&encoded).await.is_err() {
+            if let Err(error) = write_frame(&mut writer, &message).await {
+                warn!(%error, "failed to write host message");
                 break;
             }
         }
@@ -232,12 +228,10 @@ async fn handle_connection(stream: UnixStream, state: Arc<HostState>) -> Result<
 
     loop {
         tokio::select! {
-            line = lines.next_line() => {
-                let Some(line) = line.context("failed to read host request")? else {
+            request = read_frame::<_, HostRequest>(&mut reader) => {
+                let Some(request) = request.context("failed to read host request")? else {
                     break;
                 };
-                let request: HostRequest = serde_json::from_str(&line)
-                    .context("failed to decode host request")?;
                 if request.protocol != HOST_PROTOCOL_VERSION {
                     send_response(
                         &outgoing_tx,
@@ -421,10 +415,9 @@ fn send_response(
 }
 
 async fn request_controller_restart(socket: &Path) -> Result<()> {
-    let stream = UnixStream::connect(socket)
+    let mut stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("failed to connect to {}", socket.display()))?;
-    let (reader, mut writer) = stream.into_split();
     let request_id = format!("req_{}", Uuid::new_v4().simple());
     let request = HostRequest {
         protocol: HOST_PROTOCOL_VERSION,
@@ -432,18 +425,16 @@ async fn request_controller_restart(socket: &Path) -> Result<()> {
         operation_id: Some(format!("restart_{}", Uuid::new_v4().simple())),
         command: HostCommand::RestartController,
     };
-    let mut encoded = serde_json::to_vec(&request).context("failed to encode restart request")?;
-    encoded.push(b'\n');
-    writer
-        .write_all(&encoded)
+    write_frame(&mut stream, &request)
         .await
         .context("failed to send restart request")?;
-    let mut lines = BufReader::new(reader).lines();
-    let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
-        .await
-        .context("timed out waiting for host")??
-        .context("host closed without a response")?;
-    let message: HostMessage = serde_json::from_str(&line).context("invalid host response")?;
+    let message = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_frame::<_, HostMessage>(&mut stream),
+    )
+    .await
+    .context("timed out waiting for host")??
+    .context("host closed without a response")?;
     match message {
         HostMessage::Response {
             request_id: response_id,
@@ -458,6 +449,42 @@ async fn request_controller_restart(socket: &Path) -> Result<()> {
         } => bail!("{}: {}", error.code, error.message),
         _ => bail!("unexpected host response"),
     }
+}
+
+async fn write_frame<W, T>(writer: &mut W, value: &T) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let encoded = encode_message(value).map_err(anyhow::Error::msg)?;
+    if encoded.len() > MAX_HOST_FRAME_BYTES {
+        bail!("host frame exceeds {MAX_HOST_FRAME_BYTES} bytes");
+    }
+    let length = u32::try_from(encoded.len()).context("host frame length exceeds u32")?;
+    writer.write_u32(length).await?;
+    writer.write_all(&encoded).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn read_frame<R, T>(reader: &mut R) -> Result<Option<T>>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let length = match reader.read_u32().await {
+        Ok(length) => usize::try_from(length).context("invalid host frame length")?,
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if length > MAX_HOST_FRAME_BYTES {
+        bail!("host frame exceeds {MAX_HOST_FRAME_BYTES} bytes");
+    }
+    let mut encoded = vec![0_u8; length];
+    reader.read_exact(&mut encoded).await?;
+    decode_message(&encoded)
+        .map(Some)
+        .map_err(anyhow::Error::msg)
 }
 
 fn prepare_socket(path: &Path) -> Result<()> {
@@ -523,7 +550,7 @@ mod tests {
                     env: BTreeMap::new(),
                     cols: 80,
                     rows: 24,
-                    metadata: json!({"test": true}),
+                    metadata: json!({"test": true}).to_string(),
                 },
             },
         };
@@ -565,7 +592,7 @@ mod tests {
                     env: BTreeMap::new(),
                     cols: 80,
                     rows: 24,
-                    metadata: json!({"test": true}),
+                    metadata: json!({"test": true}).to_string(),
                 },
             },
         };

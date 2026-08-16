@@ -7,12 +7,18 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use treer_protocol::{
     AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult, ProtocolError,
-    ProxyMessage, ServerInfo, ServerStatus, TerminalServerMessage, WorkspaceEvent, WorkspaceInfo,
-    WorkspaceSnapshot,
+    ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind,
+    TerminalServerMessage, WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
 };
 use uuid::Uuid;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SocketFrame {
+    Text(String),
+    Binary(Vec<u8>),
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,7 +42,7 @@ struct ServerKey {
 #[derive(Clone)]
 struct ServerConnection {
     connection_id: Uuid,
-    outgoing: mpsc::UnboundedSender<String>,
+    outgoing: mpsc::UnboundedSender<SocketFrame>,
 }
 
 struct PendingCommand {
@@ -48,7 +54,8 @@ struct PendingCommand {
 struct TerminalSession {
     workspace_id: String,
     server_id: String,
-    outgoing: mpsc::UnboundedSender<String>,
+    outgoing: mpsc::UnboundedSender<SocketFrame>,
+    last_revision: Option<u64>,
 }
 
 struct WorkspaceState {
@@ -162,7 +169,7 @@ impl AppState {
         &self,
         mut server: ServerInfo,
         connection_id: Uuid,
-        outgoing: mpsc::UnboundedSender<String>,
+        outgoing: mpsc::UnboundedSender<SocketFrame>,
     ) -> Result<u64, ProtocolError> {
         self.ensure_workspace(&server.workspace_id, &server.workspace_id)
             .await;
@@ -389,7 +396,7 @@ impl AppState {
                 result: result_tx,
             },
         );
-        if outgoing.send(encoded).is_err() {
+        if outgoing.send(SocketFrame::Text(encoded)).is_err() {
             self.inner.pending.lock().await.remove(&command_id);
             return Err(ProtocolError::new("server_offline", server_id));
         }
@@ -449,7 +456,7 @@ impl AppState {
             .map(|pending| pending.encoded.clone())
             .collect::<Vec<_>>();
         for command in commands {
-            let _ = outgoing.send(command);
+            let _ = outgoing.send(SocketFrame::Text(command));
         }
     }
 
@@ -459,7 +466,7 @@ impl AppState {
         agent_id: &str,
         cols: u16,
         rows: u16,
-        outgoing: mpsc::UnboundedSender<String>,
+        outgoing: mpsc::UnboundedSender<SocketFrame>,
     ) -> Result<String, ProtocolError> {
         let agent = self.resolve_agent(workspace_id, agent_id).await?;
         let server_id = agent.server_id;
@@ -474,6 +481,7 @@ impl AppState {
                 workspace_id: workspace_id.to_string(),
                 server_id,
                 outgoing,
+                last_revision: None,
             },
         );
         let message = ProxyMessage::TerminalAttach {
@@ -496,16 +504,19 @@ impl AppState {
     pub async fn terminal_input(
         &self,
         session_id: &str,
-        data: String,
+        data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let session = self.terminal_session_route(session_id).await?;
-        send_proxy_message(
-            &session,
-            &ProxyMessage::TerminalInput {
-                session_id: session_id.to_string(),
-                data,
-            },
-        )
+        let encoded = TerminalBinaryFrame {
+            kind: TerminalBinaryKind::Input,
+            session_id: session_id.to_string(),
+            revision: 0,
+            payload: data,
+        }
+        .encode()?;
+        session
+            .send(SocketFrame::Binary(encoded))
+            .map_err(|_| ProtocolError::new("server_offline", "agent server disconnected"))
     }
 
     pub async fn terminal_resize(
@@ -549,21 +560,30 @@ impl AppState {
         server_id: &str,
         connection_id: Uuid,
         session_id: &str,
-        replay: String,
+        revision: u64,
+        replay: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        self.relay_terminal(
-            workspace_id,
-            server_id,
-            session_id,
-            TerminalServerMessage::Ready {
+        let outgoing = {
+            let mut sessions = self.inner.terminal_sessions.lock().await;
+            let Some(session) = sessions.get_mut(session_id) else {
+                return Ok(());
+            };
+            if session.workspace_id != workspace_id || session.server_id != server_id {
+                return Err(ProtocolError::new("terminal_identity_mismatch", session_id));
+            }
+            session.last_revision = Some(revision);
+            session.outgoing.clone()
+        };
+        send_terminal_to_browser(
+            &outgoing,
+            &TerminalServerMessage::Ready {
                 session_id: session_id.to_string(),
-                replay,
             },
-            false,
-        )
-        .await
+        );
+        let _ = outgoing.send(SocketFrame::Binary(replay));
+        Ok(())
     }
 
     pub async fn terminal_output(
@@ -572,18 +592,30 @@ impl AppState {
         server_id: &str,
         connection_id: Uuid,
         session_id: &str,
-        data: String,
+        revision: u64,
+        data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        self.relay_terminal(
-            workspace_id,
-            server_id,
-            session_id,
-            TerminalServerMessage::Output { data },
-            false,
-        )
-        .await
+        let outgoing = {
+            let mut sessions = self.inner.terminal_sessions.lock().await;
+            let Some(session) = sessions.get_mut(session_id) else {
+                return Ok(());
+            };
+            if session.workspace_id != workspace_id || session.server_id != server_id {
+                return Err(ProtocolError::new("terminal_identity_mismatch", session_id));
+            }
+            if session
+                .last_revision
+                .is_some_and(|last_revision| revision <= last_revision)
+            {
+                return Ok(());
+            }
+            session.last_revision = Some(revision);
+            session.outgoing.clone()
+        };
+        let _ = outgoing.send(SocketFrame::Binary(data));
+        Ok(())
     }
 
     pub async fn terminal_closed(
@@ -667,7 +699,7 @@ impl AppState {
         &self,
         workspace_id: &str,
         server_id: &str,
-    ) -> Option<mpsc::UnboundedSender<String>> {
+    ) -> Option<mpsc::UnboundedSender<SocketFrame>> {
         let key = ServerKey {
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
@@ -683,7 +715,7 @@ impl AppState {
     async fn terminal_session_route(
         &self,
         session_id: &str,
-    ) -> Result<mpsc::UnboundedSender<String>, ProtocolError> {
+    ) -> Result<mpsc::UnboundedSender<SocketFrame>, ProtocolError> {
         let route = self
             .inner
             .terminal_sessions
@@ -772,7 +804,7 @@ impl AppState {
 }
 
 fn send_proxy_message(
-    outgoing: &mpsc::UnboundedSender<String>,
+    outgoing: &mpsc::UnboundedSender<SocketFrame>,
     message: &ProxyMessage,
 ) -> Result<(), ProtocolError> {
     let encoded = serde_json::to_string(message).map_err(|error| {
@@ -782,16 +814,16 @@ fn send_proxy_message(
         )
     })?;
     outgoing
-        .send(encoded)
+        .send(SocketFrame::Text(encoded))
         .map_err(|_| ProtocolError::new("server_offline", "agent server disconnected"))
 }
 
 fn send_terminal_to_browser(
-    outgoing: &mpsc::UnboundedSender<String>,
+    outgoing: &mpsc::UnboundedSender<SocketFrame>,
     message: &TerminalServerMessage,
 ) {
     if let Ok(encoded) = serde_json::to_string(message) {
-        let _ = outgoing.send(encoded);
+        let _ = outgoing.send(SocketFrame::Text(encoded));
     }
 }
 
@@ -805,6 +837,13 @@ impl Default for AppState {
 mod tests {
     use super::*;
     use treer_protocol::AgentStatus;
+
+    fn expect_text(frame: SocketFrame) -> String {
+        match frame {
+            SocketFrame::Text(text) => text,
+            SocketFrame::Binary(_) => panic!("expected text socket frame"),
+        }
+    }
 
     fn test_server() -> ServerInfo {
         let now = Utc::now();
@@ -929,9 +968,10 @@ mod tests {
                 )
                 .await
         });
-        let first: ProxyMessage =
-            serde_json::from_str(&first_rx.recv().await.expect("first command should be sent"))
-                .expect("decode first command");
+        let first: ProxyMessage = serde_json::from_str(&expect_text(
+            first_rx.recv().await.expect("first command should be sent"),
+        ))
+        .expect("decode first command");
         let ProxyMessage::Command {
             envelope: first_envelope,
         } = first
@@ -959,12 +999,12 @@ mod tests {
             .await
             .expect("apply replacement snapshot");
 
-        let second: ProxyMessage = serde_json::from_str(
-            &second_rx
+        let second: ProxyMessage = serde_json::from_str(&expect_text(
+            second_rx
                 .recv()
                 .await
                 .expect("pending command should be resent"),
-        )
+        ))
         .expect("decode resent command");
         let ProxyMessage::Command {
             envelope: second_envelope,
@@ -987,5 +1027,105 @@ mod tests {
                 .expect("command result"),
             serde_json::json!({"replayed": true})
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
+        let state = AppState::new();
+        let server = test_server();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server, connection_id, server_tx)
+            .await
+            .expect("register controller");
+        {
+            let mut workspaces = state.inner.workspaces.write().await;
+            workspaces
+                .get_mut("alpha")
+                .expect("workspace")
+                .agents
+                .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
+        }
+        let (browser_tx, mut browser_rx) = mpsc::unbounded_channel();
+        let session_id = state
+            .attach_terminal("alpha", "agent-1", 120, 40, browser_tx)
+            .await
+            .expect("attach terminal");
+        let attach: ProxyMessage = serde_json::from_str(&expect_text(
+            server_rx.recv().await.expect("terminal attach message"),
+        ))
+        .expect("decode attach");
+        assert!(matches!(
+            attach,
+            ProxyMessage::TerminalAttach { session_id: ref attached, .. } if attached == &session_id
+        ));
+
+        state
+            .terminal_ready(
+                "alpha",
+                "server",
+                connection_id,
+                &session_id,
+                7,
+                b"replay".to_vec(),
+            )
+            .await
+            .expect("terminal ready");
+        let ready: TerminalServerMessage =
+            serde_json::from_str(&expect_text(browser_rx.recv().await.expect("ready frame")))
+                .expect("decode ready");
+        assert_eq!(
+            ready,
+            TerminalServerMessage::Ready {
+                session_id: session_id.clone()
+            }
+        );
+        assert_eq!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Binary(b"replay".to_vec()))
+        );
+
+        state
+            .terminal_output(
+                "alpha",
+                "server",
+                connection_id,
+                &session_id,
+                7,
+                b"duplicate".to_vec(),
+            )
+            .await
+            .expect("ignore duplicate output");
+        assert!(browser_rx.try_recv().is_err());
+        state
+            .terminal_output(
+                "alpha",
+                "server",
+                connection_id,
+                &session_id,
+                8,
+                b"live".to_vec(),
+            )
+            .await
+            .expect("relay live output");
+        assert_eq!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Binary(b"live".to_vec()))
+        );
+
+        state
+            .terminal_input(&session_id, vec![0, 0xff, b'\r'])
+            .await
+            .expect("relay browser input");
+        let input = match server_rx.recv().await.expect("terminal input frame") {
+            SocketFrame::Binary(encoded) => {
+                TerminalBinaryFrame::decode(&encoded).expect("decode terminal input")
+            }
+            SocketFrame::Text(_) => panic!("expected binary terminal input"),
+        };
+        assert_eq!(input.kind, TerminalBinaryKind::Input);
+        assert_eq!(input.session_id, session_id);
+        assert_eq!(input.payload, vec![0, 0xff, b'\r']);
     }
 }

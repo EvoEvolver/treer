@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::agent_socket;
 use crate::auth::{self, AuthStore};
-use crate::state::AppState;
+use crate::state::{AppState, SocketFrame};
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const XTERM_JS: &str = include_str!("../../../web/vendor/xterm.js");
@@ -44,6 +44,35 @@ impl BootstrapConfig {
 }
 
 pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore) -> Router {
+    let agent_control = Router::new()
+        .route(
+            "/agent/workspaces/{workspace_id}/snapshot",
+            get(workspace_snapshot),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents",
+            get(list_agents).post(create_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}",
+            get(get_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
+            post(prompt_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/input",
+            post(input_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/output",
+            get(read_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/stop",
+            post(stop_agent),
+        );
     let authenticated = Router::new()
         .route(
             "/api/workspaces/{workspace_id}/bootstrap",
@@ -113,6 +142,7 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/register", post(auth::register))
         .route("/agent/connect", get(agent_socket::upgrade))
+        .merge(agent_control)
         .merge(authenticated)
         .merge(administrator)
         .layer(Extension(bootstrap))
@@ -503,7 +533,7 @@ async fn stream_agent_terminal(
     query: TerminalQuery,
 ) {
     let (mut outgoing, mut incoming) = socket.split();
-    let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<SocketFrame>();
     let session_id = match state
         .attach_terminal(
             &workspace_id,
@@ -526,26 +556,28 @@ async fn stream_agent_terminal(
 
     loop {
         tokio::select! {
-            encoded = terminal_rx.recv() => {
-                let Some(encoded) = encoded else { break };
-                if outgoing.send(Message::Text(encoded.into())).await.is_err() {
+            frame = terminal_rx.recv() => {
+                let Some(frame) = frame else { break };
+                let message = match frame {
+                    SocketFrame::Text(encoded) => Message::Text(encoded.into()),
+                    SocketFrame::Binary(data) => Message::Binary(data.into()),
+                };
+                if outgoing.send(message).await.is_err() {
                     break;
                 }
             }
             message = incoming.next() => {
                 let Some(Ok(message)) = message else { break };
-                let Message::Text(text) = message else {
-                    if matches!(message, Message::Close(_)) { break; }
-                    continue;
-                };
-                let result = match serde_json::from_str::<TerminalClientMessage>(&text) {
-                    Ok(TerminalClientMessage::Input { data }) => {
-                        state.terminal_input(&session_id, data).await
-                    }
-                    Ok(TerminalClientMessage::Resize { cols, rows }) => {
-                        state.terminal_resize(&session_id, cols, rows).await
-                    }
-                    Err(error) => Err(ProtocolError::new("invalid_terminal_message", error.to_string())),
+                let result = match message {
+                    Message::Binary(data) => state.terminal_input(&session_id, data.to_vec()).await,
+                    Message::Text(text) => match serde_json::from_str::<TerminalClientMessage>(&text) {
+                        Ok(TerminalClientMessage::Resize { cols, rows }) => {
+                            state.terminal_resize(&session_id, cols, rows).await
+                        }
+                        Err(error) => Err(ProtocolError::new("invalid_terminal_message", error.to_string())),
+                    },
+                    Message::Close(_) => break,
+                    _ => continue,
                 };
                 if let Err(error) = result {
                     let message = TerminalServerMessage::Error { error };

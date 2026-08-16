@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -61,6 +59,13 @@ struct ControllerAgent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalOutput {
     pub agent_id: String,
+    pub revision: u64,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSnapshot {
+    pub revision: u64,
     pub data: Vec<u8>,
 }
 
@@ -193,7 +198,7 @@ impl ControllerRuntime {
                         env,
                         cols: request.cols,
                         rows: request.rows,
-                        metadata: serde_json::to_value(metadata)
+                        metadata: serde_json::to_string(&metadata)
                             .map_err(|error| protocol_error("metadata_error", error))?,
                     },
                 },
@@ -241,11 +246,11 @@ impl ControllerRuntime {
                     process_id: agent_id.to_string(),
                     writes: vec![
                         HostWrite {
-                            data: BASE64.encode(encode_prompt_text(text, bracketed)),
+                            data: encode_prompt_text(text, bracketed),
                             delay_ms: 0,
                         },
                         HostWrite {
-                            data: BASE64.encode([b'\r']),
+                            data: vec![b'\r'],
                             delay_ms: PROMPT_SUBMIT_DELAY.as_millis() as u64,
                         },
                     ],
@@ -270,7 +275,7 @@ impl ControllerRuntime {
                 HostCommand::Write {
                     process_id: agent_id.to_string(),
                     writes: vec![HostWrite {
-                        data: BASE64.encode(data),
+                        data: data.to_vec(),
                         delay_ms: 0,
                     }],
                 },
@@ -299,7 +304,10 @@ impl ControllerRuntime {
         })
     }
 
-    pub async fn terminal_snapshot(&self, agent_id: &str) -> Result<Vec<u8>, ProtocolError> {
+    pub async fn terminal_snapshot(
+        &self,
+        agent_id: &str,
+    ) -> Result<TerminalSnapshot, ProtocolError> {
         let response = self
             .inner
             .host
@@ -318,7 +326,10 @@ impl ControllerRuntime {
                 "read returned an unexpected response",
             ));
         };
-        decode_replay(&replay)
+        Ok(TerminalSnapshot {
+            revision: replay.next_revision.saturating_sub(1),
+            data: decode_replay(&replay)?,
+        })
     }
 
     pub async fn resize(
@@ -376,7 +387,7 @@ impl ControllerRuntime {
         process: HostProcessInfo,
         restored_text: Option<String>,
     ) -> Result<AgentInfo, ProtocolError> {
-        let metadata: AgentMetadata = serde_json::from_value(process.metadata.clone())
+        let metadata: AgentMetadata = serde_json::from_str(&process.metadata)
             .map_err(|error| protocol_error("invalid_host_metadata", error))?;
         if metadata.workspace_id != self.inner.workspace_id
             || metadata.server_id != self.inner.server_id
@@ -494,9 +505,7 @@ impl ControllerRuntime {
     }
 
     fn apply_output(&self, chunk: HostOutputChunk) {
-        let Ok(data) = BASE64.decode(&chunk.data) else {
-            return;
-        };
+        let data = chunk.data;
         let Ok(agent) = self.get(&chunk.process_id) else {
             return;
         };
@@ -524,6 +533,7 @@ impl ControllerRuntime {
         drop(agent);
         let _ = self.inner.terminal_events.send(TerminalOutput {
             agent_id: chunk.process_id,
+            revision: chunk.revision,
             data,
         });
     }
@@ -613,11 +623,7 @@ fn encode_prompt_text(text: &str, bracketed_paste: bool) -> Vec<u8> {
 fn decode_replay(replay: &HostOutputReplay) -> Result<Vec<u8>, ProtocolError> {
     let mut result = Vec::new();
     for chunk in &replay.chunks {
-        result.extend(
-            BASE64
-                .decode(&chunk.data)
-                .map_err(|error| protocol_error("invalid_host_output", error))?,
-        );
+        result.extend_from_slice(&chunk.data);
     }
     Ok(result)
 }

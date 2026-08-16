@@ -150,8 +150,10 @@ TREER_AGENT_ID
 TREER_AGENT_SERVER_URL
 ```
 
-The local server forwards remote operations over its existing proxy connection.
-An agent therefore does not need the proxy URL or another machine's address.
+The local server forwards remote operations through the Proxy's machine control
+API. An agent therefore does not need the proxy URL or another machine's
+address. Its local API uses routes under `/agent/workspaces`; browser and
+administrator APIs remain under the authenticated `/api` routes.
 
 ### 4.6 `treer-web`
 
@@ -164,8 +166,14 @@ The web UI combines the operational dashboard with a streamed browser terminal:
 - A full-width xterm.js terminal with raw PTY replay and live output.
 - Per-keystroke input, paste, terminal resize, reconnect, and stop controls.
 
-Terminal sessions are multiplexed through the existing agent-server WebSocket.
-The proxy routes opaque PTY bytes and does not parse terminal escape sequences.
+Terminal sessions are multiplexed as binary frames through the existing
+Controller WebSocket. The browser's dedicated terminal WebSocket also carries
+raw binary input and output. The Proxy routes opaque PTY bytes and does not
+parse terminal escape sequences.
+
+The Host Unix socket is binary-only. Every message is a 4-byte big-endian length
+followed by a bincode payload, capped at 16 MiB. PTY fields are raw byte vectors,
+so no component Base64-encodes terminal data.
 
 ## 5. Workspace Model and Isolation
 
@@ -283,8 +291,8 @@ Controller resolves them to opaque Host spawn requests.
 
 ## 7. Proxy-Agent Server Protocol
 
-Use JSON messages over one persistent WebSocket per agent server. Every message
-has a common envelope:
+Use one persistent WebSocket per Controller. Registration, snapshots, commands,
+resize, lifecycle, and errors use JSON text frames:
 
 ```json
 {
@@ -307,6 +315,17 @@ Initial message types:
 | agent server -> proxy | `agent.event` | Created, status, output revision, or exit change |
 | proxy -> agent server | `command` | Create, prompt, read, wait, resize, or stop |
 | agent server -> proxy | `command.result` | Correlated success or structured error |
+
+PTY replay, output, and input use binary frames rather than Base64 inside JSON.
+Each multiplexed frame has this fixed header followed by UTF-8 session ID bytes
+and the untouched PTY payload:
+
+```text
+version:u8 | kind:u8 | session_len:u16be | revision:u64be | session_id | payload
+```
+
+The `ready`, `output`, and `input` kinds share this codec. Output revision lets
+the Controller discard chunks already included in the attach replay.
 
 The proxy assigns one monotonically increasing projection revision per
 workspace. Browser clients receive an initial workspace snapshot followed by
@@ -501,7 +520,8 @@ and never receives the proxy address or remote machine address.
 ### Milestone 6: Hot-updatable machine Controller
 
 - Split stable PTY/process ownership into `treer-agent-host`.
-- Add the versioned Unix-socket Host protocol and revisioned replay.
+- Add the versioned, length-prefixed binary Unix-socket Host protocol and
+  revisioned raw-byte replay.
 - Make `treer-agent-server` rebuild state from Host snapshots.
 - Resend in-flight Proxy commands with stable IDs after Controller reconnect.
 - Make the installer update binaries and restart only the Controller when the

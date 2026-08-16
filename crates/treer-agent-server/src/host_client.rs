@@ -1,15 +1,19 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use anyhow::{anyhow, bail, Context, Result};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use treer_host_protocol::{
-    HostCommand, HostError, HostMessage, HostOutputChunk, HostProcessInfo, HostRequest,
-    HostResponse, OutputCursor, HOST_PROTOCOL_VERSION,
+    decode_message, encode_message, HostCommand, HostError, HostMessage, HostOutputChunk,
+    HostProcessInfo, HostRequest, HostResponse, OutputCursor, HOST_PROTOCOL_VERSION,
+    MAX_HOST_FRAME_BYTES,
 };
 use uuid::Uuid;
 
@@ -42,12 +46,7 @@ impl HostClient {
 
         tokio::spawn(async move {
             while let Some(request) = outgoing_rx.recv().await {
-                let mut encoded = match serde_json::to_vec(&request) {
-                    Ok(encoded) => encoded,
-                    Err(_) => break,
-                };
-                encoded.push(b'\n');
-                if writer.write_all(&encoded).await.is_err() {
+                if write_frame(&mut writer, &request).await.is_err() {
                     break;
                 }
             }
@@ -55,14 +54,11 @@ impl HostClient {
 
         let reader_pending = Arc::clone(&pending);
         tokio::spawn(async move {
-            let mut lines = BufReader::new(reader).lines();
+            let mut reader = reader;
             loop {
-                let line = match lines.next_line().await {
-                    Ok(Some(line)) => line,
+                let message = match read_frame::<_, HostMessage>(&mut reader).await {
+                    Ok(Some(message)) => message,
                     Ok(None) | Err(_) => break,
-                };
-                let Ok(message) = serde_json::from_str::<HostMessage>(&line) else {
-                    break;
                 };
                 match message {
                     HostMessage::Response {
@@ -145,4 +141,40 @@ impl HostClient {
             }
         }
     }
+}
+
+async fn write_frame<W, T>(writer: &mut W, value: &T) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let encoded = encode_message(value).map_err(anyhow::Error::msg)?;
+    if encoded.len() > MAX_HOST_FRAME_BYTES {
+        bail!("host frame exceeds {MAX_HOST_FRAME_BYTES} bytes");
+    }
+    let length = u32::try_from(encoded.len()).context("host frame length exceeds u32")?;
+    writer.write_u32(length).await?;
+    writer.write_all(&encoded).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn read_frame<R, T>(reader: &mut R) -> Result<Option<T>>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let length = match reader.read_u32().await {
+        Ok(length) => usize::try_from(length).context("invalid host frame length")?,
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if length > MAX_HOST_FRAME_BYTES {
+        bail!("host frame exceeds {MAX_HOST_FRAME_BYTES} bytes");
+    }
+    let mut encoded = vec![0_u8; length];
+    reader.read_exact(&mut encoded).await?;
+    decode_message(&encoded)
+        .map(Some)
+        .map_err(anyhow::Error::msg)
 }

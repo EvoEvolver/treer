@@ -6,8 +6,6 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use chrono::Utc;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
@@ -110,7 +108,7 @@ impl OutputBuffer {
             process_id: process_id.to_string(),
             stream_epoch: self.stream_epoch.clone(),
             revision: self.next_revision,
-            data: BASE64.encode(bytes),
+            data: bytes.to_vec(),
             bracketed_paste: self.bracketed_paste,
             emitted_at: Utc::now(),
         };
@@ -121,9 +119,7 @@ impl OutputBuffer {
             let Some(removed) = self.chunks.pop_front() else {
                 break;
             };
-            self.byte_len = self
-                .byte_len
-                .saturating_sub(BASE64.decode(removed.data).map_or(0, |data| data.len()));
+            self.byte_len = self.byte_len.saturating_sub(removed.data.len());
         }
         chunk
     }
@@ -335,14 +331,11 @@ impl HostRuntime {
         }
         let process = self.get_running(process_id)?;
         for write in writes {
-            let data = BASE64.decode(&write.data).map_err(|error| {
-                RuntimeError::InvalidRequest(format!("invalid input encoding: {error}"))
-            })?;
             let (result, result_rx) = std_mpsc::sync_channel(1);
             process
                 .input
                 .send(InputWrite {
-                    data,
+                    data: write.data.clone(),
                     delay: Duration::from_millis(write.delay_ms),
                     result,
                 })
@@ -627,7 +620,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cols: 80,
                 rows: 24,
-                metadata: json!({"opaque": true}),
+                metadata: json!({"opaque": true}).to_string(),
             })
             .expect("spawn process");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -636,8 +629,7 @@ mod tests {
             let decoded = replay
                 .chunks
                 .iter()
-                .filter_map(|chunk| BASE64.decode(&chunk.data).ok())
-                .flatten()
+                .flat_map(|chunk| chunk.data.iter().copied())
                 .collect::<Vec<_>>();
             if String::from_utf8_lossy(&decoded).contains("host-runtime-ok") {
                 break;

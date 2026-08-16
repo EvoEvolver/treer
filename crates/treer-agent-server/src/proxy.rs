@@ -3,8 +3,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use tokio::time::MissedTickBehavior;
@@ -12,7 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
-    ProtocolError, ProxyMessage, ServerInfo, ServerStatus, PROTOCOL_VERSION,
+    ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind,
+    PROTOCOL_VERSION,
 };
 use url::Url;
 
@@ -20,6 +19,11 @@ use crate::controller::ControllerRuntime;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const RESULT_CACHE_LIMIT: usize = 256;
+
+struct TerminalRelay {
+    agent_id: String,
+    last_revision: u64,
+}
 
 #[derive(Clone)]
 pub struct ProxyClient {
@@ -79,7 +83,7 @@ impl ProxyClient {
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut events = self.runtime.subscribe();
         let mut terminal_events = self.runtime.subscribe_terminal();
-        let mut terminal_sessions = HashMap::<String, String>::new();
+        let mut terminal_sessions = HashMap::<String, TerminalRelay>::new();
         info!(proxy = %self.proxy_ws, "connected to proxy");
 
         loop {
@@ -103,15 +107,23 @@ impl ProxyClient {
                 },
                 event = terminal_events.recv() => match event {
                     Ok(event) => {
-                        let data = BASE64.encode(event.data);
-                        for session_id in terminal_sessions
-                            .iter()
-                            .filter_map(|(session_id, agent_id)| (agent_id == &event.agent_id).then_some(session_id))
-                        {
-                            send(&mut outgoing, &AgentServerMessage::TerminalOutput {
-                                session_id: session_id.clone(),
-                                data: data.clone(),
-                            }).await?;
+                        let frames = terminal_sessions
+                            .iter_mut()
+                            .filter_map(|(session_id, relay)| {
+                                if relay.agent_id != event.agent_id || event.revision <= relay.last_revision {
+                                    return None;
+                                }
+                                relay.last_revision = event.revision;
+                                Some(TerminalBinaryFrame {
+                                    kind: TerminalBinaryKind::Output,
+                                    session_id: session_id.clone(),
+                                    revision: event.revision,
+                                    payload: event.data.clone(),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        for frame in frames {
+                            send_binary(&mut outgoing, frame).await?;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
@@ -127,8 +139,38 @@ impl ProxyClient {
                     };
                     let message = message.context("failed to read proxy websocket")?;
                     let Message::Text(text) = message else {
-                        if matches!(message, Message::Close(_)) {
-                            return Ok(());
+                        match message {
+                            Message::Binary(encoded) => {
+                                let frame = TerminalBinaryFrame::decode(&encoded)
+                                    .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+                                if frame.kind != TerminalBinaryKind::Input {
+                                    return Err(anyhow!("proxy sent unexpected {:?} terminal frame", frame.kind));
+                                }
+                                let result = match terminal_sessions.get(&frame.session_id) {
+                                    Some(relay) => {
+                                        let operation_id = format!(
+                                            "{}:input:{}",
+                                            frame.session_id,
+                                            uuid::Uuid::new_v4().simple()
+                                        );
+                                        self.runtime
+                                            .write_raw(&operation_id, &relay.agent_id, &frame.payload)
+                                            .await
+                                            .map(|_| ())
+                                            .map_err(|error| anyhow!(error.message))
+                                    }
+                                    None => Err(anyhow!("unknown terminal session {}", frame.session_id)),
+                                };
+                                if let Err(error) = result {
+                                    terminal_sessions.remove(&frame.session_id);
+                                    send(&mut outgoing, &AgentServerMessage::TerminalClosed {
+                                        session_id: frame.session_id,
+                                        reason: Some(error.to_string()),
+                                    }).await?;
+                                }
+                            }
+                            Message::Close(_) => return Ok(()),
+                            _ => {}
                         }
                         continue;
                     };
@@ -147,10 +189,18 @@ impl ProxyClient {
                                 Ok(replay) => {
                                     match self.runtime.resize(&operation_id, &agent_id, cols, rows).await {
                                         Ok(()) => {
-                                            terminal_sessions.insert(session_id.clone(), agent_id);
-                                            send(&mut outgoing, &AgentServerMessage::TerminalReady {
+                                            terminal_sessions.insert(
+                                                session_id.clone(),
+                                                TerminalRelay {
+                                                    agent_id,
+                                                    last_revision: replay.revision,
+                                                },
+                                            );
+                                            send_binary(&mut outgoing, TerminalBinaryFrame {
+                                                kind: TerminalBinaryKind::Ready,
                                                 session_id,
-                                                replay: BASE64.encode(replay),
+                                                revision: replay.revision,
+                                                payload: replay.data,
                                             }).await?;
                                         }
                                         Err(error) => {
@@ -169,33 +219,10 @@ impl ProxyClient {
                                 }
                             }
                         }
-                        ProxyMessage::TerminalInput { session_id, data } => {
-                            let result = match terminal_sessions.get(&session_id) {
-                                Some(agent_id) => match BASE64.decode(data).context("invalid terminal input encoding") {
-                                    Ok(data) => {
-                                        let operation_id = format!("{session_id}:input:{}", uuid::Uuid::new_v4().simple());
-                                        self.runtime
-                                            .write_raw(&operation_id, agent_id, &data)
-                                            .await
-                                            .map(|_| ())
-                                            .map_err(|error| anyhow!(error.message))
-                                    }
-                                    Err(error) => Err(error),
-                                },
-                                None => Err(anyhow!("unknown terminal session {session_id}")),
-                            };
-                            if let Err(error) = result {
-                                terminal_sessions.remove(&session_id);
-                                send(&mut outgoing, &AgentServerMessage::TerminalClosed {
-                                    session_id,
-                                    reason: Some(error.to_string()),
-                                }).await?;
-                            }
-                        }
                         ProxyMessage::TerminalResize { session_id, cols, rows } => {
-                            if let Some(agent_id) = terminal_sessions.get(&session_id) {
+                            if let Some(relay) = terminal_sessions.get(&session_id) {
                                 let operation_id = format!("{session_id}:resize:{}", uuid::Uuid::new_v4().simple());
-                                if let Err(error) = self.runtime.resize(&operation_id, agent_id, cols, rows).await {
+                                if let Err(error) = self.runtime.resize(&operation_id, &relay.agent_id, cols, rows).await {
                                     terminal_sessions.remove(&session_id);
                                     send(&mut outgoing, &AgentServerMessage::TerminalClosed {
                                         session_id,
@@ -242,18 +269,12 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
-            AgentCommand::Input { agent_id, data } => match BASE64.decode(data) {
-                Ok(data) => self
-                    .runtime
-                    .write_raw(&command_id, &agent_id, &data)
-                    .await
-                    .map(|agent| CommandResult::success(command_id.clone(), agent))
-                    .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-                Err(error) => CommandResult::failure(
-                    command_id.clone(),
-                    ProtocolError::new("invalid_input_encoding", error.to_string()),
-                ),
-            },
+            AgentCommand::Input { agent_id, data } => self
+                .runtime
+                .write_raw(&command_id, &agent_id, &data)
+                .await
+                .map(|agent| CommandResult::success(command_id.clone(), agent))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::Read { agent_id, lines } => self
                 .runtime
                 .read(&agent_id, lines)
@@ -310,4 +331,18 @@ where
         .send(Message::Text(encoded.into()))
         .await
         .context("failed to send agent message")
+}
+
+async fn send_binary<S>(outgoing: &mut S, frame: TerminalBinaryFrame) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    let encoded = frame
+        .encode()
+        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    outgoing
+        .send(Message::Binary(encoded.into()))
+        .await
+        .context("failed to send terminal binary frame")
 }

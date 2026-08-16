@@ -103,7 +103,10 @@ and set `TREER_DATABASE_PATH` only when using a volume mount other than
 
 Open `http://PROXY_HOST:8787` to discover servers, create agents, and attach to
 their live terminals. The browser terminal supports ANSI colors, alternate
-screens, cursor movement, per-keystroke input, paste, and dynamic resize.
+screens, cursor movement, per-keystroke input, paste, and dynamic resize. PTY
+input, replay, and live output remain raw bytes from the Host through the
+Controller and Proxy to the browser. The Host socket uses length-prefixed binary
+frames, and both WebSocket hops use binary frames instead of Base64 JSON payloads.
 Agents inherit `TREER_WORKSPACE_ID`,
 `TREER_SERVER_ID`, `TREER_AGENT_ID`, and `TREER_AGENT_SERVER_URL`; they can use
 the local agent server API to discover or control other agents in the same
