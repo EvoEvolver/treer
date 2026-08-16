@@ -1,0 +1,4 @@
+interface:
+  display_name: "Treer"
+  short_description: "Coordinate distributed agents through Treer"
+  default_prompt: "Use $treer to discover and coordinate agents in the current workspace."

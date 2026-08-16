@@ -1,0 +1,18 @@
+[package]
+name = "treer-agent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+portable-pty.workspace = true
+strip-ansi-escapes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+treer-protocol = { path = "../treer-protocol" }
+
+[lints]
+workspace = true

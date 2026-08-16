@@ -1,0 +1,140 @@
+# treer
+
+Treer is a distributed runtime and control plane for coding agents.
+
+Each machine runs a Treer agent server that owns local agent processes and
+terminal sessions. A central proxy server groups machines into logical
+workspaces, aggregates agent state, and routes discovery and control commands
+between them.
+
+The first prototype is intentionally trusted-network only. See [PLAN.md](PLAN.md)
+for scope, architecture, protocol, and delivery milestones.
+
+## Run the prototype
+
+Start the proxy and web control plane:
+
+```bash
+just stage-artifacts
+ADMIN_PASSWORD='choose-a-password' cargo run -p treer-proxy -- \
+  --listen 0.0.0.0:8787 \
+  --public-url http://PROXY_HOST:8787
+```
+
+`--public-url` is the URL that other machines can reach. `stage-artifacts`
+places the current platform's `treer-agent-server` and `treer` binaries under
+`dist/<platform>` for the proxy to serve. Release deployments should stage all
+required Linux and macOS platform directories or set `--artifacts-dir` to an
+equivalent artifact tree.
+
+Open the web UI, select a workspace, and choose **Add machine** to copy its
+bootstrap command:
+
+```bash
+curl -fsSL 'http://PROXY_HOST:8787/install.sh?workspace=default' | sh
+```
+
+The script detects the target platform, installs both binaries to
+`~/.local/bin`, and starts the agent server in the background using the current
+directory as its workspace root. Override `TREER_WORKSPACE_ROOT`,
+`TREER_INSTALL_DIR`, `TREER_STATE_DIR`, or `TREER_AGENT_SERVER_LISTEN` when
+needed. Logs and the daemon PID are stored under `~/.local/state/treer` by
+default.
+
+## Users and invitations
+
+The administrator signs in with username `admin` and the password supplied in
+`ADMIN_PASSWORD`. The administrator can create single-use registration links
+from **Invite** in the header. Invited users choose their own username and
+password; all signed-in users share the same workspaces, machines, agents, and
+terminals.
+
+Users, invitations, and sessions are stored in SQLite. Local runs default to
+`.treer/proxy.db`; set `TREER_DATABASE_PATH` to put it elsewhere. Changing
+`ADMIN_PASSWORD` changes the administrator's next login password without
+rewriting existing user accounts.
+
+## Railway
+
+The root `Dockerfile` and `railway.json` make the repository directly
+deployable as a Railway service. Railway's injected `PORT` and
+`RAILWAY_PUBLIC_DOMAIN` are detected automatically.
+
+1. Create a Railway service from this GitHub repository.
+2. Set the required `ADMIN_PASSWORD` service variable.
+3. Generate a public domain for the service.
+4. Attach a Railway Volume at `/data` so the SQLite users and invitations
+   survive deployments.
+
+The image builds and serves Linux agent binaries for its own CPU architecture.
+Set `TREER_PROXY_PUBLIC_URL` only when overriding the Railway-generated domain,
+and set `TREER_DATABASE_PATH` only when using a volume mount other than
+`/data`.
+
+For development, an agent server can still be started directly. The workspace
+root is the filesystem boundary for agents launched by that server.
+
+```bash
+cargo run -p treer-agent-server -- \
+  --proxy http://PROXY_HOST:8787 \
+  --workspace default \
+  --root /path/to/workspace \
+  --listen 127.0.0.1:8790
+```
+
+Open `http://PROXY_HOST:8787` to discover servers, create agents, and attach to
+their live terminals. The browser terminal supports ANSI colors, alternate
+screens, cursor movement, per-keystroke input, paste, and dynamic resize.
+Agents inherit `TREER_WORKSPACE_ID`,
+`TREER_SERVER_ID`, `TREER_AGENT_ID`, and `TREER_AGENT_SERVER_URL`; they can use
+the local agent server API to discover or control other agents in the same
+workspace.
+
+## Agent collaboration
+
+The `treer` binary talks to the local agent server by default. Managed agents
+receive its location in `PATH` and `TREER_BIN`, so they can discover and contact
+peers without knowing the proxy address.
+
+```bash
+treer whoami
+treer agent list
+treer agent get reviewer
+treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
+treer agent read reviewer --lines 80
+treer agent send-keys reviewer ctrl-c
+```
+
+Targets accept an agent id, a unique agent name, or `self`/`.` from inside a
+managed agent. `prompt --wait` waits for observed activity followed by `idle`,
+`blocked`, `exited`, or `failed` by default; repeat `--until STATUS` to select
+other states. It is state-based coordination, not strict per-prompt turn
+correlation.
+
+The original top-level `list`, `prompt`, `read`, and `stop` commands remain as
+compatibility aliases. To create a peer:
+
+```bash
+treer create --server SERVER_ID --kind command --name shell -- /bin/sh
+```
+
+Print the agent skill bundled with the installed binary:
+
+```bash
+treer --skill
+treer --skills  # accepted alias
+```
+
+This does not require a running proxy. The source is
+`skills/treer/SKILL.md`, embedded at build time so its instructions match the
+CLI version that prints them.
+
+## Checks
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The same sequence is available as `just check` when `just` is installed.

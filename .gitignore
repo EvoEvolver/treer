@@ -1,0 +1,5 @@
+/target/
+/dist/
+/.treer/
+/.vscode/
+.DS_Store

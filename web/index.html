@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Treer</title>
+  <link rel="stylesheet" href="/assets/xterm.css">
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; background: #f4f5f7; color: #17212b; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html, body { height: 100%; }
+    body { margin: 0; min-width: 320px; overflow: hidden; }
+    button, input, select, textarea { font: inherit; letter-spacing: 0; }
+    button { border: 1px solid #b8c0ca; background: #fff; color: #17212b; height: 34px; padding: 0 12px; border-radius: 5px; cursor: pointer; }
+    button:hover { background: #eef1f4; }
+    button:disabled { cursor: default; opacity: .5; }
+    button.primary { background: #176b4d; border-color: #176b4d; color: #fff; }
+    button.danger { color: #a52c2c; }
+    input, select, textarea { width: 100%; border: 1px solid #c6cdd5; border-radius: 4px; background: #fff; padding: 7px 8px; }
+    header { height: 52px; background: #17212b; color: #fff; display: flex; align-items: center; gap: 18px; padding: 0 18px; }
+    header strong { font-size: 18px; }
+    header select { width: 210px; border-color: #45515d; background: #25313c; color: #fff; }
+    .account { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    #currentUser, #connection { font-size: 12px; color: #afbac4; }
+    header button { height: 30px; padding: 0 9px; background: #25313c; border-color: #45515d; color: #fff; }
+    main { display: grid; grid-template-columns: 220px minmax(0, 1fr); height: calc(100vh - 52px); min-height: 0; }
+    aside { min-width: 0; border-right: 1px solid #d7dce2; background: #fff; overflow: auto; }
+    .pane-title { height: 42px; display: flex; align-items: center; padding: 0 14px; border-bottom: 1px solid #d7dce2; font-size: 12px; font-weight: 700; text-transform: uppercase; color: #596673; }
+    #servers { padding: 8px; }
+    .server { padding: 9px 7px; border-bottom: 1px solid #edf0f3; }
+    .server-name { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+    .meta { color: #74808c; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+    .dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: #9ca5ad; flex: none; }
+    .dot.online { background: #1f9d68; }
+    #workspacePane { display: grid; grid-template-rows: 44px minmax(96px, 20vh) 42px minmax(0, 1fr); min-width: 0; min-height: 0; }
+    .toolbar, .terminal-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 12px; background: #fff; border-bottom: 1px solid #d7dce2; }
+    .toolbar-actions { display: flex; align-items: center; gap: 7px; }
+    #agentTable { min-height: 0; overflow: auto; background: #fff; border-bottom: 1px solid #cbd2d9; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4e8ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+    th { color: #65727e; font-size: 11px; text-transform: uppercase; background: #fafbfc; position: sticky; top: 0; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover, tbody tr.selected { background: #edf6f2; }
+    .status { display: inline-flex; align-items: center; min-width: 68px; font-weight: 600; }
+    .status.blocked { color: #a55b00; }
+    .status.working, .status.starting { color: #176b8d; }
+    .status.failed, .status.exited { color: #a52c2c; }
+    .terminal-bar { background: #111922; color: #d6dee6; border-color: #2d3945; }
+    .terminal-identity { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
+    #terminalName { font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #terminalMeta { color: #8f9ba6; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .terminal-actions { display: flex; align-items: center; gap: 7px; flex: none; }
+    .terminal-actions button { height: 28px; padding: 0 9px; color: #d6dee6; background: #1d2833; border-color: #3b4855; font-size: 12px; }
+    .terminal-actions button.danger { color: #ffb1aa; }
+    #terminalStatus { color: #8f9ba6; font-size: 11px; min-width: 74px; text-align: right; }
+    #terminalHost { min-width: 0; min-height: 0; height: 100%; padding: 8px 7px; background: #0b1117; overflow: hidden; }
+    #terminalHost .xterm { height: 100%; }
+    #terminalHost .xterm-viewport { scrollbar-color: #465360 #0b1117; }
+    .terminal-empty { height: 100%; display: grid; place-items: center; color: #7f8d99; font-size: 13px; }
+    .field { margin-top: 12px; }
+    .field label { display: block; font-size: 12px; font-weight: 600; color: #5b6772; margin-bottom: 5px; }
+    .actions { display: flex; gap: 7px; margin-top: 10px; }
+    dialog { width: min(520px, calc(100vw - 28px)); border: 1px solid #aeb7c1; border-radius: 6px; padding: 0; }
+    dialog::backdrop { background: rgba(20, 28, 35, .35); }
+    dialog form { padding: 16px; }
+    dialog h2 { font-size: 17px; margin: 0 0 14px; }
+    dialog .actions { justify-content: flex-end; }
+    #installCommand { min-height: 88px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
+    #inviteUrl { min-height: 74px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
+    #authDialog { width: min(390px, calc(100vw - 28px)); }
+    #authDialog::backdrop { background: #17212b; }
+    .form-error { min-height: 18px; margin-top: 10px; color: #a52c2c; font-size: 12px; }
+    .auth-switch { margin-right: auto; border: 0; padding: 0; color: #176b4d; }
+    #empty { color: #7b8792; padding: 24px 12px; text-align: center; }
+    @media (max-width: 700px) {
+      body { overflow: auto; }
+      header { gap: 7px; padding: 0 10px; }
+      header select { width: 112px; }
+      .account { gap: 5px; }
+      #currentUser, #connection { display: none; }
+      main { display: block; height: auto; }
+      aside { border-right: 0; border-bottom: 1px solid #d7dce2; }
+      #servers { display: flex; overflow-x: auto; }
+      .server { min-width: 170px; border-right: 1px solid #edf0f3; }
+      #workspacePane { display: grid; grid-template-rows: 44px 142px 42px 58vh; min-height: 610px; }
+      th:nth-child(3), td:nth-child(3) { display: none; }
+      .terminal-identity { max-width: 42vw; }
+      #terminalMeta { display: none; }
+      #terminalStatus { display: none; }
+      #terminalHost { padding: 6px 4px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" hidden>
+  <header><strong>treer</strong><select id="workspace"></select><div class="account"><span id="currentUser"></span><button id="inviteButton" hidden>Invite</button><button id="logoutButton">Log out</button><span id="connection">connecting</span></div></header>
+  <main>
+    <aside><div class="pane-title">Machines</div><div id="servers"></div></aside>
+    <section id="workspacePane">
+      <div class="toolbar"><span><strong>Agents</strong> <small id="revision"></small></span><div class="toolbar-actions"><button id="installButton">Add machine</button><button class="primary" id="createButton">New agent</button></div></div>
+      <div id="agentTable"></div>
+      <div class="terminal-bar">
+        <div class="terminal-identity"><span id="terminalName">Terminal</span><span id="terminalMeta"></span></div>
+        <div class="terminal-actions"><span id="terminalStatus">not attached</span><button id="reconnectTerminal" disabled>Reconnect</button><button class="danger" id="stopAgent" disabled>Stop</button></div>
+      </div>
+      <div id="terminalHost"><div class="terminal-empty">Select an agent to attach</div></div>
+    </section>
+  </main>
+  </div>
+  <dialog id="authDialog">
+    <form id="loginForm">
+      <h2>Sign in to Treer</h2>
+      <div class="field"><label for="loginUsername">Username</label><input id="loginUsername" value="admin" autocomplete="username" required></div>
+      <div class="field"><label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
+      <div class="form-error" id="loginError"></div>
+      <div class="actions"><button class="primary" type="submit">Sign in</button></div>
+    </form>
+    <form id="registerForm" hidden>
+      <h2>Join Treer</h2>
+      <input id="registerInvite" type="hidden">
+      <div class="field"><label for="registerUsername">Username</label><input id="registerUsername" autocomplete="username" minlength="3" maxlength="32" required></div>
+      <div class="field"><label for="registerPassword">Password</label><input id="registerPassword" type="password" autocomplete="new-password" minlength="8" required></div>
+      <div class="form-error" id="registerError"></div>
+      <div class="actions"><button class="auth-switch" type="button" id="showLogin">Sign in instead</button><button class="primary" type="submit">Create account</button></div>
+    </form>
+  </dialog>
+  <dialog id="createDialog">
+    <form id="createForm">
+      <h2>Create agent</h2>
+      <div class="field"><label for="createServer">Machine</label><select id="createServer" required></select></div>
+      <div class="field"><label for="createKind">Kind</label><select id="createKind"><option>codex</option><option>claude</option><option>command</option></select></div>
+      <div class="field"><label for="createName">Name</label><input id="createName" value="helper" required></div>
+      <div class="field"><label for="createCwd">Working directory, relative to machine root</label><input id="createCwd" value="."></div>
+      <div class="field"><label for="createArgs">Arguments, one per line</label><textarea id="createArgs" rows="3"></textarea></div>
+      <div class="actions"><button type="button" id="cancelCreate">Cancel</button><button class="primary" type="submit">Create</button></div>
+    </form>
+  </dialog>
+  <dialog id="installDialog">
+    <form method="dialog">
+      <h2>Add machine</h2>
+      <div class="field"><label for="installCommand">Run on the target machine</label><textarea id="installCommand" readonly></textarea></div>
+      <div class="actions"><button value="close">Close</button><button class="primary" type="button" id="copyInstall">Copy</button></div>
+    </form>
+  </dialog>
+  <dialog id="inviteDialog">
+    <form method="dialog">
+      <h2>Invite user</h2>
+      <div class="field"><label for="inviteUrl">Registration link</label><textarea id="inviteUrl" readonly></textarea></div>
+      <div class="actions"><button value="close">Close</button><button class="primary" type="button" id="copyInvite">Copy</button></div>
+    </form>
+  </dialog>
+  <script src="/assets/xterm.js"></script>
+  <script src="/assets/addon-fit.js"></script>
+  <script>
+    const state = { workspace: 'default', snapshot: null, selected: null, socket: null, user: null };
+    const terminalState = { agentId: null, terminal: null, fit: null, socket: null, input: null, observer: null, resizeTimer: null };
+    const $ = id => document.getElementById(id);
+    const api = async (path, options) => {
+      const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options });
+      const body = await response.json();
+      if (!response.ok) { const error = new Error(body.error?.message || `HTTP ${response.status}`); error.status = response.status; throw error; }
+      return body;
+    };
+    async function authenticate() {
+      try {
+        state.user = await api('/api/auth/me');
+        showApplication();
+      } catch (error) {
+        if (error.status !== 401) throw error;
+        showAuthentication(new URLSearchParams(location.search).get('invite'));
+      }
+    }
+    function showAuthentication(invite) {
+      $('app').hidden = true;
+      $('registerForm').hidden = !invite;
+      $('loginForm').hidden = Boolean(invite);
+      $('registerInvite').value = invite || '';
+      $('authDialog').showModal();
+      (invite ? $('registerUsername') : $('loginUsername')).focus();
+    }
+    async function showApplication() {
+      if ($('authDialog').open) $('authDialog').close();
+      $('app').hidden = false;
+      $('currentUser').textContent = state.user.username;
+      $('inviteButton').hidden = !state.user.is_admin;
+      history.replaceState(null, '', location.pathname);
+      await loadWorkspaces();
+    }
+    async function loadWorkspaces() {
+      const data = await api('/api/workspaces');
+      $('workspace').innerHTML = data.workspaces.map(w => `<option value="${escapeHtml(w.workspace_id)}">${escapeHtml(w.name)}</option>`).join('');
+      if (!data.workspaces.some(w => w.workspace_id === state.workspace)) state.workspace = data.workspaces[0]?.workspace_id;
+      $('workspace').value = state.workspace;
+      await refresh(); connectEvents();
+    }
+    async function refresh() {
+      state.snapshot = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/snapshot`);
+      if (state.selected && !state.snapshot.agents.some(a => a.agent_id === state.selected)) state.selected = null;
+      if (!state.selected && state.snapshot.agents.length) state.selected = state.snapshot.agents[0].agent_id;
+      render();
+      if (state.selected && terminalState.agentId !== state.selected) openTerminal(state.selected);
+    }
+    function render() {
+      const snapshot = state.snapshot; if (!snapshot) return;
+      $('revision').textContent = `rev ${snapshot.revision}`;
+      $('servers').innerHTML = snapshot.servers.length ? snapshot.servers.map(server => `
+        <div class="server"><div class="server-name"><span>${escapeHtml(server.hostname || server.server_id)}</span><span class="dot ${server.status}"></span></div>
+        <div class="meta">${escapeHtml(server.server_id)}</div><div class="meta">${escapeHtml(server.root)}</div></div>`).join('') : '<div id="empty">No machines connected</div>';
+      $('createServer').innerHTML = snapshot.servers.filter(s => s.status === 'online').map(s => `<option value="${escapeHtml(s.server_id)}">${escapeHtml(s.hostname)} · ${escapeHtml(s.server_id)}</option>`).join('');
+      $('agentTable').innerHTML = snapshot.agents.length ? `<table><thead><tr><th style="width:28%">Name</th><th style="width:18%">Status</th><th style="width:20%">Kind</th><th>Machine</th></tr></thead><tbody>${snapshot.agents.map(agent => `
+        <tr data-agent="${escapeHtml(agent.agent_id)}" class="${state.selected === agent.agent_id ? 'selected' : ''}"><td>${escapeHtml(agent.name)}</td><td><span class="status ${agent.status}">${escapeHtml(agent.status)}</span></td><td>${escapeHtml(agent.kind)}</td><td>${escapeHtml(agent.server_id)}</td></tr>`).join('')}</tbody></table>` : '<div id="empty">No agents in this workspace</div>';
+      document.querySelectorAll('[data-agent]').forEach(row => row.onclick = () => selectAgent(row.dataset.agent));
+      renderTerminalBar();
+    }
+    function renderTerminalBar() {
+      const agent = state.snapshot?.agents.find(item => item.agent_id === state.selected);
+      $('terminalName').textContent = agent?.name || 'Terminal';
+      $('terminalMeta').textContent = agent ? `${agent.agent_id} · ${agent.server_id}` : '';
+      $('reconnectTerminal').disabled = !agent;
+      $('stopAgent').disabled = !agent || ['exited', 'failed'].includes(agent.status);
+    }
+    function selectAgent(agentId) {
+      if (state.selected === agentId && terminalState.agentId === agentId) { terminalState.terminal?.focus(); return; }
+      state.selected = agentId; render(); openTerminal(agentId);
+    }
+    function disposeTerminal() {
+      const socket = terminalState.socket;
+      terminalState.socket = null;
+      if (socket) socket.close();
+      terminalState.input?.dispose(); terminalState.observer?.disconnect();
+      clearTimeout(terminalState.resizeTimer);
+      terminalState.terminal?.dispose();
+      Object.assign(terminalState, { agentId: null, terminal: null, fit: null, input: null, observer: null, resizeTimer: null });
+      $('terminalHost').replaceChildren();
+    }
+    function openTerminal(agentId) {
+      disposeTerminal();
+      terminalState.agentId = agentId;
+      $('terminalStatus').textContent = 'connecting';
+      const terminal = new Terminal({
+        cursorBlink: true,
+        cursorStyle: 'block',
+        fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+        fontSize: 13,
+        lineHeight: 1.12,
+        scrollback: 10000,
+        allowTransparency: false,
+        theme: { background: '#0b1117', foreground: '#d6dee6', cursor: '#79d4ad', selectionBackground: '#365267', black: '#17212b', red: '#ff7b72', green: '#79d4ad', yellow: '#e3b341', blue: '#79b8ff', magenta: '#c297ff', cyan: '#56d4dd', white: '#d6dee6', brightBlack: '#677786' }
+      });
+      const fit = new FitAddon.FitAddon();
+      terminal.loadAddon(fit); terminal.open($('terminalHost'));
+      terminalState.terminal = terminal; terminalState.fit = fit;
+      requestAnimationFrame(() => { fit.fit(); connectTerminalSocket(agentId); });
+      terminalState.input = terminal.onData(data => {
+        const socket = terminalState.socket;
+        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: encodeBase64(data) }));
+      });
+      terminalState.observer = new ResizeObserver(() => {
+        clearTimeout(terminalState.resizeTimer);
+        terminalState.resizeTimer = setTimeout(() => {
+          if (terminalState.agentId !== agentId) return;
+          fit.fit(); sendTerminalResize();
+        }, 60);
+      });
+      terminalState.observer.observe($('terminalHost'));
+    }
+    function connectTerminalSocket(agentId) {
+      if (terminalState.agentId !== agentId) return;
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const terminal = terminalState.terminal;
+      const socket = new WebSocket(`${scheme}://${location.host}/api/workspaces/${encodeURIComponent(state.workspace)}/agents/${encodeURIComponent(agentId)}/terminal?cols=${terminal.cols}&rows=${terminal.rows}`);
+      terminalState.socket = socket;
+      socket.onmessage = event => {
+        if (terminalState.socket !== socket) return;
+        const message = JSON.parse(event.data);
+        if (message.type === 'ready') {
+          if (message.replay) terminal.write(decodeBase64(message.replay));
+          $('terminalStatus').textContent = 'live'; terminal.focus();
+        } else if (message.type === 'output') {
+          terminal.write(decodeBase64(message.data));
+        } else if (message.type === 'closed') {
+          $('terminalStatus').textContent = 'closed';
+          if (message.reason) terminal.writeln(`\r\n\x1b[31m[treer] ${message.reason}\x1b[0m`);
+        } else if (message.type === 'error') {
+          $('terminalStatus').textContent = 'error';
+          terminal.writeln(`\r\n\x1b[31m[treer] ${message.error?.message || 'terminal error'}\x1b[0m`);
+        }
+      };
+      socket.onerror = () => { if (terminalState.socket === socket) $('terminalStatus').textContent = 'error'; };
+      socket.onclose = () => { if (terminalState.socket === socket && $('terminalStatus').textContent !== 'closed') $('terminalStatus').textContent = 'disconnected'; };
+    }
+    function sendTerminalResize() {
+      const socket = terminalState.socket; const terminal = terminalState.terminal;
+      if (socket?.readyState === WebSocket.OPEN && terminal) socket.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }));
+    }
+    async function stopAgent() {
+      if (!state.selected) return;
+      try { await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/agents/${encodeURIComponent(state.selected)}/stop`, { method: 'POST', body: '{}' }); }
+      catch (error) { alert(error.message); }
+    }
+    async function showInstall() {
+      try {
+        const data = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/bootstrap`);
+        $('installCommand').value = data.command;
+        $('copyInstall').textContent = 'Copy';
+        $('installDialog').showModal();
+      } catch (error) { alert(error.message); }
+    }
+    async function copyInstall() {
+      const command = $('installCommand').value;
+      try {
+        await navigator.clipboard.writeText(command);
+      } catch (_) {
+        $('installCommand').select();
+        document.execCommand('copy');
+      }
+      $('copyInstall').textContent = 'Copied';
+    }
+    async function createInvite() {
+      try {
+        const invitation = await api('/api/admin/invitations', { method: 'POST', body: '{}' });
+        $('inviteUrl').value = invitation.url;
+        $('copyInvite').textContent = 'Copy';
+        $('inviteDialog').showModal();
+      } catch (error) { alert(error.message); }
+    }
+    async function copyText(source, button) {
+      const value = $(source).value;
+      try { await navigator.clipboard.writeText(value); }
+      catch (_) { $(source).select(); document.execCommand('copy'); }
+      $(button).textContent = 'Copied';
+    }
+    function connectEvents() {
+      state.socket?.close();
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(`${scheme}://${location.host}/api/workspaces/${encodeURIComponent(state.workspace)}/events`); state.socket = socket;
+      socket.onopen = () => $('connection').textContent = 'live';
+      socket.onclose = () => { $('connection').textContent = 'reconnecting'; if (state.socket === socket) setTimeout(connectEvents, 1200); };
+      socket.onmessage = event => { const message = JSON.parse(event.data); if (message.event === 'workspace.snapshot') { state.snapshot = message.data; render(); } else { refresh(); } };
+    }
+    function encodeBase64(value) {
+      const bytes = new TextEncoder().encode(value); let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+      return btoa(binary);
+    }
+    function decodeBase64(value) {
+      const binary = atob(value); const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    }
+    $('workspace').onchange = async event => { disposeTerminal(); state.workspace = event.target.value; state.selected = null; await refresh(); connectEvents(); };
+    $('authDialog').oncancel = event => event.preventDefault();
+    $('loginForm').onsubmit = async event => { event.preventDefault(); $('loginError').textContent = ''; try { state.user = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: $('loginUsername').value, password: $('loginPassword').value }) }); await showApplication(); } catch (error) { $('loginError').textContent = error.message; } };
+    $('registerForm').onsubmit = async event => { event.preventDefault(); $('registerError').textContent = ''; try { state.user = await api('/api/auth/register', { method: 'POST', body: JSON.stringify({ invite: $('registerInvite').value, username: $('registerUsername').value, password: $('registerPassword').value }) }); await showApplication(); } catch (error) { $('registerError').textContent = error.message; } };
+    $('showLogin').onclick = () => { $('registerForm').hidden = true; $('loginForm').hidden = false; $('loginUsername').focus(); };
+    $('inviteButton').onclick = createInvite;
+    $('copyInvite').onclick = () => copyText('inviteUrl', 'copyInvite');
+    $('logoutButton').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { location.href = '/'; } };
+    $('installButton').onclick = showInstall;
+    $('copyInstall').onclick = copyInstall;
+    $('createButton').onclick = () => $('createDialog').showModal();
+    $('cancelCreate').onclick = () => $('createDialog').close();
+    $('reconnectTerminal').onclick = () => { if (state.selected) openTerminal(state.selected); };
+    $('stopAgent').onclick = stopAgent;
+    $('createForm').onsubmit = async event => { event.preventDefault(); try { const agent = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/agents`, { method: 'POST', body: JSON.stringify({ server_id: $('createServer').value, kind: $('createKind').value, name: $('createName').value, cwd: $('createCwd').value, args: $('createArgs').value.split('\n').map(v => v.trim()).filter(Boolean), cols: 120, rows: 36 }) }); $('createDialog').close(); state.selected = agent.agent_id; await refresh(); } catch (error) { alert(error.message); } };
+    function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character])); }
+    authenticate().catch(error => { $('app').hidden = false; $('connection').textContent = error.message; });
+  </script>
+</body>
+</html>

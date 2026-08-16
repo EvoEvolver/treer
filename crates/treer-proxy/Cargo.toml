@@ -1,0 +1,26 @@
+[package]
+name = "treer-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+argon2.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+treer-protocol = { path = "../treer-protocol" }
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

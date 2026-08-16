@@ -1,0 +1,6 @@
+target
+dist
+.treer
+.git
+.vscode
+.DS_Store
