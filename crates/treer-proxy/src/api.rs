@@ -13,9 +13,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use treer_protocol::{
-    AgentCommand, ApiError, CreateAgentRequest, CreateWorkspaceRequest, InputAgentRequest,
-    PromptAgentRequest, ProtocolError, RenameRequest, TerminalClientMessage, TerminalServerMessage,
-    WorkspaceEvent,
+    AgentCommand, ApiError, CreateAgentRequest, InputAgentRequest, PromptAgentRequest,
+    ProtocolError, RenameRequest, TerminalClientMessage, TerminalServerMessage, WorkspaceEvent,
 };
 use url::Url;
 use uuid::Uuid;
@@ -102,6 +101,23 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         ));
     let authenticated = Router::new()
         .route(
+            "/api/organizations",
+            get(auth::organizations).post(auth::create_organization_handler),
+        )
+        .route(
+            "/api/organizations/{organization_id}/members",
+            get(auth::members),
+        )
+        .route(
+            "/api/organizations/{organization_id}/members/{username}",
+            axum::routing::patch(auth::update_member_role_handler)
+                .delete(auth::remove_member_handler),
+        )
+        .route(
+            "/api/organizations/{organization_id}/invitations",
+            post(auth::create_invitation),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/bootstrap",
             post(bootstrap_info),
         )
@@ -154,13 +170,11 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         .route("/api/auth/logout", post(auth::logout))
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
-            auth::require_user,
-        ));
-    let administrator = Router::new()
-        .route("/api/admin/invitations", post(auth::create_invitation))
+            auth::require_workspace_access,
+        ))
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
-            auth::require_admin,
+            auth::require_user,
         ));
     Router::new()
         .route("/", get(index))
@@ -175,7 +189,6 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         .route("/agent/connect", get(agent_socket::upgrade))
         .merge(agent_control)
         .merge(authenticated)
-        .merge(administrator)
         .layer(Extension(bootstrap))
         .layer(Extension(auth_store))
         .with_state(state)
@@ -435,18 +448,49 @@ echo "treer: manage the host service with $server_dir/treer-agent-server service
     )
 }
 
-async fn list_workspaces(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "workspaces": state.list_workspaces().await }))
+#[derive(Deserialize)]
+struct ListWorkspacesQuery {
+    organization_id: String,
+}
+
+#[derive(Deserialize)]
+struct CreateWorkspaceApiRequest {
+    organization_id: String,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    name: String,
+}
+
+async fn list_workspaces(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Query(query): Query<ListWorkspacesQuery>,
+) -> Result<Json<Value>, ApiFailure> {
+    Ok(Json(json!({
+        "workspaces": auth
+            .list_workspaces(&query.organization_id, &session.username)
+            .await?
+    })))
 }
 
 async fn create_workspace(
     State(state): State<AppState>,
-    Json(request): Json<CreateWorkspaceRequest>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Json(request): Json<CreateWorkspaceApiRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     let workspace_id = request
         .workspace_id
         .unwrap_or_else(|| format!("ws_{}", Uuid::new_v4().simple()));
-    let info = state.create_workspace(workspace_id, request.name).await?;
+    let info = auth
+        .create_workspace(
+            &request.organization_id,
+            &workspace_id,
+            &request.name,
+            &session.username,
+        )
+        .await?;
+    state.create_workspace_info(info.clone()).await?;
     Ok(Json(json!({ "workspace": info })))
 }
 

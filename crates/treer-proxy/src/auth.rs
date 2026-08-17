@@ -4,23 +4,25 @@ use std::sync::Arc;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{Extension, Request, State};
+use axum::extract::{Extension, Path as AxumPath, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{Duration, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
-use treer_protocol::{AgentServerSnapshot, ApiError, ProtocolError, ServerInfo};
+use treer_protocol::{AgentServerSnapshot, ApiError, ProtocolError, ServerInfo, WorkspaceInfo};
 use url::Url;
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "treer_session";
 const SESSION_TTL_DAYS: i64 = 30;
 const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
+const DEFAULT_ORGANIZATION_ID: &str = "org_default";
+const DEFAULT_ORGANIZATION_NAME: &str = "Default organization";
 
 #[derive(Clone)]
 pub struct AuthStore {
@@ -35,6 +37,21 @@ pub struct CurrentSession {
     pub token: String,
     pub username: String,
     pub is_admin: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct OrganizationInfo {
+    pub organization_id: String,
+    pub name: String,
+    pub role: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct OrganizationMember {
+    pub username: String,
+    pub role: String,
+    pub joined_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +94,16 @@ pub struct RegisterRequest {
     invite: String,
     username: String,
     password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOrganizationRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMemberRoleRequest {
+    role: String,
 }
 
 impl AuthStore {
@@ -149,6 +176,9 @@ impl AuthStore {
         )
         .execute(&self.pool)
         .await?;
+        self.ensure_column("invitations", "organization_id", "TEXT")
+            .await?;
+        self.ensure_column("invitations", "role", "TEXT").await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sessions (\
              token TEXT PRIMARY KEY, \
@@ -224,7 +254,396 @@ impl AuthStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS organizations (\
+             organization_id TEXT PRIMARY KEY, \
+             name TEXT NOT NULL, \
+             created_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS organization_members (\
+             organization_id TEXT NOT NULL, \
+             username TEXT NOT NULL COLLATE NOCASE, \
+             role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')), \
+             joined_at TEXT NOT NULL, \
+             PRIMARY KEY(organization_id, username), \
+             FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS organization_members_username \
+             ON organization_members(username COLLATE NOCASE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workspaces (\
+             workspace_id TEXT PRIMARY KEY, \
+             organization_id TEXT NOT NULL, \
+             name TEXT NOT NULL, \
+             created_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL, \
+             FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (\
+             name TEXT PRIMARY KEY, \
+             applied_at TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS workspaces_organization_id \
+             ON workspaces(organization_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT OR IGNORE INTO organizations(organization_id, name, created_at, created_by) \
+             VALUES(?, ?, ?, 'admin')",
+        )
+        .bind(DEFAULT_ORGANIZATION_ID)
+        .bind(DEFAULT_ORGANIZATION_NAME)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO organization_members(organization_id, username, role, joined_at) \
+             VALUES(?, 'admin', 'owner', ?)",
+        )
+        .bind(DEFAULT_ORGANIZATION_ID)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        let legacy_members_migrated = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schema_migrations WHERE name = 'organization_members_v1'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            != 0;
+        if !legacy_members_migrated {
+            let mut transaction = self.pool.begin().await?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO organization_members(organization_id, username, role, joined_at) \
+                 SELECT ?, username, 'member', ? FROM users",
+            )
+            .bind(DEFAULT_ORGANIZATION_ID)
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO schema_migrations(name, applied_at) \
+                 VALUES('organization_members_v1', ?)",
+            )
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
+             VALUES('default', ?, 'Default', ?, 'admin')",
+        )
+        .bind(DEFAULT_ORGANIZATION_ID)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
+             SELECT workspace_id, ?, workspace_id, ?, 'migration' FROM (\
+               SELECT workspace_id FROM machines \
+               UNION SELECT workspace_id FROM machine_enrollments \
+               UNION SELECT workspace_id FROM machine_names \
+               UNION SELECT workspace_id FROM agent_names\
+             )",
+        )
+        .bind(DEFAULT_ORGANIZATION_ID)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE invitations SET organization_id = ?, role = 'member' \
+             WHERE organization_id IS NULL OR role IS NULL",
+        )
+        .bind(DEFAULT_ORGANIZATION_ID)
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    async fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> anyhow::Result<()> {
+        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&self.pool)
+            .await?;
+        if !rows
+            .iter()
+            .any(|row| row.get::<String, _>("name") == column)
+        {
+            sqlx::query(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn all_workspaces(&self) -> Result<Vec<WorkspaceInfo>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT workspace_id, name, created_at FROM workspaces ORDER BY workspace_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(workspace_from_row).collect()
+    }
+
+    pub async fn list_organizations(
+        &self,
+        username: &str,
+    ) -> Result<Vec<OrganizationInfo>, AuthFailure> {
+        let rows = if self.disabled {
+            sqlx::query(
+                "SELECT organization_id, name, created_at, 'owner' AS role \
+                 FROM organizations ORDER BY name COLLATE NOCASE, organization_id",
+            )
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query(
+                "SELECT o.organization_id, o.name, o.created_at, m.role \
+                 FROM organizations o \
+                 JOIN organization_members m ON m.organization_id = o.organization_id \
+                 WHERE m.username = ? COLLATE NOCASE \
+                 ORDER BY o.name COLLATE NOCASE, o.organization_id",
+            )
+            .bind(username)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(AuthFailure::database)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| OrganizationInfo {
+                organization_id: row.get("organization_id"),
+                name: row.get("name"),
+                role: row.get("role"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn create_organization(
+        &self,
+        username: &str,
+        name: &str,
+    ) -> Result<OrganizationInfo, AuthFailure> {
+        let name = validate_resource_name(name, "organization")?;
+        let organization_id = format!("org_{}", Uuid::new_v4().simple());
+        let now = Utc::now().to_rfc3339();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO organizations(organization_id, name, created_at, created_by) \
+             VALUES(?, ?, ?, ?)",
+        )
+        .bind(&organization_id)
+        .bind(&name)
+        .bind(&now)
+        .bind(username)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO organization_members(organization_id, username, role, joined_at) \
+             VALUES(?, ?, 'owner', ?)",
+        )
+        .bind(&organization_id)
+        .bind(username)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(OrganizationInfo {
+            organization_id,
+            name,
+            role: "owner".to_string(),
+            created_at: now,
+        })
+    }
+
+    pub async fn require_organization_member(
+        &self,
+        organization_id: &str,
+        username: &str,
+    ) -> Result<String, AuthFailure> {
+        self.membership_role(organization_id, username)
+            .await?
+            .ok_or_else(|| {
+                AuthFailure::forbidden(
+                    "organization_access_denied",
+                    "you are not a member of this organization",
+                )
+            })
+    }
+
+    pub async fn require_workspace_member(
+        &self,
+        workspace_id: &str,
+        username: &str,
+    ) -> Result<(), AuthFailure> {
+        let organization_id = sqlx::query_scalar::<_, String>(
+            "SELECT organization_id FROM workspaces WHERE workspace_id = ?",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
+        self.require_organization_member(&organization_id, username)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_members(
+        &self,
+        organization_id: &str,
+        username: &str,
+    ) -> Result<Vec<OrganizationMember>, AuthFailure> {
+        self.require_organization_member(organization_id, username)
+            .await?;
+        let rows = sqlx::query(
+            "SELECT username, role, joined_at FROM organization_members \
+             WHERE organization_id = ? \
+             ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, \
+             username COLLATE NOCASE",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| OrganizationMember {
+                username: row.get("username"),
+                role: row.get("role"),
+                joined_at: row.get("joined_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_workspaces(
+        &self,
+        organization_id: &str,
+        username: &str,
+    ) -> Result<Vec<WorkspaceInfo>, AuthFailure> {
+        self.require_organization_member(organization_id, username)
+            .await?;
+        let rows = sqlx::query(
+            "SELECT workspace_id, name, created_at FROM workspaces \
+             WHERE organization_id = ? ORDER BY name COLLATE NOCASE, workspace_id",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(workspace_from_row).collect()
+    }
+
+    pub async fn create_workspace(
+        &self,
+        organization_id: &str,
+        workspace_id: &str,
+        name: &str,
+        username: &str,
+    ) -> Result<WorkspaceInfo, AuthFailure> {
+        self.require_organization_member(organization_id, username)
+            .await?;
+        let name = validate_resource_name(name, "workspace")?;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
+             VALUES(?, ?, ?, ?, ?)",
+        )
+        .bind(workspace_id)
+        .bind(organization_id)
+        .bind(&name)
+        .bind(now.to_rfc3339())
+        .bind(username)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict("workspace_exists", "workspace already exists")
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
+        Ok(WorkspaceInfo {
+            workspace_id: workspace_id.to_string(),
+            name,
+            created_at: now,
+        })
+    }
+
+    async fn membership_role(
+        &self,
+        organization_id: &str,
+        username: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        if self.disabled {
+            let exists = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM organizations WHERE organization_id = ?",
+            )
+            .bind(organization_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            return Ok((exists != 0).then(|| "owner".to_string()));
+        }
+        sqlx::query_scalar(
+            "SELECT role FROM organization_members \
+             WHERE organization_id = ? AND username = ? COLLATE NOCASE",
+        )
+        .bind(organization_id)
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)
+    }
+
+    async fn require_manager(
+        &self,
+        organization_id: &str,
+        username: &str,
+    ) -> Result<String, AuthFailure> {
+        let role = self
+            .require_organization_member(organization_id, username)
+            .await?;
+        if matches!(role.as_str(), "owner" | "admin") {
+            Ok(role)
+        } else {
+            Err(AuthFailure::forbidden(
+                "organization_manager_required",
+                "organization owner or administrator access required",
+            ))
+        }
     }
 
     pub async fn set_machine_name(
@@ -612,19 +1031,99 @@ impl AuthStore {
         Ok(())
     }
 
-    async fn create_invitation(&self, created_by: &str) -> Result<(String, Url), AuthFailure> {
+    async fn create_invitation(
+        &self,
+        organization_id: &str,
+        created_by: &str,
+    ) -> Result<(String, Url), AuthFailure> {
+        self.require_manager(organization_id, created_by).await?;
         let token = format!("inv_{}", Uuid::new_v4().simple());
-        sqlx::query("INSERT INTO invitations(token, created_at, created_by) VALUES(?, ?, ?)")
-            .bind(&token)
-            .bind(Utc::now().to_rfc3339())
-            .bind(created_by)
-            .execute(&self.pool)
-            .await
-            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO invitations(\
+             token, created_at, created_by, organization_id, role) \
+             VALUES(?, ?, ?, ?, 'member')",
+        )
+        .bind(&token)
+        .bind(Utc::now().to_rfc3339())
+        .bind(created_by)
+        .bind(organization_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
         let mut url = self.public_url.clone();
         url.set_path("/");
         url.query_pairs_mut().clear().append_pair("invite", &token);
         Ok((token, url))
+    }
+
+    pub async fn update_member_role(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        target: &str,
+        role: &str,
+    ) -> Result<(), AuthFailure> {
+        let actor_role = self
+            .require_organization_member(organization_id, actor)
+            .await?;
+        if actor_role != "owner" {
+            return Err(AuthFailure::forbidden(
+                "organization_owner_required",
+                "organization owner access required",
+            ));
+        }
+        if !matches!(role, "admin" | "member") {
+            return Err(AuthFailure::bad_request(
+                "invalid_member_role",
+                "member role must be admin or member",
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE organization_members SET role = ? \
+             WHERE organization_id = ? AND username = ? COLLATE NOCASE AND role != 'owner'",
+        )
+        .bind(role)
+        .bind(organization_id)
+        .bind(target)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if result.rows_affected() != 1 {
+            return Err(AuthFailure::not_found(
+                "member_not_found",
+                "member does not exist or is the organization owner",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn remove_member(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        target: &str,
+    ) -> Result<(), AuthFailure> {
+        self.require_manager(organization_id, actor).await?;
+        let target_role = self
+            .membership_role(organization_id, target)
+            .await?
+            .ok_or_else(|| AuthFailure::not_found("member_not_found", "member does not exist"))?;
+        if target_role == "owner" {
+            return Err(AuthFailure::conflict(
+                "owner_cannot_be_removed",
+                "the organization owner cannot be removed",
+            ));
+        }
+        sqlx::query(
+            "DELETE FROM organization_members \
+             WHERE organization_id = ? AND username = ? COLLATE NOCASE",
+        )
+        .bind(organization_id)
+        .bind(target)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(())
     }
 
     async fn register(
@@ -640,19 +1139,21 @@ impl AuthStore {
                 "password must contain at least 8 characters",
             ));
         }
-        let available = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM invitations WHERE token = ? AND used_at IS NULL",
+        let invitation = sqlx::query(
+            "SELECT organization_id, role FROM invitations WHERE token = ? AND used_at IS NULL",
         )
         .bind(invite)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(AuthFailure::database)?;
-        if available == 0 {
-            return Err(AuthFailure::bad_request(
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| {
+            AuthFailure::bad_request(
                 "invalid_invitation",
                 "invitation is invalid or already used",
-            ));
-        }
+            )
+        })?;
+        let organization_id: String = invitation.get("organization_id");
+        let role: String = invitation.get("role");
         let password_hash = hash_password(password)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let user_id = format!("usr_{}", Uuid::new_v4().simple());
@@ -691,6 +1192,17 @@ impl AuthStore {
                 "invitation is invalid or already used",
             ));
         }
+        sqlx::query(
+            "INSERT INTO organization_members(organization_id, username, role, joined_at) \
+             VALUES(?, ?, ?, ?)",
+        )
+        .bind(organization_id)
+        .bind(&username)
+        .bind(role)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         self.create_session(&username, false).await
     }
@@ -710,18 +1222,20 @@ pub async fn require_user(
     }
 }
 
-pub async fn require_admin(
+pub async fn require_workspace_access(
     State(auth): State<AuthStore>,
-    mut request: Request,
+    Extension(session): Extension<CurrentSession>,
+    request: Request,
     next: Next,
 ) -> Response {
-    match authenticate_request(&auth, request.headers()).await {
-        Ok(session) if session.is_admin => {
-            request.extensions_mut().insert(session);
-            next.run(request).await
-        }
-        Ok(_) => AuthFailure::forbidden("admin_required", "administrator access required")
-            .into_response(),
+    let Some(workspace_id) = workspace_id_from_api_path(request.uri().path()) else {
+        return next.run(request).await;
+    };
+    match auth
+        .require_workspace_member(&workspace_id, &session.username)
+        .await
+    {
+        Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     }
 }
@@ -786,6 +1300,39 @@ pub async fn me(Extension(session): Extension<CurrentSession>) -> Json<Value> {
     Json(json!({ "username": session.username, "is_admin": session.is_admin }))
 }
 
+pub async fn organizations(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "organizations": auth.list_organizations(&session.username).await?
+    })))
+}
+
+pub async fn create_organization_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Json(request): Json<CreateOrganizationRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "organization": auth.create_organization(&session.username, &request.name).await?
+    })))
+}
+
+pub async fn members(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+) -> Result<Json<Value>, AuthFailure> {
+    let role = auth
+        .require_organization_member(&organization_id, &session.username)
+        .await?;
+    Ok(Json(json!({
+        "members": auth.list_members(&organization_id, &session.username).await?,
+        "current_role": role
+    })))
+}
+
 pub async fn logout(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
@@ -808,9 +1355,38 @@ pub async fn logout(
 pub async fn create_invitation(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
 ) -> Result<Json<Value>, AuthFailure> {
-    let (token, url) = auth.create_invitation(&session.username).await?;
+    let (token, url) = auth
+        .create_invitation(&organization_id, &session.username)
+        .await?;
     Ok(Json(json!({ "token": token, "url": url.as_str() })))
+}
+
+pub async fn update_member_role_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, username)): AxumPath<(String, String)>,
+    Json(request): Json<UpdateMemberRoleRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    auth.update_member_role(
+        &organization_id,
+        &session.username,
+        &username,
+        &request.role,
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn remove_member_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, username)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    auth.remove_member(&organization_id, &session.username, &username)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 fn session_response(auth: &AuthStore, session: &CurrentSession) -> Response {
@@ -866,6 +1442,14 @@ fn machine_workspace_matches(session: &MachineSession, path: &str) -> bool {
         .is_ok_and(|workspace| session.allows_workspace(&workspace))
 }
 
+fn workspace_id_from_api_path(path: &str) -> Option<String> {
+    let encoded = path.strip_prefix("/api/workspaces/")?.split('/').next()?;
+    percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .ok()
+        .map(|workspace| workspace.into_owned())
+}
+
 fn random_secret() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
@@ -911,6 +1495,36 @@ fn validate_username(username: &str) -> Result<String, AuthFailure> {
     Ok(username.to_string())
 }
 
+fn validate_resource_name(value: &str, resource: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 80 || value.chars().any(|character| character.is_control())
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_name",
+            &format!("{resource} name must be 1-80 printable characters"),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn workspace_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceInfo, AuthFailure> {
+    let created_at: String = row.get("created_at");
+    let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            tracing::error!(%error, "invalid workspace timestamp in database");
+            AuthFailure::internal(
+                "database_error",
+                "workspace timestamp is invalid".to_string(),
+            )
+        })?;
+    Ok(WorkspaceInfo {
+        workspace_id: row.get("workspace_id"),
+        name: row.get("name"),
+        created_at,
+    })
+}
+
 fn hash_password(password: &str) -> Result<String, AuthFailure> {
     let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
         .map_err(|error| AuthFailure::internal("password_hash_error", error.to_string()))?;
@@ -935,6 +1549,10 @@ pub struct AuthFailure {
 }
 
 impl AuthFailure {
+    fn not_found(code: &str, message: &str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, code, message)
+    }
+
     fn unauthorized(code: &str, message: &str) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, code, message)
     }
@@ -997,7 +1615,7 @@ mod tests {
             .expect("admin login");
         assert!(admin.is_admin);
         let (invite, url) = store
-            .create_invitation(&admin.username)
+            .create_invitation(DEFAULT_ORGANIZATION_ID, &admin.username)
             .await
             .expect("invitation");
         assert!(url.as_str().contains(&invite));
@@ -1016,6 +1634,150 @@ mod tests {
             .expect("case-insensitive login");
         assert_eq!(login.username, "ALICE");
         assert!(!login.is_admin);
+    }
+
+    #[tokio::test]
+    async fn organization_roles_control_members_and_share_workspaces() {
+        let store = AuthStore::in_memory("owner-password").await;
+        let owner = store
+            .login("admin", "owner-password")
+            .await
+            .expect("owner login");
+        let organization = store
+            .create_organization(&owner.username, "Engineering")
+            .await
+            .expect("create organization");
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "ws_engineering",
+                "Engineering",
+                &owner.username,
+            )
+            .await
+            .expect("create workspace");
+        let (alice_invite, _) = store
+            .create_invitation(&organization.organization_id, &owner.username)
+            .await
+            .expect("invite alice");
+        let alice = store
+            .register(&alice_invite, "alice", "password123")
+            .await
+            .expect("register alice");
+
+        let workspaces = store
+            .list_workspaces(&organization.organization_id, &alice.username)
+            .await
+            .expect("member workspaces");
+        assert_eq!(workspaces[0].workspace_id, "ws_engineering");
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "ws_product",
+                "Product",
+                &alice.username,
+            )
+            .await
+            .expect("members may create workspaces");
+        assert!(store
+            .create_invitation(&organization.organization_id, &alice.username)
+            .await
+            .is_err());
+
+        store
+            .update_member_role(
+                &organization.organization_id,
+                &owner.username,
+                &alice.username,
+                "admin",
+            )
+            .await
+            .expect("promote alice");
+        let (bob_invite, _) = store
+            .create_invitation(&organization.organization_id, &alice.username)
+            .await
+            .expect("admin invite");
+        store
+            .register(&bob_invite, "bob", "password123")
+            .await
+            .expect("register bob");
+        store
+            .remove_member(&organization.organization_id, &alice.username, "bob")
+            .await
+            .expect("admin removes member");
+        assert!(store
+            .remove_member(
+                &organization.organization_id,
+                &alice.username,
+                &owner.username
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn workspace_access_is_limited_to_organization_members() {
+        let store = AuthStore::in_memory("owner-password").await;
+        let owner = store
+            .login("admin", "owner-password")
+            .await
+            .expect("owner login");
+        let (invite, _) = store
+            .create_invitation(DEFAULT_ORGANIZATION_ID, &owner.username)
+            .await
+            .expect("default organization invite");
+        let alice = store
+            .register(&invite, "alice", "password123")
+            .await
+            .expect("register alice");
+        let private = store
+            .create_organization(&owner.username, "Private")
+            .await
+            .expect("create private organization");
+        store
+            .create_workspace(
+                &private.organization_id,
+                "ws_private",
+                "Private",
+                &owner.username,
+            )
+            .await
+            .expect("create private workspace");
+
+        let error = store
+            .require_workspace_member("ws_private", &alice.username)
+            .await
+            .expect_err("cross-organization access must fail");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn restarting_does_not_restore_removed_legacy_members() {
+        let store = AuthStore::in_memory("owner-password").await;
+        let owner = store
+            .login("admin", "owner-password")
+            .await
+            .expect("owner login");
+        let (invite, _) = store
+            .create_invitation(DEFAULT_ORGANIZATION_ID, &owner.username)
+            .await
+            .expect("invite alice");
+        store
+            .register(&invite, "alice", "password123")
+            .await
+            .expect("register alice");
+        store
+            .remove_member(DEFAULT_ORGANIZATION_ID, &owner.username, "alice")
+            .await
+            .expect("remove alice");
+
+        store.migrate().await.expect("repeat migration");
+
+        assert!(store
+            .membership_role(DEFAULT_ORGANIZATION_ID, "alice")
+            .await
+            .expect("membership lookup")
+            .is_none());
     }
 
     #[tokio::test]

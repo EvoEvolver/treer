@@ -103,15 +103,20 @@ impl AppState {
     }
 
     pub async fn ensure_workspace(&self, workspace_id: &str, name: &str) -> WorkspaceInfo {
+        self.ensure_workspace_info(WorkspaceInfo {
+            workspace_id: workspace_id.to_string(),
+            name: name.to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+    }
+
+    pub async fn ensure_workspace_info(&self, info: WorkspaceInfo) -> WorkspaceInfo {
         let mut workspaces = self.inner.workspaces.write().await;
         workspaces
-            .entry(workspace_id.to_string())
+            .entry(info.workspace_id.clone())
             .or_insert_with(|| WorkspaceState {
-                info: WorkspaceInfo {
-                    workspace_id: workspace_id.to_string(),
-                    name: name.to_string(),
-                    created_at: Utc::now(),
-                },
+                info,
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
@@ -122,25 +127,19 @@ impl AppState {
             .clone()
     }
 
-    pub async fn create_workspace(
+    pub async fn create_workspace_info(
         &self,
-        workspace_id: String,
-        name: String,
+        info: WorkspaceInfo,
     ) -> Result<WorkspaceInfo, ProtocolError> {
         let mut workspaces = self.inner.workspaces.write().await;
-        if workspaces.contains_key(&workspace_id) {
+        if workspaces.contains_key(&info.workspace_id) {
             return Err(ProtocolError::new(
                 "workspace_exists",
-                format!("workspace {workspace_id} already exists"),
+                format!("workspace {} already exists", info.workspace_id),
             ));
         }
-        let info = WorkspaceInfo {
-            workspace_id: workspace_id.clone(),
-            name,
-            created_at: Utc::now(),
-        };
         workspaces.insert(
-            workspace_id,
+            info.workspace_id.clone(),
             WorkspaceState {
                 info: info.clone(),
                 revision: 0,
@@ -151,13 +150,6 @@ impl AppState {
             },
         );
         Ok(info)
-    }
-
-    pub async fn list_workspaces(&self) -> Vec<WorkspaceInfo> {
-        let workspaces = self.inner.workspaces.read().await;
-        let mut result: Vec<_> = workspaces.values().map(|item| item.info.clone()).collect();
-        result.sort_by(|left, right| left.workspace_id.cmp(&right.workspace_id));
-        result
     }
 
     pub async fn snapshot(&self, workspace_id: &str) -> Result<WorkspaceSnapshot, ProtocolError> {

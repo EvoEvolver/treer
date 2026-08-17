@@ -89,7 +89,13 @@ async fn main() -> anyhow::Result<()> {
     .await
     .with_context(|| format!("failed to open database at {}", database_path.display()))?;
     let state = AppState::new();
-    state.ensure_workspace("default", "Default").await;
+    for workspace in auth
+        .all_workspaces()
+        .await
+        .map_err(|_| anyhow::anyhow!("failed to load workspaces from database"))?
+    {
+        state.ensure_workspace_info(workspace).await;
+    }
     let app = api::router(state, bootstrap, auth).layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await

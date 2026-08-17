@@ -47,9 +47,12 @@
     .brand { display: flex; align-items: center; gap: 10px; flex: none; }
     .brand-mark { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 6px; background: #22a381; color: #fff; font-size: 15px; font-weight: 800; }
     .brand strong { font-size: 16px; font-weight: 700; }
-    .workspace-control { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .context-control { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .context-group { display: flex; align-items: center; gap: 7px; min-width: 0; }
     .workspace-label { color: #8f9c99; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-    header select { width: 200px; height: 34px; border-color: #3b4745; background: #222d2b; color: #eff5f3; padding-block: 0; }
+    header select { width: 180px; height: 34px; border-color: #3b4745; background: #222d2b; color: #eff5f3; padding-block: 0; }
+    #organization { width: 200px; }
+    #newOrganizationButton, #newWorkspaceButton { width: 32px; padding: 0; font-size: 18px; line-height: 1; }
     .account { margin-left: auto; display: flex; align-items: center; gap: 8px; }
     .user { display: flex; align-items: center; gap: 8px; margin-right: 4px; }
     .avatar { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: #34413e; color: #c7d0cd; font-size: 11px; font-weight: 800; text-transform: uppercase; }
@@ -122,19 +125,29 @@
     dialog .actions { justify-content: flex-end; }
     #installCommand { min-height: 88px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
     #inviteUrl { min-height: 74px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
+    .dialog-body { padding: 24px; }
+    .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .dialog-heading h2 { margin: 0; }
+    .member-list { border-top: 1px solid var(--line); max-height: min(420px, 55vh); overflow: auto; }
+    .member-row { min-height: 52px; display: grid; grid-template-columns: minmax(0, 1fr) 120px 70px; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+    .member-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 650; }
+    .member-role { color: var(--muted); font-size: 12px; text-transform: capitalize; }
+    .member-row select { height: 32px; padding-block: 0; font-size: 12px; }
+    .member-row button { height: 30px; padding-inline: 9px; font-size: 11px; }
     #authDialog { width: min(400px, calc(100vw - 28px)); }
     #authDialog::backdrop { background: #17201f; }
     #authDialog h2::before { content: 'T'; display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 22px; border-radius: 7px; background: var(--accent); color: #fff; font-size: 18px; }
     .form-error { min-height: 18px; margin-top: 10px; color: var(--danger); font-size: 12px; }
     .auth-switch { margin-right: auto; border: 0; padding: 0; color: var(--accent); background: transparent; box-shadow: none; }
-    #empty { color: #87928f; padding: 28px 12px; text-align: center; font-size: 12px; }
+    .empty { color: #87928f; padding: 28px 12px; text-align: center; font-size: 12px; }
     @media (max-width: 760px) {
       body { overflow: auto; }
-      header { height: 56px; gap: 10px; padding: 0 12px; }
-      .brand strong, .workspace-label { display: none; }
-      .brand { gap: 0; }
-      header select { width: min(32vw, 150px); }
-      .account { gap: 5px; }
+      header { height: auto; min-height: 96px; flex-wrap: wrap; gap: 8px; padding: 9px 12px; }
+      .brand, .workspace-label { display: none; }
+      .context-control { width: 100%; flex: none; gap: 5px; }
+      .context-group { flex: 1; }
+      header select, #organization { width: 100%; min-width: 0; }
+      .account { width: 100%; margin-left: 0; justify-content: flex-end; gap: 5px; }
       .user, #connection { display: none; }
       header button { padding: 0 8px; }
       main { display: block; height: auto; }
@@ -153,6 +166,8 @@
       #terminalStatus { display: none; }
       #terminalHost { padding: 6px 4px; }
       dialog form { padding: 20px; }
+      .dialog-body { padding: 20px; }
+      .member-row { grid-template-columns: minmax(0, 1fr) 105px 58px; }
     }
   </style>
 </head>
@@ -160,8 +175,11 @@
   <div id="app" hidden>
   <header>
     <div class="brand"><span class="brand-mark">T</span><strong>treer</strong></div>
-    <div class="workspace-control"><span class="workspace-label">Workspace</span><select id="workspace" aria-label="Workspace"></select></div>
-    <div class="account"><div class="user"><span class="avatar" id="userAvatar"></span><span id="currentUser"></span></div><button id="inviteButton" hidden>Invite</button><button id="logoutButton">Log out</button><span id="connection">connecting</span></div>
+    <div class="context-control">
+      <div class="context-group"><span class="workspace-label">Organization</span><select id="organization" aria-label="Organization"></select><button id="newOrganizationButton" title="Create organization" aria-label="Create organization">+</button></div>
+      <div class="context-group"><span class="workspace-label">Workspace</span><select id="workspace" aria-label="Workspace"></select><button id="newWorkspaceButton" title="Create workspace" aria-label="Create workspace">+</button></div>
+    </div>
+    <div class="account"><div class="user"><span class="avatar" id="userAvatar"></span><span id="currentUser"></span></div><button id="membersButton">Members</button><button id="logoutButton">Log out</button><span id="connection">connecting</span></div>
   </header>
   <main>
     <aside><div class="pane-title"><span>Machines</span><span class="count" id="serverCount">0</span></div><div id="servers"></div></aside>
@@ -203,6 +221,27 @@
       <div class="field"><label for="createArgs">Arguments, one per line</label><textarea id="createArgs" rows="3"></textarea></div>
       <div class="actions"><button type="button" id="cancelCreate">Cancel</button><button class="primary" type="submit">Create</button></div>
     </form>
+  </dialog>
+  <dialog id="createOrganizationDialog">
+    <form id="createOrganizationForm">
+      <h2>Create organization</h2>
+      <div class="field"><label for="organizationName">Name</label><input id="organizationName" maxlength="80" required></div>
+      <div class="actions"><button type="button" id="cancelOrganization">Cancel</button><button class="primary" type="submit">Create</button></div>
+    </form>
+  </dialog>
+  <dialog id="createWorkspaceDialog">
+    <form id="createWorkspaceForm">
+      <h2>Create workspace</h2>
+      <div class="field"><label for="workspaceName">Name</label><input id="workspaceName" maxlength="80" required></div>
+      <div class="actions"><button type="button" id="cancelWorkspace">Cancel</button><button class="primary" type="submit">Create</button></div>
+    </form>
+  </dialog>
+  <dialog id="membersDialog">
+    <div class="dialog-body">
+      <div class="dialog-heading"><h2>Organization members</h2><button class="primary" id="inviteButton" hidden>Invite member</button></div>
+      <div class="member-list" id="memberList"></div>
+      <div class="actions"><button id="closeMembers">Close</button></div>
+    </div>
   </dialog>
   <dialog id="installDialog">
     <form method="dialog">
@@ -246,7 +285,7 @@
   <script src="/assets/xterm.js"></script>
   <script src="/assets/addon-fit.js"></script>
   <script>
-    const state = { workspace: 'default', snapshot: null, selected: null, socket: null, user: null };
+    const state = { organization: null, organizations: [], workspace: null, snapshot: null, selected: null, socket: null, user: null };
     const terminalState = { agentId: null, terminal: null, fit: null, socket: null, input: null, observer: null, resizeTimer: null, reconnectTimer: null };
     const $ = id => document.getElementById(id);
     const api = async (path, options) => {
@@ -258,7 +297,7 @@
     async function authenticate() {
       try {
         state.user = await api('/api/auth/me');
-        showApplication();
+        await showApplication();
       } catch (error) {
         if (error.status !== 401) throw error;
         showAuthentication(new URLSearchParams(location.search).get('invite'));
@@ -277,19 +316,54 @@
       $('app').hidden = false;
       $('currentUser').textContent = state.user.username;
       $('userAvatar').textContent = state.user.username.slice(0, 1);
-      $('inviteButton').hidden = !state.user.is_admin;
       history.replaceState(null, '', location.pathname);
+      await loadOrganizations();
+    }
+    async function loadOrganizations(preferred) {
+      const data = await api('/api/organizations');
+      state.organizations = data.organizations;
+      $('organization').innerHTML = data.organizations.map(item => `<option value="${escapeHtml(item.organization_id)}">${escapeHtml(item.name)}</option>`).join('');
+      if (preferred && data.organizations.some(item => item.organization_id === preferred)) state.organization = preferred;
+      if (!data.organizations.some(item => item.organization_id === state.organization)) state.organization = data.organizations[0]?.organization_id || null;
+      $('organization').value = state.organization || '';
+      $('membersButton').disabled = !state.organization;
+      $('newWorkspaceButton').disabled = !state.organization;
       await loadWorkspaces();
     }
-    async function loadWorkspaces() {
-      const data = await api('/api/workspaces');
+    async function loadWorkspaces(preferred) {
+      if (!state.organization) {
+        $('workspace').replaceChildren();
+        state.workspace = null;
+        showEmptyWorkspace('Create an organization to get started');
+        return;
+      }
+      const data = await api(`/api/workspaces?organization_id=${encodeURIComponent(state.organization)}`);
       $('workspace').innerHTML = data.workspaces.map(w => `<option value="${escapeHtml(w.workspace_id)}">${escapeHtml(w.name)}</option>`).join('');
+      if (preferred && data.workspaces.some(w => w.workspace_id === preferred)) state.workspace = preferred;
       if (!data.workspaces.some(w => w.workspace_id === state.workspace)) state.workspace = data.workspaces[0]?.workspace_id;
-      $('workspace').value = state.workspace;
-      await refresh(); connectEvents();
+      $('workspace').value = state.workspace || '';
+      if (!state.workspace) {
+        showEmptyWorkspace('Create a workspace in this organization');
+        return;
+      }
+      await refresh();
+      connectEvents();
+    }
+    function showEmptyWorkspace(message) {
+      state.socket?.close(); state.socket = null;
+      state.snapshot = null; state.selected = null;
+      disposeTerminal();
+      $('serverCount').textContent = '0'; $('agentCount').textContent = '0'; $('revision').textContent = '';
+      $('servers').innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
+      $('agentTable').innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
+      $('terminalHost').innerHTML = '<div class="terminal-empty">No workspace selected</div>';
+      $('installButton').disabled = true; $('createButton').disabled = true;
+      $('connection').textContent = 'no workspace'; $('connection').classList.remove('live');
     }
     async function refresh() {
+      if (!state.workspace) return;
       state.snapshot = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/snapshot`);
+      $('installButton').disabled = false; $('createButton').disabled = false;
       if (state.selected && !state.snapshot.agents.some(a => a.agent_id === state.selected)) state.selected = null;
       if (!state.selected && state.snapshot.agents.length) state.selected = state.snapshot.agents[0].agent_id;
       render();
@@ -306,10 +380,10 @@
       $('agentCount').textContent = snapshot.agents.length;
       $('servers').innerHTML = snapshot.servers.length ? snapshot.servers.map(server => `
         <div class="server"><div class="server-heading"><div class="server-name"><span>${escapeHtml(server.name || server.hostname || server.server_id)}</span><span class="dot ${server.status}" title="${escapeHtml(server.status)}"></span></div><div class="server-actions"><button class="inline-action rename-machine" data-server="${escapeHtml(server.server_id)}" type="button">Rename</button><button class="inline-action danger delete-machine" data-server="${escapeHtml(server.server_id)}" type="button">Delete</button></div></div>
-        <div class="meta">${escapeHtml(server.server_id)}</div><div class="meta">${escapeHtml(server.root)}</div></div>`).join('') : '<div id="empty">No machines connected</div>';
+        <div class="meta">${escapeHtml(server.server_id)}</div><div class="meta">${escapeHtml(server.root)}</div></div>`).join('') : '<div class="empty">No machines connected</div>';
       $('createServer').innerHTML = snapshot.servers.filter(s => s.status === 'online').map(s => `<option value="${escapeHtml(s.server_id)}">${escapeHtml(s.name || s.hostname)} · ${escapeHtml(s.server_id)}</option>`).join('');
       $('agentTable').innerHTML = snapshot.agents.length ? `<table><thead><tr><th style="width:28%">Name</th><th style="width:18%">Status</th><th style="width:20%">Kind</th><th>Machine</th></tr></thead><tbody>${snapshot.agents.map(agent => `
-        <tr data-agent="${escapeHtml(agent.agent_id)}" class="${state.selected === agent.agent_id ? 'selected' : ''}" aria-selected="${state.selected === agent.agent_id}"><td>${escapeHtml(agent.name)}</td><td><span class="status ${agent.status}">${escapeHtml(agent.status)}</span></td><td><span class="kind">${escapeHtml(agent.kind)}</span></td><td>${escapeHtml(machineName(agent.server_id))}</td></tr>`).join('')}</tbody></table>` : '<div id="empty">No agents in this workspace</div>';
+        <tr data-agent="${escapeHtml(agent.agent_id)}" class="${state.selected === agent.agent_id ? 'selected' : ''}" aria-selected="${state.selected === agent.agent_id}"><td>${escapeHtml(agent.name)}</td><td><span class="status ${agent.status}">${escapeHtml(agent.status)}</span></td><td><span class="kind">${escapeHtml(agent.kind)}</span></td><td>${escapeHtml(machineName(agent.server_id))}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No agents in this workspace</div>';
       document.querySelectorAll('[data-agent]').forEach(row => row.onclick = () => selectAgent(row.dataset.agent));
       document.querySelectorAll('.rename-machine').forEach(button => button.onclick = () => {
         const server = state.snapshot.servers.find(item => item.server_id === button.dataset.server);
@@ -505,10 +579,78 @@
     }
     async function createInvite() {
       try {
-        const invitation = await api('/api/admin/invitations', { method: 'POST', body: '{}' });
+        const invitation = await api(`/api/organizations/${encodeURIComponent(state.organization)}/invitations`, { method: 'POST', body: '{}' });
         $('inviteUrl').value = invitation.url;
         $('copyInvite').textContent = 'Copy';
+        if ($('membersDialog').open) $('membersDialog').close();
         $('inviteDialog').showModal();
+      } catch (error) { alert(error.message); }
+    }
+    function showCreateOrganization() {
+      $('organizationName').value = '';
+      $('createOrganizationDialog').showModal();
+      $('organizationName').focus();
+    }
+    async function createOrganization(event) {
+      event.preventDefault();
+      try {
+        const data = await api('/api/organizations', { method: 'POST', body: JSON.stringify({ name: $('organizationName').value }) });
+        $('createOrganizationDialog').close();
+        disposeTerminal();
+        state.workspace = null; state.selected = null;
+        await loadOrganizations(data.organization.organization_id);
+      } catch (error) { alert(error.message); }
+    }
+    function showCreateWorkspace() {
+      if (!state.organization) return;
+      $('workspaceName').value = '';
+      $('createWorkspaceDialog').showModal();
+      $('workspaceName').focus();
+    }
+    async function createWorkspace(event) {
+      event.preventDefault();
+      try {
+        const data = await api('/api/workspaces', { method: 'POST', body: JSON.stringify({ organization_id: state.organization, name: $('workspaceName').value }) });
+        $('createWorkspaceDialog').close();
+        disposeTerminal();
+        state.selected = null;
+        await loadWorkspaces(data.workspace.workspace_id);
+      } catch (error) { alert(error.message); }
+    }
+    async function showMembers() {
+      if (!state.organization) return;
+      try {
+        const data = await api(`/api/organizations/${encodeURIComponent(state.organization)}/members`);
+        renderMembers(data.members, data.current_role);
+        if (!$('membersDialog').open) $('membersDialog').showModal();
+      } catch (error) { alert(error.message); }
+    }
+    function renderMembers(members, currentRole) {
+      const canManage = ['owner', 'admin'].includes(currentRole);
+      $('inviteButton').hidden = !canManage;
+      $('memberList').innerHTML = members.map(member => {
+        const roleControl = currentRole === 'owner' && member.role !== 'owner'
+          ? `<select class="member-role-select" data-username="${escapeHtml(member.username)}" aria-label="Role for ${escapeHtml(member.username)}"><option value="member" ${member.role === 'member' ? 'selected' : ''}>Member</option><option value="admin" ${member.role === 'admin' ? 'selected' : ''}>Admin</option></select>`
+          : `<span class="member-role">${escapeHtml(member.role)}</span>`;
+        const remove = canManage && member.role !== 'owner'
+          ? `<button class="danger remove-member" data-username="${escapeHtml(member.username)}">Remove</button>`
+          : '<span></span>';
+        return `<div class="member-row"><span class="member-name">${escapeHtml(member.username)}</span>${roleControl}${remove}</div>`;
+      }).join('') || '<div class="empty">No members</div>';
+      document.querySelectorAll('.member-role-select').forEach(select => select.onchange = () => updateMemberRole(select.dataset.username, select.value));
+      document.querySelectorAll('.remove-member').forEach(button => button.onclick = () => removeMember(button.dataset.username));
+    }
+    async function updateMemberRole(username, role) {
+      try {
+        await api(`/api/organizations/${encodeURIComponent(state.organization)}/members/${encodeURIComponent(username)}`, { method: 'PATCH', body: JSON.stringify({ role }) });
+        await showMembers();
+      } catch (error) { alert(error.message); await showMembers(); }
+    }
+    async function removeMember(username) {
+      if (!confirm(`Remove ${username} from this organization?`)) return;
+      try {
+        await api(`/api/organizations/${encodeURIComponent(state.organization)}/members/${encodeURIComponent(username)}`, { method: 'DELETE' });
+        await showMembers();
       } catch (error) { alert(error.message); }
     }
     async function copyText(source, button) {
@@ -519,18 +661,28 @@
     }
     function connectEvents() {
       state.socket?.close();
+      if (!state.workspace) return;
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
       const socket = new WebSocket(`${scheme}://${location.host}/api/workspaces/${encodeURIComponent(state.workspace)}/events`); state.socket = socket;
       socket.onopen = () => { $('connection').textContent = 'live'; $('connection').classList.add('live'); };
       socket.onclose = () => { $('connection').textContent = 'reconnecting'; $('connection').classList.remove('live'); if (state.socket === socket) setTimeout(connectEvents, 1200); };
       socket.onmessage = event => { const message = JSON.parse(event.data); if (message.event === 'workspace.snapshot') { state.snapshot = message.data; render(); } else { refresh(); } };
     }
+    $('organization').onchange = async event => { disposeTerminal(); state.organization = event.target.value; state.workspace = null; state.selected = null; await loadWorkspaces(); };
     $('workspace').onchange = async event => { disposeTerminal(); state.workspace = event.target.value; state.selected = null; await refresh(); connectEvents(); };
     $('authDialog').oncancel = event => event.preventDefault();
     $('loginForm').onsubmit = async event => { event.preventDefault(); $('loginError').textContent = ''; try { state.user = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: $('loginUsername').value, password: $('loginPassword').value }) }); await showApplication(); } catch (error) { $('loginError').textContent = error.message; } };
     $('registerForm').onsubmit = async event => { event.preventDefault(); $('registerError').textContent = ''; try { state.user = await api('/api/auth/register', { method: 'POST', body: JSON.stringify({ invite: $('registerInvite').value, username: $('registerUsername').value, password: $('registerPassword').value }) }); await showApplication(); } catch (error) { $('registerError').textContent = error.message; } };
     $('showLogin').onclick = () => { $('registerForm').hidden = true; $('loginForm').hidden = false; $('loginUsername').focus(); };
+    $('membersButton').onclick = showMembers;
+    $('closeMembers').onclick = () => $('membersDialog').close();
     $('inviteButton').onclick = createInvite;
+    $('newOrganizationButton').onclick = showCreateOrganization;
+    $('cancelOrganization').onclick = () => $('createOrganizationDialog').close();
+    $('createOrganizationForm').onsubmit = createOrganization;
+    $('newWorkspaceButton').onclick = showCreateWorkspace;
+    $('cancelWorkspace').onclick = () => $('createWorkspaceDialog').close();
+    $('createWorkspaceForm').onsubmit = createWorkspace;
     $('copyInvite').onclick = () => copyText('inviteUrl', 'copyInvite');
     $('logoutButton').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { location.href = '/'; } };
     $('installButton').onclick = showInstall;
