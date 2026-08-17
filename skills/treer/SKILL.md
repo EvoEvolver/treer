@@ -114,6 +114,11 @@ treer agent get reviewer
 treer agent read reviewer --lines 120
 ```
 
+`treer agent attach <target>` is reserved for a human using an interactive
+terminal on an Agent Server machine. Agents must use `prompt`, `read`, and
+`send-keys` instead of opening an attached terminal session. A human can press
+`Ctrl-]` to detach without stopping the target.
+
 Delete an agent only when its process and workspace entry should both be
 removed. Deletion is persistent and is different from merely stopping it:
 
@@ -143,6 +148,8 @@ validates every key before sending any bytes.
 - Do not create peers on arbitrary machines; select from the current workspace.
 - Use `self` instead of copying the caller's injected ID.
 - Read agent output before responding to an unexpected state.
+- Do not use `agent attach` from an automated agent workflow; it requires a
+  human-operated TTY.
 - Do not claim reliable task delivery, durable mailboxes, or strict turn
   correlation; the current collaboration surface is terminal-oriented.
 - Use `treer agent stop <target>` only when terminating that process is intended.

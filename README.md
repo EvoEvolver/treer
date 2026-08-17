@@ -152,11 +152,18 @@ treer agent list
 treer agent get reviewer
 treer agent rename reviewer code-reviewer
 treer machine rename self build-machine
+treer agent attach reviewer
 treer agent delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
 treer agent send-keys reviewer ctrl-c
 ```
+
+On the machine running an Agent Server, `treer agent attach <target>` opens the
+agent's live PTY in the current native terminal. Input, colors, cursor control,
+and terminal resize are passed through directly. Press `Ctrl-]` to detach
+without stopping the agent. The shorter `treer attach <target>` alias is also
+available.
 
 Targets accept an agent id, a unique agent name, or `self`/`.` from inside a
 managed agent. `prompt --wait` waits for observed activity followed by `idle`,

@@ -77,6 +77,10 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/stop",
             post(stop_agent),
         )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
+            get(agent_terminal),
+        )
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
             auth::require_machine,

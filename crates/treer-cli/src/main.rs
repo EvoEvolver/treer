@@ -1,17 +1,24 @@
+use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand, ValueEnum};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
+use futures_util::{SinkExt, StreamExt};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AgentInfo, AgentStatus, CreateAgentRequest, InputAgentRequest, RenameRequest,
+    TerminalClientMessage, TerminalServerMessage,
 };
 use url::Url;
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
+const ATTACH_DETACH_BYTE: u8 = 0x1d;
 const SKILL: &str = include_str!("../../../skills/treer/SKILL.md");
 
 #[derive(Debug, Parser)]
@@ -85,6 +92,8 @@ enum Command {
     Rename { target: String, name: String },
     #[command(about = "Delete an agent (compatibility alias for `agent delete`)")]
     Delete { target: String },
+    #[command(about = "Attach an interactive terminal (compatibility alias for `agent attach`)")]
+    Attach { target: String },
     #[command(about = "Stop an agent (compatibility alias for `agent stop`)")]
     Stop { target: String },
 }
@@ -99,6 +108,8 @@ enum AgentCommand {
     Rename { target: String, name: String },
     #[command(about = "Stop and permanently remove an agent")]
     Delete { target: String },
+    #[command(about = "Attach the current terminal; press Ctrl-] to detach")]
+    Attach { target: String },
     #[command(about = "Submit a prompt to another agent")]
     Prompt {
         target: String,
@@ -324,6 +335,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Read { target, lines } => read_agent(&client, &target, lines).await?,
         Command::Rename { target, name } => rename_agent(&client, &target, name).await?,
         Command::Delete { target } => delete_agent(&client, &target).await?,
+        Command::Attach { target } => attach_agent(&client, &target).await?,
         Command::Stop { target } => stop_agent(&client, &target).await?,
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -336,6 +348,7 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
         AgentCommand::Get { target } => Ok(serde_json::to_value(client.get_agent(&target).await?)?),
         AgentCommand::Rename { target, name } => rename_agent(client, &target, name).await,
         AgentCommand::Delete { target } => delete_agent(client, &target).await,
+        AgentCommand::Attach { target } => attach_agent(client, &target).await,
         AgentCommand::Prompt { target, text, wait } => {
             prompt_and_maybe_wait(client, &target, text, wait).await
         }
@@ -432,6 +445,150 @@ async fn delete_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
             None,
         )
         .await
+}
+
+async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!("attach requires an interactive terminal");
+    }
+    let target = normalize_target(target)?;
+    let (cols, rows) = terminal_size().context("failed to read terminal size")?;
+    let mut url = client
+        .base
+        .join(&format!("api/agents/{}/terminal", path_segment(&target)))
+        .context("failed to build terminal URL")?;
+    let websocket_scheme = match url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        scheme => bail!("unsupported agent server URL scheme {scheme}"),
+    };
+    url.set_scheme(websocket_scheme)
+        .map_err(|_| anyhow::anyhow!("invalid agent server URL scheme"))?;
+    url.query_pairs_mut()
+        .append_pair("cols", &cols.max(1).to_string())
+        .append_pair("rows", &rows.max(1).to_string());
+
+    let (socket, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .with_context(|| format!("failed to attach to {target}"))?;
+    eprintln!("[treer] attached to {target}; press Ctrl-] to detach");
+    let raw_mode = RawModeGuard::enable()?;
+    let (mut outgoing, mut incoming) = socket.split();
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut input = [0_u8; 4096];
+    let mut reason = "detached".to_string();
+    let mut terminal_error = None;
+    #[cfg(unix)]
+    let mut resize_events =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+            .context("failed to listen for terminal resize")?;
+    #[cfg(not(unix))]
+    let mut resize_events = tokio::time::interval(Duration::from_millis(250));
+
+    loop {
+        tokio::select! {
+            read = stdin.read(&mut input) => {
+                let read = read.context("failed to read terminal input")?;
+                if read == 0 {
+                    reason = "terminal input closed".to_string();
+                    break;
+                }
+                if let Some(detach_at) = input[..read].iter().position(|byte| *byte == ATTACH_DETACH_BYTE) {
+                    if detach_at > 0 {
+                        outgoing
+                            .send(Message::Binary(input[..detach_at].to_vec().into()))
+                            .await
+                            .context("failed to send terminal input")?;
+                    }
+                    break;
+                }
+                outgoing
+                    .send(Message::Binary(input[..read].to_vec().into()))
+                    .await
+                    .context("failed to send terminal input")?;
+            }
+            message = incoming.next() => {
+                let Some(message) = message else {
+                    reason = "terminal connection closed".to_string();
+                    break;
+                };
+                match message.context("failed to read terminal output")? {
+                    Message::Binary(data) => {
+                        stdout.write_all(&data).await.context("failed to write terminal output")?;
+                        stdout.flush().await.context("failed to flush terminal output")?;
+                    }
+                    Message::Text(text) => match serde_json::from_str::<TerminalServerMessage>(&text)
+                        .context("invalid terminal server message")? {
+                        TerminalServerMessage::Ready { .. } => {}
+                        TerminalServerMessage::Closed { reason: closed_reason } => {
+                            reason = closed_reason.unwrap_or_else(|| "agent terminal closed".to_string());
+                            break;
+                        }
+                        TerminalServerMessage::Error { error } => {
+                            reason = format!("{}: {}", error.code, error.message);
+                            terminal_error = Some(error);
+                            break;
+                        }
+                    },
+                    Message::Close(frame) => {
+                        reason = frame
+                            .map(|frame| frame.reason.to_string())
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or_else(|| "terminal connection closed".to_string());
+                        break;
+                    }
+                    Message::Ping(data) => {
+                        outgoing.send(Message::Pong(data)).await.context("failed to reply to terminal ping")?;
+                    }
+                    Message::Pong(_) | Message::Frame(_) => {}
+                }
+            }
+            _ = wait_for_resize(&mut resize_events) => {
+                let (cols, rows) = terminal_size().context("failed to read terminal size")?;
+                let resize = TerminalClientMessage::Resize {
+                    cols: cols.max(1),
+                    rows: rows.max(1),
+                };
+                outgoing
+                    .send(Message::Text(serde_json::to_string(&resize)?.into()))
+                    .await
+                    .context("failed to resize agent terminal")?;
+            }
+        }
+    }
+    let _ = outgoing.send(Message::Close(None)).await;
+    drop(raw_mode);
+    eprintln!("\r\n[treer] {reason}");
+    if let Some(error) = terminal_error {
+        bail!("{}: {}", error.code, error.message);
+    }
+    Ok(json!({ "agent": target, "status": "detached", "reason": reason }))
+}
+
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> anyhow::Result<Self> {
+        enable_raw_mode().context("failed to enable terminal raw mode")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_resize(events: &mut tokio::signal::unix::Signal) {
+    let _ = events.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn wait_for_resize(events: &mut tokio::time::Interval) {
+    events.tick().await;
 }
 
 async fn rename_machine(client: &ApiClient, target: &str, name: String) -> anyhow::Result<Value> {
@@ -547,5 +704,24 @@ mod tests {
         }
         assert!(SKILL.starts_with("---\nname: treer\n"));
         assert!(!SKILL.contains("TODO"));
+    }
+
+    #[test]
+    fn attach_commands_parse() {
+        let top_level = Args::try_parse_from(["treer", "attach", "reviewer"])
+            .expect("top-level attach should parse");
+        assert!(matches!(
+            top_level.command,
+            Some(Command::Attach { target }) if target == "reviewer"
+        ));
+
+        let nested = Args::try_parse_from(["treer", "agent", "attach", "reviewer"])
+            .expect("nested attach should parse");
+        assert!(matches!(
+            nested.command,
+            Some(Command::Agent {
+                command: AgentCommand::Attach { target }
+            }) if target == "reviewer"
+        ));
     }
 }
