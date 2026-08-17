@@ -58,7 +58,7 @@ impl ProxyClient {
         loop {
             match self.run_connection().await {
                 Ok(()) => warn!("proxy connection closed"),
-                Err(err) => warn!(%err, "proxy connection failed"),
+                Err(err) => warn!(error = %format_args!("{err:#}"), "proxy connection failed"),
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(5));
