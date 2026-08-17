@@ -22,11 +22,12 @@ const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
 const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const AGENT_COMMAND_DELAY: Duration = Duration::from_millis(500);
+const CLAUDE_TRUST_CONFIRM_DELAY: Duration = Duration::from_millis(1_500);
 
 struct AgentLaunch {
     command: String,
     args: Vec<String>,
-    initial_input: Option<Vec<u8>>,
+    initial_writes: Vec<HostWrite>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,19 +250,16 @@ impl ControllerRuntime {
         } else {
             self.upsert_process(process, None)?
         };
-        let Some(initial_input) = launch.initial_input else {
+        if launch.initial_writes.is_empty() {
             return Ok(agent);
-        };
+        }
         let response = self
             .inner
             .host
             .request(
                 HostCommand::Write {
                     process_id: agent.agent_id.clone(),
-                    writes: vec![HostWrite {
-                        data: initial_input,
-                        delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
-                    }],
+                    writes: launch.initial_writes,
                 },
                 Some(format!("{operation_id}:launch")),
             )
@@ -783,7 +781,18 @@ impl ControllerRuntime {
 
 fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolError> {
     match request.kind.as_str() {
-        "codex" | "claude" => Ok(shell_agent_launch(&request.kind, &request.args)),
+        "codex" => Ok(shell_agent_launch(
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            &request.args,
+            false,
+        )),
+        "claude" => Ok(shell_agent_launch(
+            "claude",
+            "--dangerously-skip-permissions",
+            &request.args,
+            true,
+        )),
         "command" => {
             let (command, args) = request.args.split_first().map_or_else(
                 || (interactive_shell(), vec!["-i".to_string()]),
@@ -792,7 +801,7 @@ fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolE
             Ok(AgentLaunch {
                 command,
                 args,
-                initial_input: None,
+                initial_writes: Vec::new(),
             })
         }
         other => Err(ProtocolError::new(
@@ -802,13 +811,31 @@ fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolE
     }
 }
 
-fn shell_agent_launch(agent_command: &str, args: &[String]) -> AgentLaunch {
-    let mut input = shell_join(agent_command, args).into_bytes();
+fn shell_agent_launch(
+    agent_command: &str,
+    default_arg: &str,
+    args: &[String],
+    confirm_workspace_trust: bool,
+) -> AgentLaunch {
+    let launch_args = std::iter::once(default_arg.to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut input = shell_join(agent_command, &launch_args).into_bytes();
     input.push(b'\r');
+    let mut initial_writes = vec![HostWrite {
+        data: input,
+        delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
+    }];
+    if confirm_workspace_trust {
+        initial_writes.push(HostWrite {
+            data: vec![b'\r'],
+            delay_ms: CLAUDE_TRUST_CONFIRM_DELAY.as_millis() as u64,
+        });
+    }
     AgentLaunch {
         command: interactive_shell(),
         args: vec!["-i".to_string()],
-        initial_input: Some(input),
+        initial_writes,
     }
 }
 
@@ -978,13 +1005,47 @@ mod tests {
             String::new(),
         ];
 
-        let launch = shell_agent_launch("codex", &args);
+        let launch = shell_agent_launch(
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            &args,
+            false,
+        );
 
         assert!(!launch.command.is_empty());
         assert_eq!(launch.args, ["-i"]);
         assert_eq!(
-            launch.initial_input.as_deref(),
-            Some(b"'codex' '--model' 'gpt 5' 'it'\\''s' ''\r".as_slice())
+            launch.initial_writes,
+            [HostWrite {
+                data: b"'codex' '--dangerously-bypass-approvals-and-sandbox' '--model' 'gpt 5' 'it'\\''s' ''\r".to_vec(),
+                delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
+            }]
+        );
+    }
+
+    #[test]
+    fn claude_launch_skips_permissions_and_confirms_workspace_trust() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "claude".to_string(),
+            name: "claude-test".to_string(),
+            cwd: ".".to_string(),
+            args: vec!["--model".to_string(), "sonnet".to_string()],
+            cols: 120,
+            rows: 36,
+        };
+
+        let launch = resolve_launch(&request).expect("resolve claude launch");
+
+        assert_eq!(launch.initial_writes.len(), 2);
+        assert_eq!(
+            launch.initial_writes[0].data,
+            b"'claude' '--dangerously-skip-permissions' '--model' 'sonnet'\r"
+        );
+        assert_eq!(launch.initial_writes[1].data, b"\r");
+        assert_eq!(
+            launch.initial_writes[1].delay_ms,
+            CLAUDE_TRUST_CONFIRM_DELAY.as_millis() as u64
         );
     }
 
@@ -1004,7 +1065,7 @@ mod tests {
 
         assert_eq!(launch.command, "/bin/sh");
         assert_eq!(launch.args, ["-c", "pwd"]);
-        assert!(launch.initial_input.is_none());
+        assert!(launch.initial_writes.is_empty());
     }
 
     #[test]
