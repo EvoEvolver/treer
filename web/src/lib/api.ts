@@ -1,11 +1,13 @@
 export interface User {
-  username: string
-  is_admin?: boolean
+  user_id: string
+  email: string
+  preferred_name: string
 }
 
 export interface Organization {
   organization_id: string
   name: string
+  role: "owner" | "admin" | "member"
 }
 
 export interface Workspace {
@@ -36,8 +38,18 @@ export interface Snapshot {
 }
 
 export interface Member {
-  username: string
+  user_id: string
+  email: string
+  preferred_name: string
   role: "owner" | "admin" | "member"
+}
+
+export interface AdminOrganization {
+  organization_id: string
+  name: string
+  member_count: number
+  owner_count: number
+  initial_invitation_pending: boolean
 }
 
 export interface VirtualNetworkHost {

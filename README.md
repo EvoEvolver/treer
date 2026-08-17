@@ -25,8 +25,8 @@ cargo run -p treer-proxy -- \
 ```
 
 `--disable-auth` is intended for local testing. It skips the login screen and
-uses a local administrator identity. Omit it and set `ADMIN_PASSWORD` for shared
-or deployed servers.
+uses a synthetic local user. Omit it and set `ADMIN_PASSWORD` for shared or
+deployed servers.
 
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
 places the current platform's `treer-agent-host`, `treer-agent-server`, and
@@ -124,18 +124,24 @@ linger cannot be enabled automatically. On macOS, a LaunchAgent starts at user
 login; an always-on pre-login LaunchDaemon would require a separate privileged
 installation flow.
 
-## Users and invitations
+## Users, administrators, and invitations
 
-The administrator signs in with username `admin` and the password supplied in
-`ADMIN_PASSWORD`. The administrator can create single-use registration links
-from **Invite** in the header. Invited users choose their own username and
-password; all signed-in users share the same workspaces, machines, agents, and
-terminals.
+The platform administrator is not a Treer user and does not belong to an
+organization. Open `/admin` and use the password supplied in `ADMIN_PASSWORD`
+to access the separate admin panel. For an organization without an owner, the
+panel can create a single-use initial invitation. That invitation lets the
+first owner register with an email address, preferred name, and password.
 
-Users, invitations, and sessions are stored in SQLite. Local runs default to
-`.treer/proxy.db`; set `TREER_DATABASE_PATH` to put it elsewhere. Changing
-`ADMIN_PASSWORD` changes the administrator's next login password without
-rewriting existing user accounts.
+Organization owners and administrators can create subsequent member
+invitations from **Members**. Users sign in with email, and can update their
+email or preferred name without changing their stable identity or organization
+access. Organization owners and administrators can also rename their
+organization.
+
+Users, invitations, user sessions, and separate administrator sessions are
+stored in SQLite. Local runs default to `.treer/proxy.db`; set
+`TREER_DATABASE_PATH` to put it elsewhere. Changing `ADMIN_PASSWORD` changes
+the administrator's next login password without rewriting user accounts.
 
 ## Railway
 

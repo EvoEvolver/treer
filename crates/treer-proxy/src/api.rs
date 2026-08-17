@@ -132,11 +132,15 @@ pub fn router(
             get(auth::organizations).post(auth::create_organization_handler),
         )
         .route(
+            "/api/organizations/{organization_id}",
+            axum::routing::patch(auth::rename_organization_handler),
+        )
+        .route(
             "/api/organizations/{organization_id}/members",
             get(auth::members),
         )
         .route(
-            "/api/organizations/{organization_id}/members/{username}",
+            "/api/organizations/{organization_id}/members/{user_id}",
             axum::routing::patch(auth::update_member_role_handler)
                 .delete(auth::remove_member_handler),
         )
@@ -202,6 +206,10 @@ pub fn router(
             get(workspace_events),
         )
         .route("/api/auth/me", get(auth::me))
+        .route(
+            "/api/auth/profile",
+            axum::routing::patch(auth::update_profile),
+        )
         .route("/api/auth/logout", post(auth::logout))
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
@@ -211,8 +219,21 @@ pub fn router(
             auth_store.clone(),
             auth::require_user,
         ));
+    let admin = Router::new()
+        .route("/api/admin/me", get(auth::admin_me))
+        .route("/api/admin/logout", post(auth::admin_logout))
+        .route("/api/admin/organizations", get(auth::admin_organizations))
+        .route(
+            "/api/admin/organizations/{organization_id}/initial-invitation",
+            post(auth::admin_create_initial_invitation),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            auth_store.clone(),
+            auth::require_admin,
+        ));
     Router::new()
         .route("/", get(index))
+        .route("/admin", get(index))
         .route("/install.sh", get(install_script))
         .route("/api/machines/enroll", post(enroll_machine))
         .route("/artifacts/{platform}/{binary}", get(download_artifact))
@@ -222,9 +243,11 @@ pub fn router(
         .route("/api/health", get(health))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/register", post(auth::register))
+        .route("/api/admin/login", post(auth::admin_login))
         .route("/agent/connect", get(agent_socket::upgrade))
         .merge(agent_control)
         .merge(authenticated)
+        .merge(admin)
         .layer(Extension(bootstrap))
         .layer(Extension(policy))
         .layer(Extension(auth_store))
@@ -269,7 +292,7 @@ async fn bootstrap_info(
 ) -> Result<Json<Value>, ApiFailure> {
     state.snapshot(&workspace_id).await?;
     let enrollment = auth
-        .create_machine_enrollment(&workspace_id, &session.username)
+        .create_machine_enrollment(&workspace_id, &session.user_id)
         .await?;
     let (install_command, connect_command) = bootstrap_commands(&config.public_url, &enrollment);
     let script_url = install_script_url(&config.public_url);
@@ -463,7 +486,7 @@ async fn list_workspaces(
 ) -> Result<Json<Value>, ApiFailure> {
     Ok(Json(json!({
         "workspaces": auth
-            .list_workspaces(&query.organization_id, &session.username)
+            .list_workspaces(&query.organization_id, &session.user_id)
             .await?
     })))
 }
@@ -482,7 +505,7 @@ async fn create_workspace(
             &request.organization_id,
             &workspace_id,
             &request.name,
-            &session.username,
+            &session.user_id,
         )
         .await?;
     state.create_workspace_info(info.clone()).await?;
@@ -527,7 +550,7 @@ async fn create_virtual_network_host(
         .await?;
     request.destination_server_id = destination.server_id;
     let host = auth
-        .create_virtual_network_host(&workspace_id, &session.username, request)
+        .create_virtual_network_host(&workspace_id, &session.user_id, request)
         .await?;
     Ok(Json(json!({ "host": host })))
 }

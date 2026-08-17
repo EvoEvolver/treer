@@ -5,6 +5,7 @@ import {
   CirclePlus,
   Copy,
   FolderKanban,
+  KeyRound,
   LogOut,
   MoreHorizontal,
   Network,
@@ -13,12 +14,13 @@ import {
   RotateCw,
   Server,
   Square,
+  ShieldCheck,
   TerminalSquare,
   Trash2,
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, websocketUrl, type Agent, type Machine, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, websocketUrl, type AdminOrganization, type Agent, type Machine, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -60,7 +62,8 @@ function IconButton({ label, children, ...props }: React.ComponentProps<typeof B
 function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const invite = new URLSearchParams(window.location.search).get("invite")
   const [registering, setRegistering] = useState(Boolean(invite))
-  const [username, setUsername] = useState(registering ? "" : "admin")
+  const [email, setEmail] = useState("")
+  const [preferredName, setPreferredName] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
@@ -71,7 +74,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
     setSubmitting(true)
     try {
       const path = registering ? "/api/auth/register" : "/api/auth/login"
-      const body = registering ? { invite, username, password } : { username, password }
+      const body = registering ? { invite, email, preferred_name: preferredName, password } : { email, password }
       const user = await api<User>(path, { method: "POST", body: JSON.stringify(body) })
       window.history.replaceState(null, "", window.location.pathname)
       onAuthenticated(user)
@@ -87,7 +90,8 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
       <div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] font-serif text-lg font-bold text-white">T</div>
       <h1 className="text-xl font-semibold">{registering ? "Join Treer" : "Sign in to Treer"}</h1>
       <p className="mt-1 text-sm text-muted-foreground">{registering ? "Create your account to join the workspace." : "Open your agent workspace."}</p>
-      <div className="mt-6 space-y-2"><Label htmlFor="username">Username</Label><Input id="username" autoComplete="username" value={username} minLength={registering ? 3 : undefined} maxLength={32} onChange={(event) => setUsername(event.target.value)} required autoFocus /></div>
+      <div className="mt-6 space-y-2"><Label htmlFor="email">Email</Label><Input id="email" type="text" inputMode="email" autoComplete="email" value={email} maxLength={254} onChange={(event) => setEmail(event.target.value)} required autoFocus /></div>
+      {registering && <div className="mt-4 space-y-2"><Label htmlFor="preferred-name">Preferred name</Label><Input id="preferred-name" autoComplete="name" value={preferredName} maxLength={80} onChange={(event) => setPreferredName(event.target.value)} required /></div>}
       <div className="mt-4 space-y-2"><Label htmlFor="password">Password</Label><Input id="password" type="password" autoComplete={registering ? "new-password" : "current-password"} value={password} minLength={registering ? 8 : undefined} onChange={(event) => setPassword(event.target.value)} required /></div>
       <div className="mt-3 min-h-5 text-xs text-destructive">{error}</div>
       <div className="mt-4 flex items-center justify-between gap-3">
@@ -98,7 +102,57 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
   </main>
 }
 
-export default function App() {
+function AdminPanel() {
+  const [authenticated, setAuthenticated] = useState<boolean | undefined>(undefined)
+  const [password, setPassword] = useState("")
+  const [organizations, setOrganizations] = useState<AdminOrganization[]>([])
+  const [inviteUrl, setInviteUrl] = useState("")
+  const [error, setError] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+
+  const loadOrganizations = useCallback(async () => {
+    const data = await api<{ organizations: AdminOrganization[] }>("/api/admin/organizations")
+    setOrganizations(data.organizations)
+  }, [])
+
+  useEffect(() => {
+    api<{ admin: boolean }>("/api/admin/me")
+      .then(() => { setAuthenticated(true); return loadOrganizations() })
+      .catch((reason) => {
+        if (reason instanceof ApiError && reason.status === 401) setAuthenticated(false)
+        else setError(reason instanceof Error ? reason.message : "Unable to load admin panel")
+      })
+  }, [loadOrganizations])
+
+  async function login(event: FormEvent) {
+    event.preventDefault(); setSubmitting(true); setError("")
+    try {
+      await api("/api/admin/login", { method: "POST", body: JSON.stringify({ password }) })
+      setPassword(""); setAuthenticated(true); await loadOrganizations()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Authentication failed") }
+    finally { setSubmitting(false) }
+  }
+
+  async function createInitialInvite(organizationId: string) {
+    setError("")
+    try {
+      const data = await api<{ url: string }>(`/api/admin/organizations/${encodeURIComponent(organizationId)}/initial-invitation`, { method: "POST", body: "{}" })
+      setInviteUrl(data.url); await loadOrganizations()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to create invitation") }
+  }
+
+  async function logout() {
+    await api("/api/admin/logout", { method: "POST", body: "{}" })
+    setAuthenticated(false); setOrganizations([]); setInviteUrl("")
+  }
+
+  if (authenticated === undefined) return <div className="grid min-h-dvh place-items-center bg-[#f7f7f5] text-sm text-muted-foreground">Loading admin...</div>
+  if (!authenticated) return <main className="grid min-h-dvh place-items-center bg-[#f7f7f5] p-4"><form onSubmit={login} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm"><div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] text-white"><ShieldCheck className="size-4" /></div><h1 className="text-xl font-semibold">Treer administration</h1><p className="mt-1 text-sm text-muted-foreground">Platform access is separate from user accounts.</p><div className="mt-6 space-y-2"><Label htmlFor="admin-password">Admin password</Label><Input id="admin-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></div><div className="mt-3 min-h-5 text-xs text-destructive">{error}</div><div className="mt-4 flex justify-end"><Button type="submit" disabled={submitting}>{submitting ? "Please wait" : "Open admin panel"}</Button></div></form></main>
+
+  return <main className="min-h-dvh bg-[#f7f7f5]"><header className="border-b bg-background"><div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-5"><div className="flex items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span>Treer administration</div><div className="flex items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-7"><h1 className="text-2xl font-semibold">Organizations</h1><p className="mt-1 text-sm text-muted-foreground">Bootstrap organizations that do not have an owner yet.</p></div>{error && <div className="mb-4 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="divide-y border-y">{organizations.map((organization) => { const initialized = organization.owner_count > 0; const unavailable = initialized || organization.initial_invitation_pending; return <div key={organization.organization_id} className="grid min-h-16 grid-cols-1 items-start gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div className="min-w-0"><div className="truncate text-sm font-medium">{organization.name}</div><div className="mt-1 text-xs text-muted-foreground">{organization.member_count} members · {initialized ? "Initialized" : organization.initial_invitation_pending ? "Invitation pending" : "No owner"}</div></div><Button size="sm" className="w-full sm:w-auto" variant={unavailable ? "outline" : "default"} disabled={unavailable} onClick={() => createInitialInvite(organization.organization_id)}><KeyRound />Create initial invite</Button></div> })}</div></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>Initial owner invitation</DialogTitle><DialogDescription>This one-time link creates the organization's first owner account.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
+}
+
+function WorkspaceApp() {
   const [user, setUser] = useState<User | null | undefined>(undefined)
   const [organizations, setOrganizations] = useState<Organization[]>([])
   const [organizationId, setOrganizationId] = useState<string | null>(null)
@@ -116,9 +170,13 @@ export default function App() {
   const [membersOpen, setMembersOpen] = useState(false)
   const [virtualHostsOpen, setVirtualHostsOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [renameOrganizationOpen, setRenameOrganizationOpen] = useState(false)
   const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
   const [organizationName, setOrganizationName] = useState("")
+  const [preferredName, setPreferredName] = useState("")
+  const [profileEmail, setProfileEmail] = useState("")
   const [workspaceName, setWorkspaceName] = useState("")
   const [agentName, setAgentName] = useState(defaultAgentName())
   const [agentKind, setAgentKind] = useState("codex")
@@ -130,7 +188,6 @@ export default function App() {
   const [connectCommand, setConnectCommand] = useState("")
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
-  const [currentRole, setCurrentRole] = useState<Member["role"]>("member")
   const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
   const [virtualHostname, setVirtualHostname] = useState("")
   const [virtualDestination, setVirtualDestination] = useState("")
@@ -225,6 +282,7 @@ export default function App() {
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
+  const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)
 
   useEffect(() => {
@@ -247,6 +305,23 @@ export default function App() {
       setCreateWorkspaceOpen(false); setWorkspaceName("")
       const list = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
       setWorkspaces(list.workspaces); setWorkspaceId(data.workspace.workspace_id)
+    } catch (reason) { showError(reason) }
+  }
+
+  async function renameOrganization(event: FormEvent) {
+    event.preventDefault()
+    if (!organizationId) return
+    try {
+      await api(`/api/organizations/${encodeURIComponent(organizationId)}`, { method: "PATCH", body: JSON.stringify({ name: organizationName }) })
+      setRenameOrganizationOpen(false); await loadOrganizations(organizationId)
+    } catch (reason) { showError(reason) }
+  }
+
+  async function updateProfile(event: FormEvent) {
+    event.preventDefault()
+    try {
+      const updated = await api<User>("/api/auth/profile", { method: "PATCH", body: JSON.stringify({ email: profileEmail, preferred_name: preferredName }) })
+      setUser(updated); setProfileOpen(false)
     } catch (reason) { showError(reason) }
   }
 
@@ -297,23 +372,23 @@ export default function App() {
   async function openMembers() {
     if (!organizationId) return
     try {
-      const data = await api<{ members: Member[]; current_role: Member["role"] }>(`/api/organizations/${encodeURIComponent(organizationId)}/members`)
-      setMembers(data.members); setCurrentRole(data.current_role); setMembersOpen(true)
+      const data = await api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/members`)
+      setMembers(data.members); setMembersOpen(true)
     } catch (reason) { showError(reason) }
   }
 
-  async function updateMemberRole(username: string, role: Member["role"]) {
+  async function updateMemberRole(userId: string, role: Member["role"]) {
     if (!organizationId) return
     try {
-      await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(username)}`, { method: "PATCH", body: JSON.stringify({ role }) })
+      await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ role }) })
       await openMembers()
     } catch (reason) { showError(reason) }
   }
 
-  async function removeMember(username: string) {
+  async function removeMember(userId: string) {
     if (!organizationId) return
     try {
-      await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(username)}`, { method: "DELETE" })
+      await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE" })
       await openMembers()
     } catch (reason) { showError(reason) }
   }
@@ -386,7 +461,7 @@ export default function App() {
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#37352f] font-serif font-bold text-white">{initials(organization?.name ?? "Treer")}</div>
           <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={setOrganizationId}><SelectTrigger className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-black/[.04]"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
-          <IconButton label="Create organization" onClick={() => setCreateOrganizationOpen(true)}><Plus /></IconButton>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
@@ -422,8 +497,8 @@ export default function App() {
         <div className="shrink-0 border-t p-2">
           <Button variant="ghost" className="h-8 w-full justify-start px-2 text-xs font-normal text-muted-foreground" onClick={openMembers} disabled={!organizationId}><Users className="size-3.5" />Members</Button>
           <DropdownMenu>
-            <DropdownMenuTrigger asChild><button className="mt-1 grid h-10 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-black/[.05]"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.username)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.username}</span><span className="flex items-center gap-1.5 text-[9px] capitalize text-muted-foreground"><span className={cn("size-1.5 rounded-full bg-amber-500", connection === "live" && "bg-emerald-500")} />{connection}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="start" className="w-56"><DropdownMenuLabel>{user.username}</DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers}><Users />Members</DropdownMenuItem><DropdownMenuItem onSelect={logout}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
+            <DropdownMenuTrigger asChild><button className="mt-1 grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-black/[.05]"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
+            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { setPreferredName(user.preferred_name); setProfileEmail(user.email); setProfileOpen(true) }}><Pencil />Edit profile</DropdownMenuItem><DropdownMenuItem onSelect={openMembers}><Users />Members</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
           </DropdownMenu>
         </div>
       </aside>
@@ -452,6 +527,10 @@ export default function App() {
     <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={organizationName} onValueChange={setOrganizationName} onSubmit={createOrganization} />
     <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={createWorkspace} />
 
+    <Dialog open={renameOrganizationOpen} onOpenChange={setRenameOrganizationOpen}><DialogContent><form onSubmit={renameOrganization}><DialogHeader><DialogTitle>Rename organization</DialogTitle><DialogDescription>Update the organization name shown to its members.</DialogDescription></DialogHeader><div className="my-5"><Field label="Organization name"><Input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameOrganizationOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
+
+    <Dialog open={profileOpen} onOpenChange={setProfileOpen}><DialogContent><form onSubmit={updateProfile}><DialogHeader><DialogTitle>Edit profile</DialogTitle><DialogDescription>Your preferred name is visible to other organization members.</DialogDescription></DialogHeader><div className="my-5 space-y-4"><Field label="Preferred name"><Input value={preferredName} onChange={(event) => setPreferredName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Email"><Input type="email" value={profileEmail} onChange={(event) => setProfileEmail(event.target.value)} required maxLength={254} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
+
     <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start an agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Kind"><Select value={agentKind} onValueChange={setAgentKind}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="codex">codex</SelectItem><SelectItem value="claude">claude</SelectItem><SelectItem value="command">command</SelectItem></SelectContent></Select></Field><Field label="Name"><Input value={agentName} onChange={(event) => setAgentName(event.target.value)} required /></Field><Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field><Field label="Arguments, one per line"><Textarea rows={3} value={agentArgs} onChange={(event) => setAgentArgs(event.target.value)} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId}>Create agent</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
@@ -462,7 +541,7 @@ export default function App() {
 
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget?.name} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.username} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="truncate text-sm font-medium">{member.username}</span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.username, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.username}`} className="text-destructive" onClick={() => removeMember(member.username)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
+    <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="min-w-0"><span className="block truncate text-sm font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive" onClick={() => removeMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
 
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
   </TooltipProvider>
@@ -486,4 +565,8 @@ function MachineItem({ machine, onRename, onDelete }: { machine: Machine; onRena
 
 function AgentItem({ agent, machine, selected, onClick }: { agent: Agent; machine?: Machine; selected: boolean; onClick: () => void }) {
   return <button onClick={onClick} className={cn("grid min-h-12 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-[5px] px-2.5 py-2 text-left hover:bg-black/[.045]", selected && "bg-black/[.075] hover:bg-black/[.075]")}><span className="min-w-0"><span className="block truncate text-xs font-medium">{agent.name}</span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{agent.kind} · {machineName(machine, agent.server_id)}</span></span><Status value={agent.status} /></button>
+}
+
+export default function App() {
+  return window.location.pathname === "/admin" ? <AdminPanel /> : <WorkspaceApp />
 }
