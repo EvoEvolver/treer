@@ -124,7 +124,7 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/discovery", get(discovery))
         .route(
             "/api/machines/{server_id}",
-            axum::routing::patch(rename_machine),
+            axum::routing::patch(rename_machine).delete(delete_machine),
         )
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
@@ -192,6 +192,13 @@ async fn rename_machine(
             )
             .await?,
     ))
+}
+
+async fn delete_machine(
+    State(state): State<LocalApiState>,
+    Path(server_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(state.delete(&format!("servers/{server_id}")).await?))
 }
 
 async fn rename_agent(

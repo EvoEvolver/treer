@@ -70,6 +70,14 @@ treer machine rename self build-machine
 
 Names are workspace-visible labels; agent IDs and server IDs do not change.
 
+Delete a machine only when it and all of its agents should be removed from the
+workspace. This revokes its credential but does not uninstall the service on
+that machine:
+
+```bash
+treer machine delete <server-id>
+```
+
 ## Create and coordinate a peer
 
 Select an online `server_id` from `treer discover`, then create the requested
@@ -154,3 +162,5 @@ validates every key before sending any bytes.
   correlation; the current collaboration surface is terminal-oriented.
 - Use `treer agent stop <target>` only when terminating that process is intended.
 - Use `treer agent delete <target>` only when permanent removal is intended.
+- Use `treer machine delete <server-id>` only when the user explicitly asks to
+  remove that machine; it also removes every agent registered on it.

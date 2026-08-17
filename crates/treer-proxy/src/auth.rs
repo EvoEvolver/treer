@@ -352,6 +352,55 @@ impl AuthStore {
         Ok(())
     }
 
+    pub async fn delete_machine(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        agent_ids: &[String],
+    ) -> Result<(), AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        if !self.disabled {
+            let update = sqlx::query(
+                "UPDATE machines SET revoked_at = ? \
+                 WHERE server_id = ? AND workspace_id = ? AND revoked_at IS NULL",
+            )
+            .bind(Utc::now().to_rfc3339())
+            .bind(server_id)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+            if update.rows_affected() != 1 {
+                return Err(AuthFailure::conflict(
+                    "machine_already_deleted",
+                    "machine credential is already revoked",
+                ));
+            }
+        }
+        sqlx::query("DELETE FROM machine_names WHERE server_id = ? AND workspace_id = ?")
+            .bind(server_id)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        for agent_id in agent_ids {
+            sqlx::query("DELETE FROM agent_names WHERE agent_id = ? AND workspace_id = ?")
+                .bind(agent_id)
+                .bind(workspace_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+            sqlx::query("DELETE FROM deleted_agents WHERE agent_id = ? AND workspace_id = ?")
+                .bind(agent_id)
+                .bind(workspace_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        }
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
     pub async fn create_machine_enrollment(
         &self,
         workspace_id: &str,
@@ -1047,6 +1096,54 @@ mod tests {
     async fn machine_authentication_rejects_missing_credentials() {
         let store = AuthStore::in_memory("owner-password").await;
         assert!(store.authenticate_machine(&HeaderMap::new()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn deleting_machine_revokes_credential_and_cleans_names() {
+        let store = AuthStore::in_memory("owner-password").await;
+        let enrollment = store
+            .create_machine_enrollment("workspace-a", "admin")
+            .await
+            .expect("create enrollment");
+        let claim = store
+            .claim_machine_enrollment(&enrollment)
+            .await
+            .expect("claim enrollment");
+        store
+            .set_machine_name("workspace-a", &claim.server_id, "builder")
+            .await
+            .expect("store machine name");
+        store
+            .set_agent_name("workspace-a", "agent-a", "reviewer")
+            .await
+            .expect("store agent name");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", claim.machine_token))
+                .expect("authorization header"),
+        );
+
+        store
+            .delete_machine("workspace-a", &claim.server_id, &["agent-a".to_string()])
+            .await
+            .expect("delete machine");
+
+        assert!(store.authenticate_machine(&headers).await.is_err());
+        let machine_name =
+            sqlx::query_scalar::<_, String>("SELECT name FROM machine_names WHERE server_id = ?")
+                .bind(&claim.server_id)
+                .fetch_optional(&store.pool)
+                .await
+                .expect("query machine name");
+        let agent_name =
+            sqlx::query_scalar::<_, String>("SELECT name FROM agent_names WHERE agent_id = ?")
+                .bind("agent-a")
+                .fetch_optional(&store.pool)
+                .await
+                .expect("query agent name");
+        assert!(machine_name.is_none());
+        assert!(agent_name.is_none());
     }
 
     #[tokio::test]

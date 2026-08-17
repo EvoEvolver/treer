@@ -18,6 +18,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
 pub enum SocketFrame {
     Text(String),
     Binary(Vec<u8>),
+    Close,
 }
 
 #[derive(Clone)]
@@ -64,6 +65,7 @@ struct WorkspaceState {
     revision: u64,
     servers: HashMap<String, ServerInfo>,
     agents: HashMap<String, AgentInfo>,
+    deleted_servers: HashSet<String>,
     deleted_agents: HashSet<String>,
 }
 
@@ -113,6 +115,7 @@ impl AppState {
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
+                deleted_servers: HashSet::new(),
                 deleted_agents: HashSet::new(),
             })
             .info
@@ -143,6 +146,7 @@ impl AppState {
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
+                deleted_servers: HashSet::new(),
                 deleted_agents: HashSet::new(),
             },
         );
@@ -177,6 +181,19 @@ impl AppState {
     ) -> Result<u64, ProtocolError> {
         self.ensure_workspace(&server.workspace_id, &server.workspace_id)
             .await;
+        if self
+            .inner
+            .workspaces
+            .read()
+            .await
+            .get(&server.workspace_id)
+            .is_some_and(|workspace| workspace.deleted_servers.contains(&server.server_id))
+        {
+            return Err(ProtocolError::new(
+                "server_deleted",
+                format!("server {} was deleted", server.server_id),
+            ));
+        }
         let now = Utc::now();
         server.status = ServerStatus::Online;
         server.connected_at = now;
@@ -232,6 +249,9 @@ impl AppState {
             let workspace = workspaces
                 .get_mut(&workspace_id)
                 .ok_or_else(|| ProtocolError::new("workspace_not_found", &workspace_id))?;
+            if workspace.deleted_servers.contains(&server_id) {
+                return Err(ProtocolError::new("server_deleted", &server_id));
+            }
             if let Some(current) = workspace.servers.get(&server_id) {
                 server.name.clone_from(&current.name);
             }
@@ -305,6 +325,9 @@ impl AppState {
             let workspace = workspaces
                 .get_mut(&workspace_id)
                 .ok_or_else(|| ProtocolError::new("workspace_not_found", &workspace_id))?;
+            if workspace.deleted_servers.contains(&agent.server_id) {
+                return Err(ProtocolError::new("server_deleted", &agent.server_id));
+            }
             if workspace.deleted_agents.contains(&agent.agent_id) {
                 return Ok(());
             }
@@ -421,6 +444,103 @@ impl AppState {
         };
         let _ = self.inner.events.send(event);
         Ok(server)
+    }
+
+    pub async fn delete_server(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+    ) -> Result<(ServerInfo, Vec<AgentInfo>), ProtocolError> {
+        let (server, agents, event) = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+            let server = workspace
+                .servers
+                .remove(server_id)
+                .ok_or_else(|| ProtocolError::new("server_not_found", server_id))?;
+            workspace.deleted_servers.insert(server_id.to_string());
+            let agent_ids = workspace
+                .agents
+                .values()
+                .filter(|agent| agent.server_id == server_id)
+                .map(|agent| agent.agent_id.clone())
+                .collect::<Vec<_>>();
+            let agents = agent_ids
+                .iter()
+                .filter_map(|agent_id| workspace.agents.remove(agent_id))
+                .collect::<Vec<_>>();
+            workspace.deleted_agents.extend(agent_ids.iter().cloned());
+            workspace.revision = workspace.revision.saturating_add(1);
+            let event = WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: workspace_id.to_string(),
+                event: "server.deleted".to_string(),
+                data: serde_json::json!({
+                    "server": server,
+                    "agent_ids": agent_ids,
+                }),
+            };
+            (server, agents, event)
+        };
+        let _ = self.inner.events.send(event);
+
+        let key = ServerKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        };
+        if let Some(connection) = self.inner.connections.write().await.remove(&key) {
+            let _ = connection.outgoing.send(SocketFrame::Close);
+        }
+
+        let cancelled = {
+            let mut pending = self.inner.pending.lock().await;
+            let command_ids = pending
+                .iter()
+                .filter(|(_, command)| command.server == key)
+                .map(|(command_id, _)| command_id.clone())
+                .collect::<Vec<_>>();
+            command_ids
+                .into_iter()
+                .filter_map(|command_id| {
+                    pending
+                        .remove(&command_id)
+                        .map(|command| (command_id, command))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (command_id, command) in cancelled {
+            let _ = command.result.send(CommandResult::failure(
+                command_id,
+                ProtocolError::new("server_deleted", server_id),
+            ));
+        }
+
+        let terminals = {
+            let mut sessions = self.inner.terminal_sessions.lock().await;
+            let session_ids = sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.workspace_id == workspace_id && session.server_id == server_id
+                })
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<Vec<_>>();
+            session_ids
+                .into_iter()
+                .filter_map(|session_id| sessions.remove(&session_id))
+                .collect::<Vec<_>>()
+        };
+        for terminal in terminals {
+            send_terminal_to_browser(
+                &terminal.outgoing,
+                &TerminalServerMessage::Closed {
+                    reason: Some("machine deleted".to_string()),
+                },
+            );
+        }
+
+        Ok((server, agents))
     }
 
     pub async fn rename_agent(
@@ -1034,6 +1154,7 @@ mod tests {
         match frame {
             SocketFrame::Text(text) => text,
             SocketFrame::Binary(_) => panic!("expected text socket frame"),
+            SocketFrame::Close => panic!("expected text socket frame"),
         }
     }
 
@@ -1244,6 +1365,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_server_closes_resources_and_blocks_late_reconnects() {
+        let state = AppState::new();
+        let server = test_server();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), connection_id, server_tx)
+            .await
+            .expect("register server");
+        state
+            .apply_snapshot(
+                connection_id,
+                AgentServerSnapshot {
+                    server: server.clone(),
+                    agents: vec![test_agent("agent-1", "helper")],
+                },
+            )
+            .await
+            .expect("apply snapshot");
+
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        state
+            .attach_terminal("alpha", "agent-1", 120, 40, terminal_tx)
+            .await
+            .expect("attach terminal");
+        let attach = server_rx.recv().await.expect("terminal attach");
+        assert!(matches!(attach, SocketFrame::Text(_)));
+
+        let command_state = state.clone();
+        let pending = tokio::spawn(async move {
+            command_state
+                .send_command(
+                    "alpha",
+                    "server",
+                    AgentCommand::Read {
+                        agent_id: "agent-1".to_string(),
+                        lines: None,
+                    },
+                )
+                .await
+        });
+        let command = server_rx.recv().await.expect("pending command");
+        assert!(matches!(command, SocketFrame::Text(_)));
+
+        let (deleted, agents) = state
+            .delete_server("alpha", "server")
+            .await
+            .expect("delete server");
+        assert_eq!(deleted.server_id, "server");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(server_rx.recv().await, Some(SocketFrame::Close));
+
+        let pending_error = pending
+            .await
+            .expect("join pending command")
+            .expect_err("pending command should fail");
+        assert_eq!(pending_error.code, "server_deleted");
+        let terminal_message: TerminalServerMessage = serde_json::from_str(&expect_text(
+            terminal_rx.recv().await.expect("terminal close"),
+        ))
+        .expect("decode terminal close");
+        assert_eq!(
+            terminal_message,
+            TerminalServerMessage::Closed {
+                reason: Some("machine deleted".to_string()),
+            }
+        );
+
+        let snapshot = state.snapshot("alpha").await.expect("workspace snapshot");
+        assert!(snapshot.servers.is_empty());
+        assert!(snapshot.agents.is_empty());
+        let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
+        assert_eq!(
+            state
+                .register_server(server, Uuid::new_v4(), replacement_tx)
+                .await
+                .expect_err("deleted server should not reconnect")
+                .code,
+            "server_deleted"
+        );
+    }
+
+    #[tokio::test]
     async fn pending_command_is_resent_after_controller_snapshot() {
         let state = AppState::new();
         let server = test_server();
@@ -1422,6 +1626,7 @@ mod tests {
                 TerminalBinaryFrame::decode(&encoded).expect("decode terminal input")
             }
             SocketFrame::Text(_) => panic!("expected binary terminal input"),
+            SocketFrame::Close => panic!("expected binary terminal input"),
         };
         assert_eq!(input.kind, TerminalBinaryKind::Input);
         assert_eq!(input.session_id, session_id);

@@ -144,6 +144,8 @@ enum AgentCommand {
 enum MachineCommand {
     #[command(about = "Rename a machine")]
     Rename { target: String, name: String },
+    #[command(about = "Remove a machine and revoke its credential")]
+    Delete { target: String },
 }
 
 #[derive(Debug, clap::Args)]
@@ -380,6 +382,7 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
 async fn run_machine_command(client: &ApiClient, command: MachineCommand) -> anyhow::Result<Value> {
     match command {
         MachineCommand::Rename { target, name } => rename_machine(client, &target, name).await,
+        MachineCommand::Delete { target } => delete_machine(client, &target).await,
     }
 }
 
@@ -591,12 +594,7 @@ async fn wait_for_resize(events: &mut tokio::time::Interval) {
 }
 
 async fn rename_machine(client: &ApiClient, target: &str, name: String) -> anyhow::Result<Value> {
-    let target = if matches!(target, "self" | ".") {
-        std::env::var("TREER_SERVER_ID")
-            .context("self target requires TREER_SERVER_ID inside a managed agent")?
-    } else {
-        target.to_string()
-    };
+    let target = normalize_machine_target(target)?;
     client
         .value(
             Method::PATCH,
@@ -604,6 +602,26 @@ async fn rename_machine(client: &ApiClient, target: &str, name: String) -> anyho
             Some(serde_json::to_value(RenameRequest { name })?),
         )
         .await
+}
+
+async fn delete_machine(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
+    let target = normalize_machine_target(target)?;
+    client
+        .value(
+            Method::DELETE,
+            &format!("api/machines/{}", path_segment(&target)),
+            None,
+        )
+        .await
+}
+
+fn normalize_machine_target(target: &str) -> anyhow::Result<String> {
+    if matches!(target, "self" | ".") {
+        std::env::var("TREER_SERVER_ID")
+            .context("self target requires TREER_SERVER_ID inside a managed agent")
+    } else {
+        Ok(target.to_string())
+    }
 }
 
 fn normalize_target(target: &str) -> anyhow::Result<String> {
@@ -774,6 +792,18 @@ mod tests {
             Some(Command::Agent {
                 command: AgentCommand::Attach { target }
             }) if target == "reviewer"
+        ));
+    }
+
+    #[test]
+    fn machine_delete_command_parses() {
+        let args = Args::try_parse_from(["treer", "machine", "delete", "srv_test"])
+            .expect("machine delete should parse");
+        assert!(matches!(
+            args.command,
+            Some(Command::Machine {
+                command: MachineCommand::Delete { target }
+            }) if target == "srv_test"
         ));
     }
 }

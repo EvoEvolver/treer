@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, Path, Query, State, WebSocketUpgrade};
@@ -73,7 +74,7 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         )
         .route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
-            axum::routing::patch(rename_server),
+            axum::routing::patch(rename_server).delete(delete_server),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -115,7 +116,7 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         .route("/api/workspaces/{workspace_id}/servers", get(list_servers))
         .route(
             "/api/workspaces/{workspace_id}/servers/{server_id}",
-            axum::routing::patch(rename_server),
+            axum::routing::patch(rename_server).delete(delete_server),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents",
@@ -498,6 +499,49 @@ async fn rename_server(
     )?))
 }
 
+async fn delete_server(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    state.resolve_server(&workspace_id, &server_id).await?;
+    let agents = state
+        .snapshot(&workspace_id)
+        .await?
+        .agents
+        .into_iter()
+        .filter(|agent| agent.server_id == server_id)
+        .collect::<Vec<_>>();
+    let stops = agents
+        .iter()
+        .filter(|agent| !agent.status.is_terminal())
+        .map(|agent| async {
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                state.send_command(
+                    &workspace_id,
+                    &server_id,
+                    AgentCommand::Stop {
+                        agent_id: agent.agent_id.clone(),
+                    },
+                ),
+            )
+            .await
+        });
+    let _ = futures_util::future::join_all(stops).await;
+    let agent_ids = agents
+        .iter()
+        .map(|agent| agent.agent_id.clone())
+        .collect::<Vec<_>>();
+    auth.delete_machine(&workspace_id, &server_id, &agent_ids)
+        .await?;
+    let (server, deleted_agents) = state.delete_server(&workspace_id, &server_id).await?;
+    Ok(Json(json!({
+        "server": server,
+        "deleted_agents": deleted_agents,
+    })))
+}
+
 async fn rename_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -707,6 +751,7 @@ async fn stream_agent_terminal(
                 let message = match frame {
                     SocketFrame::Text(encoded) => Message::Text(encoded.into()),
                     SocketFrame::Binary(data) => Message::Binary(data.into()),
+                    SocketFrame::Close => Message::Close(None),
                 };
                 if outgoing.send(message).await.is_err() {
                     break;

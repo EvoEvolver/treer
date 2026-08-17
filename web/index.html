@@ -67,10 +67,12 @@
     .server { position: relative; padding: 11px 12px; margin-bottom: 3px; border: 1px solid transparent; border-radius: 6px; }
     .server:hover { background: #fff; border-color: var(--line); }
     .server-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .server-actions { display: flex; align-items: center; flex: none; }
     .server-name { min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
     .server-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     button.inline-action { height: 26px; padding: 0 7px; border-color: transparent; background: transparent; color: var(--muted); font-size: 10px; box-shadow: none; }
     button.inline-action:hover { border-color: var(--line); background: var(--surface-subtle); color: var(--ink); }
+    button.inline-action.danger { color: var(--danger); }
     .meta { color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.45; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: #aab3b0; flex: none; }
     .dot.online { background: #20a777; box-shadow: 0 0 0 3px rgba(32, 167, 119, .1); }
@@ -226,6 +228,14 @@
       <div class="actions"><button type="button" id="cancelDelete">Cancel</button><button class="danger" type="submit">Delete</button></div>
     </form>
   </dialog>
+  <dialog id="deleteMachineDialog">
+    <form id="deleteMachineForm">
+      <h2>Delete machine</h2>
+      <p class="dialog-copy">Remove <strong id="deleteMachineName"></strong> and all of its agents from Treer? Its credential will be revoked and it must be enrolled again before it can reconnect. This does not uninstall its local service.</p>
+      <input id="deleteMachineTarget" type="hidden">
+      <div class="actions"><button type="button" id="cancelDeleteMachine">Cancel</button><button class="danger" type="submit">Delete</button></div>
+    </form>
+  </dialog>
   <dialog id="inviteDialog">
     <form method="dialog">
       <h2>Invite user</h2>
@@ -295,7 +305,7 @@
       $('serverCount').textContent = snapshot.servers.length;
       $('agentCount').textContent = snapshot.agents.length;
       $('servers').innerHTML = snapshot.servers.length ? snapshot.servers.map(server => `
-        <div class="server"><div class="server-heading"><div class="server-name"><span>${escapeHtml(server.name || server.hostname || server.server_id)}</span><span class="dot ${server.status}" title="${escapeHtml(server.status)}"></span></div><button class="inline-action rename-machine" data-server="${escapeHtml(server.server_id)}" type="button">Rename</button></div>
+        <div class="server"><div class="server-heading"><div class="server-name"><span>${escapeHtml(server.name || server.hostname || server.server_id)}</span><span class="dot ${server.status}" title="${escapeHtml(server.status)}"></span></div><div class="server-actions"><button class="inline-action rename-machine" data-server="${escapeHtml(server.server_id)}" type="button">Rename</button><button class="inline-action danger delete-machine" data-server="${escapeHtml(server.server_id)}" type="button">Delete</button></div></div>
         <div class="meta">${escapeHtml(server.server_id)}</div><div class="meta">${escapeHtml(server.root)}</div></div>`).join('') : '<div id="empty">No machines connected</div>';
       $('createServer').innerHTML = snapshot.servers.filter(s => s.status === 'online').map(s => `<option value="${escapeHtml(s.server_id)}">${escapeHtml(s.name || s.hostname)} · ${escapeHtml(s.server_id)}</option>`).join('');
       $('agentTable').innerHTML = snapshot.agents.length ? `<table><thead><tr><th style="width:28%">Name</th><th style="width:18%">Status</th><th style="width:20%">Kind</th><th>Machine</th></tr></thead><tbody>${snapshot.agents.map(agent => `
@@ -304,6 +314,10 @@
       document.querySelectorAll('.rename-machine').forEach(button => button.onclick = () => {
         const server = state.snapshot.servers.find(item => item.server_id === button.dataset.server);
         if (server) showRename('machine', server.server_id, server.name || server.hostname);
+      });
+      document.querySelectorAll('.delete-machine').forEach(button => button.onclick = () => {
+        const server = state.snapshot.servers.find(item => item.server_id === button.dataset.server);
+        if (server) showDeleteMachine(server);
       });
       renderTerminalBar();
     }
@@ -456,6 +470,21 @@
         await refresh();
       } catch (error) { alert(error.message); }
     }
+    function showDeleteMachine(server) {
+      $('deleteMachineTarget').value = server.server_id;
+      $('deleteMachineName').textContent = server.name || server.hostname || server.server_id;
+      $('deleteMachineDialog').showModal();
+      $('cancelDeleteMachine').focus();
+    }
+    async function submitDeleteMachine(event) {
+      event.preventDefault();
+      const target = encodeURIComponent($('deleteMachineTarget').value);
+      try {
+        await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/servers/${target}`, { method: 'DELETE' });
+        $('deleteMachineDialog').close();
+        await refresh();
+      } catch (error) { alert(error.message); }
+    }
     async function showInstall() {
       try {
         const data = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/bootstrap`, { method: 'POST', body: '{}' });
@@ -520,6 +549,8 @@
       const agent = state.snapshot?.agents.find(item => item.agent_id === state.selected);
       if (agent) showDelete(agent);
     };
+    $('cancelDeleteMachine').onclick = () => $('deleteMachineDialog').close();
+    $('deleteMachineForm').onsubmit = submitDeleteMachine;
     $('reconnectTerminal').onclick = () => { if (state.selected) openTerminal(state.selected); };
     $('stopAgent').onclick = stopAgent;
     $('createForm').onsubmit = async event => { event.preventDefault(); try { const agent = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/agents`, { method: 'POST', body: JSON.stringify({ server_id: $('createServer').value, kind: $('createKind').value, name: $('createName').value, cwd: $('createCwd').value, args: $('createArgs').value.split('\n').map(v => v.trim()).filter(Boolean), cols: 120, rows: 36 }) }); $('createDialog').close(); state.selected = agent.agent_id; await refresh(); } catch (error) { alert(error.message); } };

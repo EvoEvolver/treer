@@ -35,6 +35,7 @@ async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: Ma
             let message = match frame {
                 SocketFrame::Text(encoded) => Message::Text(encoded.into()),
                 SocketFrame::Binary(encoded) => Message::Binary(encoded.into()),
+                SocketFrame::Close => Message::Close(None),
             };
             if socket_tx.send(message).await.is_err() {
                 break;

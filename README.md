@@ -163,6 +163,7 @@ treer agent list
 treer agent get reviewer
 treer agent rename reviewer code-reviewer
 treer machine rename self build-machine
+treer machine delete srv_obsolete
 treer agent attach reviewer
 treer agent delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
