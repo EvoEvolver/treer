@@ -21,6 +21,13 @@ const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
 const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+const AGENT_COMMAND_DELAY: Duration = Duration::from_millis(500);
+
+struct AgentLaunch {
+    command: String,
+    args: Vec<String>,
+    initial_input: Option<Vec<u8>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentMetadata {
@@ -152,7 +159,7 @@ impl ControllerRuntime {
                 "agent name cannot be empty",
             ));
         }
-        let (command, args) = resolve_command(&request)?;
+        let launch = resolve_launch(&request)?;
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
             workspace_id: self.inner.workspace_id.clone(),
@@ -192,8 +199,8 @@ impl ControllerRuntime {
                 HostCommand::Spawn {
                     request: HostSpawnRequest {
                         process_id: agent_id,
-                        command,
-                        args,
+                        command: launch.command,
+                        args: launch.args,
                         cwd: request.cwd,
                         env,
                         cols: request.cols,
@@ -212,13 +219,33 @@ impl ControllerRuntime {
                 "spawn returned an unexpected response",
             ));
         };
-        if let Ok(agent) = self.get(&process.process_id) {
-            return agent
+        let agent = if let Ok(agent) = self.get(&process.process_id) {
+            agent
                 .lock()
                 .map(|agent| agent.info.clone())
-                .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"));
-        }
-        self.upsert_process(process, None)
+                .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?
+        } else {
+            self.upsert_process(process, None)?
+        };
+        let Some(initial_input) = launch.initial_input else {
+            return Ok(agent);
+        };
+        let response = self
+            .inner
+            .host
+            .request(
+                HostCommand::Write {
+                    process_id: agent.agent_id.clone(),
+                    writes: vec![HostWrite {
+                        data: initial_input,
+                        delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
+                    }],
+                },
+                Some(format!("{operation_id}:launch")),
+            )
+            .await
+            .map_err(|error| protocol_error("host_error", error))?;
+        self.process_response(response, AgentStatus::Working)
     }
 
     pub async fn prompt(
@@ -589,24 +616,62 @@ impl ControllerRuntime {
     }
 }
 
-fn resolve_command(request: &CreateAgentRequest) -> Result<(String, Vec<String>), ProtocolError> {
+fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolError> {
     match request.kind.as_str() {
-        "codex" => Ok(("codex".to_string(), request.args.clone())),
-        "claude" => Ok(("claude".to_string(), request.args.clone())),
-        "command" => request.args.split_first().map_or_else(
-            || {
-                Ok((
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-                    Vec::new(),
-                ))
-            },
-            |(command, args)| Ok((command.clone(), args.to_vec())),
-        ),
+        "codex" | "claude" => Ok(shell_agent_launch(&request.kind, &request.args)),
+        "command" => {
+            let (command, args) = request.args.split_first().map_or_else(
+                || (interactive_shell(), vec!["-i".to_string()]),
+                |(command, args)| (command.clone(), args.to_vec()),
+            );
+            Ok(AgentLaunch {
+                command,
+                args,
+                initial_input: None,
+            })
+        }
         other => Err(ProtocolError::new(
             "invalid_request",
             format!("unsupported agent kind {other}"),
         )),
     }
+}
+
+fn shell_agent_launch(agent_command: &str, args: &[String]) -> AgentLaunch {
+    let mut input = shell_join(agent_command, args).into_bytes();
+    input.push(b'\r');
+    AgentLaunch {
+        command: interactive_shell(),
+        args: vec!["-i".to_string()],
+        initial_input: Some(input),
+    }
+}
+
+fn interactive_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh".to_string()
+            } else if std::path::Path::new("/bin/bash").is_file() {
+                "/bin/bash".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        })
+}
+
+fn shell_join(command: &str, args: &[String]) -> String {
+    std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn encode_prompt_text(text: &str, bracketed_paste: bool) -> Vec<u8> {
@@ -715,5 +780,43 @@ mod tests {
             b"\x1b[200~hello\x1b[201~"
         );
         assert_eq!(encode_prompt_text("hello", false), b"hello");
+    }
+
+    #[test]
+    fn agent_commands_are_entered_in_an_interactive_shell() {
+        let args = vec![
+            "--model".to_string(),
+            "gpt 5".to_string(),
+            "it's".to_string(),
+            String::new(),
+        ];
+
+        let launch = shell_agent_launch("codex", &args);
+
+        assert!(!launch.command.is_empty());
+        assert_eq!(launch.args, ["-i"]);
+        assert_eq!(
+            launch.initial_input.as_deref(),
+            Some(b"'codex' '--model' 'gpt 5' 'it'\\''s' ''\r".as_slice())
+        );
+    }
+
+    #[test]
+    fn explicit_command_agents_still_spawn_directly() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "command".to_string(),
+            name: "shell".to_string(),
+            cwd: ".".to_string(),
+            args: vec!["/bin/sh".to_string(), "-c".to_string(), "pwd".to_string()],
+            cols: 120,
+            rows: 36,
+        };
+
+        let launch = resolve_launch(&request).expect("resolve command launch");
+
+        assert_eq!(launch.command, "/bin/sh");
+        assert_eq!(launch.args, ["-c", "pwd"]);
+        assert!(launch.initial_input.is_none());
     }
 }

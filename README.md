@@ -136,6 +136,9 @@ It does not understand agent kinds, prompts, workspaces, or the Proxy protocol.
 commands, detects agent status, exposes the local API, and rebuilds its full
 snapshot from the Host after every restart. Mutating Host commands carry stable
 operation IDs so a reconnect or retry cannot spawn or stop an agent twice.
+Codex and Claude agents start inside the user's interactive shell before their
+commands are entered through the PTY. This loads shell configuration such as
+`.bashrc` or `.zshrc` before command lookup.
 
 ## Agent collaboration
 
