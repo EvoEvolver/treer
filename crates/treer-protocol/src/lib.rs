@@ -570,32 +570,6 @@ pub struct NetworkConnectRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkPolicy {
-    pub policy_id: String,
-    pub workspace_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_server_id: Option<String>,
-    pub destination_server_id: String,
-    pub target_host: String,
-    pub port_start: u16,
-    pub port_end: u16,
-    pub created_at: DateTime<Utc>,
-    pub created_by: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateNetworkPolicyRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_server_id: Option<String>,
-    pub destination_server_id: String,
-    #[serde(default = "default_network_target_host")]
-    pub target_host: String,
-    pub port_start: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port_end: Option<u16>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VirtualNetworkHost {
     pub workspace_id: String,
     pub hostname: String,

@@ -40,15 +40,6 @@ export interface Member {
   role: "owner" | "admin" | "member"
 }
 
-export interface NetworkPolicy {
-  policy_id: string
-  source_server_id?: string
-  destination_server_id: string
-  target_host: string
-  port_start: number
-  port_end: number
-}
-
 export interface VirtualNetworkHost {
   hostname: string
   destination_server_id: string

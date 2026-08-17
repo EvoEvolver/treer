@@ -175,11 +175,10 @@ WebSocket; no machine needs an inbound port. Each stream has an independent
 flow-control window, and terminal, transfer, and network frames share the same
 authenticated connection.
 
-Network access is denied until a workspace network policy permits a source
-machine, destination machine, target host, and port range. Policies can be
-managed from the Machines tab. The same panel can create workspace-scoped
-virtual hosts. A record maps any valid hostname to a machine, target host,
-and optional target port. For example, mapping `api.internal` to `build-machine`,
+Network access is allowed by default. Workspace virtual hosts are service
+discovery records, independent from authorization: a record maps any valid
+hostname to a machine, target host, and optional target port. They can be
+managed from the Machines tab. For example, mapping `api.internal` to `build-machine`,
 `127.0.0.1`, port `8080` makes this work without exposing port 8080:
 
 ```bash
@@ -188,11 +187,18 @@ curl http://build-machine.treer:8080/
 curl http://git.internal.via.build-machine.treer:3000/
 ```
 
-The network policy must allow the mapped destination, target host, and target
-port. Deleting a machine also deletes virtual hosts and policies that point to
-it. Virtual host names are exact and case-insensitive; they do not require a
+Deleting a machine also deletes virtual hosts that point to it. Virtual host
+names are exact and case-insensitive; they do not require a
 `.treer` suffix. Names matching `host.via.machine.treer` are reserved for direct
 routing.
+
+Authorization is a separate Proxy subsystem. The current policy engine defaults
+to allow and evaluates ordered asynchronous policy evaluators using
+subject/action/resource context. Future agent, terminal, file, shell, and
+network rules can share that boundary without changing virtual-host resolution.
+Agent proxy URLs carry the agent ID through SOCKS5 authentication, so network
+policy requests already identify their originating agent; local machine shells
+fall back to a machine-level subject.
 
 `build-machine.treer` connects to `127.0.0.1` on that machine.
 `host.via.build-machine.treer` connects to `host` from that machine. The first

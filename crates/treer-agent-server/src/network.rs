@@ -139,7 +139,7 @@ impl NetworkRuntime {
                 destination: route.destination,
                 host: route.host,
                 port: route.port,
-                source_agent_id: None,
+                source_agent_id: route.source_agent_id,
             };
             let result = async {
                 runtime
@@ -231,6 +231,7 @@ struct SocksRoute {
     destination: String,
     host: String,
     port: u16,
+    source_agent_id: Option<String>,
 }
 
 async fn bind_near(api_address: SocketAddr) -> io::Result<TcpListener> {
@@ -260,13 +261,18 @@ async fn read_socks_request(socket: &mut TcpStream) -> anyhow::Result<SocksRoute
     }
     let mut methods = vec![0_u8; usize::from(greeting[1])];
     socket.read_exact(&mut methods).await?;
-    if !methods.contains(&0) {
+    let source_agent_id = if methods.contains(&2) {
+        socket.write_all(&[5, 2]).await?;
+        Some(read_socks_username(socket).await?)
+    } else if methods.contains(&0) {
+        socket.write_all(&[5, 0]).await?;
+        None
+    } else {
         socket.write_all(&[5, 0xff]).await?;
         return Err(anyhow!(
-            "SOCKS client does not allow unauthenticated access"
+            "SOCKS client does not offer a supported authentication method"
         ));
-    }
-    socket.write_all(&[5, 0]).await?;
+    };
 
     let mut request = [0_u8; 4];
     socket.read_exact(&mut request).await?;
@@ -283,7 +289,26 @@ async fn read_socks_request(socket: &mut TcpStream) -> anyhow::Result<SocksRoute
         _ => return Err(anyhow!("Treer destinations must use a hostname")),
     };
     let port = socket.read_u16().await?;
-    parse_route(&domain, port)
+    let mut route = parse_route(&domain, port)?;
+    route.source_agent_id = source_agent_id;
+    Ok(route)
+}
+
+async fn read_socks_username(socket: &mut TcpStream) -> anyhow::Result<String> {
+    let version = socket.read_u8().await?;
+    let username_len = socket.read_u8().await?;
+    let mut username = vec![0_u8; usize::from(username_len)];
+    socket.read_exact(&mut username).await?;
+    let password_len = socket.read_u8().await?;
+    let mut password = vec![0_u8; usize::from(password_len)];
+    socket.read_exact(&mut password).await?;
+    if version != 1 || username.is_empty() || password != b"treer" {
+        socket.write_all(&[1, 1]).await?;
+        return Err(anyhow!("invalid Treer SOCKS agent identity"));
+    }
+    let username = String::from_utf8(username).context("SOCKS username is not UTF-8")?;
+    socket.write_all(&[1, 0]).await?;
+    Ok(username)
 }
 
 fn parse_route(domain: &str, port: u16) -> anyhow::Result<SocksRoute> {
@@ -305,6 +330,7 @@ fn parse_route(domain: &str, port: u16) -> anyhow::Result<SocksRoute> {
         destination,
         host,
         port,
+        source_agent_id: None,
     })
 }
 
@@ -419,5 +445,45 @@ mod tests {
         let virtual_host = parse_route("API.Internal.", 80).expect("virtual host route");
         assert_eq!(virtual_host.destination, "api.internal");
         assert_eq!(virtual_host.host, "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn socks_username_becomes_the_source_agent_identity() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SOCKS client");
+            read_socks_request(&mut socket)
+                .await
+                .expect("SOCKS request")
+        });
+        let mut client = TcpStream::connect(address)
+            .await
+            .expect("connect SOCKS server");
+        client.write_all(&[5, 1, 2]).await.expect("greeting");
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).await.expect("method");
+        assert_eq!(method, [5, 2]);
+        client
+            .write_all(&[
+                1, 7, b'a', b'g', b'e', b'n', b't', b'-', b'a', 5, b't', b'r', b'e', b'e', b'r',
+            ])
+            .await
+            .expect("username authentication");
+        let mut auth = [0_u8; 2];
+        client.read_exact(&mut auth).await.expect("auth response");
+        assert_eq!(auth, [1, 0]);
+        client
+            .write_all(&[
+                5, 1, 0, 3, 12, b'a', b'p', b'i', b'.', b'i', b'n', b't', b'e', b'r', b'n', b'a',
+                b'l', 0, 80,
+            ])
+            .await
+            .expect("connect request");
+        let route = server.await.expect("SOCKS server task");
+        assert_eq!(route.destination, "api.internal");
+        assert_eq!(route.source_agent_id.as_deref(), Some("agent-a"));
     }
 }

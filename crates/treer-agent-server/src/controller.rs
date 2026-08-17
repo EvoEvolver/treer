@@ -374,6 +374,10 @@ impl ControllerRuntime {
     }
 
     fn process_environment(&self, agent_id: Option<&str>) -> BTreeMap<String, String> {
+        let network_proxy_url = agent_id.map_or_else(
+            || self.inner.network_proxy_url.clone(),
+            |agent_id| agent_network_proxy_url(&self.inner.network_proxy_url, agent_id),
+        );
         let mut env = BTreeMap::from([
             (
                 "TREER_WORKSPACE_ID".to_string(),
@@ -384,18 +388,9 @@ impl ControllerRuntime {
                 "TREER_AGENT_SERVER_URL".to_string(),
                 self.inner.agent_server_url.clone(),
             ),
-            (
-                "ALL_PROXY".to_string(),
-                self.inner.network_proxy_url.clone(),
-            ),
-            (
-                "all_proxy".to_string(),
-                self.inner.network_proxy_url.clone(),
-            ),
-            (
-                "TREER_NETWORK_PROXY".to_string(),
-                self.inner.network_proxy_url.clone(),
-            ),
+            ("ALL_PROXY".to_string(), network_proxy_url.clone()),
+            ("all_proxy".to_string(), network_proxy_url.clone()),
+            ("TREER_NETWORK_PROXY".to_string(), network_proxy_url),
         ]);
         if let Some(agent_id) = agent_id {
             env.insert("TREER_AGENT_ID".to_string(), agent_id.to_string());
@@ -943,6 +938,16 @@ fn protocol_error(code: &str, error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(code, error.to_string())
 }
 
+fn agent_network_proxy_url(base: &str, agent_id: &str) -> String {
+    let Ok(mut url) = url::Url::parse(base) else {
+        return base.to_string();
+    };
+    if url.set_username(agent_id).is_err() || url.set_password(Some("treer")).is_err() {
+        return base.to_string();
+    }
+    url.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,5 +1005,13 @@ mod tests {
         assert_eq!(launch.command, "/bin/sh");
         assert_eq!(launch.args, ["-c", "pwd"]);
         assert!(launch.initial_input.is_none());
+    }
+
+    #[test]
+    fn agent_proxy_urls_carry_policy_identity() {
+        let url = agent_network_proxy_url("socks5h://127.0.0.1:8791", "agent-a");
+        let url = url::Url::parse(&url).expect("agent proxy URL");
+        assert_eq!(url.username(), "agent-a");
+        assert_eq!(url.password(), Some("treer"));
     }
 }

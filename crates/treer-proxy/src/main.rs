@@ -1,6 +1,7 @@
 mod agent_socket;
 mod api;
 mod auth;
+pub mod policy;
 mod state;
 
 use std::net::SocketAddr;
@@ -96,7 +97,8 @@ async fn main() -> anyhow::Result<()> {
     {
         state.ensure_workspace_info(workspace).await;
     }
-    let app = api::router(state, bootstrap, auth).layer(TraceLayer::new_for_http());
+    let policy = policy::PolicyEngine::allow_all();
+    let app = api::router(state, bootstrap, auth, policy).layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;

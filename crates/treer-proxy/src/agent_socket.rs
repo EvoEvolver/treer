@@ -13,21 +13,29 @@ use treer_protocol::{
 use uuid::Uuid;
 
 use crate::auth::{AuthStore, MachineSession};
+use crate::policy::{PolicyEngine, PolicyRequest};
 use crate::state::{AppState, SocketFrame};
 
 pub async fn upgrade(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     match auth.authenticate_machine(&headers).await {
-        Ok(machine) => ws.on_upgrade(move |socket| handle(socket, state, auth, machine)),
+        Ok(machine) => ws.on_upgrade(move |socket| handle(socket, state, auth, policy, machine)),
         Err(error) => error.into_response(),
     }
 }
 
-async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: MachineSession) {
+async fn handle(
+    socket: WebSocket,
+    state: AppState,
+    auth: AuthStore,
+    policy: PolicyEngine,
+    machine: MachineSession,
+) {
     let connection_id = Uuid::new_v4();
     let (mut socket_tx, mut socket_rx) = socket.split();
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<SocketFrame>();
@@ -69,6 +77,7 @@ async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: Ma
                             route_network_open(
                                 &state,
                                 &auth,
+                                &policy,
                                 workspace_id,
                                 server_id,
                                 connection_id,
@@ -395,6 +404,7 @@ fn identity_error() -> ProtocolError {
 async fn route_network_open(
     state: &AppState,
     auth: &AuthStore,
+    policy: &PolicyEngine,
     workspace_id: &str,
     source_server_id: &str,
     connection_id: Uuid,
@@ -426,28 +436,33 @@ async fn route_network_open(
         .resolve_server(workspace_id, &destination_target)
         .await
         .map_err(|error| (stream_id.clone(), error))?;
-    let allowed = auth
-        .network_policy_allows(
-            workspace_id,
-            source_server_id,
-            &destination.server_id,
-            &target_host,
-            target_port,
-        )
-        .await
-        .map_err(|error| (stream_id.clone(), error.into_parts().1))?;
-    if !allowed {
-        return Err((
-            stream_id,
-            ProtocolError::new(
-                "network_policy_denied",
-                format!(
-                    "network policy denies {} -> {}:{} on {}",
-                    source_server_id, target_host, target_port, destination.server_id
+    if let Some(agent_id) = request.source_agent_id.as_deref() {
+        let agent = state
+            .resolve_agent(workspace_id, agent_id)
+            .await
+            .map_err(|error| (stream_id.clone(), error))?;
+        if agent.server_id != source_server_id {
+            return Err((
+                stream_id,
+                ProtocolError::new(
+                    "policy_subject_mismatch",
+                    "network policy subject does not belong to the source machine",
                 ),
-            ),
-        ));
+            ));
+        }
     }
+    let policy_request = PolicyRequest::network_connect(
+        workspace_id,
+        source_server_id,
+        request.source_agent_id.as_deref(),
+        &destination.server_id,
+        &target_host,
+        target_port,
+    );
+    policy
+        .authorize(&policy_request)
+        .await
+        .map_err(|error| (stream_id.clone(), error))?;
     frame.payload = serde_json::to_vec(&NetworkConnectRequest {
         source_server_id: source_server_id.to_string(),
         source_agent_id: request.source_agent_id,

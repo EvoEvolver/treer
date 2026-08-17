@@ -13,16 +13,16 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use treer_protocol::{
-    AgentCommand, ApiError, CreateAgentRequest, CreateNetworkPolicyRequest,
-    CreateVirtualNetworkHostRequest, InputAgentRequest, MachineEnrollmentResponse,
-    PromptAgentRequest, ProtocolError, RenameRequest, TerminalClientMessage, TerminalServerMessage,
-    TransferServerMessage, WorkspaceEvent,
+    AgentCommand, ApiError, CreateAgentRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
+    MachineEnrollmentResponse, PromptAgentRequest, ProtocolError, RenameRequest,
+    TerminalClientMessage, TerminalServerMessage, TransferServerMessage, WorkspaceEvent,
 };
 use url::Url;
 use uuid::Uuid;
 
 use crate::agent_socket;
 use crate::auth::{self, AuthStore, CurrentSession};
+use crate::policy::PolicyEngine;
 use crate::state::{AppState, ShellOptions, SocketFrame, TransferDirection, TransferOptions};
 
 const INDEX_HTML: &str = include_str!("../../../web/dist/index.html");
@@ -59,7 +59,12 @@ impl BootstrapConfig {
     }
 }
 
-pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore) -> Router {
+pub fn router(
+    state: AppState,
+    bootstrap: BootstrapConfig,
+    auth_store: AuthStore,
+    policy: PolicyEngine,
+) -> Router {
     let agent_control = Router::new()
         .route(
             "/agent/workspaces/{workspace_id}/snapshot",
@@ -141,14 +146,6 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         )
         .route("/api/workspaces/{workspace_id}/servers", get(list_servers))
         .route(
-            "/api/workspaces/{workspace_id}/network-policies",
-            get(list_network_policies).post(create_network_policy),
-        )
-        .route(
-            "/api/workspaces/{workspace_id}/network-policies/{policy_id}",
-            axum::routing::delete(delete_network_policy),
-        )
-        .route(
             "/api/workspaces/{workspace_id}/virtual-hosts",
             get(list_virtual_network_hosts).post(create_virtual_network_host),
         )
@@ -217,6 +214,7 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         .merge(agent_control)
         .merge(authenticated)
         .layer(Extension(bootstrap))
+        .layer(Extension(policy))
         .layer(Extension(auth_store))
         .with_state(state)
 }
@@ -493,45 +491,6 @@ async fn list_servers(
 ) -> Result<Json<Value>, ApiFailure> {
     let snapshot = state.snapshot(&workspace_id).await?;
     Ok(Json(json!({ "servers": snapshot.servers })))
-}
-
-async fn list_network_policies(
-    Extension(auth): Extension<AuthStore>,
-    Path(workspace_id): Path<String>,
-) -> Result<Json<Value>, ApiFailure> {
-    Ok(Json(json!({
-        "policies": auth.list_network_policies(&workspace_id).await?
-    })))
-}
-
-async fn create_network_policy(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(session): Extension<CurrentSession>,
-    Path(workspace_id): Path<String>,
-    Json(mut request): Json<CreateNetworkPolicyRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let destination = state
-        .resolve_server(&workspace_id, &request.destination_server_id)
-        .await?;
-    request.destination_server_id = destination.server_id;
-    if let Some(source) = request.source_server_id.as_ref() {
-        let source = state.resolve_server(&workspace_id, source).await?;
-        request.source_server_id = Some(source.server_id);
-    }
-    let policy = auth
-        .create_network_policy(&workspace_id, &session.username, request)
-        .await?;
-    Ok(Json(json!({ "policy": policy })))
-}
-
-async fn delete_network_policy(
-    Extension(auth): Extension<AuthStore>,
-    Path((workspace_id, policy_id)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiFailure> {
-    auth.delete_network_policy(&workspace_id, &policy_id)
-        .await?;
-    Ok(Json(json!({ "deleted": true })))
 }
 
 async fn list_virtual_network_hosts(

@@ -16,8 +16,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentServerSnapshot, ApiError,
-    CreateNetworkPolicyRequest, CreateVirtualNetworkHostRequest, NetworkPolicy, ProtocolError,
-    ServerInfo, VirtualNetworkHost, WorkspaceInfo,
+    CreateVirtualNetworkHostRequest, ProtocolError, ServerInfo, VirtualNetworkHost, WorkspaceInfo,
 };
 use url::Url;
 use uuid::Uuid;
@@ -305,27 +304,6 @@ impl AuthStore {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS workspaces_organization_id \
              ON workspaces(organization_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS network_policies (\
-             policy_id TEXT PRIMARY KEY, \
-             workspace_id TEXT NOT NULL, \
-             source_server_id TEXT, \
-             destination_server_id TEXT NOT NULL, \
-             target_host TEXT NOT NULL, \
-             port_start INTEGER NOT NULL, \
-             port_end INTEGER NOT NULL, \
-             created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, \
-             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS network_policies_workspace_id \
-             ON network_policies(workspace_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -647,22 +625,6 @@ impl AuthStore {
         })
     }
 
-    pub async fn list_network_policies(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Vec<NetworkPolicy>, AuthFailure> {
-        let rows = sqlx::query(
-            "SELECT policy_id, workspace_id, source_server_id, destination_server_id, \
-             target_host, port_start, port_end, created_at, created_by \
-             FROM network_policies WHERE workspace_id = ? ORDER BY created_at, policy_id",
-        )
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        rows.into_iter().map(network_policy_from_row).collect()
-    }
-
     pub async fn list_virtual_network_hosts(
         &self,
         workspace_id: &str,
@@ -784,112 +746,6 @@ impl AuthStore {
             ));
         }
         Ok(())
-    }
-
-    pub async fn create_network_policy(
-        &self,
-        workspace_id: &str,
-        username: &str,
-        request: CreateNetworkPolicyRequest,
-    ) -> Result<NetworkPolicy, AuthFailure> {
-        if request.port_start == 0 {
-            return Err(AuthFailure::bad_request(
-                "invalid_network_policy",
-                "port_start must be between 1 and 65535",
-            ));
-        }
-        let port_end = request.port_end.unwrap_or(request.port_start);
-        if port_end < request.port_start {
-            return Err(AuthFailure::bad_request(
-                "invalid_network_policy",
-                "port_end must not be less than port_start",
-            ));
-        }
-        let target_host = request.target_host.trim();
-        if target_host.is_empty() || target_host.len() > 253 {
-            return Err(AuthFailure::bad_request(
-                "invalid_network_policy",
-                "target_host must be a non-empty hostname, address, or *",
-            ));
-        }
-        let policy = NetworkPolicy {
-            policy_id: format!("netpol_{}", Uuid::new_v4().simple()),
-            workspace_id: workspace_id.to_string(),
-            source_server_id: request.source_server_id,
-            destination_server_id: request.destination_server_id,
-            target_host: target_host.to_string(),
-            port_start: request.port_start,
-            port_end,
-            created_at: Utc::now(),
-            created_by: username.to_string(),
-        };
-        sqlx::query(
-            "INSERT INTO network_policies(\
-             policy_id, workspace_id, source_server_id, destination_server_id, target_host, \
-             port_start, port_end, created_at, created_by) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&policy.policy_id)
-        .bind(&policy.workspace_id)
-        .bind(&policy.source_server_id)
-        .bind(&policy.destination_server_id)
-        .bind(&policy.target_host)
-        .bind(i64::from(policy.port_start))
-        .bind(i64::from(policy.port_end))
-        .bind(policy.created_at.to_rfc3339())
-        .bind(&policy.created_by)
-        .execute(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        Ok(policy)
-    }
-
-    pub async fn delete_network_policy(
-        &self,
-        workspace_id: &str,
-        policy_id: &str,
-    ) -> Result<(), AuthFailure> {
-        let result =
-            sqlx::query("DELETE FROM network_policies WHERE workspace_id = ? AND policy_id = ?")
-                .bind(workspace_id)
-                .bind(policy_id)
-                .execute(&self.pool)
-                .await
-                .map_err(AuthFailure::database)?;
-        if result.rows_affected() == 0 {
-            return Err(AuthFailure::not_found(
-                "network_policy_not_found",
-                "network policy does not exist",
-            ));
-        }
-        Ok(())
-    }
-
-    pub async fn network_policy_allows(
-        &self,
-        workspace_id: &str,
-        source_server_id: &str,
-        destination_server_id: &str,
-        target_host: &str,
-        port: u16,
-    ) -> Result<bool, AuthFailure> {
-        let allowed = sqlx::query_scalar::<_, i64>(
-            "SELECT EXISTS(SELECT 1 FROM network_policies \
-             WHERE workspace_id = ? \
-             AND (source_server_id IS NULL OR source_server_id = ?) \
-             AND destination_server_id = ? \
-             AND (target_host = '*' OR target_host = ?) \
-             AND port_start <= ? AND port_end >= ?)",
-        )
-        .bind(workspace_id)
-        .bind(source_server_id)
-        .bind(destination_server_id)
-        .bind(target_host)
-        .bind(i64::from(port))
-        .bind(i64::from(port))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        Ok(allowed != 0)
     }
 
     async fn membership_role(
@@ -1092,16 +948,6 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
-        sqlx::query(
-            "DELETE FROM network_policies WHERE workspace_id = ? \
-             AND (source_server_id = ? OR destination_server_id = ?)",
-        )
-        .bind(workspace_id)
-        .bind(server_id)
-        .bind(server_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
         sqlx::query(
             "DELETE FROM virtual_network_hosts WHERE workspace_id = ? AND destination_server_id = ?",
         )
@@ -1900,41 +1746,6 @@ fn virtual_network_host_from_row(
     })
 }
 
-fn network_policy_from_row(row: sqlx::sqlite::SqliteRow) -> Result<NetworkPolicy, AuthFailure> {
-    let created_at = row
-        .get::<String, _>("created_at")
-        .parse()
-        .map_err(|error| {
-            AuthFailure::internal(
-                "database_error",
-                format!("network policy has invalid created_at: {error}"),
-            )
-        })?;
-    let port_start = u16::try_from(row.get::<i64, _>("port_start")).map_err(|_| {
-        AuthFailure::internal(
-            "database_error",
-            "network policy has invalid port_start".to_string(),
-        )
-    })?;
-    let port_end = u16::try_from(row.get::<i64, _>("port_end")).map_err(|_| {
-        AuthFailure::internal(
-            "database_error",
-            "network policy has invalid port_end".to_string(),
-        )
-    })?;
-    Ok(NetworkPolicy {
-        policy_id: row.get("policy_id"),
-        workspace_id: row.get("workspace_id"),
-        source_server_id: row.get("source_server_id"),
-        destination_server_id: row.get("destination_server_id"),
-        target_host: row.get("target_host"),
-        port_start,
-        port_end,
-        created_at,
-        created_by: row.get("created_by"),
-    })
-}
-
 fn hash_password(password: &str) -> Result<String, AuthFailure> {
     let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
         .map_err(|error| AuthFailure::internal("password_hash_error", error.to_string()))?;
@@ -2014,10 +1825,7 @@ impl IntoResponse for AuthFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use treer_protocol::{
-        AgentInfo, AgentStatus, CreateNetworkPolicyRequest, CreateVirtualNetworkHostRequest,
-        ServerStatus,
-    };
+    use treer_protocol::{AgentInfo, AgentStatus, CreateVirtualNetworkHostRequest, ServerStatus};
 
     #[tokio::test]
     async fn virtual_network_hosts_are_normalized_resolved_and_cleaned_up() {
@@ -2091,70 +1899,6 @@ mod tests {
             .list_virtual_network_hosts("default")
             .await
             .expect("list virtual hosts")
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn network_policies_match_source_destination_host_and_port() {
-        let mut store = AuthStore::in_memory("owner-password").await;
-        let policy = store
-            .create_network_policy(
-                "default",
-                "admin",
-                CreateNetworkPolicyRequest {
-                    source_server_id: Some("source".to_string()),
-                    destination_server_id: "destination".to_string(),
-                    target_host: "127.0.0.1".to_string(),
-                    port_start: 8000,
-                    port_end: Some(8010),
-                },
-            )
-            .await
-            .expect("create network policy");
-        assert!(store
-            .network_policy_allows("default", "source", "destination", "127.0.0.1", 8005,)
-            .await
-            .expect("policy lookup"));
-        assert!(!store
-            .network_policy_allows("default", "other", "destination", "127.0.0.1", 8005,)
-            .await
-            .expect("source mismatch"));
-        assert!(!store
-            .network_policy_allows("default", "source", "destination", "localhost", 8005,)
-            .await
-            .expect("host mismatch"));
-        store
-            .delete_network_policy("default", &policy.policy_id)
-            .await
-            .expect("delete policy");
-        assert!(store
-            .list_network_policies("default")
-            .await
-            .expect("list policies")
-            .is_empty());
-        store
-            .create_network_policy(
-                "default",
-                "admin",
-                CreateNetworkPolicyRequest {
-                    source_server_id: None,
-                    destination_server_id: "destination".to_string(),
-                    target_host: "*".to_string(),
-                    port_start: 1,
-                    port_end: Some(u16::MAX),
-                },
-            )
-            .await
-            .expect("create machine policy");
-        store.disabled = true;
-        store
-            .delete_machine("default", "destination", &[])
-            .await
-            .expect("delete machine");
-        assert!(store
-            .list_network_policies("default")
-            .await
-            .expect("list policies after machine deletion")
             .is_empty());
     }
 
