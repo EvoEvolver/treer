@@ -2,6 +2,7 @@
   "name": "treer-web",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@10.12.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -39,5 +40,10 @@
     "typescript": "^5.9.2",
     "vite": "^6.0.7",
     "vite-plugin-singlefile": "^2.2.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
