@@ -204,3 +204,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The same sequence is available as `just check` when `just` is installed.
+
+## License
+
+Copyright 2026 Zijian Zhang.
+
+Treer is licensed under the [Apache License 2.0](LICENSE). Vendored third-party
+assets retain their own license terms; see the license files under `web/vendor`.
