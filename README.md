@@ -34,6 +34,12 @@ places the current platform's `treer-agent-host`, `treer-agent-server`, and
 deployments should stage all required Linux and macOS platform directories or
 set `--artifacts-dir` to an equivalent artifact tree.
 
+The `Build macOS ARM64 artifacts` GitHub workflow builds `darwin-aarch64`
+binaries on a native Apple Silicon runner for every `main` push and manual run.
+The files are retained as a workflow artifact for 14 days. Pushing a `v*` tag
+also creates or updates that GitHub Release with the three binaries and a
+`SHA256SUMS-darwin-aarch64.txt` file.
+
 Open the web UI, select a workspace, and choose **Add machine** to generate a
 10-minute, single-use bootstrap command. It has this shape:
 
