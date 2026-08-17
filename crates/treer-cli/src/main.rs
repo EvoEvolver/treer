@@ -6,7 +6,9 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use treer_protocol::{AgentInfo, AgentStatus, CreateAgentRequest, InputAgentRequest};
+use treer_protocol::{
+    AgentInfo, AgentStatus, CreateAgentRequest, InputAgentRequest, RenameRequest,
+};
 use url::Url;
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
@@ -42,6 +44,11 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    #[command(about = "Manage workspace machines")]
+    Machine {
+        #[command(subcommand)]
+        command: MachineCommand,
+    },
     #[command(about = "Show the current managed agent identity")]
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
@@ -74,6 +81,8 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         lines: usize,
     },
+    #[command(about = "Rename an agent (compatibility alias for `agent rename`)")]
+    Rename { target: String, name: String },
     #[command(about = "Stop an agent (compatibility alias for `agent stop`)")]
     Stop { target: String },
 }
@@ -84,6 +93,8 @@ enum AgentCommand {
     List,
     #[command(about = "Show one agent by unique name or id")]
     Get { target: String },
+    #[command(about = "Rename an agent")]
+    Rename { target: String, name: String },
     #[command(about = "Submit a prompt to another agent")]
     Prompt {
         target: String,
@@ -113,6 +124,12 @@ enum AgentCommand {
     },
     #[command(about = "Stop an agent")]
     Stop { target: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum MachineCommand {
+    #[command(about = "Rename a machine")]
+    Rename { target: String, name: String },
 }
 
 #[derive(Debug, clap::Args)]
@@ -265,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
     let client = ApiClient::new(args.url);
     let value = match command {
         Command::Agent { command } => run_agent_command(&client, command).await?,
+        Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::Whoami => {
             let agent_id = std::env::var("TREER_AGENT_ID").context(
                 "TREER_AGENT_ID is not set; `treer whoami` must run inside a managed agent",
@@ -300,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
             prompt_and_maybe_wait(&client, &target, text, wait).await?
         }
         Command::Read { target, lines } => read_agent(&client, &target, lines).await?,
+        Command::Rename { target, name } => rename_agent(&client, &target, name).await?,
         Command::Stop { target } => stop_agent(&client, &target).await?,
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -310,6 +329,7 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
     match command {
         AgentCommand::List => client.value(Method::GET, "api/agents", None).await,
         AgentCommand::Get { target } => Ok(serde_json::to_value(client.get_agent(&target).await?)?),
+        AgentCommand::Rename { target, name } => rename_agent(client, &target, name).await,
         AgentCommand::Prompt { target, text, wait } => {
             prompt_and_maybe_wait(client, &target, text, wait).await
         }
@@ -336,6 +356,12 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
             )?)
         }
         AgentCommand::Stop { target } => stop_agent(client, &target).await,
+    }
+}
+
+async fn run_machine_command(client: &ApiClient, command: MachineCommand) -> anyhow::Result<Value> {
+    match command {
+        MachineCommand::Rename { target, name } => rename_machine(client, &target, name).await,
     }
 }
 
@@ -376,6 +402,33 @@ async fn stop_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
             Method::POST,
             &format!("api/agents/{}/stop", path_segment(&target)),
             Some(json!({})),
+        )
+        .await
+}
+
+async fn rename_agent(client: &ApiClient, target: &str, name: String) -> anyhow::Result<Value> {
+    let target = normalize_target(target)?;
+    client
+        .value(
+            Method::PATCH,
+            &format!("api/agents/{}", path_segment(&target)),
+            Some(serde_json::to_value(RenameRequest { name })?),
+        )
+        .await
+}
+
+async fn rename_machine(client: &ApiClient, target: &str, name: String) -> anyhow::Result<Value> {
+    let target = if matches!(target, "self" | ".") {
+        std::env::var("TREER_SERVER_ID")
+            .context("self target requires TREER_SERVER_ID inside a managed agent")?
+    } else {
+        target.to_string()
+    };
+    client
+        .value(
+            Method::PATCH,
+            &format!("api/machines/{}", path_segment(&target)),
+            Some(serde_json::to_value(RenameRequest { name })?),
         )
         .await
 }

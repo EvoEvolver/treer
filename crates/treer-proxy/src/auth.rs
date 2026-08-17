@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
-use treer_protocol::{ApiError, ProtocolError};
+use treer_protocol::{AgentServerSnapshot, ApiError, ProtocolError, ServerInfo};
 use url::Url;
 use uuid::Uuid;
 
@@ -185,6 +186,115 @@ impl AuthStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS machine_names (\
+             server_id TEXT PRIMARY KEY, \
+             workspace_id TEXT NOT NULL, \
+             name TEXT NOT NULL, \
+             updated_at TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_names (\
+             agent_id TEXT PRIMARY KEY, \
+             workspace_id TEXT NOT NULL, \
+             name TEXT NOT NULL, \
+             updated_at TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_names_workspace_id \
+             ON agent_names(workspace_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_machine_name(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        name: &str,
+    ) -> Result<(), AuthFailure> {
+        sqlx::query(
+            "INSERT INTO machine_names(server_id, workspace_id, name, updated_at) \
+             VALUES(?, ?, ?, ?) \
+             ON CONFLICT(server_id) DO UPDATE SET \
+             workspace_id = excluded.workspace_id, name = excluded.name, \
+             updated_at = excluded.updated_at",
+        )
+        .bind(server_id)
+        .bind(workspace_id)
+        .bind(name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    pub async fn set_agent_name(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        name: &str,
+    ) -> Result<(), AuthFailure> {
+        sqlx::query(
+            "INSERT INTO agent_names(agent_id, workspace_id, name, updated_at) \
+             VALUES(?, ?, ?, ?) \
+             ON CONFLICT(agent_id) DO UPDATE SET \
+             workspace_id = excluded.workspace_id, name = excluded.name, \
+             updated_at = excluded.updated_at",
+        )
+        .bind(agent_id)
+        .bind(workspace_id)
+        .bind(name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    pub async fn apply_server_name(&self, server: &mut ServerInfo) -> Result<(), AuthFailure> {
+        if server.name.trim().is_empty() {
+            server.name.clone_from(&server.hostname);
+        }
+        let name = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM machine_names WHERE server_id = ? AND workspace_id = ?",
+        )
+        .bind(&server.server_id)
+        .bind(&server.workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if let Some(name) = name {
+            server.name = name;
+        }
+        Ok(())
+    }
+
+    pub async fn apply_agent_names(
+        &self,
+        snapshot: &mut AgentServerSnapshot,
+    ) -> Result<(), AuthFailure> {
+        let rows = sqlx::query("SELECT agent_id, name FROM agent_names WHERE workspace_id = ?")
+            .bind(&snapshot.server.workspace_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        let names: HashMap<String, String> = rows
+            .into_iter()
+            .map(|row| (row.get("agent_id"), row.get("name")))
+            .collect();
+        for agent in &mut snapshot.agents {
+            if let Some(name) = names.get(&agent.agent_id) {
+                agent.name.clone_from(name);
+            }
+        }
         Ok(())
     }
 
@@ -773,6 +883,7 @@ impl IntoResponse for AuthFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use treer_protocol::{AgentInfo, AgentStatus, ServerStatus};
 
     #[tokio::test]
     async fn invitation_registration_and_login_round_trip() {
@@ -882,6 +993,60 @@ mod tests {
     async fn machine_authentication_rejects_missing_credentials() {
         let store = AuthStore::in_memory("owner-password").await;
         assert!(store.authenticate_machine(&HeaderMap::new()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn persisted_names_are_applied_to_controller_snapshots() {
+        let store = AuthStore::in_memory("owner-password").await;
+        store
+            .set_machine_name("workspace-a", "server-a", "build-machine")
+            .await
+            .expect("store machine name");
+        store
+            .set_agent_name("workspace-a", "agent-a", "reviewer")
+            .await
+            .expect("store agent name");
+        let now = Utc::now();
+        let mut snapshot = AgentServerSnapshot {
+            server: ServerInfo {
+                server_id: "server-a".to_string(),
+                workspace_id: "workspace-a".to_string(),
+                name: String::new(),
+                hostname: "original-host".to_string(),
+                root: "/workspace".to_string(),
+                labels: Default::default(),
+                status: ServerStatus::Online,
+                connected_at: now,
+                last_seen_at: now,
+            },
+            agents: vec![AgentInfo {
+                agent_id: "agent-a".to_string(),
+                workspace_id: "workspace-a".to_string(),
+                server_id: "server-a".to_string(),
+                kind: "codex".to_string(),
+                name: "original-agent".to_string(),
+                cwd: ".".to_string(),
+                status: AgentStatus::Idle,
+                pid: None,
+                started_at: now,
+                updated_at: now,
+                exited_at: None,
+                exit_code: None,
+                output_revision: 0,
+            }],
+        };
+
+        store
+            .apply_server_name(&mut snapshot.server)
+            .await
+            .expect("apply machine name");
+        store
+            .apply_agent_names(&mut snapshot)
+            .await
+            .expect("apply agent names");
+
+        assert_eq!(snapshot.server.name, "build-machine");
+        assert_eq!(snapshot.agents[0].name, "reviewer");
     }
 
     #[test]

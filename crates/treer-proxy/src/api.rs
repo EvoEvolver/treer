@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use treer_protocol::{
     AgentCommand, ApiError, CreateAgentRequest, CreateWorkspaceRequest, InputAgentRequest,
-    PromptAgentRequest, ProtocolError, TerminalClientMessage, TerminalServerMessage,
+    PromptAgentRequest, ProtocolError, RenameRequest, TerminalClientMessage, TerminalServerMessage,
     WorkspaceEvent,
 };
 use url::Url;
@@ -55,7 +55,11 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}",
-            get(get_agent),
+            get(get_agent).patch(rename_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/servers/{server_id}",
+            axum::routing::patch(rename_server),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -92,12 +96,16 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         )
         .route("/api/workspaces/{workspace_id}/servers", get(list_servers))
         .route(
+            "/api/workspaces/{workspace_id}/servers/{server_id}",
+            axum::routing::patch(rename_server),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/agents",
             get(list_agents).post(create_agent),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}",
-            get(get_agent),
+            get(get_agent).patch(rename_agent),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -421,6 +429,49 @@ async fn get_agent(
     )?))
 }
 
+async fn rename_server(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Json(request): Json<RenameRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    state.resolve_server(&workspace_id, &server_id).await?;
+    let name = normalize_display_name(request.name)?;
+    auth.set_machine_name(&workspace_id, &server_id, &name)
+        .await?;
+    Ok(Json(serde_json::to_value(
+        state.rename_server(&workspace_id, &server_id, name).await?,
+    )?))
+}
+
+async fn rename_agent(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, target)): Path<(String, String)>,
+    Json(request): Json<RenameRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let name = normalize_display_name(request.name)?;
+    auth.set_agent_name(&workspace_id, &agent.agent_id, &name)
+        .await?;
+    Ok(Json(serde_json::to_value(
+        state
+            .rename_agent(&workspace_id, &agent.agent_id, name)
+            .await?,
+    )?))
+}
+
+fn normalize_display_name(name: String) -> Result<String, ProtocolError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(ProtocolError::new(
+            "invalid_name",
+            "name must contain 1-80 visible characters",
+        ));
+    }
+    Ok(name.to_string())
+}
+
 async fn create_agent(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
@@ -695,6 +746,7 @@ impl From<ProtocolError> for ApiFailure {
             "workspace_not_found" | "server_not_found" | "agent_not_found" => StatusCode::NOT_FOUND,
             "workspace_exists" | "agent_ambiguous" => StatusCode::CONFLICT,
             "server_offline" | "no_online_server" => StatusCode::SERVICE_UNAVAILABLE,
+            "invalid_name" | "invalid_request" => StatusCode::BAD_REQUEST,
             _ => StatusCode::BAD_GATEWAY,
         };
         Self { status, error }
@@ -765,5 +817,16 @@ mod tests {
         assert!(valid_artifact_component("linux-aarch64"));
         assert!(!valid_artifact_component("../linux-aarch64"));
         assert!(!valid_artifact_component("linux/aarch64"));
+    }
+
+    #[test]
+    fn display_names_are_trimmed_and_validated() {
+        assert_eq!(
+            normalize_display_name("  build machine  ".to_string()).expect("valid name"),
+            "build machine"
+        );
+        assert!(normalize_display_name("  ".to_string()).is_err());
+        assert!(normalize_display_name("bad\nname".to_string()).is_err());
+        assert!(normalize_display_name("x".repeat(81)).is_err());
     }
 }

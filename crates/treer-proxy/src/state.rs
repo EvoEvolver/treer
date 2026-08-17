@@ -223,26 +223,44 @@ impl AppState {
         let snapshot_workspace_id = workspace_id.clone();
         let server_id = server.server_id.clone();
         let agents = snapshot.agents;
-        let event_server = server.clone();
-        self.mutate_workspace(
-            &workspace_id,
-            "server.snapshot",
-            &event_server,
-            move |workspace| {
-                workspace.servers.insert(server_id.clone(), server);
-                workspace
-                    .agents
-                    .retain(|_, agent| agent.server_id != server_id);
-                for agent in agents {
-                    if agent.workspace_id == snapshot_workspace_id && agent.server_id == server_id {
-                        workspace.agents.insert(agent.agent_id.clone(), agent);
+        let event = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(&workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", &workspace_id))?;
+            if let Some(current) = workspace.servers.get(&server_id) {
+                server.name.clone_from(&current.name);
+            }
+            workspace.servers.insert(server_id.clone(), server.clone());
+            let names: HashMap<_, _> = workspace
+                .agents
+                .values()
+                .filter(|agent| agent.server_id == server_id)
+                .map(|agent| (agent.agent_id.clone(), agent.name.clone()))
+                .collect();
+            workspace
+                .agents
+                .retain(|_, agent| agent.server_id != server_id);
+            for mut agent in agents {
+                if agent.workspace_id == snapshot_workspace_id && agent.server_id == server_id {
+                    if let Some(name) = names.get(&agent.agent_id) {
+                        agent.name.clone_from(name);
                     }
+                    workspace.agents.insert(agent.agent_id.clone(), agent);
                 }
-            },
-        )
-        .await?;
-        self.resend_pending(&workspace_id, &event_server.server_id)
-            .await;
+            }
+            workspace.revision = workspace.revision.saturating_add(1);
+            WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: workspace_id.clone(),
+                event: "server.snapshot".to_string(),
+                data: serde_json::to_value(&server).map_err(|error| {
+                    ProtocolError::new("encode_error", format!("failed to encode event: {error}"))
+                })?,
+            }
+        };
+        let _ = self.inner.events.send(event);
+        self.resend_pending(&workspace_id, &server_id).await;
         Ok(())
     }
 
@@ -270,22 +288,115 @@ impl AppState {
     pub async fn apply_agent_event(
         &self,
         connection_id: Uuid,
-        agent: AgentInfo,
+        mut agent: AgentInfo,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(&agent.workspace_id, &agent.server_id, connection_id)
             .await?;
         let workspace_id = agent.workspace_id.clone();
-        let event_agent = agent.clone();
-        self.mutate_workspace(
-            &workspace_id,
-            "agent.updated",
-            &event_agent,
-            move |workspace| {
-                workspace.agents.insert(agent.agent_id.clone(), agent);
-            },
-        )
-        .await?;
+        let event = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(&workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", &workspace_id))?;
+            if let Some(current) = workspace.agents.get(&agent.agent_id) {
+                agent.name.clone_from(&current.name);
+            }
+            workspace
+                .agents
+                .insert(agent.agent_id.clone(), agent.clone());
+            workspace.revision = workspace.revision.saturating_add(1);
+            WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id,
+                event: "agent.updated".to_string(),
+                data: serde_json::to_value(&agent).map_err(|error| {
+                    ProtocolError::new("encode_error", format!("failed to encode event: {error}"))
+                })?,
+            }
+        };
+        let _ = self.inner.events.send(event);
         Ok(())
+    }
+
+    pub async fn resolve_server(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+    ) -> Result<ServerInfo, ProtocolError> {
+        let workspaces = self.inner.workspaces.read().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+        workspace
+            .servers
+            .get(server_id)
+            .cloned()
+            .ok_or_else(|| ProtocolError::new("server_not_found", server_id))
+    }
+
+    pub async fn rename_server(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        name: String,
+    ) -> Result<ServerInfo, ProtocolError> {
+        let (server, event) = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+            let server = workspace
+                .servers
+                .get_mut(server_id)
+                .ok_or_else(|| ProtocolError::new("server_not_found", server_id))?;
+            server.name = name;
+            let server = server.clone();
+            workspace.revision = workspace.revision.saturating_add(1);
+            let event = WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: workspace_id.to_string(),
+                event: "server.renamed".to_string(),
+                data: serde_json::to_value(&server).map_err(|error| {
+                    ProtocolError::new("encode_error", format!("failed to encode event: {error}"))
+                })?,
+            };
+            (server, event)
+        };
+        let _ = self.inner.events.send(event);
+        Ok(server)
+    }
+
+    pub async fn rename_agent(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        name: String,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let (agent, event) = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+            let agent = workspace
+                .agents
+                .get_mut(agent_id)
+                .ok_or_else(|| ProtocolError::new("agent_not_found", agent_id))?;
+            agent.name = name;
+            agent.updated_at = Utc::now();
+            let agent = agent.clone();
+            workspace.revision = workspace.revision.saturating_add(1);
+            let event = WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: workspace_id.to_string(),
+                event: "agent.renamed".to_string(),
+                data: serde_json::to_value(&agent).map_err(|error| {
+                    ProtocolError::new("encode_error", format!("failed to encode event: {error}"))
+                })?,
+            };
+            (agent, event)
+        };
+        let _ = self.inner.events.send(event);
+        Ok(agent)
     }
 
     pub async fn resolve_agent_server(
@@ -850,6 +961,7 @@ mod tests {
         ServerInfo {
             server_id: "server".to_string(),
             workspace_id: "alpha".to_string(),
+            name: "test-host".to_string(),
             hostname: "test-host".to_string(),
             root: "/tmp".to_string(),
             labels: Default::default(),
@@ -942,6 +1054,56 @@ mod tests {
             .await
             .expect_err("duplicate names must fail");
         assert_eq!(error.code, "agent_ambiguous");
+    }
+
+    #[tokio::test]
+    async fn renamed_objects_survive_controller_snapshots_and_events() {
+        let state = AppState::new();
+        let server = test_server();
+        let connection_id = Uuid::new_v4();
+        let (outgoing, _messages) = mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), connection_id, outgoing)
+            .await
+            .expect("register server");
+        state
+            .apply_snapshot(
+                connection_id,
+                AgentServerSnapshot {
+                    server: server.clone(),
+                    agents: vec![test_agent("agent-1", "original-agent")],
+                },
+            )
+            .await
+            .expect("initial snapshot");
+
+        state
+            .rename_server("alpha", "server", "renamed-machine".to_string())
+            .await
+            .expect("rename server");
+        state
+            .rename_agent("alpha", "agent-1", "renamed-agent".to_string())
+            .await
+            .expect("rename agent");
+
+        state
+            .apply_snapshot(
+                connection_id,
+                AgentServerSnapshot {
+                    server,
+                    agents: vec![test_agent("agent-1", "original-agent")],
+                },
+            )
+            .await
+            .expect("replacement snapshot");
+        state
+            .apply_agent_event(connection_id, test_agent("agent-1", "original-agent"))
+            .await
+            .expect("agent event");
+
+        let snapshot = state.snapshot("alpha").await.expect("workspace snapshot");
+        assert_eq!(snapshot.servers[0].name, "renamed-machine");
+        assert_eq!(snapshot.agents[0].name, "renamed-agent");
     }
 
     #[tokio::test]

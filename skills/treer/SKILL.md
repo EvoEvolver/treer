@@ -27,6 +27,7 @@ The installed binary is the authority for syntax:
 ```bash
 treer --help
 treer agent --help
+treer machine --help
 ```
 
 Successful commands print JSON. Read IDs and state from the response instead of
@@ -58,6 +59,16 @@ treer agent list
 treer agent get self
 treer agent get reviewer
 ```
+
+Use stable IDs when renaming an object. `self` and `.` are accepted for both
+the current agent and its machine:
+
+```bash
+treer agent rename self coordinator
+treer machine rename self build-machine
+```
+
+Names are workspace-visible labels; agent IDs and server IDs do not change.
 
 ## Create and coordinate a peer
 

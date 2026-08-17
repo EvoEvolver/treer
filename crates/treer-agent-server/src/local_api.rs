@@ -8,6 +8,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use treer_protocol::{
     ApiError, CreateAgentRequest, InputAgentRequest, PromptAgentRequest, ProtocolError,
+    RenameRequest,
 };
 use url::Url;
 
@@ -61,14 +62,30 @@ impl LocalApiState {
             .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
         decode(response).await
     }
+
+    async fn patch(&self, suffix: &str, body: &Value) -> Result<Value, LocalApiError> {
+        let mut request = self.client.patch(self.proxy_url(suffix)?).json(body);
+        if let Some(token) = &self.machine_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
+        decode(response).await
+    }
 }
 
 pub fn router(state: LocalApiState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/discovery", get(discovery))
+        .route(
+            "/api/machines/{server_id}",
+            axum::routing::patch(rename_machine),
+        )
         .route("/api/agents", get(list_agents).post(create_agent))
-        .route("/api/agents/{agent_id}", get(get_agent))
+        .route("/api/agents/{agent_id}", get(get_agent).patch(rename_agent))
         .route("/api/agents/{agent_id}/prompt", post(prompt_agent))
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
@@ -107,6 +124,38 @@ async fn create_agent(
         state
             .post(
                 "agents",
+                &serde_json::to_value(request)
+                    .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+            )
+            .await?,
+    ))
+}
+
+async fn rename_machine(
+    State(state): State<LocalApiState>,
+    Path(server_id): Path<String>,
+    Json(request): Json<RenameRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .patch(
+                &format!("servers/{server_id}"),
+                &serde_json::to_value(request)
+                    .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+            )
+            .await?,
+    ))
+}
+
+async fn rename_agent(
+    State(state): State<LocalApiState>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<RenameRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .patch(
+                &format!("agents/{agent_id}"),
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
             )

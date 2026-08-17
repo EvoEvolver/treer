@@ -66,7 +66,11 @@
     #servers { padding: 8px; }
     .server { position: relative; padding: 11px 12px; margin-bottom: 3px; border: 1px solid transparent; border-radius: 6px; }
     .server:hover { background: #fff; border-color: var(--line); }
-    .server-name { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 650; }
+    .server-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .server-name { min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
+    .server-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button.inline-action { height: 26px; padding: 0 7px; border-color: transparent; background: transparent; color: var(--muted); font-size: 10px; box-shadow: none; }
+    button.inline-action:hover { border-color: var(--line); background: var(--surface-subtle); color: var(--ink); }
     .meta { color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.45; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: #aab3b0; flex: none; }
     .dot.online { background: #20a777; box-shadow: 0 0 0 3px rgba(32, 167, 119, .1); }
@@ -163,7 +167,7 @@
       <div id="agentTable"></div>
       <div class="terminal-bar">
         <div class="terminal-identity"><span id="terminalName">Terminal</span><span id="terminalMeta"></span></div>
-        <div class="terminal-actions"><span id="terminalStatus">not attached</span><button id="reconnectTerminal" disabled>Reconnect</button><button class="danger" id="stopAgent" disabled>Stop</button></div>
+        <div class="terminal-actions"><span id="terminalStatus">not attached</span><button id="renameAgent" disabled>Rename</button><button id="reconnectTerminal" disabled>Reconnect</button><button class="danger" id="stopAgent" disabled>Stop</button></div>
       </div>
       <div id="terminalHost"><div class="terminal-empty">Select an agent to attach</div></div>
     </section>
@@ -191,7 +195,7 @@
       <h2>Create agent</h2>
       <div class="field"><label for="createServer">Machine</label><select id="createServer" required></select></div>
       <div class="field"><label for="createKind">Kind</label><select id="createKind"><option>codex</option><option>claude</option><option>command</option></select></div>
-      <div class="field"><label for="createName">Name</label><input id="createName" value="helper" required></div>
+      <div class="field"><label for="createName">Name</label><input id="createName" required></div>
       <div class="field"><label for="createCwd">Working directory, relative to machine root</label><input id="createCwd" value="."></div>
       <div class="field"><label for="createArgs">Arguments, one per line</label><textarea id="createArgs" rows="3"></textarea></div>
       <div class="actions"><button type="button" id="cancelCreate">Cancel</button><button class="primary" type="submit">Create</button></div>
@@ -202,6 +206,15 @@
       <h2>Add machine</h2>
       <div class="field"><label for="installCommand">Run on the target machine</label><textarea id="installCommand" readonly></textarea></div>
       <div class="actions"><button value="close">Close</button><button class="primary" type="button" id="copyInstall">Copy</button></div>
+    </form>
+  </dialog>
+  <dialog id="renameDialog">
+    <form id="renameForm">
+      <h2 id="renameTitle">Rename</h2>
+      <input id="renameKind" type="hidden">
+      <input id="renameTarget" type="hidden">
+      <div class="field"><label for="renameName">Name</label><input id="renameName" maxlength="80" required></div>
+      <div class="actions"><button type="button" id="cancelRename">Cancel</button><button class="primary" type="submit">Rename</button></div>
     </form>
   </dialog>
   <dialog id="inviteDialog">
@@ -269,18 +282,27 @@
       $('serverCount').textContent = snapshot.servers.length;
       $('agentCount').textContent = snapshot.agents.length;
       $('servers').innerHTML = snapshot.servers.length ? snapshot.servers.map(server => `
-        <div class="server"><div class="server-name"><span>${escapeHtml(server.hostname || server.server_id)}</span><span class="dot ${server.status}" title="${escapeHtml(server.status)}"></span></div>
+        <div class="server"><div class="server-heading"><div class="server-name"><span>${escapeHtml(server.name || server.hostname || server.server_id)}</span><span class="dot ${server.status}" title="${escapeHtml(server.status)}"></span></div><button class="inline-action rename-machine" data-server="${escapeHtml(server.server_id)}" type="button">Rename</button></div>
         <div class="meta">${escapeHtml(server.server_id)}</div><div class="meta">${escapeHtml(server.root)}</div></div>`).join('') : '<div id="empty">No machines connected</div>';
-      $('createServer').innerHTML = snapshot.servers.filter(s => s.status === 'online').map(s => `<option value="${escapeHtml(s.server_id)}">${escapeHtml(s.hostname)} · ${escapeHtml(s.server_id)}</option>`).join('');
+      $('createServer').innerHTML = snapshot.servers.filter(s => s.status === 'online').map(s => `<option value="${escapeHtml(s.server_id)}">${escapeHtml(s.name || s.hostname)} · ${escapeHtml(s.server_id)}</option>`).join('');
       $('agentTable').innerHTML = snapshot.agents.length ? `<table><thead><tr><th style="width:28%">Name</th><th style="width:18%">Status</th><th style="width:20%">Kind</th><th>Machine</th></tr></thead><tbody>${snapshot.agents.map(agent => `
-        <tr data-agent="${escapeHtml(agent.agent_id)}" class="${state.selected === agent.agent_id ? 'selected' : ''}" aria-selected="${state.selected === agent.agent_id}"><td>${escapeHtml(agent.name)}</td><td><span class="status ${agent.status}">${escapeHtml(agent.status)}</span></td><td><span class="kind">${escapeHtml(agent.kind)}</span></td><td>${escapeHtml(agent.server_id)}</td></tr>`).join('')}</tbody></table>` : '<div id="empty">No agents in this workspace</div>';
+        <tr data-agent="${escapeHtml(agent.agent_id)}" class="${state.selected === agent.agent_id ? 'selected' : ''}" aria-selected="${state.selected === agent.agent_id}"><td>${escapeHtml(agent.name)}</td><td><span class="status ${agent.status}">${escapeHtml(agent.status)}</span></td><td><span class="kind">${escapeHtml(agent.kind)}</span></td><td>${escapeHtml(machineName(agent.server_id))}</td></tr>`).join('')}</tbody></table>` : '<div id="empty">No agents in this workspace</div>';
       document.querySelectorAll('[data-agent]').forEach(row => row.onclick = () => selectAgent(row.dataset.agent));
+      document.querySelectorAll('.rename-machine').forEach(button => button.onclick = () => {
+        const server = state.snapshot.servers.find(item => item.server_id === button.dataset.server);
+        if (server) showRename('machine', server.server_id, server.name || server.hostname);
+      });
       renderTerminalBar();
+    }
+    function machineName(serverId) {
+      const server = state.snapshot?.servers.find(item => item.server_id === serverId);
+      return server?.name || server?.hostname || serverId;
     }
     function renderTerminalBar() {
       const agent = state.snapshot?.agents.find(item => item.agent_id === state.selected);
       $('terminalName').textContent = agent?.name || 'Terminal';
       $('terminalMeta').textContent = agent ? `${agent.agent_id} · ${agent.server_id}` : '';
+      $('renameAgent').disabled = !agent;
       $('reconnectTerminal').disabled = !agent;
       $('stopAgent').disabled = !agent || ['exited', 'failed'].includes(agent.status);
     }
@@ -373,6 +395,38 @@
       try { await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/agents/${encodeURIComponent(state.selected)}/stop`, { method: 'POST', body: '{}' }); }
       catch (error) { alert(error.message); }
     }
+    function defaultAgentName() {
+      const now = new Date();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      return `agent-${now.getFullYear()}-${month}-${day}`;
+    }
+    function showCreate() {
+      $('createName').value = defaultAgentName();
+      $('createDialog').showModal();
+      $('createName').focus();
+      $('createName').select();
+    }
+    function showRename(kind, target, name) {
+      $('renameKind').value = kind;
+      $('renameTarget').value = target;
+      $('renameName').value = name;
+      $('renameTitle').textContent = kind === 'machine' ? 'Rename machine' : 'Rename agent';
+      $('renameDialog').showModal();
+      $('renameName').focus();
+      $('renameName').select();
+    }
+    async function submitRename(event) {
+      event.preventDefault();
+      const kind = $('renameKind').value;
+      const target = encodeURIComponent($('renameTarget').value);
+      const resource = kind === 'machine' ? `servers/${target}` : `agents/${target}`;
+      try {
+        await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/${resource}`, { method: 'PATCH', body: JSON.stringify({ name: $('renameName').value }) });
+        $('renameDialog').close();
+        await refresh();
+      } catch (error) { alert(error.message); }
+    }
     async function showInstall() {
       try {
         const data = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/bootstrap`, { method: 'POST', body: '{}' });
@@ -423,8 +477,14 @@
     $('logoutButton').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { location.href = '/'; } };
     $('installButton').onclick = showInstall;
     $('copyInstall').onclick = copyInstall;
-    $('createButton').onclick = () => $('createDialog').showModal();
+    $('createButton').onclick = showCreate;
     $('cancelCreate').onclick = () => $('createDialog').close();
+    $('cancelRename').onclick = () => $('renameDialog').close();
+    $('renameForm').onsubmit = submitRename;
+    $('renameAgent').onclick = () => {
+      const agent = state.snapshot?.agents.find(item => item.agent_id === state.selected);
+      if (agent) showRename('agent', agent.agent_id, agent.name);
+    };
     $('reconnectTerminal').onclick = () => { if (state.selected) openTerminal(state.selected); };
     $('stopAgent').onclick = stopAgent;
     $('createForm').onsubmit = async event => { event.preventDefault(); try { const agent = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/agents`, { method: 'POST', body: JSON.stringify({ server_id: $('createServer').value, kind: $('createKind').value, name: $('createName').value, cwd: $('createCwd').value, args: $('createArgs').value.split('\n').map(v => v.trim()).filter(Boolean), cols: 120, rows: 36 }) }); $('createDialog').close(); state.selected = agent.agent_id; await refresh(); } catch (error) { alert(error.message); } };

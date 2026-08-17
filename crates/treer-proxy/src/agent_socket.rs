@@ -21,12 +21,12 @@ pub async fn upgrade(
     ws: WebSocketUpgrade,
 ) -> Response {
     match auth.authenticate_machine(&headers).await {
-        Ok(machine) => ws.on_upgrade(move |socket| handle(socket, state, machine)),
+        Ok(machine) => ws.on_upgrade(move |socket| handle(socket, state, auth, machine)),
         Err(error) => error.into_response(),
     }
 }
 
-async fn handle(socket: WebSocket, state: AppState, machine: MachineSession) {
+async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: MachineSession) {
     let connection_id = Uuid::new_v4();
     let (mut socket_tx, mut socket_rx) = socket.split();
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<SocketFrame>();
@@ -112,7 +112,10 @@ async fn handle(socket: WebSocket, state: AppState, machine: MachineSession) {
         };
 
         match parsed {
-            AgentServerMessage::Register { protocol, server } => {
+            AgentServerMessage::Register {
+                protocol,
+                mut server,
+            } => {
                 if protocol != PROTOCOL_VERSION {
                     send_error(
                         &outgoing_tx,
@@ -144,6 +147,10 @@ async fn handle(socket: WebSocket, state: AppState, machine: MachineSession) {
                 }
                 let workspace_id = server.workspace_id.clone();
                 let server_id = server.server_id.clone();
+                if let Err(error) = auth.apply_server_name(&mut server).await {
+                    send_error(&outgoing_tx, error.into_parts().1);
+                    continue;
+                }
                 match state
                     .register_server(server, connection_id, outgoing_tx.clone())
                     .await
@@ -159,12 +166,20 @@ async fn handle(socket: WebSocket, state: AppState, machine: MachineSession) {
                     Err(error) => send_error(&outgoing_tx, error),
                 }
             }
-            AgentServerMessage::Snapshot { snapshot } => {
+            AgentServerMessage::Snapshot { mut snapshot } => {
                 if identity_matches(
                     &identity,
                     &snapshot.server.workspace_id,
                     &snapshot.server.server_id,
                 ) {
+                    if let Err(error) = auth.apply_server_name(&mut snapshot.server).await {
+                        send_error(&outgoing_tx, error.into_parts().1);
+                        continue;
+                    }
+                    if let Err(error) = auth.apply_agent_names(&mut snapshot).await {
+                        send_error(&outgoing_tx, error.into_parts().1);
+                        continue;
+                    }
                     if let Err(error) = state.apply_snapshot(connection_id, snapshot).await {
                         send_error(&outgoing_tx, error);
                     }

@@ -331,6 +331,7 @@ pub fn server_info(
     ServerInfo {
         server_id,
         workspace_id,
+        name: hostname.clone(),
         hostname,
         root,
         labels: std::collections::BTreeMap::from([

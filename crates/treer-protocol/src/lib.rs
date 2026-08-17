@@ -44,6 +44,8 @@ pub struct WorkspaceInfo {
 pub struct ServerInfo {
     pub server_id: String,
     pub workspace_id: String,
+    #[serde(default)]
+    pub name: String,
     pub hostname: String,
     pub root: String,
     #[serde(default)]
@@ -103,6 +105,11 @@ pub struct CreateAgentRequest {
     pub cols: u16,
     #[serde(default = "default_rows")]
     pub rows: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameRequest {
+    pub name: String,
 }
 
 const fn default_cols() -> u16 {

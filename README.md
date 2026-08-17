@@ -150,6 +150,8 @@ peers without knowing the proxy address.
 treer whoami
 treer agent list
 treer agent get reviewer
+treer agent rename reviewer code-reviewer
+treer machine rename self build-machine
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
 treer agent send-keys reviewer ctrl-c
