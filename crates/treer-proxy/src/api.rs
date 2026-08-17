@@ -753,7 +753,7 @@ async fn delete_server(
     Extension(auth): Extension<AuthStore>,
     Path((workspace_id, server_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    state.resolve_server(&workspace_id, &server_id).await?;
+    let server = state.resolve_server(&workspace_id, &server_id).await?;
     let agents = state
         .snapshot(&workspace_id)
         .await?
@@ -778,6 +778,19 @@ async fn delete_server(
             .await
         });
     let _ = futures_util::future::join_all(stops).await;
+    let shutdown_requested = if server.labels.get("treer.shutdown").map(String::as_str) == Some("1")
+    {
+        matches!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                state.send_command(&workspace_id, &server_id, AgentCommand::ShutdownMachine),
+            )
+            .await,
+            Ok(Ok(_))
+        )
+    } else {
+        false
+    };
     let agent_ids = agents
         .iter()
         .map(|agent| agent.agent_id.clone())
@@ -788,6 +801,7 @@ async fn delete_server(
     Ok(Json(json!({
         "server": server,
         "deleted_agents": deleted_agents,
+        "shutdown_requested": shutdown_requested,
     })))
 }
 

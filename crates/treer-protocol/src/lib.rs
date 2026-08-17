@@ -177,6 +177,7 @@ pub enum AgentCommand {
     Stop {
         agent_id: String,
     },
+    ShutdownMachine,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -923,6 +924,20 @@ mod tests {
         let json = serde_json::to_value(message).expect("serialize command");
         assert_eq!(json["type"], "command");
         assert_eq!(json["envelope"]["command"]["action"], "stop");
+    }
+
+    #[test]
+    fn machine_shutdown_wire_shape_is_stable() {
+        let message = ProxyMessage::Command {
+            envelope: CommandEnvelope {
+                command_id: "cmd_shutdown".to_string(),
+                workspace_id: "default".to_string(),
+                command: AgentCommand::ShutdownMachine,
+            },
+        };
+
+        let json = serde_json::to_value(message).expect("serialize command");
+        assert_eq!(json["envelope"]["command"]["action"], "shutdown_machine");
     }
 
     #[test]

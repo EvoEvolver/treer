@@ -597,6 +597,10 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::ShutdownMachine => {
+                schedule_machine_shutdown(self.server.workspace_id.clone());
+                CommandResult::success(command_id.clone(), serde_json::json!({ "accepted": true }))
+            }
         };
         if let Ok(mut cache) = self.command_cache.lock() {
             if cache.len() >= RESULT_CACHE_LIMIT {
@@ -608,6 +612,22 @@ impl ProxyClient {
         }
         result
     }
+}
+
+fn schedule_machine_shutdown(workspace: String) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let shutdown_workspace = workspace.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::service::stop_remotely(&shutdown_workspace)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(workspace, %error, "failed to stop machine service"),
+            Err(error) => warn!(workspace, %error, "machine service stop task failed"),
+        }
+    });
 }
 
 pub fn server_info(
@@ -629,6 +649,7 @@ pub fn server_info(
             ("treer.ssh".to_string(), "1".to_string()),
             ("treer.scp".to_string(), "1".to_string()),
             ("treer.network".to_string(), "1".to_string()),
+            ("treer.shutdown".to_string(), "1".to_string()),
         ]),
         status: ServerStatus::Online,
         connected_at: now,
@@ -688,4 +709,23 @@ where
         .send(Message::Binary(encoded.into()))
         .await
         .context("failed to send network binary frame")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_advertises_remote_shutdown_support() {
+        let server = server_info(
+            "server-a".to_string(),
+            "default".to_string(),
+            "machine-a".to_string(),
+            "/workspace".to_string(),
+        );
+        assert_eq!(
+            server.labels.get("treer.shutdown").map(String::as_str),
+            Some("1")
+        );
+    }
 }

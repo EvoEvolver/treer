@@ -2289,6 +2289,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machine_shutdown_uses_the_confirmed_command_channel() {
+        let state = AppState::new();
+        let server = test_server();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server, Uuid::new_v4(), server_tx)
+            .await
+            .expect("register controller");
+
+        let waiting_state = state.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_state
+                .send_command("alpha", "server", AgentCommand::ShutdownMachine)
+                .await
+        });
+        let message: ProxyMessage = serde_json::from_str(&expect_text(
+            server_rx.recv().await.expect("shutdown command"),
+        ))
+        .expect("decode shutdown command");
+        let ProxyMessage::Command { envelope } = message else {
+            panic!("expected command message");
+        };
+        assert_eq!(envelope.command, AgentCommand::ShutdownMachine);
+
+        state
+            .complete_command(CommandResult::success(
+                envelope.command_id,
+                serde_json::json!({"accepted": true}),
+            ))
+            .await;
+        assert_eq!(
+            waiting
+                .await
+                .expect("join shutdown command")
+                .expect("shutdown accepted"),
+            serde_json::json!({"accepted": true})
+        );
+    }
+
+    #[tokio::test]
     async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
         let state = AppState::new();
         let server = test_server();

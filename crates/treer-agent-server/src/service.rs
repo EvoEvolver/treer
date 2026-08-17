@@ -169,6 +169,11 @@ pub fn stop(workspace: &str) -> Result<()> {
     platform::stop(&ServicePaths::new(workspace)?, workspace)
 }
 
+pub fn stop_remotely(workspace: &str) -> Result<()> {
+    validate_workspace(workspace)?;
+    platform::stop_remotely(&ServicePaths::new(workspace)?, workspace)
+}
+
 pub fn restart(workspace: &str) -> Result<()> {
     validate_workspace(workspace)?;
     platform::restart(&ServicePaths::new(workspace)?, workspace)
@@ -778,6 +783,14 @@ mod platform {
         )
     }
 
+    pub fn stop_remotely(_paths: &ServicePaths, workspace: &str) -> Result<()> {
+        let unit = unit_name(workspace);
+        run_checked(
+            Command::new("systemctl").args(["--user", "--no-block", "stop", unit.as_str()]),
+            "systemctl --user --no-block stop",
+        )
+    }
+
     pub fn restart(_paths: &ServicePaths, workspace: &str) -> Result<()> {
         let unit = unit_name(workspace);
         run_checked(
@@ -932,6 +945,10 @@ mod platform {
         )
     }
 
+    pub fn stop_remotely(paths: &ServicePaths, workspace: &str) -> Result<()> {
+        stop(paths, workspace)
+    }
+
     pub fn restart(paths: &ServicePaths, workspace: &str) -> Result<()> {
         let target = service_target(workspace)?;
         let _ = Command::new("launchctl")
@@ -987,6 +1004,10 @@ mod platform {
     }
 
     pub fn stop(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+        unsupported()
+    }
+
+    pub fn stop_remotely(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
         unsupported()
     }
 

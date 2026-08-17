@@ -211,6 +211,13 @@ names are exact and case-insensitive; they do not require a
 `.treer` suffix. Names matching `host.via.machine.treer` are reserved for direct
 routing.
 
+Deleting an online machine sends a confirmed shutdown command over its existing
+Controller WebSocket before revoking the machine credential. A capable
+Controller then stops the local systemd user service or macOS LaunchAgent, which
+also terminates its Host and managed agents. The service remains installed and
+can still be started manually. Offline machines and older Controllers are
+deleted without waiting; their revoked credential prevents a later reconnect.
+
 Authorization is a separate Proxy subsystem. The current policy engine defaults
 to allow and evaluates ordered asynchronous policy evaluators using
 subject/action/resource context. Future agent, terminal, file, shell, and
