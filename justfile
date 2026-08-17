@@ -10,12 +10,20 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
 check:
+    cd web && npm run typecheck
+    cd web && npm run build
     cargo fmt --all -- --check
     cargo test --workspace
     cargo clippy --workspace --all-targets -- -D warnings
 
 proxy:
     cargo run -p treer-proxy
+
+web:
+    cd web && npm run dev
+
+web-build:
+    cd web && npm run build
 
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}

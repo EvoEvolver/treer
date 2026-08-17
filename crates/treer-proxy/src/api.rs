@@ -23,7 +23,7 @@ use crate::agent_socket;
 use crate::auth::{self, AuthStore, CurrentSession};
 use crate::state::{AppState, SocketFrame};
 
-const INDEX_HTML: &str = include_str!("../../../web/index.html");
+const INDEX_HTML: &str = include_str!("../../../web/dist/index.html");
 const XTERM_JS: &str = include_str!("../../../web/vendor/xterm.js");
 const XTERM_CSS: &str = include_str!("../../../web/vendor/xterm.css");
 const XTERM_FIT_JS: &str = include_str!("../../../web/vendor/addon-fit.js");
