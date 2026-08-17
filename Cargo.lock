@@ -2264,6 +2264,7 @@ dependencies = [
  "treer-agent-runtime",
  "treer-host-protocol",
  "treer-protocol",
+ "treer-transfer",
  "url",
  "uuid",
 ]
@@ -2283,6 +2284,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "treer-protocol",
+ "treer-transfer",
  "url",
 ]
 
@@ -2324,6 +2326,16 @@ dependencies = [
  "tracing-subscriber",
  "treer-protocol",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "treer-transfer"
+version = "0.1.1"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "treer-protocol",
  "uuid",
 ]
 

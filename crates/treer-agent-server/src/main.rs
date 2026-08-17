@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use tracing::info;
+use treer_protocol::{parse_machine_enrollment_key, ApiError, MachineEnrollmentResponse};
 use url::Url;
 use uuid::Uuid;
 
@@ -27,6 +28,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Connect this machine to a Proxy workspace")]
+    Connect(ConnectArgs),
     #[command(hide = true, about = "Run from a saved service configuration")]
     Run {
         #[arg(long)]
@@ -46,8 +49,6 @@ struct ServiceArgs {
 
 #[derive(Debug, Subcommand)]
 enum ServiceCommand {
-    #[command(about = "Install and start the service")]
-    Install(ServiceInstallArgs),
     #[command(about = "Start the installed service")]
     Start,
     #[command(about = "Stop the installed service")]
@@ -70,13 +71,11 @@ enum ServiceCommand {
 }
 
 #[derive(Debug, ClapArgs)]
-struct ServiceInstallArgs {
+struct ConnectArgs {
     #[arg(long, env = "TREER_PROXY_URL", default_value = "http://127.0.0.1:8787")]
     proxy: Url,
-    #[arg(long, env = "TREER_SERVER_ID")]
-    server_id: String,
-    #[arg(long, env = "TREER_MACHINE_TOKEN")]
-    machine_token: String,
+    #[arg(long = "key", env = "TREER_ENROLLMENT_KEY")]
+    enrollment_key: String,
     #[arg(long, env = "TREER_WORKSPACE_ROOT", default_value = ".")]
     root: PathBuf,
     #[arg(long, env = "TREER_AGENT_SERVER_LISTEN")]
@@ -116,6 +115,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         None => run_server(args.server).await,
+        Some(Command::Connect(connect)) => connect_machine(connect).await,
         Some(Command::Run { config }) => {
             let config = service::ServiceConfig::load(&config)?;
             run_server(ServerArgs {
@@ -157,10 +157,13 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         host,
         sync,
         host_events,
-        args.workspace.clone(),
-        server_id.clone(),
-        agent_server_url,
-        sibling_treer_binary(),
+        controller::ControllerConfig {
+            workspace_id: args.workspace.clone(),
+            server_id: server_id.clone(),
+            workspace_root: root.clone(),
+            agent_server_url,
+            treer_binary: sibling_treer_binary(),
+        },
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
     let proxy_http = normalize_http_url(args.proxy.clone())?;
@@ -206,24 +209,6 @@ async fn run_server(args: ServerArgs) -> Result<()> {
 
 async fn run_service_command(args: ServiceArgs) -> Result<()> {
     match args.command {
-        ServiceCommand::Install(install) => {
-            if let Some(listen) = install.listen {
-                require_loopback_listen(listen)?;
-            }
-            let listen = service::resolve_listen(&args.workspace, install.listen).await?;
-            let host_socket = service::host_socket_path(&args.workspace)?;
-            service::install(service::ServiceConfig {
-                proxy: install.proxy.to_string(),
-                workspace: args.workspace,
-                server_id: install.server_id,
-                machine_token: install.machine_token,
-                root: std::fs::canonicalize(&install.root).with_context(|| {
-                    format!("invalid workspace root {}", install.root.display())
-                })?,
-                listen: listen.to_string(),
-                host_socket,
-            })
-        }
         ServiceCommand::Start => service::start(&args.workspace),
         ServiceCommand::Stop => service::stop(&args.workspace),
         ServiceCommand::Restart => service::restart(&args.workspace),
@@ -232,6 +217,72 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
         ServiceCommand::Logs { lines, follow } => service::logs(&args.workspace, lines, follow),
         ServiceCommand::Uninstall => service::uninstall(&args.workspace),
     }
+}
+
+async fn connect_machine(args: ConnectArgs) -> Result<()> {
+    if let Some(listen) = args.listen {
+        require_loopback_listen(listen)?;
+    }
+    let enrollment = parse_machine_enrollment_key(&args.enrollment_key)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if service::is_registered(&enrollment.workspace_id)? {
+        anyhow::bail!(
+            "workspace {} is already connected on this machine; uninstall it before enrolling again",
+            enrollment.workspace_id
+        );
+    }
+    service::preflight_registration(&enrollment.workspace_id)?;
+    let root = std::fs::canonicalize(&args.root)
+        .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
+    let proxy = normalize_http_url(args.proxy)?;
+    let response = claim_machine_enrollment(&proxy, &args.enrollment_key).await?;
+    if response.workspace_id != enrollment.workspace_id {
+        anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
+    }
+    let listen = service::resolve_listen(&response.workspace_id, args.listen).await?;
+    let host_socket = service::host_socket_path(&response.workspace_id)?;
+    service::register(service::ServiceConfig {
+        proxy: proxy.to_string(),
+        workspace: response.workspace_id.clone(),
+        server_id: response.server_id,
+        machine_token: response.machine_token,
+        root,
+        listen: listen.to_string(),
+        host_socket,
+    })?;
+    service::start(&response.workspace_id)?;
+    println!(
+        "treer: connected workspace {} to {}",
+        response.workspace_id, proxy
+    );
+    Ok(())
+}
+
+async fn claim_machine_enrollment(
+    proxy: &Url,
+    enrollment_key: &str,
+) -> Result<MachineEnrollmentResponse> {
+    let endpoint = proxy
+        .join("api/machines/enroll")
+        .context("failed to build Proxy enrollment URL")?;
+    let response = reqwest::Client::new()
+        .post(endpoint.clone())
+        .bearer_auth(enrollment_key)
+        .send()
+        .await
+        .with_context(|| format!("failed to connect to {endpoint}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let error = response.json::<ApiError>().await.ok();
+        let message = error
+            .map(|error| error.error.message)
+            .unwrap_or_else(|| format!("Proxy enrollment failed with HTTP {status}"));
+        anyhow::bail!(message);
+    }
+    response
+        .json()
+        .await
+        .context("Proxy returned an invalid enrollment response")
 }
 
 fn require_loopback_listen(listen: SocketAddr) -> Result<()> {
@@ -313,6 +364,10 @@ fn sibling_treer_binary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderMap;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use treer_protocol::format_machine_enrollment_key;
 
     #[test]
     fn local_agent_api_only_accepts_loopback_addresses() {
@@ -322,5 +377,69 @@ mod tests {
         assert!(
             require_loopback_listen("192.0.2.1:8790".parse().expect("public address")).is_err()
         );
+    }
+
+    #[test]
+    fn connect_command_gets_its_workspace_from_the_key() {
+        let key = format_machine_enrollment_key(
+            "workspace-a",
+            "abc123",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("enrollment key");
+        let args = Args::try_parse_from([
+            "treer-agent-server",
+            "connect",
+            "--proxy",
+            "https://treer.example",
+            "--key",
+            &key,
+        ])
+        .expect("parse connect command");
+        let Some(Command::Connect(connect)) = args.command else {
+            panic!("expected connect command");
+        };
+        assert_eq!(
+            parse_machine_enrollment_key(&connect.enrollment_key)
+                .expect("parse enrollment key")
+                .workspace_id,
+            "workspace-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn enrollment_exchange_uses_a_bearer_key() {
+        const KEY: &str = "enr_v1_776f726b73706163652d61_abc123.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let app = Router::new().route(
+            "/api/machines/enroll",
+            post(|headers: HeaderMap| async move {
+                let expected = format!("Bearer {KEY}");
+                assert_eq!(
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok()),
+                    Some(expected.as_str())
+                );
+                Json(MachineEnrollmentResponse {
+                    workspace_id: "workspace-a".to_string(),
+                    server_id: "srv_test".to_string(),
+                    machine_token: "srv_test.secret".to_string(),
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test Proxy");
+        let address = listener.local_addr().expect("test Proxy address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let response = claim_machine_enrollment(
+            &Url::parse(&format!("http://{address}/")).expect("Proxy URL"),
+            KEY,
+        )
+        .await
+        .expect("claim enrollment");
+        assert_eq!(response.workspace_id, "workspace-a");
+        assert_eq!(response.server_id, "srv_test");
+        server.abort();
     }
 }

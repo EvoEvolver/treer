@@ -1,6 +1,6 @@
 ---
 name: treer
-description: Coordinate distributed coding agents through the Treer CLI. Use when the user explicitly mentions Treer or asks to discover, create, inspect, prompt, wait for, send keys to, read, or stop agents registered in a Treer workspace. Requires a Treer-managed agent environment for self-relative operations.
+description: Coordinate distributed coding agents and run commands on workspace machines through the Treer CLI. Use when the user explicitly mentions Treer or asks to discover, create, inspect, prompt, wait for, send keys to, read, stop, or remotely access agents and machines registered in a Treer workspace. Requires a Treer-managed agent environment for self-relative operations.
 ---
 
 # Treer
@@ -28,10 +28,13 @@ The installed binary is the authority for syntax:
 treer --help
 treer agent --help
 treer machine --help
+treer ssh --help
+treer scp --help
 ```
 
-Successful commands print JSON. Read IDs and state from the response instead of
-predicting them.
+Control commands print JSON. Read IDs and state from the response instead of
+predicting them; `ssh` and `scp` instead preserve terminal and file-copy
+semantics.
 
 ## Understand identity and scope
 
@@ -69,6 +72,44 @@ treer machine rename self build-machine
 ```
 
 Names are workspace-visible labels; agent IDs and server IDs do not change.
+
+## Access another workspace machine
+
+Use `treer ssh` to start a transient shell on an online machine in the current
+workspace. This is a Treer-native PTY routed through the Proxy, not OpenSSH, so
+it does not require an SSH daemon, machine address, or SSH keys.
+
+For automated agent work, always provide a command after `--`:
+
+```bash
+treer ssh <server-id> --cwd . -- git status --short
+treer ssh build-machine -- cargo test --workspace
+```
+
+Machine targets accept a server ID, a unique machine name, or `self`/`.`. If
+names are duplicated, Treer returns `server_ambiguous`; use the exact server ID.
+The working directory is resolved on the target machine. The remote command's
+stdout, stderr, and exit code are forwarded to the caller, and stdin is
+forwarded when piped.
+
+Interactive `treer ssh <machine>` is reserved for a human-operated TTY. Press
+`Ctrl-]` to disconnect. Remote shells are transient, are not registered as
+agents, and are stopped when the client disconnects.
+
+Use `treer scp` to move files between the caller's machine and another online
+workspace machine:
+
+```bash
+treer scp output.json build-machine:artifacts/output.json
+treer scp build-machine:artifacts/result.json ./result.json
+treer scp -r build-machine:results ./downloaded-results
+```
+
+Exactly one operand must use `machine:path`. Machine resolution follows `ssh`:
+use a server ID, unique machine name, or `self`/`.`. Remote paths are relative
+to that machine's configured workspace root. Use `-r` only when copying a
+directory. Treer rejects symbolic links and special files, and it does not yet
+support direct remote-to-remote copies.
 
 Delete a machine only when it and all of its agents should be removed from the
 workspace. This revokes its credential but does not uninstall the service on
@@ -158,6 +199,8 @@ validates every key before sending any bytes.
 - Read agent output before responding to an unexpected state.
 - Do not use `agent attach` from an automated agent workflow; it requires a
   human-operated TTY.
+- Do not run interactive `treer ssh` from an automated agent workflow; pass a
+  finite command after `--` and check its exit status.
 - Do not claim reliable task delivery, durable mailboxes, or strict turn
   correlation; the current collaboration surface is terminal-oriented.
 - Use `treer agent stop <target>` only when terminating that process is intended.

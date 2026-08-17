@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -44,15 +44,26 @@ pub struct ControllerRuntime {
     inner: Arc<ControllerInner>,
 }
 
+pub struct ControllerConfig {
+    pub workspace_id: String,
+    pub server_id: String,
+    pub workspace_root: PathBuf,
+    pub agent_server_url: String,
+    pub treer_binary: Option<PathBuf>,
+}
+
 struct ControllerInner {
     host: HostClient,
     workspace_id: String,
     server_id: String,
+    workspace_root: PathBuf,
     agent_server_url: String,
     treer_binary: Option<PathBuf>,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
     terminal_events: broadcast::Sender<TerminalOutput>,
+    process_events: broadcast::Sender<HostProcessInfo>,
+    transient_shells: RwLock<HashSet<String>>,
 }
 
 struct ControllerAgent {
@@ -65,7 +76,7 @@ struct ControllerAgent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalOutput {
-    pub agent_id: String,
+    pub process_id: String,
     pub revision: u64,
     pub data: Vec<u8>,
 }
@@ -81,10 +92,7 @@ impl ControllerRuntime {
         host: HostClient,
         sync: HostResponse,
         events: HostEvents,
-        workspace_id: String,
-        server_id: String,
-        agent_server_url: String,
-        treer_binary: Option<PathBuf>,
+        config: ControllerConfig,
     ) -> Result<(Self, tokio::sync::watch::Receiver<bool>), ProtocolError> {
         let HostResponse::Synced {
             processes, replay, ..
@@ -97,16 +105,20 @@ impl ControllerRuntime {
         };
         let (agent_events, _) = broadcast::channel(512);
         let (terminal_events, _) = broadcast::channel(2048);
+        let (process_events, _) = broadcast::channel(512);
         let runtime = Self {
             inner: Arc::new(ControllerInner {
                 host,
-                workspace_id,
-                server_id,
-                agent_server_url,
-                treer_binary,
+                workspace_id: config.workspace_id,
+                server_id: config.server_id,
+                workspace_root: config.workspace_root,
+                agent_server_url: config.agent_server_url,
+                treer_binary: config.treer_binary,
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
                 terminal_events,
+                process_events,
+                transient_shells: RwLock::new(HashSet::new()),
             }),
         };
         let replays: HashMap<_, _> = replay
@@ -114,6 +126,19 @@ impl ControllerRuntime {
             .map(|replay| (replay.process_id.clone(), replay))
             .collect();
         for mut process in processes {
+            if is_transient_shell(&process.metadata) {
+                if process.running {
+                    runtime
+                        .inner
+                        .transient_shells
+                        .write()
+                        .map_err(|_| {
+                            ProtocolError::new("state_error", "shell registry lock poisoned")
+                        })?
+                        .insert(process.process_id.clone());
+                }
+                continue;
+            }
             let Some(replay) = replays.get(&process.process_id) else {
                 continue;
             };
@@ -124,6 +149,15 @@ impl ControllerRuntime {
         let disconnected = events.disconnected.clone();
         runtime.start_event_tasks(events);
         runtime.start_idle_monitor();
+        if runtime
+            .inner
+            .transient_shells
+            .read()
+            .is_ok_and(|shells| !shells.is_empty())
+        {
+            let cleanup = runtime.clone();
+            tokio::spawn(async move { cleanup.cleanup_transient_shells().await });
+        }
         Ok((runtime, disconnected))
     }
 
@@ -133,6 +167,14 @@ impl ControllerRuntime {
 
     pub fn subscribe_terminal(&self) -> broadcast::Receiver<TerminalOutput> {
         self.inner.terminal_events.subscribe()
+    }
+
+    pub fn subscribe_processes(&self) -> broadcast::Receiver<HostProcessInfo> {
+        self.inner.process_events.subscribe()
+    }
+
+    pub fn workspace_root(&self) -> &std::path::Path {
+        &self.inner.workspace_root
     }
 
     pub fn list(&self) -> Vec<AgentInfo> {
@@ -168,30 +210,7 @@ impl ControllerRuntime {
             name: request.name,
             cwd: request.cwd.clone(),
         };
-        let mut env = BTreeMap::from([
-            (
-                "TREER_WORKSPACE_ID".to_string(),
-                self.inner.workspace_id.clone(),
-            ),
-            ("TREER_SERVER_ID".to_string(), self.inner.server_id.clone()),
-            ("TREER_AGENT_ID".to_string(), agent_id.clone()),
-            (
-                "TREER_AGENT_SERVER_URL".to_string(),
-                self.inner.agent_server_url.clone(),
-            ),
-        ]);
-        if let Some(treer_binary) = &self.inner.treer_binary {
-            env.insert("TREER_BIN".to_string(), treer_binary.display().to_string());
-            if let Some(parent) = treer_binary.parent() {
-                let mut paths = vec![parent.to_path_buf()];
-                if let Some(current_path) = std::env::var_os("PATH") {
-                    paths.extend(std::env::split_paths(&current_path));
-                }
-                if let Ok(path) = std::env::join_paths(paths) {
-                    env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
-                }
-            }
-        }
+        let env = self.process_environment(Some(&agent_id));
         let response = self
             .inner
             .host
@@ -246,6 +265,139 @@ impl ControllerRuntime {
             .await
             .map_err(|error| protocol_error("host_error", error))?;
         self.process_response(response, AgentStatus::Working)
+    }
+
+    pub async fn open_shell(
+        &self,
+        operation_id: &str,
+        shell_id: &str,
+        cwd: &str,
+        command: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSnapshot, ProtocolError> {
+        let shell = interactive_shell();
+        let args = command.map_or_else(
+            || vec!["-i".to_string()],
+            |command| vec!["-lc".to_string(), command.to_string()],
+        );
+        self.inner
+            .transient_shells
+            .write()
+            .map_err(|_| ProtocolError::new("state_error", "shell registry lock poisoned"))?
+            .insert(shell_id.to_string());
+        let response = self
+            .inner
+            .host
+            .request(
+                HostCommand::Spawn {
+                    request: HostSpawnRequest {
+                        process_id: shell_id.to_string(),
+                        command: shell,
+                        args,
+                        cwd: cwd.to_string(),
+                        env: self.process_environment(None),
+                        cols: cols.max(1),
+                        rows: rows.max(1),
+                        metadata: serde_json::json!({ "treer_transient": "ssh" }).to_string(),
+                    },
+                },
+                Some(operation_id.to_string()),
+            )
+            .await;
+        match response {
+            Ok(HostResponse::Process { process }) if process.process_id == shell_id => {}
+            Ok(_) => {
+                let cleanup_id = format!("{operation_id}:cleanup");
+                let _ = self.stop_transient_shell(&cleanup_id, shell_id).await;
+                return Err(ProtocolError::new(
+                    "host_protocol_error",
+                    "spawn returned an unexpected response",
+                ));
+            }
+            Err(error) => {
+                self.finish_transient_shell(shell_id);
+                return Err(protocol_error("host_error", error));
+            }
+        }
+        match self.terminal_snapshot(shell_id).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                let cleanup_id = format!("{operation_id}:cleanup");
+                let _ = self.stop_transient_shell(&cleanup_id, shell_id).await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn stop_transient_shell(
+        &self,
+        operation_id: &str,
+        shell_id: &str,
+    ) -> Result<(), ProtocolError> {
+        self.inner
+            .host
+            .request(
+                HostCommand::Stop {
+                    process_id: shell_id.to_string(),
+                },
+                Some(operation_id.to_string()),
+            )
+            .await
+            .map_err(|error| protocol_error("host_error", error))?;
+        self.finish_transient_shell(shell_id);
+        Ok(())
+    }
+
+    pub async fn cleanup_transient_shells(&self) {
+        let shell_ids = self
+            .inner
+            .transient_shells
+            .read()
+            .map(|shells| shells.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for shell_id in shell_ids {
+            let operation_id = format!("{shell_id}:cleanup");
+            if let Err(error) = self.stop_transient_shell(&operation_id, &shell_id).await {
+                warn!(shell_id, message = %error.message, "failed to clean up remote shell");
+            }
+        }
+    }
+
+    pub fn finish_transient_shell(&self, shell_id: &str) {
+        if let Ok(mut shells) = self.inner.transient_shells.write() {
+            shells.remove(shell_id);
+        }
+    }
+
+    fn process_environment(&self, agent_id: Option<&str>) -> BTreeMap<String, String> {
+        let mut env = BTreeMap::from([
+            (
+                "TREER_WORKSPACE_ID".to_string(),
+                self.inner.workspace_id.clone(),
+            ),
+            ("TREER_SERVER_ID".to_string(), self.inner.server_id.clone()),
+            (
+                "TREER_AGENT_SERVER_URL".to_string(),
+                self.inner.agent_server_url.clone(),
+            ),
+        ]);
+        if let Some(agent_id) = agent_id {
+            env.insert("TREER_AGENT_ID".to_string(), agent_id.to_string());
+        }
+        if let Some(treer_binary) = &self.inner.treer_binary {
+            env.insert("TREER_BIN".to_string(), treer_binary.display().to_string());
+            if let Some(parent) = treer_binary.parent() {
+                let mut paths = vec![parent.to_path_buf()];
+                if let Some(current_path) = std::env::var_os("PATH") {
+                    paths.extend(std::env::split_paths(&current_path));
+                }
+                if let Ok(path) = std::env::join_paths(paths) {
+                    env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+                }
+            }
+        }
+        env
     }
 
     pub async fn prompt(
@@ -532,40 +684,43 @@ impl ControllerRuntime {
     }
 
     fn apply_output(&self, chunk: HostOutputChunk) {
-        let data = chunk.data;
-        let Ok(agent) = self.get(&chunk.process_id) else {
-            return;
-        };
-        let Ok(mut agent) = agent.lock() else {
-            return;
-        };
-        let previous_status = agent.info.status;
-        let plain = strip_ansi_escapes::strip(&data);
-        agent.text.push_str(&String::from_utf8_lossy(&plain));
-        trim_text(&mut agent.text);
-        agent.bracketed_paste = chunk.bracketed_paste;
-        agent.last_output = Instant::now();
-        agent.info.output_revision = chunk.revision;
-        if !agent.info.status.is_terminal() {
-            agent.info.status = detect_status(&agent.text).unwrap_or(AgentStatus::Working);
+        if let Ok(agent) = self.get(&chunk.process_id) {
+            if let Ok(mut agent) = agent.lock() {
+                let previous_status = agent.info.status;
+                let plain = strip_ansi_escapes::strip(&chunk.data);
+                agent.text.push_str(&String::from_utf8_lossy(&plain));
+                trim_text(&mut agent.text);
+                agent.bracketed_paste = chunk.bracketed_paste;
+                agent.last_output = Instant::now();
+                agent.info.output_revision = chunk.revision;
+                if !agent.info.status.is_terminal() {
+                    agent.info.status = detect_status(&agent.text).unwrap_or(AgentStatus::Working);
+                }
+                agent.info.updated_at = chunk.emitted_at;
+                let status_changed = previous_status != agent.info.status;
+                let should_emit = status_changed
+                    || agent.last_metadata_event.elapsed() >= OUTPUT_METADATA_INTERVAL;
+                if should_emit {
+                    agent.last_metadata_event = Instant::now();
+                    let _ = self.inner.events.send(agent.info.clone());
+                }
+            }
         }
-        agent.info.updated_at = chunk.emitted_at;
-        let status_changed = previous_status != agent.info.status;
-        let should_emit =
-            status_changed || agent.last_metadata_event.elapsed() >= OUTPUT_METADATA_INTERVAL;
-        if should_emit {
-            agent.last_metadata_event = Instant::now();
-            let _ = self.inner.events.send(agent.info.clone());
-        }
-        drop(agent);
         let _ = self.inner.terminal_events.send(TerminalOutput {
-            agent_id: chunk.process_id,
+            process_id: chunk.process_id,
             revision: chunk.revision,
-            data,
+            data: chunk.data,
         });
     }
 
     fn apply_process(&self, process: HostProcessInfo) {
+        let _ = self.inner.process_events.send(process.clone());
+        if is_transient_shell(&process.metadata) {
+            if !process.running {
+                self.finish_transient_shell(&process.process_id);
+            }
+            return;
+        }
         let Ok(agent) = self.get(&process.process_id) else {
             let _ = self.upsert_process(process, None);
             return;
@@ -660,6 +815,18 @@ fn interactive_shell() -> String {
                 "/bin/sh".to_string()
             }
         })
+}
+
+fn is_transient_shell(metadata: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("treer_transient")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|kind| kind == "ssh")
 }
 
 fn shell_join(command: &str, args: &[String]) -> String {

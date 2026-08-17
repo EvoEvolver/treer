@@ -5,8 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const TERMINAL_BINARY_VERSION: u8 = 1;
 const TERMINAL_BINARY_HEADER_LEN: usize = 12;
+pub const TRANSFER_BINARY_VERSION: u8 = 1;
+const TRANSFER_BINARY_MAGIC: &[u8; 3] = b"TRF";
+const TRANSFER_BINARY_HEADER_LEN: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -298,6 +302,140 @@ impl TerminalBinaryFrame {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TransferBinaryKind {
+    Entry = 1,
+    Data = 2,
+    EntryEnd = 3,
+    TransferEnd = 4,
+}
+
+impl TryFrom<u8> for TransferBinaryKind {
+    type Error = ProtocolError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Entry),
+            2 => Ok(Self::Data),
+            3 => Ok(Self::EntryEnd),
+            4 => Ok(Self::TransferEnd),
+            _ => Err(ProtocolError::new(
+                "invalid_transfer_frame",
+                format!("unknown transfer binary frame kind {value}"),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferBinaryFrame {
+    pub kind: TransferBinaryKind,
+    pub session_id: String,
+    pub payload: Vec<u8>,
+}
+
+impl TransferBinaryFrame {
+    pub fn is_transfer_frame(encoded: &[u8]) -> bool {
+        encoded.starts_with(TRANSFER_BINARY_MAGIC)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        let session = self.session_id.as_bytes();
+        let session_len = u16::try_from(session.len()).map_err(|_| {
+            ProtocolError::new("invalid_transfer_frame", "transfer session id is too long")
+        })?;
+        if session.is_empty() {
+            return Err(ProtocolError::new(
+                "invalid_transfer_frame",
+                "transfer session id is empty",
+            ));
+        }
+        let mut encoded =
+            Vec::with_capacity(TRANSFER_BINARY_HEADER_LEN + session.len() + self.payload.len());
+        encoded.extend_from_slice(TRANSFER_BINARY_MAGIC);
+        encoded.push(TRANSFER_BINARY_VERSION);
+        encoded.push(self.kind as u8);
+        encoded.extend_from_slice(&session_len.to_be_bytes());
+        encoded.extend_from_slice(session);
+        encoded.extend_from_slice(&self.payload);
+        Ok(encoded)
+    }
+
+    pub fn decode(encoded: &[u8]) -> Result<Self, ProtocolError> {
+        if encoded.len() < TRANSFER_BINARY_HEADER_LEN {
+            return Err(ProtocolError::new(
+                "invalid_transfer_frame",
+                "transfer binary frame is shorter than its header",
+            ));
+        }
+        if !Self::is_transfer_frame(encoded) {
+            return Err(ProtocolError::new(
+                "invalid_transfer_frame",
+                "transfer binary frame has an invalid magic value",
+            ));
+        }
+        if encoded[3] != TRANSFER_BINARY_VERSION {
+            return Err(ProtocolError::new(
+                "transfer_binary_version_mismatch",
+                format!(
+                    "transfer binary frame uses version {}, expected {}",
+                    encoded[3], TRANSFER_BINARY_VERSION
+                ),
+            ));
+        }
+        let kind = TransferBinaryKind::try_from(encoded[4])?;
+        let session_len = usize::from(u16::from_be_bytes([encoded[5], encoded[6]]));
+        let payload_offset = TRANSFER_BINARY_HEADER_LEN
+            .checked_add(session_len)
+            .filter(|offset| *offset <= encoded.len())
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    "invalid_transfer_frame",
+                    "transfer session id exceeds the binary frame",
+                )
+            })?;
+        if session_len == 0 {
+            return Err(ProtocolError::new(
+                "invalid_transfer_frame",
+                "transfer session id is empty",
+            ));
+        }
+        let session_id = std::str::from_utf8(&encoded[7..payload_offset])
+            .map_err(|_| {
+                ProtocolError::new("invalid_transfer_frame", "transfer session id is not UTF-8")
+            })?
+            .to_string();
+        Ok(Self {
+            kind,
+            session_id,
+            payload: encoded[payload_offset..].to_vec(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferEntryKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferEntry {
+    pub path: String,
+    pub kind: TransferEntryKind,
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferStats {
+    pub entries: u64,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandResult {
     pub command_id: String,
@@ -349,6 +487,22 @@ pub enum AgentServerMessage {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+    TransferReady {
+        session_id: String,
+    },
+    TransferProgress {
+        session_id: String,
+    },
+    TransferComplete {
+        session_id: String,
+        stats: TransferStats,
+    },
+    TransferFailed {
+        session_id: String,
+        error: ProtocolError,
     },
 }
 
@@ -368,12 +522,36 @@ pub enum ProxyMessage {
         cols: u16,
         rows: u16,
     },
+    ShellOpen {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+    },
     TerminalResize {
         session_id: String,
         cols: u16,
         rows: u16,
     },
     TerminalDetach {
+        session_id: String,
+    },
+    ShellDetach {
+        session_id: String,
+    },
+    TransferUpload {
+        session_id: String,
+        destination: String,
+        recursive: bool,
+    },
+    TransferDownload {
+        session_id: String,
+        source: String,
+        recursive: bool,
+    },
+    TransferCancel {
         session_id: String,
     },
     Error {
@@ -390,9 +568,35 @@ pub enum TerminalClientMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TerminalServerMessage {
-    Ready { session_id: String },
-    Closed { reason: Option<String> },
-    Error { error: ProtocolError },
+    Ready {
+        session_id: String,
+    },
+    Closed {
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+    Error {
+        error: ProtocolError,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TransferServerMessage {
+    Ready {
+        session_id: String,
+    },
+    Progress {
+        session_id: String,
+    },
+    Complete {
+        session_id: String,
+        stats: TransferStats,
+    },
+    Error {
+        error: ProtocolError,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -406,6 +610,116 @@ pub struct WorkspaceEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: ProtocolError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineEnrollmentKey {
+    pub identifier: String,
+    pub workspace_id: String,
+    pub enrollment_id: String,
+    pub secret: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineEnrollmentResponse {
+    pub workspace_id: String,
+    pub server_id: String,
+    pub machine_token: String,
+}
+
+pub fn format_machine_enrollment_key(
+    workspace_id: &str,
+    enrollment_id: &str,
+    secret: &str,
+) -> Result<String, ProtocolError> {
+    if workspace_id.is_empty()
+        || enrollment_id.is_empty()
+        || !enrollment_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+        || secret.len() != 64
+        || !secret.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ProtocolError::new(
+            "invalid_machine_enrollment_key",
+            "machine enrollment key components are invalid",
+        ));
+    }
+    let workspace = encode_hex(workspace_id.as_bytes());
+    Ok(format!(
+        "{MACHINE_ENROLLMENT_KEY_PREFIX}{workspace}_{enrollment_id}.{secret}"
+    ))
+}
+
+pub fn parse_machine_enrollment_key(value: &str) -> Result<MachineEnrollmentKey, ProtocolError> {
+    let (identifier, secret) = value.split_once('.').ok_or_else(invalid_enrollment_key)?;
+    let encoded = identifier
+        .strip_prefix(MACHINE_ENROLLMENT_KEY_PREFIX)
+        .ok_or_else(invalid_enrollment_key)?;
+    let (workspace, enrollment_id) = encoded
+        .rsplit_once('_')
+        .ok_or_else(invalid_enrollment_key)?;
+    if enrollment_id.is_empty()
+        || !enrollment_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+        || secret.len() != 64
+        || !secret.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid_enrollment_key());
+    }
+    let workspace_id =
+        String::from_utf8(decode_hex(workspace)?).map_err(|_| invalid_enrollment_key())?;
+    if workspace_id.is_empty() {
+        return Err(invalid_enrollment_key());
+    }
+    Ok(MachineEnrollmentKey {
+        identifier: identifier.to_string(),
+        workspace_id,
+        enrollment_id: enrollment_id.to_string(),
+        secret: secret.to_string(),
+    })
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(DIGITS[usize::from(byte >> 4)] as char);
+        encoded.push(DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, ProtocolError> {
+    if value.is_empty() || !value.len().is_multiple_of(2) {
+        return Err(invalid_enrollment_key());
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_value(pair[0]).ok_or_else(invalid_enrollment_key)?;
+            let low = hex_value(pair[1]).ok_or_else(invalid_enrollment_key)?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+const fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn invalid_enrollment_key() -> ProtocolError {
+    ProtocolError::new(
+        "invalid_machine_enrollment_key",
+        "machine enrollment key is invalid",
+    )
 }
 
 #[cfg(test)]
@@ -442,6 +756,40 @@ mod tests {
     }
 
     #[test]
+    fn remote_shell_messages_include_command_and_exit_status() {
+        let open = ProxyMessage::ShellOpen {
+            session_id: "ssh_1".to_string(),
+            cols: 120,
+            rows: 36,
+            cwd: "src".to_string(),
+            command: Some("cargo test -q".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(open).expect("serialize shell open"),
+            serde_json::json!({
+                "type": "shell_open",
+                "session_id": "ssh_1",
+                "cols": 120,
+                "rows": 36,
+                "cwd": "src",
+                "command": "cargo test -q"
+            })
+        );
+        let closed = TerminalServerMessage::Closed {
+            reason: Some("remote process exited".to_string()),
+            exit_code: Some(7),
+        };
+        assert_eq!(
+            serde_json::to_value(closed).expect("serialize close"),
+            serde_json::json!({
+                "type": "closed",
+                "reason": "remote process exited",
+                "exit_code": 7
+            })
+        );
+    }
+
+    #[test]
     fn terminal_binary_frame_round_trips_raw_bytes() {
         let frame = TerminalBinaryFrame {
             kind: TerminalBinaryKind::Output,
@@ -465,5 +813,40 @@ mod tests {
         encoded[0] = TERMINAL_BINARY_VERSION.saturating_add(1);
         let error = TerminalBinaryFrame::decode(&encoded).expect_err("version must fail");
         assert_eq!(error.code, "terminal_binary_version_mismatch");
+    }
+
+    #[test]
+    fn transfer_binary_frame_round_trips_raw_bytes() {
+        let frame = TransferBinaryFrame {
+            kind: TransferBinaryKind::Data,
+            session_id: "copy_abc".to_string(),
+            payload: vec![0, 1, 2, 0xff],
+        };
+        let encoded = frame.encode().expect("encode transfer frame");
+        assert!(TransferBinaryFrame::is_transfer_frame(&encoded));
+        assert_eq!(TransferBinaryFrame::decode(&encoded), Ok(frame));
+    }
+
+    #[test]
+    fn machine_enrollment_keys_embed_the_workspace() {
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let key = format_machine_enrollment_key("team one/研发", "abc123", secret)
+            .expect("format enrollment key");
+        assert!(!key.contains("team one"));
+        assert_eq!(
+            parse_machine_enrollment_key(&key).expect("parse enrollment key"),
+            MachineEnrollmentKey {
+                identifier: key.split_once('.').expect("key separator").0.to_string(),
+                workspace_id: "team one/研发".to_string(),
+                enrollment_id: "abc123".to_string(),
+                secret: secret.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_machine_enrollment_keys_are_rejected() {
+        assert!(parse_machine_enrollment_key("enr_old.secret").is_err());
+        assert!(parse_machine_enrollment_key("enr_v1_zz_id.0123").is_err());
     }
 }

@@ -13,15 +13,16 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use treer_protocol::{
-    AgentCommand, ApiError, CreateAgentRequest, InputAgentRequest, PromptAgentRequest,
-    ProtocolError, RenameRequest, TerminalClientMessage, TerminalServerMessage, WorkspaceEvent,
+    AgentCommand, ApiError, CreateAgentRequest, InputAgentRequest, MachineEnrollmentResponse,
+    PromptAgentRequest, ProtocolError, RenameRequest, TerminalClientMessage, TerminalServerMessage,
+    TransferServerMessage, WorkspaceEvent,
 };
 use url::Url;
 use uuid::Uuid;
 
 use crate::agent_socket;
 use crate::auth::{self, AuthStore, CurrentSession};
-use crate::state::{AppState, SocketFrame};
+use crate::state::{AppState, ShellOptions, SocketFrame, TransferDirection, TransferOptions};
 
 const INDEX_HTML: &str = include_str!("../../../web/dist/index.html");
 const XTERM_JS: &str = include_str!("../../../web/vendor/xterm.js");
@@ -94,6 +95,14 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/ssh/{server_id}",
+            get(shell_terminal),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/scp/{server_id}",
+            get(file_transfer),
         )
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
@@ -178,7 +187,8 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         ));
     Router::new()
         .route("/", get(index))
-        .route("/install.sh", post(install_script))
+        .route("/install.sh", get(install_script))
+        .route("/api/machines/enroll", post(enroll_machine))
         .route("/artifacts/{platform}/{binary}", get(download_artifact))
         .route("/assets/xterm.js", get(xterm_js))
         .route("/assets/xterm.css", get(xterm_css))
@@ -234,39 +244,47 @@ async fn bootstrap_info(
     let enrollment = auth
         .create_machine_enrollment(&workspace_id, &session.username)
         .await?;
+    let (install_command, connect_command) = bootstrap_commands(&config.public_url, &enrollment);
     let script_url = install_script_url(&config.public_url);
-    let authorization = format!("Authorization: Bearer {enrollment}");
     Ok(Json(json!({
-        "command": format!(
-            "curl -fsSL -X POST -H {} {} | sh",
-            shell_quote(&authorization),
-            shell_quote(script_url.as_str()),
-        ),
+        "install_command": install_command,
+        "connect_command": connect_command,
         "script_url": script_url.as_str(),
         "workspace_id": workspace_id,
     })))
 }
 
-async fn install_script(
-    Extension(config): Extension<BootstrapConfig>,
+fn bootstrap_commands(public_url: &Url, enrollment_key: &str) -> (String, String) {
+    let script_url = install_script_url(public_url);
+    let install_command = format!("curl -fsSL {} | sh", shell_quote(script_url.as_str()));
+    let connect_command = format!(
+        "TREER_ENROLLMENT_KEY={} \"$HOME/.local/libexec/treer/treer-agent-server\" connect --proxy {}",
+        shell_quote(enrollment_key),
+        shell_quote(public_url.as_str()),
+    );
+    (install_command, connect_command)
+}
+
+async fn install_script(Extension(config): Extension<BootstrapConfig>) -> Response {
+    let script = render_install_script(&config.public_url);
+    (
+        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        script,
+    )
+        .into_response()
+}
+
+async fn enroll_machine(
     Extension(auth): Extension<AuthStore>,
     headers: HeaderMap,
 ) -> Result<Response, ApiFailure> {
     let enrollment = auth.claim_machine_enrollment_from_headers(&headers).await?;
-    let script = render_install_script(
-        &config.public_url,
-        &enrollment.workspace_id,
-        &enrollment.server_id,
-        &enrollment.machine_token,
-    );
-    Ok((
-        [
-            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        script,
-    )
-        .into_response())
+    let response = MachineEnrollmentResponse {
+        workspace_id: enrollment.workspace_id,
+        server_id: enrollment.server_id,
+        machine_token: enrollment.machine_token,
+    };
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response())
 }
 
 async fn download_artifact(
@@ -348,27 +366,16 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn render_install_script(
-    public_url: &Url,
-    workspace_id: &str,
-    server_id: &str,
-    machine_token: &str,
-) -> String {
+fn render_install_script(public_url: &Url) -> String {
     let mut artifact_base = public_url.clone();
     artifact_base.set_path("/artifacts/");
     format!(
         r#"#!/bin/sh
 set -eu
 
-proxy_url={proxy_url}
 artifact_base={artifact_base}
-workspace={workspace}
-server_id={server_id}
-machine_token={machine_token}
-workspace_root=${{TREER_WORKSPACE_ROOT:-$(pwd)}}
 install_dir=${{TREER_INSTALL_DIR:-"${{HOME:?HOME is required}}/.local/bin"}}
 server_dir=${{TREER_AGENT_SERVER_INSTALL_DIR:-"${{HOME}}/.local/libexec/treer"}}
-state_dir=${{TREER_STATE_DIR:-"${{HOME}}/.local/state/treer"}}
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64|Linux-amd64) platform=linux-x86_64 ;;
@@ -387,7 +394,7 @@ else
   exit 1
 fi
 
-mkdir -p "$install_dir" "$server_dir" "$state_dir"
+mkdir -p "$install_dir" "$server_dir"
 tmp_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/treer-install.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
@@ -400,51 +407,11 @@ mv "$tmp_dir/treer" "$install_dir/treer"
 mv "$tmp_dir/treer-agent-host" "$server_dir/treer-agent-host"
 mv "$tmp_dir/treer-agent-server" "$server_dir/treer-agent-server"
 
-workspace_key=$(printf '%s' "$workspace" | tr -c 'A-Za-z0-9_.-' '_')
-pid_file="$state_dir/agent-server-$workspace_key.pid"
-if [ -f "$pid_file" ]; then
-  old_pid=$(cat "$pid_file" 2>/dev/null || true)
-  if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-    old_command=$(ps -p "$old_pid" -o command= 2>/dev/null || true)
-    case "$old_command" in
-      *treer-agent-server*)
-        echo "treer: stopping legacy agent server (pid $old_pid)"
-        kill "$old_pid" 2>/dev/null || true
-        sleep 1
-        if kill -0 "$old_pid" 2>/dev/null; then
-          echo "treer: legacy agent server did not stop (pid $old_pid)" >&2
-          exit 1
-        fi
-        ;;
-      *) echo "treer: ignoring stale agent server pid $old_pid" ;;
-    esac
-  fi
-  rm -f "$pid_file"
-fi
-
-if [ -n "${{TREER_AGENT_SERVER_LISTEN:-}}" ]; then
-  set -- --listen "$TREER_AGENT_SERVER_LISTEN"
-else
-  set --
-fi
-
-TREER_STATE_DIR="$state_dir" TREER_MACHINE_TOKEN="$machine_token" \
-  "$server_dir/treer-agent-server" \
-  service --workspace "$workspace" install \
-  --proxy "$proxy_url" \
-  --server-id "$server_id" \
-  --root "$workspace_root" \
-  "$@"
-
-echo "treer: workspace $workspace at $workspace_root"
+echo "treer: binaries installed"
 echo "treer: add $install_dir to PATH to use the treer command"
-echo "treer: manage the host service with $server_dir/treer-agent-server service --workspace $workspace <status|stop|start|restart|logs|uninstall>"
+echo "treer: run the workspace connection command from the Proxy UI next"
 "#,
-        proxy_url = shell_quote(public_url.as_str()),
         artifact_base = shell_quote(artifact_base.as_str().trim_end_matches('/')),
-        workspace = shell_quote(workspace_id),
-        server_id = shell_quote(server_id),
-        machine_token = shell_quote(machine_token),
     )
 }
 
@@ -739,6 +706,37 @@ struct TerminalQuery {
     rows: u16,
 }
 
+#[derive(Debug, Deserialize)]
+struct ShellQuery {
+    #[serde(default = "default_terminal_cols")]
+    cols: u16,
+    #[serde(default = "default_terminal_rows")]
+    rows: u16,
+    #[serde(default = "default_shell_cwd")]
+    cwd: String,
+    #[serde(default)]
+    command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TransferDirectionQuery {
+    Upload,
+    Download,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferQuery {
+    direction: TransferDirectionQuery,
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+fn default_shell_cwd() -> String {
+    ".".to_string()
+}
+
 const fn default_terminal_cols() -> u16 {
     120
 }
@@ -755,29 +753,183 @@ async fn agent_terminal(
 ) -> Result<Response, ApiFailure> {
     state.resolve_agent_server(&workspace_id, &agent_id).await?;
     Ok(ws.on_upgrade(move |socket| {
-        stream_agent_terminal(socket, state, workspace_id, agent_id, query)
+        stream_terminal(
+            socket,
+            state,
+            workspace_id,
+            TerminalTarget::Agent(agent_id),
+            query.cols,
+            query.rows,
+        )
     }))
 }
 
-async fn stream_agent_terminal(
+async fn shell_terminal(
+    State(state): State<AppState>,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Query(query): Query<ShellQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiFailure> {
+    state.resolve_server(&workspace_id, &server_id).await?;
+    Ok(ws.on_upgrade(move |socket| {
+        stream_terminal(
+            socket,
+            state,
+            workspace_id,
+            TerminalTarget::Shell {
+                server_id,
+                cwd: query.cwd,
+                command: query.command,
+            },
+            query.cols,
+            query.rows,
+        )
+    }))
+}
+
+async fn file_transfer(
+    State(state): State<AppState>,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Query(query): Query<TransferQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiFailure> {
+    state.resolve_server(&workspace_id, &server_id).await?;
+    Ok(ws.on_upgrade(move |socket| {
+        stream_file_transfer(socket, state, workspace_id, server_id, query)
+    }))
+}
+
+async fn stream_file_transfer(
     socket: WebSocket,
     state: AppState,
     workspace_id: String,
-    agent_id: String,
-    query: TerminalQuery,
+    server_id: String,
+    query: TransferQuery,
 ) {
     let (mut outgoing, mut incoming) = socket.split();
-    let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<SocketFrame>();
+    let (transfer_tx, mut transfer_rx) = tokio::sync::mpsc::channel::<SocketFrame>(16);
+    let direction = match query.direction {
+        TransferDirectionQuery::Upload => TransferDirection::Upload,
+        TransferDirectionQuery::Download => TransferDirection::Download,
+    };
     let session_id = match state
-        .attach_terminal(
+        .attach_transfer(
             &workspace_id,
-            &agent_id,
-            query.cols,
-            query.rows,
-            terminal_tx,
+            &server_id,
+            TransferOptions {
+                path: query.path,
+                recursive: query.recursive,
+                direction,
+            },
+            transfer_tx,
         )
         .await
     {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            let message = TransferServerMessage::Error { error };
+            if let Ok(encoded) = serde_json::to_string(&message) {
+                let _ = outgoing.send(Message::Text(encoded.into())).await;
+            }
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            frame = transfer_rx.recv() => {
+                let Some(frame) = frame else { break };
+                let finished = matches!(
+                    &frame,
+                    SocketFrame::Text(encoded)
+                        if serde_json::from_str::<TransferServerMessage>(encoded).is_ok_and(
+                            |message| matches!(
+                                message,
+                                TransferServerMessage::Complete { .. }
+                                    | TransferServerMessage::Error { .. }
+                            )
+                        )
+                );
+                let message = match frame {
+                    SocketFrame::Text(encoded) => Message::Text(encoded.into()),
+                    SocketFrame::Binary(data) => Message::Binary(data.into()),
+                    SocketFrame::Close => Message::Close(None),
+                };
+                if outgoing.send(message).await.is_err() || finished {
+                    break;
+                }
+            }
+            message = incoming.next() => {
+                let Some(Ok(message)) = message else { break };
+                let result = match message {
+                    Message::Binary(data) => state.transfer_input(&session_id, data.to_vec()).await,
+                    Message::Close(_) => break,
+                    Message::Text(_) => Err(ProtocolError::new(
+                        "invalid_transfer_message",
+                        "file transfers accept binary data frames only",
+                    )),
+                    _ => continue,
+                };
+                if let Err(error) = result {
+                    let message = TransferServerMessage::Error { error };
+                    if let Ok(encoded) = serde_json::to_string(&message) {
+                        if outgoing.send(Message::Text(encoded.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    state.detach_transfer(&session_id).await;
+}
+
+enum TerminalTarget {
+    Agent(String),
+    Shell {
+        server_id: String,
+        cwd: String,
+        command: Option<String>,
+    },
+}
+
+async fn stream_terminal(
+    socket: WebSocket,
+    state: AppState,
+    workspace_id: String,
+    target: TerminalTarget,
+    cols: u16,
+    rows: u16,
+) {
+    let (mut outgoing, mut incoming) = socket.split();
+    let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<SocketFrame>();
+    let attached = match target {
+        TerminalTarget::Agent(agent_id) => {
+            state
+                .attach_terminal(&workspace_id, &agent_id, cols, rows, terminal_tx)
+                .await
+        }
+        TerminalTarget::Shell {
+            server_id,
+            cwd,
+            command,
+        } => {
+            state
+                .attach_shell(
+                    &workspace_id,
+                    &server_id,
+                    ShellOptions {
+                        cwd,
+                        command,
+                        cols,
+                        rows,
+                    },
+                    terminal_tx,
+                )
+                .await
+        }
+    };
+    let session_id = match attached {
         Ok(session_id) => session_id,
         Err(error) => {
             let message = TerminalServerMessage::Error { error };
@@ -910,8 +1062,10 @@ impl From<ProtocolError> for ApiFailure {
     fn from(error: ProtocolError) -> Self {
         let status = match error.code.as_str() {
             "workspace_not_found" | "server_not_found" | "agent_not_found" => StatusCode::NOT_FOUND,
-            "workspace_exists" | "agent_ambiguous" => StatusCode::CONFLICT,
-            "server_offline" | "no_online_server" => StatusCode::SERVICE_UNAVAILABLE,
+            "workspace_exists" | "agent_ambiguous" | "server_ambiguous" => StatusCode::CONFLICT,
+            "server_offline" | "no_online_server" | "ssh_unsupported" | "scp_unsupported" => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             "invalid_name" | "invalid_request" => StatusCode::BAD_REQUEST,
             _ => StatusCode::BAD_GATEWAY,
         };
@@ -967,22 +1121,36 @@ mod tests {
     }
 
     #[test]
-    fn installer_is_posix_shell_and_contains_runtime_configuration() {
+    fn bootstrap_separates_public_installation_from_workspace_connection() {
         let config = test_config();
-        let script =
-            render_install_script(&config.public_url, "default", "srv_test", "srv_test.secret");
+        let key = "enr_v1_64656661756c74_abc.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let (install, connect) = bootstrap_commands(&config.public_url, key);
+        assert_eq!(
+            install,
+            "curl -fsSL 'https://treer.example/install.sh' | sh"
+        );
+        assert!(!install.contains("enr_"));
+        assert!(!install.contains("connect"));
+        assert!(connect.contains(key));
+        assert!(connect.contains("treer-agent-server\" connect --proxy"));
+        assert!(!connect.contains("install.sh"));
+    }
+
+    #[test]
+    fn installer_is_posix_shell_and_only_installs_binaries() {
+        let config = test_config();
+        let script = render_install_script(&config.public_url);
         assert!(script.starts_with("#!/bin/sh\nset -eu\n"));
         assert!(script.contains("platform=linux-aarch64"));
         assert!(script.contains(".local/libexec/treer"));
         assert!(script.contains("treer-agent-host"));
-        assert!(script.contains("service --workspace \"$workspace\" install"));
-        assert!(script.contains("--proxy \"$proxy_url\""));
-        assert!(script.contains("--server-id \"$server_id\""));
-        assert!(script.contains("TREER_MACHINE_TOKEN=\"$machine_token\""));
-        assert!(script.contains("set -- --listen \"$TREER_AGENT_SERVER_LISTEN\""));
-        assert!(!script.contains("TREER_AGENT_SERVER_LISTEN:-127.0.0.1:8790"));
-        assert!(script.contains("workspace='default'"));
         assert!(script.contains("https://treer.example/artifacts"));
+        assert!(!script.contains("service --workspace"));
+        assert!(!script.contains("machine_token"));
+        assert!(!script.contains("TREER_MACHINE_TOKEN"));
+        assert!(!script.contains("TREER_ENROLLMENT_KEY"));
+        assert!(!script.contains("systemctl"));
+        assert!(!script.contains("launchctl"));
         assert!(!script.contains("nohup"));
     }
 
@@ -990,8 +1158,7 @@ mod tests {
     #[test]
     fn rendered_installer_has_valid_shell_syntax() {
         let config = test_config();
-        let script =
-            render_install_script(&config.public_url, "default", "srv_test", "srv_test.secret");
+        let script = render_install_script(&config.public_url);
         let mut child = Command::new("sh")
             .arg("-n")
             .stdin(Stdio::piped())

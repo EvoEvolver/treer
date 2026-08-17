@@ -8,7 +8,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use treer_protocol::{
     AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult, ProtocolError,
     ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind,
-    TerminalServerMessage, WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
+    TerminalServerMessage, TransferBinaryFrame, TransferServerMessage, TransferStats,
+    WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
 };
 use uuid::Uuid;
 
@@ -21,6 +22,25 @@ pub enum SocketFrame {
     Close,
 }
 
+pub struct ShellOptions {
+    pub cwd: String,
+    pub command: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    Upload,
+    Download,
+}
+
+pub struct TransferOptions {
+    pub path: String,
+    pub recursive: bool,
+    pub direction: TransferDirection,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: std::sync::Arc<Inner>,
@@ -31,6 +51,7 @@ struct Inner {
     connections: RwLock<HashMap<ServerKey, ServerConnection>>,
     pending: Mutex<HashMap<String, PendingCommand>>,
     terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
+    transfer_sessions: Mutex<HashMap<String, TransferSession>>,
     events: broadcast::Sender<WorkspaceEvent>,
 }
 
@@ -55,9 +76,17 @@ struct PendingCommand {
 struct TerminalSession {
     workspace_id: String,
     server_id: String,
-    agent_id: String,
+    process_id: String,
+    transient: bool,
     outgoing: mpsc::UnboundedSender<SocketFrame>,
     last_revision: Option<u64>,
+}
+
+struct TransferSession {
+    workspace_id: String,
+    server_id: String,
+    direction: TransferDirection,
+    outgoing: mpsc::Sender<SocketFrame>,
 }
 
 struct WorkspaceState {
@@ -93,6 +122,7 @@ impl AppState {
                 connections: RwLock::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 terminal_sessions: Mutex::new(HashMap::new()),
+                transfer_sessions: Mutex::new(HashMap::new()),
                 events,
             }),
         }
@@ -393,17 +423,29 @@ impl AppState {
     pub async fn resolve_server(
         &self,
         workspace_id: &str,
-        server_id: &str,
+        target: &str,
     ) -> Result<ServerInfo, ProtocolError> {
         let workspaces = self.inner.workspaces.read().await;
         let workspace = workspaces
             .get(workspace_id)
             .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
-        workspace
+        if let Some(server) = workspace.servers.get(target) {
+            return Ok(server.clone());
+        }
+        let mut matches = workspace
             .servers
-            .get(server_id)
-            .cloned()
-            .ok_or_else(|| ProtocolError::new("server_not_found", server_id))
+            .values()
+            .filter(|server| server.name == target);
+        let Some(server) = matches.next() else {
+            return Err(ProtocolError::new("server_not_found", target));
+        };
+        if matches.next().is_some() {
+            return Err(ProtocolError::new(
+                "server_ambiguous",
+                format!("more than one machine is named {target}; use a server id"),
+            ));
+        }
+        Ok(server.clone())
     }
 
     pub async fn rename_server(
@@ -528,9 +570,12 @@ impl AppState {
                 &terminal.outgoing,
                 &TerminalServerMessage::Closed {
                     reason: Some("machine deleted".to_string()),
+                    exit_code: None,
                 },
             );
         }
+        self.close_server_transfers(workspace_id, server_id, "machine deleted")
+            .await;
 
         Ok((server, agents))
     }
@@ -760,7 +805,8 @@ impl AppState {
             TerminalSession {
                 workspace_id: workspace_id.to_string(),
                 server_id,
-                agent_id: agent.agent_id.clone(),
+                process_id: agent.agent_id.clone(),
+                transient: false,
                 outgoing,
                 last_revision: None,
             },
@@ -782,6 +828,311 @@ impl AppState {
         Ok(session_id)
     }
 
+    pub async fn attach_shell(
+        &self,
+        workspace_id: &str,
+        server_target: &str,
+        options: ShellOptions,
+        outgoing: mpsc::UnboundedSender<SocketFrame>,
+    ) -> Result<String, ProtocolError> {
+        let server = self.resolve_server(workspace_id, server_target).await?;
+        if server.status != ServerStatus::Online {
+            return Err(ProtocolError::new("server_offline", server.server_id));
+        }
+        if server.labels.get("treer.ssh").map(String::as_str) != Some("1") {
+            return Err(ProtocolError::new(
+                "ssh_unsupported",
+                "target machine must update treer-agent-server before it can accept remote shells",
+            ));
+        }
+        let server_outgoing = self
+            .server_outgoing(workspace_id, &server.server_id)
+            .await
+            .ok_or_else(|| ProtocolError::new("server_offline", &server.server_id))?;
+        let session_id = format!("ssh_{}", Uuid::new_v4().simple());
+        self.inner.terminal_sessions.lock().await.insert(
+            session_id.clone(),
+            TerminalSession {
+                workspace_id: workspace_id.to_string(),
+                server_id: server.server_id,
+                process_id: session_id.clone(),
+                transient: true,
+                outgoing,
+                last_revision: None,
+            },
+        );
+        let message = ProxyMessage::ShellOpen {
+            session_id: session_id.clone(),
+            cols: options.cols.max(1),
+            rows: options.rows.max(1),
+            cwd: options.cwd,
+            command: options.command,
+        };
+        if let Err(error) = send_proxy_message(&server_outgoing, &message) {
+            self.inner
+                .terminal_sessions
+                .lock()
+                .await
+                .remove(&session_id);
+            return Err(error);
+        }
+        Ok(session_id)
+    }
+
+    pub async fn attach_transfer(
+        &self,
+        workspace_id: &str,
+        server_target: &str,
+        options: TransferOptions,
+        outgoing: mpsc::Sender<SocketFrame>,
+    ) -> Result<String, ProtocolError> {
+        let server = self.resolve_server(workspace_id, server_target).await?;
+        if server.status != ServerStatus::Online {
+            return Err(ProtocolError::new("server_offline", server.server_id));
+        }
+        if server.labels.get("treer.scp").map(String::as_str) != Some("1") {
+            return Err(ProtocolError::new(
+                "scp_unsupported",
+                "target machine must update treer-agent-server before it can transfer files",
+            ));
+        }
+        let server_outgoing = self
+            .server_outgoing(workspace_id, &server.server_id)
+            .await
+            .ok_or_else(|| ProtocolError::new("server_offline", &server.server_id))?;
+        let session_id = format!("copy_{}", Uuid::new_v4().simple());
+        self.inner.transfer_sessions.lock().await.insert(
+            session_id.clone(),
+            TransferSession {
+                workspace_id: workspace_id.to_string(),
+                server_id: server.server_id,
+                direction: options.direction,
+                outgoing,
+            },
+        );
+        let message = match options.direction {
+            TransferDirection::Upload => ProxyMessage::TransferUpload {
+                session_id: session_id.clone(),
+                destination: options.path,
+                recursive: options.recursive,
+            },
+            TransferDirection::Download => ProxyMessage::TransferDownload {
+                session_id: session_id.clone(),
+                source: options.path,
+                recursive: options.recursive,
+            },
+        };
+        if let Err(error) = send_proxy_message(&server_outgoing, &message) {
+            self.inner
+                .transfer_sessions
+                .lock()
+                .await
+                .remove(&session_id);
+            return Err(error);
+        }
+        Ok(session_id)
+    }
+
+    pub async fn transfer_input(
+        &self,
+        session_id: &str,
+        encoded: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        let frame = TransferBinaryFrame::decode(&encoded)?;
+        if frame.session_id != session_id {
+            return Err(ProtocolError::new(
+                "transfer_identity_mismatch",
+                "transfer frame belongs to another session",
+            ));
+        }
+        let (workspace_id, server_id, direction) = self
+            .inner
+            .transfer_sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|session| {
+                (
+                    session.workspace_id.clone(),
+                    session.server_id.clone(),
+                    session.direction,
+                )
+            })
+            .ok_or_else(|| ProtocolError::new("transfer_not_found", session_id))?;
+        if direction != TransferDirection::Upload {
+            return Err(ProtocolError::new(
+                "invalid_transfer_direction",
+                "download sessions do not accept client data",
+            ));
+        }
+        self.server_outgoing(&workspace_id, &server_id)
+            .await
+            .ok_or_else(|| ProtocolError::new("server_offline", server_id))?
+            .send(SocketFrame::Binary(encoded))
+            .map_err(|_| ProtocolError::new("server_offline", "agent server disconnected"))
+    }
+
+    pub async fn detach_transfer(&self, session_id: &str) {
+        let session = self.inner.transfer_sessions.lock().await.remove(session_id);
+        let Some(session) = session else { return };
+        if let Some(outgoing) = self
+            .server_outgoing(&session.workspace_id, &session.server_id)
+            .await
+        {
+            let _ = send_proxy_message(
+                &outgoing,
+                &ProxyMessage::TransferCancel {
+                    session_id: session_id.to_string(),
+                },
+            );
+        }
+    }
+
+    pub async fn transfer_ready(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        session_id: &str,
+    ) -> Result<(), ProtocolError> {
+        self.require_current_connection(workspace_id, server_id, connection_id)
+            .await?;
+        self.relay_transfer(
+            workspace_id,
+            server_id,
+            session_id,
+            TransferServerMessage::Ready {
+                session_id: session_id.to_string(),
+            },
+            false,
+        )
+        .await
+    }
+
+    pub async fn transfer_progress(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        session_id: &str,
+    ) -> Result<(), ProtocolError> {
+        self.require_current_connection(workspace_id, server_id, connection_id)
+            .await?;
+        self.relay_transfer(
+            workspace_id,
+            server_id,
+            session_id,
+            TransferServerMessage::Progress {
+                session_id: session_id.to_string(),
+            },
+            false,
+        )
+        .await
+    }
+
+    pub async fn transfer_output(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        frame: TransferBinaryFrame,
+        encoded: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        self.require_current_connection(workspace_id, server_id, connection_id)
+            .await?;
+        let outgoing = {
+            let sessions = self.inner.transfer_sessions.lock().await;
+            let Some(session) = sessions.get(&frame.session_id) else {
+                return Ok(());
+            };
+            if session.workspace_id != workspace_id || session.server_id != server_id {
+                return Err(ProtocolError::new(
+                    "transfer_identity_mismatch",
+                    &frame.session_id,
+                ));
+            }
+            if session.direction != TransferDirection::Download {
+                return Err(ProtocolError::new(
+                    "invalid_transfer_direction",
+                    "upload sessions do not accept server data",
+                ));
+            }
+            session.outgoing.clone()
+        };
+        outgoing
+            .send(SocketFrame::Binary(encoded))
+            .await
+            .map_err(|_| ProtocolError::new("transfer_cancelled", "transfer client disconnected"))
+    }
+
+    pub async fn transfer_complete(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        session_id: &str,
+        stats: TransferStats,
+    ) -> Result<(), ProtocolError> {
+        self.require_current_connection(workspace_id, server_id, connection_id)
+            .await?;
+        self.relay_transfer(
+            workspace_id,
+            server_id,
+            session_id,
+            TransferServerMessage::Complete {
+                session_id: session_id.to_string(),
+                stats,
+            },
+            true,
+        )
+        .await
+    }
+
+    pub async fn transfer_failed(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        session_id: &str,
+        error: ProtocolError,
+    ) -> Result<(), ProtocolError> {
+        self.require_current_connection(workspace_id, server_id, connection_id)
+            .await?;
+        self.relay_transfer(
+            workspace_id,
+            server_id,
+            session_id,
+            TransferServerMessage::Error { error },
+            true,
+        )
+        .await
+    }
+
+    async fn relay_transfer(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        session_id: &str,
+        message: TransferServerMessage,
+        close: bool,
+    ) -> Result<(), ProtocolError> {
+        let outgoing = {
+            let mut sessions = self.inner.transfer_sessions.lock().await;
+            let Some(session) = sessions.get(session_id) else {
+                return Ok(());
+            };
+            if session.workspace_id != workspace_id || session.server_id != server_id {
+                return Err(ProtocolError::new("transfer_identity_mismatch", session_id));
+            }
+            let outgoing = session.outgoing.clone();
+            if close {
+                sessions.remove(session_id);
+            }
+            outgoing
+        };
+        send_transfer_to_client(&outgoing, &message).await
+    }
+
     async fn close_agent_terminals(&self, workspace_id: &str, agent_id: &str) {
         let sessions = self
             .inner
@@ -790,7 +1141,7 @@ impl AppState {
             .await
             .iter()
             .filter(|(_, session)| {
-                session.workspace_id == workspace_id && session.agent_id == agent_id
+                session.workspace_id == workspace_id && session.process_id == agent_id
             })
             .map(|(session_id, session)| (session_id.clone(), session.outgoing.clone()))
             .collect::<Vec<_>>();
@@ -799,6 +1150,7 @@ impl AppState {
                 &outgoing,
                 &TerminalServerMessage::Closed {
                     reason: Some("agent deleted".to_string()),
+                    exit_code: None,
                 },
             );
             self.detach_terminal(&session_id).await;
@@ -849,12 +1201,16 @@ impl AppState {
             .server_outgoing(&session.workspace_id, &session.server_id)
             .await
         {
-            let _ = send_proxy_message(
-                &outgoing,
-                &ProxyMessage::TerminalDetach {
+            let message = if session.transient {
+                ProxyMessage::ShellDetach {
                     session_id: session_id.to_string(),
-                },
-            );
+                }
+            } else {
+                ProxyMessage::TerminalDetach {
+                    session_id: session_id.to_string(),
+                }
+            };
+            let _ = send_proxy_message(&outgoing, &message);
         }
     }
 
@@ -929,6 +1285,7 @@ impl AppState {
         connection_id: Uuid,
         session_id: &str,
         reason: Option<String>,
+        exit_code: Option<i32>,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
@@ -936,7 +1293,7 @@ impl AppState {
             workspace_id,
             server_id,
             session_id,
-            TerminalServerMessage::Closed { reason },
+            TerminalServerMessage::Closed { reason, exit_code },
             true,
         )
         .await
@@ -994,8 +1351,37 @@ impl AppState {
                 &session.outgoing,
                 &TerminalServerMessage::Closed {
                     reason: Some("agent server disconnected".to_string()),
+                    exit_code: None,
                 },
             );
+        }
+        self.close_server_transfers(workspace_id, server_id, "agent server disconnected")
+            .await;
+    }
+
+    async fn close_server_transfers(&self, workspace_id: &str, server_id: &str, reason: &str) {
+        let disconnected = {
+            let mut sessions = self.inner.transfer_sessions.lock().await;
+            let session_ids = sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.workspace_id == workspace_id && session.server_id == server_id
+                })
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<Vec<_>>();
+            session_ids
+                .into_iter()
+                .filter_map(|session_id| sessions.remove(&session_id))
+                .collect::<Vec<_>>()
+        };
+        for session in disconnected {
+            let _ = send_transfer_to_client(
+                &session.outgoing,
+                &TransferServerMessage::Error {
+                    error: ProtocolError::new("server_offline", reason),
+                },
+            )
+            .await;
         }
     }
 
@@ -1131,6 +1517,18 @@ fn send_terminal_to_browser(
     }
 }
 
+async fn send_transfer_to_client(
+    outgoing: &mpsc::Sender<SocketFrame>,
+    message: &TransferServerMessage,
+) -> Result<(), ProtocolError> {
+    let encoded = serde_json::to_string(message)
+        .map_err(|error| ProtocolError::new("encode_error", error.to_string()))?;
+    outgoing
+        .send(SocketFrame::Text(encoded))
+        .await
+        .map_err(|_| ProtocolError::new("transfer_cancelled", "transfer client disconnected"))
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -1225,6 +1623,187 @@ mod tests {
                 .expect("name target")
                 .agent_id,
             "agent-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_shells_route_by_machine_name_and_detach_transiently() {
+        let state = AppState::new();
+        state.ensure_workspace("alpha", "Alpha").await;
+        let mut server = test_server();
+        server
+            .labels
+            .insert("treer.ssh".to_string(), "1".to_string());
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server, Uuid::new_v4(), server_tx)
+            .await
+            .expect("register server");
+        let (terminal_tx, _terminal_rx) = mpsc::unbounded_channel();
+
+        let session_id = state
+            .attach_shell(
+                "alpha",
+                "test-host",
+                ShellOptions {
+                    cwd: "src".to_string(),
+                    command: Some("pwd".to_string()),
+                    cols: 100,
+                    rows: 40,
+                },
+                terminal_tx,
+            )
+            .await
+            .expect("attach shell");
+        let open: ProxyMessage = serde_json::from_str(&expect_text(
+            server_rx.recv().await.expect("shell open message"),
+        ))
+        .expect("decode shell open");
+        assert_eq!(
+            open,
+            ProxyMessage::ShellOpen {
+                session_id: session_id.clone(),
+                cols: 100,
+                rows: 40,
+                cwd: "src".to_string(),
+                command: Some("pwd".to_string()),
+            }
+        );
+
+        state.detach_terminal(&session_id).await;
+        let detach: ProxyMessage = serde_json::from_str(&expect_text(
+            server_rx.recv().await.expect("shell detach message"),
+        ))
+        .expect("decode shell detach");
+        assert_eq!(detach, ProxyMessage::ShellDetach { session_id });
+    }
+
+    #[tokio::test]
+    async fn old_agent_servers_reject_remote_shells_without_disconnect() {
+        let state = AppState::new();
+        state.ensure_workspace("alpha", "Alpha").await;
+        let (server_tx, _server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(test_server(), Uuid::new_v4(), server_tx)
+            .await
+            .expect("register server");
+        let (terminal_tx, _terminal_rx) = mpsc::unbounded_channel();
+
+        let error = state
+            .attach_shell(
+                "alpha",
+                "server",
+                ShellOptions {
+                    cwd: ".".to_string(),
+                    command: None,
+                    cols: 120,
+                    rows: 36,
+                },
+                terminal_tx,
+            )
+            .await
+            .expect_err("old server must not receive new wire messages");
+        assert_eq!(error.code, "ssh_unsupported");
+    }
+
+    #[tokio::test]
+    async fn file_uploads_route_binary_frames_and_completion() {
+        let state = AppState::new();
+        state.ensure_workspace("alpha", "Alpha").await;
+        let mut server = test_server();
+        server
+            .labels
+            .insert("treer.scp".to_string(), "1".to_string());
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server, connection_id, server_tx)
+            .await
+            .expect("register server");
+        let (client_tx, mut client_rx) = mpsc::channel(16);
+        let session_id = state
+            .attach_transfer(
+                "alpha",
+                "test-host",
+                TransferOptions {
+                    path: "dest.bin".to_string(),
+                    recursive: false,
+                    direction: TransferDirection::Upload,
+                },
+                client_tx,
+            )
+            .await
+            .expect("attach transfer");
+        let open: ProxyMessage = serde_json::from_str(&expect_text(
+            server_rx.recv().await.expect("transfer open message"),
+        ))
+        .expect("decode transfer open");
+        assert_eq!(
+            open,
+            ProxyMessage::TransferUpload {
+                session_id: session_id.clone(),
+                destination: "dest.bin".to_string(),
+                recursive: false,
+            }
+        );
+
+        state
+            .transfer_ready("alpha", "server", connection_id, &session_id)
+            .await
+            .expect("transfer ready");
+        let ready: TransferServerMessage =
+            serde_json::from_str(&expect_text(client_rx.recv().await.expect("ready message")))
+                .expect("decode ready");
+        assert_eq!(
+            ready,
+            TransferServerMessage::Ready {
+                session_id: session_id.clone()
+            }
+        );
+
+        state
+            .transfer_progress("alpha", "server", connection_id, &session_id)
+            .await
+            .expect("transfer progress");
+        let progress: TransferServerMessage = serde_json::from_str(&expect_text(
+            client_rx.recv().await.expect("progress message"),
+        ))
+        .expect("decode progress");
+        assert_eq!(
+            progress,
+            TransferServerMessage::Progress {
+                session_id: session_id.clone()
+            }
+        );
+
+        let encoded = TransferBinaryFrame {
+            kind: treer_protocol::TransferBinaryKind::Data,
+            session_id: session_id.clone(),
+            payload: vec![0, 0xff],
+        }
+        .encode()
+        .expect("encode transfer data");
+        state
+            .transfer_input(&session_id, encoded.clone())
+            .await
+            .expect("route transfer data");
+        assert_eq!(server_rx.recv().await, Some(SocketFrame::Binary(encoded)));
+
+        let stats = TransferStats {
+            entries: 1,
+            bytes: 2,
+        };
+        state
+            .transfer_complete("alpha", "server", connection_id, &session_id, stats)
+            .await
+            .expect("complete transfer");
+        let complete: TransferServerMessage = serde_json::from_str(&expect_text(
+            client_rx.recv().await.expect("complete message"),
+        ))
+        .expect("decode complete");
+        assert_eq!(
+            complete,
+            TransferServerMessage::Complete { session_id, stats }
         );
     }
 
@@ -1422,6 +2001,7 @@ mod tests {
             terminal_message,
             TerminalServerMessage::Closed {
                 reason: Some("machine deleted".to_string()),
+                exit_code: None,
             }
         );
 

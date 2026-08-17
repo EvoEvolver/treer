@@ -20,6 +20,7 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 treer-protocol = { path = "../treer-protocol" }
+treer-transfer = { path = "../treer-transfer" }
 url.workspace = true
 
 [lints]

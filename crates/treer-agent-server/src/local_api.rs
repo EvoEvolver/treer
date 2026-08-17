@@ -132,6 +132,8 @@ pub fn router(state: LocalApiState) -> Router {
             get(get_agent).patch(rename_agent).delete(delete_agent),
         )
         .route("/api/agents/{agent_id}/terminal", get(agent_terminal))
+        .route("/api/ssh/{server_id}", get(shell_terminal))
+        .route("/api/scp/{server_id}", get(file_transfer))
         .route("/api/agents/{agent_id}/prompt", post(prompt_agent))
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
@@ -232,6 +234,30 @@ struct TerminalQuery {
     rows: u16,
 }
 
+#[derive(Debug, Deserialize)]
+struct ShellQuery {
+    #[serde(default = "default_terminal_cols")]
+    cols: u16,
+    #[serde(default = "default_terminal_rows")]
+    rows: u16,
+    #[serde(default = "default_shell_cwd")]
+    cwd: String,
+    #[serde(default)]
+    command: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferQuery {
+    direction: String,
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+fn default_shell_cwd() -> String {
+    ".".to_string()
+}
+
 const fn default_terminal_cols() -> u16 {
     120
 }
@@ -251,6 +277,44 @@ async fn agent_terminal(
         .query_pairs_mut()
         .append_pair("cols", &query.cols.max(1).to_string())
         .append_pair("rows", &query.rows.max(1).to_string());
+    Ok(ws.on_upgrade(move |socket| relay_terminal(socket, state, upstream)))
+}
+
+async fn shell_terminal(
+    State(state): State<LocalApiState>,
+    Path(server_id): Path<String>,
+    Query(query): Query<ShellQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, LocalApiError> {
+    let mut upstream = state.proxy_websocket_url(&format!("ssh/{server_id}"))?;
+    upstream
+        .query_pairs_mut()
+        .append_pair("cols", &query.cols.max(1).to_string())
+        .append_pair("rows", &query.rows.max(1).to_string())
+        .append_pair("cwd", &query.cwd);
+    if let Some(command) = query.command {
+        upstream.query_pairs_mut().append_pair("command", &command);
+    }
+    Ok(ws.on_upgrade(move |socket| relay_terminal(socket, state, upstream)))
+}
+
+async fn file_transfer(
+    State(state): State<LocalApiState>,
+    Path(server_id): Path<String>,
+    Query(query): Query<TransferQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, LocalApiError> {
+    if !matches!(query.direction.as_str(), "upload" | "download") {
+        return Err(LocalApiError::bad_request(
+            "transfer direction must be upload or download".to_string(),
+        ));
+    }
+    let mut upstream = state.proxy_websocket_url(&format!("scp/{server_id}"))?;
+    upstream
+        .query_pairs_mut()
+        .append_pair("direction", &query.direction)
+        .append_pair("path", &query.path)
+        .append_pair("recursive", &query.recursive.to_string());
     Ok(ws.on_upgrade(move |socket| relay_terminal(socket, state, upstream)))
 }
 

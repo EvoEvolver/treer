@@ -105,15 +105,12 @@ async fn local_api_matches(address: &SocketAddr, workspace: &str, server_id: &st
             .is_none_or(|value| value == server_id)
 }
 
-pub fn install(mut config: ServiceConfig) -> Result<()> {
+pub fn register(config: ServiceConfig) -> Result<()> {
     validate_workspace(&config.workspace)?;
     let paths = ServicePaths::new(&config.workspace)?;
+    require_host_binary(&paths)?;
     fs::create_dir_all(&paths.state_dir)
         .with_context(|| format!("failed to create {}", paths.state_dir.display()))?;
-    if paths.config.is_file() {
-        let installed = ServiceConfig::load(&paths.config)?;
-        preserve_installed_machine_identity(&mut config, &installed);
-    }
     config.save(&paths.config)?;
     let host_config = HostDaemonConfig {
         socket_path: config.host_socket.clone(),
@@ -122,34 +119,30 @@ pub fn install(mut config: ServiceConfig) -> Result<()> {
         root: config.root.clone(),
     };
     save_json(&host_config, &paths.host_config)?;
-    if !paths.host_executable.is_file() {
-        bail!(
-            "treer-agent-host was not found next to {}",
-            paths.executable.display()
-        );
-    }
-    let host_running = std::os::unix::net::UnixStream::connect(&config.host_socket).is_ok();
-    platform::install(&paths, &config.workspace, !host_running)?;
-    if host_running {
-        restart_controller_at(&paths, &config.host_socket)?;
-        println!("treer: Controller updated without restarting the Host");
-    } else {
-        println!("treer: agent Host service installed and started");
-    }
-    println!("treer: local API listening on {}", config.listen);
-    println!(
-        "treer: status: \"{}\" service --workspace {} status",
-        paths.executable.display(),
-        config.workspace,
-    );
+    platform::register(&paths, &config.workspace)?;
+    println!("treer: agent Host service registered");
+    println!("treer: configured local API address: {}", config.listen);
     Ok(())
 }
 
-fn preserve_installed_machine_identity(config: &mut ServiceConfig, installed: &ServiceConfig) {
-    let same_proxy = config.proxy.trim_end_matches('/') == installed.proxy.trim_end_matches('/');
-    if same_proxy && config.workspace == installed.workspace {
-        config.server_id.clone_from(&installed.server_id);
-        config.machine_token.clone_from(&installed.machine_token);
+pub fn is_registered(workspace: &str) -> Result<bool> {
+    validate_workspace(workspace)?;
+    Ok(ServicePaths::new(workspace)?.config.is_file())
+}
+
+pub fn preflight_registration(workspace: &str) -> Result<()> {
+    validate_workspace(workspace)?;
+    require_host_binary(&ServicePaths::new(workspace)?)
+}
+
+fn require_host_binary(paths: &ServicePaths) -> Result<()> {
+    if paths.host_executable.is_file() {
+        Ok(())
+    } else {
+        bail!(
+            "treer-agent-host was not found next to {}",
+            paths.executable.display()
+        )
     }
 }
 
@@ -415,7 +408,7 @@ mod platform {
         Ok(config_home.join("systemd/user").join(unit_name(workspace)))
     }
 
-    pub fn install(paths: &ServicePaths, workspace: &str, start_host: bool) -> Result<()> {
+    pub fn register(paths: &ServicePaths, workspace: &str) -> Result<()> {
         let unit_path = unit_path(workspace)?;
         let parent = unit_path
             .parent()
@@ -435,13 +428,7 @@ mod platform {
             Command::new("systemctl").args(["--user", "enable", unit.as_str()]),
             "systemctl --user enable",
         )?;
-        if start_host {
-            run_checked(
-                Command::new("systemctl").args(["--user", "restart", unit.as_str()]),
-                "systemctl --user restart",
-            )?;
-            enable_linger();
-        }
+        enable_linger();
         Ok(())
     }
 
@@ -557,7 +544,7 @@ mod platform {
         Ok(format!("{}/{}", domain()?, label(workspace)))
     }
 
-    pub fn install(paths: &ServicePaths, workspace: &str, start_host: bool) -> Result<()> {
+    pub fn register(paths: &ServicePaths, workspace: &str) -> Result<()> {
         let plist_path = plist_path(workspace)?;
         let parent = plist_path
             .parent()
@@ -578,21 +565,6 @@ mod platform {
             )
             .as_bytes(),
         )?;
-        if start_host {
-            let domain = domain()?;
-            let target = service_target(workspace)?;
-            let _ = Command::new("launchctl")
-                .args(["bootout", target.as_str()])
-                .status();
-            run_checked(
-                Command::new("launchctl").args([
-                    "bootstrap",
-                    domain.as_str(),
-                    plist_path.to_string_lossy().as_ref(),
-                ]),
-                "launchctl bootstrap",
-            )?;
-        }
         Ok(())
     }
 
@@ -605,7 +577,7 @@ mod platform {
             .success();
         if loaded {
             run_checked(
-                Command::new("launchctl").args(["kickstart", "-k", target.as_str()]),
+                Command::new("launchctl").args(["kickstart", target.as_str()]),
                 "launchctl kickstart",
             )
         } else {
@@ -676,7 +648,7 @@ mod platform {
         bail!("service management is currently supported on Linux and macOS")
     }
 
-    pub fn install(_paths: &ServicePaths, _workspace: &str, _start_host: bool) -> Result<()> {
+    pub fn register(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
         unsupported()
     }
 
@@ -754,56 +726,6 @@ mod tests {
         assert!(!local_api_matches(&address, "default", "srv_other").await);
 
         server.abort();
-    }
-
-    #[test]
-    fn reinstall_keeps_machine_identity_for_the_same_proxy_and_workspace() {
-        let installed = test_config(
-            "https://treer.example",
-            "default",
-            "old-server",
-            "old-token",
-        );
-        let mut requested = test_config(
-            "https://treer.example/",
-            "default",
-            "new-server",
-            "new-token",
-        );
-
-        preserve_installed_machine_identity(&mut requested, &installed);
-
-        assert_eq!(requested.server_id, "old-server");
-        assert_eq!(requested.machine_token, "old-token");
-    }
-
-    #[test]
-    fn moving_to_another_proxy_uses_the_new_machine_identity() {
-        let installed = test_config("https://old.example", "default", "old-server", "old-token");
-        let mut requested =
-            test_config("https://new.example", "default", "new-server", "new-token");
-
-        preserve_installed_machine_identity(&mut requested, &installed);
-
-        assert_eq!(requested.server_id, "new-server");
-        assert_eq!(requested.machine_token, "new-token");
-    }
-
-    fn test_config(
-        proxy: &str,
-        workspace: &str,
-        server_id: &str,
-        machine_token: &str,
-    ) -> ServiceConfig {
-        ServiceConfig {
-            proxy: proxy.to_owned(),
-            workspace: workspace.to_owned(),
-            server_id: server_id.to_owned(),
-            machine_token: machine_token.to_owned(),
-            root: PathBuf::from("/tmp"),
-            listen: "127.0.0.1:8791".to_owned(),
-            host_socket: PathBuf::from("/tmp/treer.sock"),
-        }
     }
 
     #[test]

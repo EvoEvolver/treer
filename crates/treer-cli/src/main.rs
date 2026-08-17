@@ -13,13 +13,16 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
-    AgentInfo, AgentStatus, CreateAgentRequest, InputAgentRequest, RenameRequest,
-    TerminalClientMessage, TerminalServerMessage,
+    AgentInfo, AgentStatus, CreateAgentRequest, InputAgentRequest, RenameRequest, ServerInfo,
+    ServerStatus, TerminalClientMessage, TerminalServerMessage, TransferBinaryFrame,
+    TransferServerMessage, TransferStats, WorkspaceSnapshot,
 };
+use treer_transfer::TransferReceiver;
 use url::Url;
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 const ATTACH_DETACH_BYTE: u8 = 0x1d;
+const TRANSFER_WINDOW_FRAMES: usize = 16;
 const SKILL: &str = include_str!("../../../skills/treer/SKILL.md");
 
 #[derive(Debug, Parser)]
@@ -59,6 +62,21 @@ enum Command {
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
     Discover,
+    #[command(about = "Open a shell on another workspace machine")]
+    Ssh {
+        target: String,
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    #[command(about = "Copy files to or from another workspace machine")]
+    Scp {
+        #[arg(short = 'r', long)]
+        recursive: bool,
+        source: String,
+        destination: String,
+    },
     #[command(about = "List agents (compatibility alias for `agent list`)")]
     List,
     #[command(about = "Create an agent")]
@@ -297,6 +315,25 @@ async fn main() -> anyhow::Result<()> {
         .context("a command is required; run `treer --help` for usage")?;
     let client = ApiClient::new(resolve_server_url(args.url, &args.workspace)?);
     let value = match command {
+        Command::Ssh {
+            target,
+            cwd,
+            command,
+        } => {
+            let exit_code = ssh_machine(&client, &target, cwd, command).await?;
+            if exit_code != 0 {
+                std::process::exit(exit_code.clamp(1, 255));
+            }
+            return Ok(());
+        }
+        Command::Scp {
+            recursive,
+            source,
+            destination,
+        } => {
+            scp(&client, recursive, &source, &destination).await?;
+            return Ok(());
+        }
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::Whoami => {
@@ -450,15 +487,385 @@ async fn delete_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
 }
 
 async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        bail!("attach requires an interactive terminal");
-    }
     let target = normalize_target(target)?;
-    let (cols, rows) = terminal_size().context("failed to read terminal size")?;
-    let mut url = client
+    let url = client
         .base
         .join(&format!("api/agents/{}/terminal", path_segment(&target)))
         .context("failed to build terminal URL")?;
+    let outcome = relay_terminal(url, &target, true).await?;
+    Ok(json!({ "agent": target, "status": "detached", "reason": outcome.reason }))
+}
+
+async fn ssh_machine(
+    client: &ApiClient,
+    target: &str,
+    cwd: String,
+    command: Vec<String>,
+) -> anyhow::Result<i32> {
+    let server = resolve_machine(client, target).await?;
+    if server.status != ServerStatus::Online {
+        bail!("machine {} is offline", server.name);
+    }
+    let interactive = command.is_empty();
+    let mut url = client
+        .base
+        .join(&format!("api/ssh/{}", path_segment(&server.server_id)))
+        .context("failed to build remote shell URL")?;
+    url.query_pairs_mut().append_pair("cwd", &cwd);
+    if !command.is_empty() {
+        url.query_pairs_mut()
+            .append_pair("command", &command.join(" "));
+    }
+    let outcome = relay_terminal(url, &server.name, interactive).await?;
+    if interactive {
+        return Ok(outcome.exit_code.unwrap_or(0));
+    }
+    Ok(outcome.exit_code.unwrap_or(1))
+}
+
+#[derive(Debug)]
+struct RemotePath {
+    machine: String,
+    path: String,
+}
+
+async fn scp(
+    client: &ApiClient,
+    recursive: bool,
+    source: &str,
+    destination: &str,
+) -> anyhow::Result<()> {
+    let remote_source = parse_remote_path(source);
+    let remote_destination = parse_remote_path(destination);
+    match (remote_source, remote_destination) {
+        (Some(_), Some(_)) => {
+            bail!("remote-to-remote copies are not supported; exactly one path must be local")
+        }
+        (None, None) => bail!("exactly one path must use the machine:path form"),
+        (None, Some(remote)) => upload_path(client, PathBuf::from(source), remote, recursive).await,
+        (Some(remote), None) => {
+            download_path(client, remote, PathBuf::from(destination), recursive).await
+        }
+    }
+}
+
+fn parse_remote_path(value: &str) -> Option<RemotePath> {
+    if value.starts_with('/') || value.starts_with("./") || value.starts_with("../") {
+        return None;
+    }
+    let (machine, path) = value.split_once(':')?;
+    if machine.is_empty()
+        || path.is_empty()
+        || machine.contains('/')
+        || machine.contains(std::path::MAIN_SEPARATOR)
+    {
+        return None;
+    }
+    Some(RemotePath {
+        machine: machine.to_string(),
+        path: path.to_string(),
+    })
+}
+
+async fn upload_path(
+    client: &ApiClient,
+    source: PathBuf,
+    remote: RemotePath,
+    recursive: bool,
+) -> anyhow::Result<()> {
+    let metadata = tokio::fs::symlink_metadata(&source)
+        .await
+        .with_context(|| format!("source does not exist: {}", source.display()))?;
+    if metadata.is_dir() && !recursive {
+        bail!("{} is a directory; use --recursive", source.display());
+    }
+    let server = resolve_machine(client, &remote.machine).await?;
+    require_online_machine(&server)?;
+    let url = transfer_url(client, &server, "upload", &remote.path, recursive)?;
+    let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .with_context(|| format!("failed to connect to {}", server.name))?;
+    let session_id = wait_for_transfer_ready(&mut socket).await?;
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel(16);
+    let task_session = session_id.clone();
+    let mut producer = tokio::spawn(async move {
+        treer_transfer::stream_path(source, recursive, task_session, frame_tx).await
+    });
+    let (mut outgoing, mut incoming) = socket.split();
+    let mut producer_finished = false;
+    let mut local_stats = None;
+    let mut in_flight = 0_usize;
+    let outcome: anyhow::Result<TransferStats> = loop {
+        tokio::select! {
+            frame = frame_rx.recv(), if !producer_finished && in_flight < TRANSFER_WINDOW_FRAMES => {
+                let Some(frame) = frame else {
+                    producer_finished = true;
+                    local_stats = Some(
+                        (&mut producer)
+                            .await
+                            .context("file reader task failed")?
+                            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
+                    );
+                    continue;
+                };
+                let encoded = frame
+                    .encode()
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+                outgoing
+                    .send(Message::Binary(encoded.into()))
+                    .await
+                    .context("failed to send file data")?;
+                in_flight += 1;
+            }
+            message = incoming.next() => {
+                let Some(message) = message else {
+                    break Err(anyhow::anyhow!("transfer connection closed"));
+                };
+                match message.context("failed to read transfer response")? {
+                    Message::Text(text) => match serde_json::from_str::<TransferServerMessage>(&text)
+                        .context("invalid transfer response")? {
+                        TransferServerMessage::Complete { stats, .. } => break Ok(stats),
+                        TransferServerMessage::Progress { .. } => {
+                            in_flight = in_flight.saturating_sub(1);
+                        }
+                        TransferServerMessage::Error { error } => {
+                            break Err(anyhow::anyhow!("{}: {}", error.code, error.message));
+                        }
+                        TransferServerMessage::Ready { .. } => {}
+                    },
+                    Message::Ping(data) => {
+                        outgoing.send(Message::Pong(data)).await.context("failed to reply to ping")?;
+                    }
+                    Message::Close(_) => break Err(anyhow::anyhow!("transfer connection closed")),
+                    Message::Binary(_) => {
+                        break Err(anyhow::anyhow!("upload received unexpected file data"));
+                    }
+                    Message::Pong(_) | Message::Frame(_) => {}
+                }
+            }
+        }
+    };
+    let remote_stats = match outcome {
+        Ok(stats) => stats,
+        Err(error) => {
+            if !producer_finished {
+                producer.abort();
+                let _ = producer.await;
+            }
+            return Err(error);
+        }
+    };
+    let local_stats = match local_stats {
+        Some(stats) => stats,
+        None => producer
+            .await
+            .context("file reader task failed")?
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?,
+    };
+    if local_stats != remote_stats {
+        bail!("remote transfer summary did not match the local file data");
+    }
+    eprintln!(
+        "copied {} entr{} ({} bytes) to {}:{}",
+        remote_stats.entries,
+        if remote_stats.entries == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        remote_stats.bytes,
+        server.name,
+        remote.path
+    );
+    Ok(())
+}
+
+async fn download_path(
+    client: &ApiClient,
+    remote: RemotePath,
+    destination: PathBuf,
+    recursive: bool,
+) -> anyhow::Result<()> {
+    let server = resolve_machine(client, &remote.machine).await?;
+    require_online_machine(&server)?;
+    let url = transfer_url(client, &server, "download", &remote.path, recursive)?;
+    let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .with_context(|| format!("failed to connect to {}", server.name))?;
+    let session_id = wait_for_transfer_ready(&mut socket).await?;
+    let mut receiver = TransferReceiver::new(destination, None, recursive, session_id)
+        .await
+        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    let mut local_stats = None;
+    let remote_stats = loop {
+        let Some(message) = socket.next().await else {
+            receiver.cancel().await;
+            bail!("transfer connection closed");
+        };
+        match message.context("failed to read file data")? {
+            Message::Binary(encoded) => {
+                let frame = TransferBinaryFrame::decode(&encoded)
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+                if let Some(stats) = receiver
+                    .receive(frame)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
+                {
+                    local_stats = Some(stats);
+                }
+            }
+            Message::Text(text) => match serde_json::from_str::<TransferServerMessage>(&text)
+                .context("invalid transfer response")?
+            {
+                TransferServerMessage::Complete { stats, .. } => break stats,
+                TransferServerMessage::Progress { .. } => {}
+                TransferServerMessage::Error { error } => {
+                    receiver.cancel().await;
+                    bail!("{}: {}", error.code, error.message);
+                }
+                TransferServerMessage::Ready { .. } => {}
+            },
+            Message::Ping(data) => {
+                socket
+                    .send(Message::Pong(data))
+                    .await
+                    .context("failed to reply to ping")?;
+            }
+            Message::Close(_) => {
+                receiver.cancel().await;
+                bail!("transfer connection closed");
+            }
+            Message::Pong(_) | Message::Frame(_) => {}
+        }
+    };
+    if local_stats != Some(remote_stats) {
+        receiver.cancel().await;
+        bail!("local transfer summary did not match the remote file data");
+    }
+    eprintln!(
+        "copied {} entr{} ({} bytes) from {}:{}",
+        remote_stats.entries,
+        if remote_stats.entries == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        remote_stats.bytes,
+        server.name,
+        remote.path
+    );
+    Ok(())
+}
+
+fn transfer_url(
+    client: &ApiClient,
+    server: &ServerInfo,
+    direction: &str,
+    path: &str,
+    recursive: bool,
+) -> anyhow::Result<Url> {
+    let mut url = client
+        .base
+        .join(&format!("api/scp/{}", path_segment(&server.server_id)))
+        .context("failed to build file transfer URL")?;
+    url.query_pairs_mut()
+        .append_pair("direction", direction)
+        .append_pair("path", path)
+        .append_pair("recursive", &recursive.to_string());
+    let scheme = match url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        scheme => bail!("unsupported agent server URL scheme {scheme}"),
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| anyhow::anyhow!("invalid agent server URL scheme"))?;
+    Ok(url)
+}
+
+async fn wait_for_transfer_ready(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> anyhow::Result<String> {
+    loop {
+        let Some(message) = socket.next().await else {
+            bail!("transfer connection closed before it was ready");
+        };
+        match message.context("failed to initialize transfer")? {
+            Message::Text(text) => match serde_json::from_str::<TransferServerMessage>(&text)
+                .context("invalid transfer response")?
+            {
+                TransferServerMessage::Ready { session_id } => return Ok(session_id),
+                TransferServerMessage::Progress { .. } => {
+                    bail!("transfer reported progress before it became ready")
+                }
+                TransferServerMessage::Error { error } => {
+                    bail!("{}: {}", error.code, error.message)
+                }
+                TransferServerMessage::Complete { .. } => {
+                    bail!("transfer completed before it became ready")
+                }
+            },
+            Message::Ping(data) => socket
+                .send(Message::Pong(data))
+                .await
+                .context("failed to reply to ping")?,
+            Message::Close(_) => bail!("transfer connection closed before it was ready"),
+            Message::Binary(_) => bail!("transfer sent data before it was ready"),
+            Message::Pong(_) | Message::Frame(_) => {}
+        }
+    }
+}
+
+fn require_online_machine(server: &ServerInfo) -> anyhow::Result<()> {
+    if server.status != ServerStatus::Online {
+        bail!("machine {} is offline", server.name);
+    }
+    Ok(())
+}
+
+async fn resolve_machine(client: &ApiClient, target: &str) -> anyhow::Result<ServerInfo> {
+    let target = normalize_machine_target(target)?;
+    let snapshot: WorkspaceSnapshot = client.request(Method::GET, "api/discovery", None).await?;
+    if let Some(server) = snapshot
+        .servers
+        .iter()
+        .find(|server| server.server_id == target)
+    {
+        return Ok(server.clone());
+    }
+    let mut matches = snapshot
+        .servers
+        .into_iter()
+        .filter(|server| server.name == target);
+    let Some(server) = matches.next() else {
+        bail!("machine {target} was not found in this workspace");
+    };
+    if matches.next().is_some() {
+        bail!("more than one machine is named {target}; use a server id");
+    }
+    Ok(server)
+}
+
+struct TerminalOutcome {
+    reason: String,
+    exit_code: Option<i32>,
+}
+
+async fn relay_terminal(
+    mut url: Url,
+    target: &str,
+    interactive_required: bool,
+) -> anyhow::Result<TerminalOutcome> {
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if interactive_required && !interactive {
+        bail!("remote shell requires an interactive terminal when no command is provided");
+    }
+    let (cols, rows) = if interactive {
+        terminal_size().context("failed to read terminal size")?
+    } else {
+        (120, 36)
+    };
     let websocket_scheme = match url.scheme() {
         "http" => "ws",
         "https" => "wss",
@@ -472,15 +879,16 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
 
     let (socket, _) = tokio_tungstenite::connect_async(url.as_str())
         .await
-        .with_context(|| format!("failed to attach to {target}"))?;
-    eprintln!("[treer] attached to {target}; press Ctrl-] to detach");
-    let raw_mode = RawModeGuard::enable()?;
+        .with_context(|| format!("failed to connect to {target}"))?;
+    if interactive {
+        eprintln!("[treer] connected to {target}; press Ctrl-] to disconnect");
+    }
+    let raw_mode = interactive.then(RawModeGuard::enable).transpose()?;
     let (mut outgoing, mut incoming) = socket.split();
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut input = [0_u8; 4096];
-    let mut reason = "detached".to_string();
-    let mut terminal_error = None;
+    let mut stdin_open = true;
     #[cfg(unix)]
     let mut resize_events =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
@@ -488,22 +896,27 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
     #[cfg(not(unix))]
     let mut resize_events = tokio::time::interval(Duration::from_millis(250));
 
-    loop {
+    let (reason, exit_code, terminal_error, detached) = loop {
         tokio::select! {
-            read = stdin.read(&mut input) => {
+            read = stdin.read(&mut input), if stdin_open => {
                 let read = read.context("failed to read terminal input")?;
                 if read == 0 {
-                    reason = "terminal input closed".to_string();
-                    break;
-                }
-                if let Some(detach_at) = input[..read].iter().position(|byte| *byte == ATTACH_DETACH_BYTE) {
-                    if detach_at > 0 {
-                        outgoing
-                            .send(Message::Binary(input[..detach_at].to_vec().into()))
-                            .await
-                            .context("failed to send terminal input")?;
+                    if interactive {
+                        break ("terminal input closed".to_string(), None, None, false);
                     }
-                    break;
+                    stdin_open = false;
+                    continue;
+                }
+                if interactive {
+                    if let Some(detach_at) = input[..read].iter().position(|byte| *byte == ATTACH_DETACH_BYTE) {
+                        if detach_at > 0 {
+                            outgoing
+                                .send(Message::Binary(input[..detach_at].to_vec().into()))
+                                .await
+                                .context("failed to send terminal input")?;
+                        }
+                        break ("detached".to_string(), None, None, true);
+                    }
                 }
                 outgoing
                     .send(Message::Binary(input[..read].to_vec().into()))
@@ -512,8 +925,7 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
             }
             message = incoming.next() => {
                 let Some(message) = message else {
-                    reason = "terminal connection closed".to_string();
-                    break;
+                    break ("terminal connection closed".to_string(), None, None, false);
                 };
                 match message.context("failed to read terminal output")? {
                     Message::Binary(data) => {
@@ -523,22 +935,29 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
                     Message::Text(text) => match serde_json::from_str::<TerminalServerMessage>(&text)
                         .context("invalid terminal server message")? {
                         TerminalServerMessage::Ready { .. } => {}
-                        TerminalServerMessage::Closed { reason: closed_reason } => {
-                            reason = closed_reason.unwrap_or_else(|| "agent terminal closed".to_string());
-                            break;
+                        TerminalServerMessage::Closed { reason: closed_reason, exit_code: closed_exit_code } => {
+                            break (
+                                closed_reason.unwrap_or_else(|| "remote terminal closed".to_string()),
+                                closed_exit_code,
+                                None,
+                                false,
+                            );
                         }
                         TerminalServerMessage::Error { error } => {
-                            reason = format!("{}: {}", error.code, error.message);
-                            terminal_error = Some(error);
-                            break;
+                            break (
+                                format!("{}: {}", error.code, error.message),
+                                None,
+                                Some(error),
+                                false,
+                            );
                         }
                     },
                     Message::Close(frame) => {
-                        reason = frame
+                        let reason = frame
                             .map(|frame| frame.reason.to_string())
                             .filter(|reason| !reason.is_empty())
                             .unwrap_or_else(|| "terminal connection closed".to_string());
-                        break;
+                        break (reason, None, None, false);
                     }
                     Message::Ping(data) => {
                         outgoing.send(Message::Pong(data)).await.context("failed to reply to terminal ping")?;
@@ -546,7 +965,7 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
                     Message::Pong(_) | Message::Frame(_) => {}
                 }
             }
-            _ = wait_for_resize(&mut resize_events) => {
+            _ = wait_for_resize(&mut resize_events), if interactive => {
                 let (cols, rows) = terminal_size().context("failed to read terminal size")?;
                 let resize = TerminalClientMessage::Resize {
                     cols: cols.max(1),
@@ -555,17 +974,22 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
                 outgoing
                     .send(Message::Text(serde_json::to_string(&resize)?.into()))
                     .await
-                    .context("failed to resize agent terminal")?;
+                    .context("failed to resize remote terminal")?;
             }
         }
-    }
+    };
     let _ = outgoing.send(Message::Close(None)).await;
     drop(raw_mode);
-    eprintln!("\r\n[treer] {reason}");
+    if interactive {
+        eprintln!("\r\n[treer] {reason}");
+    }
     if let Some(error) = terminal_error {
         bail!("{}: {}", error.code, error.message);
     }
-    Ok(json!({ "agent": target, "status": "detached", "reason": reason }))
+    if !interactive && exit_code.is_none() && !detached {
+        bail!("remote command ended without an exit status: {reason}");
+    }
+    Ok(TerminalOutcome { reason, exit_code })
 }
 
 struct RawModeGuard;
@@ -805,5 +1229,57 @@ mod tests {
                 command: MachineCommand::Delete { target }
             }) if target == "srv_test"
         ));
+    }
+
+    #[test]
+    fn ssh_commands_parse_interactive_and_remote_commands() {
+        let interactive = Args::try_parse_from(["treer", "ssh", "builder"])
+            .expect("interactive ssh should parse");
+        assert!(matches!(
+            interactive.command,
+            Some(Command::Ssh { target, cwd, command })
+                if target == "builder" && cwd == "." && command.is_empty()
+        ));
+
+        let command = Args::try_parse_from([
+            "treer", "ssh", "builder", "--cwd", "src", "--", "cargo", "test", "-q",
+        ])
+        .expect("remote ssh command should parse");
+        assert!(matches!(
+            command.command,
+            Some(Command::Ssh { target, cwd, command })
+                if target == "builder"
+                    && cwd == "src"
+                    && command == ["cargo", "test", "-q"]
+        ));
+    }
+
+    #[test]
+    fn scp_commands_parse_uploads_and_recursive_downloads() {
+        let upload = Args::try_parse_from(["treer", "scp", "notes.txt", "builder:notes.txt"])
+            .expect("scp upload should parse");
+        assert!(matches!(
+            upload.command,
+            Some(Command::Scp { recursive: false, source, destination })
+                if source == "notes.txt" && destination == "builder:notes.txt"
+        ));
+
+        let download =
+            Args::try_parse_from(["treer", "scp", "-r", "builder:results", "./downloaded"])
+                .expect("recursive scp download should parse");
+        assert!(matches!(
+            download.command,
+            Some(Command::Scp { recursive: true, source, destination })
+                if source == "builder:results" && destination == "./downloaded"
+        ));
+    }
+
+    #[test]
+    fn scp_remote_paths_require_machine_prefixes() {
+        let remote = parse_remote_path("builder:src/main.rs").expect("remote path");
+        assert_eq!(remote.machine, "builder");
+        assert_eq!(remote.path, "src/main.rs");
+        assert!(parse_remote_path("./local:file").is_none());
+        assert!(parse_remote_path("/tmp/local:file").is_none());
     }
 }

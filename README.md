@@ -43,31 +43,46 @@ workflow artifact for 14 days. Pushing a `v*` tag creates or updates that
 GitHub Release with the three binaries and a `SHA256SUMS-darwin-aarch64.txt`
 file. Ordinary branch pushes do not run the artifact build.
 
-Open the web UI, select a workspace, and choose **Add machine** to generate a
-10-minute, single-use bootstrap command. It has this shape:
+Open the web UI, select a workspace, and choose **Add machine**. The dialog
+separates installation from workspace enrollment. The installation command is
+public and reusable:
 
 ```bash
-curl -fsSL -X POST -H 'Authorization: Bearer enr_...' \
-  'https://PROXY_HOST/install.sh' | sh
+curl -fsSL 'https://PROXY_HOST/install.sh' | sh
 ```
 
 The script detects the target platform, installs `treer` to `~/.local/bin` and
-the Host and Controller binaries to `~/.local/libexec/treer`, then registers and
-starts the Host using the current directory as its workspace root. Linux uses a
-systemd user service with restart and linger enabled; macOS uses a per-user
-LaunchAgent with `KeepAlive`. Override `TREER_WORKSPACE_ROOT`,
-`TREER_INSTALL_DIR`, `TREER_AGENT_SERVER_INSTALL_DIR`, `TREER_STATE_DIR`, or
-`TREER_AGENT_SERVER_LISTEN` when needed. By default, installation selects the
-first available loopback port starting at `8790` and saves it per workspace.
-Reinstalling or hot-updating a healthy Controller preserves that port.
+the Host and Controller binaries to `~/.local/libexec/treer`. It does not contain
+a credential, create workspace configuration, register a service, or start a
+process. Override `TREER_INSTALL_DIR` or `TREER_AGENT_SERVER_INSTALL_DIR` when
+needed.
 
-Running the bootstrap command again replaces the installed binaries on disk and
-asks the existing Host process to restart only the Controller. The updated Host
-binary takes effect on the next full service restart. Existing agents, PTYs, and
-buffered terminal output stay alive while the browser reconnects.
+The separate connection command contains a 10-minute, single-use enrollment key:
 
-The enrollment token can be used once. During enrollment the Proxy creates a
-stable server ID and a long-lived credential bound to that server and workspace.
+```bash
+TREER_ENROLLMENT_KEY='enr_v1_...' \
+  "$HOME/.local/libexec/treer/treer-agent-server" connect \
+  --proxy 'https://PROXY_HOST/'
+```
+
+`connect` decodes the workspace ID from the key, exchanges it for a long-lived
+machine credential, uses the current directory as the workspace root, registers
+the Host service, and starts it. Linux uses a systemd user service with restart
+and linger enabled; macOS uses a per-user LaunchAgent with `KeepAlive`. Override
+`TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`, or `TREER_AGENT_SERVER_LISTEN` when
+needed. The first available loopback port starting at `8790` is saved per
+workspace.
+
+Installing replacement binaries does not restart a running service.
+`service restart-controller` activates an updated Controller without restarting
+the Host. The updated Host binary takes effect on the next full service restart.
+Existing agents, PTYs, and buffered terminal output stay alive during a
+Controller restart while the browser reconnects.
+
+The enrollment key can be used once and contains a versioned encoding of its
+workspace ID. The Proxy verifies that embedded workspace against its enrollment
+record, then creates a stable server ID and a long-lived credential bound to that
+server and workspace.
 The credential is stored in the Controller configuration with owner-only file
 permissions and is required for both the Controller WebSocket and agent-facing
 Proxy API. Production mode requires an HTTPS public URL.
@@ -164,6 +179,10 @@ treer agent get reviewer
 treer agent rename reviewer code-reviewer
 treer machine rename self build-machine
 treer machine delete srv_obsolete
+treer ssh build-machine
+treer ssh build-machine -- cargo test
+treer scp results.json build-machine:artifacts/results.json
+treer scp -r build-machine:artifacts ./downloaded-artifacts
 treer agent attach reviewer
 treer agent delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
@@ -176,6 +195,39 @@ agent's live PTY in the current native terminal. Input, colors, cursor control,
 and terminal resize are passed through directly. Press `Ctrl-]` to detach
 without stopping the agent. The shorter `treer attach <target>` alias is also
 available.
+
+`treer ssh <machine>` opens a new native PTY on another online machine in the
+same workspace. It is routed through the local Agent Server and Proxy; the
+target does not need an SSH daemon, network address, or SSH keys. The target can
+be a server ID, a unique machine name, or `self`/`.`. Use `--cwd <path>` to
+select the target working directory, or put a command after `--` for a
+non-interactive session:
+
+```bash
+treer ssh gpu-worker
+treer ssh gpu-worker --cwd project -- cargo test --workspace
+```
+
+Remote shells are transient and are not registered as agents. Detaching an
+interactive session with `Ctrl-]`, closing the client, or losing the connection
+stops that shell and its child process. Non-interactive sessions forward stdin,
+stdout, and the remote exit code.
+
+`treer scp` copies regular files or directory trees through the same authenticated
+workspace connection. Exactly one operand uses `machine:path`; add `-r` for a
+directory:
+
+```bash
+treer scp report.json gpu-worker:artifacts/report.json
+treer scp gpu-worker:artifacts/report.json ./report.json
+treer scp -r results gpu-worker:archive/results
+```
+
+Remote paths are relative to the target machine's configured workspace root.
+Transfers use binary WebSocket frames, preserve Unix permission bits, verify
+declared file sizes and transfer totals, and commit each file with an atomic
+rename. Symbolic links and special files are rejected. The current version does
+not copy directly between two remote machines.
 
 Targets accept an agent id, a unique agent name, or `self`/`.` from inside a
 managed agent. `prompt --wait` waits for observed activity followed by `idle`,

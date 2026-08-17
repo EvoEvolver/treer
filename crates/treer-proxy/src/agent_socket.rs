@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use treer_protocol::{
     AgentServerMessage, ProtocolError, ProxyMessage, TerminalBinaryFrame, TerminalBinaryKind,
-    PROTOCOL_VERSION,
+    TransferBinaryFrame, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
 
@@ -51,6 +51,32 @@ async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: Ma
         let Message::Text(text) = message else {
             match message {
                 Message::Binary(encoded) => {
+                    if TransferBinaryFrame::is_transfer_frame(&encoded) {
+                        let frame = match TransferBinaryFrame::decode(&encoded) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                send_error(&outgoing_tx, error);
+                                continue;
+                            }
+                        };
+                        let Some((workspace_id, server_id)) = identity.as_ref() else {
+                            send_error(&outgoing_tx, identity_error());
+                            continue;
+                        };
+                        if let Err(error) = state
+                            .transfer_output(
+                                workspace_id,
+                                server_id,
+                                connection_id,
+                                frame,
+                                encoded.to_vec(),
+                            )
+                            .await
+                        {
+                            send_error(&outgoing_tx, error);
+                        }
+                        continue;
+                    }
                     let frame = match TerminalBinaryFrame::decode(&encoded) {
                         Ok(frame) => frame,
                         Err(error) => {
@@ -226,7 +252,11 @@ async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: Ma
                     send_error(&outgoing_tx, identity_error());
                 }
             }
-            AgentServerMessage::TerminalClosed { session_id, reason } => {
+            AgentServerMessage::TerminalClosed {
+                session_id,
+                reason,
+                exit_code,
+            } => {
                 if let Some((workspace_id, server_id)) = identity.as_ref() {
                     if let Err(error) = state
                         .terminal_closed(
@@ -235,7 +265,62 @@ async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: Ma
                             connection_id,
                             &session_id,
                             reason,
+                            exit_code,
                         )
+                        .await
+                    {
+                        send_error(&outgoing_tx, error);
+                    }
+                } else {
+                    send_error(&outgoing_tx, identity_error());
+                }
+            }
+            AgentServerMessage::TransferReady { session_id } => {
+                if let Some((workspace_id, server_id)) = identity.as_ref() {
+                    if let Err(error) = state
+                        .transfer_ready(workspace_id, server_id, connection_id, &session_id)
+                        .await
+                    {
+                        send_error(&outgoing_tx, error);
+                    }
+                } else {
+                    send_error(&outgoing_tx, identity_error());
+                }
+            }
+            AgentServerMessage::TransferProgress { session_id } => {
+                if let Some((workspace_id, server_id)) = identity.as_ref() {
+                    if let Err(error) = state
+                        .transfer_progress(workspace_id, server_id, connection_id, &session_id)
+                        .await
+                    {
+                        send_error(&outgoing_tx, error);
+                    }
+                } else {
+                    send_error(&outgoing_tx, identity_error());
+                }
+            }
+            AgentServerMessage::TransferComplete { session_id, stats } => {
+                if let Some((workspace_id, server_id)) = identity.as_ref() {
+                    if let Err(error) = state
+                        .transfer_complete(
+                            workspace_id,
+                            server_id,
+                            connection_id,
+                            &session_id,
+                            stats,
+                        )
+                        .await
+                    {
+                        send_error(&outgoing_tx, error);
+                    }
+                } else {
+                    send_error(&outgoing_tx, identity_error());
+                }
+            }
+            AgentServerMessage::TransferFailed { session_id, error } => {
+                if let Some((workspace_id, server_id)) = identity.as_ref() {
+                    if let Err(error) = state
+                        .transfer_failed(workspace_id, server_id, connection_id, &session_id, error)
                         .await
                     {
                         send_error(&outgoing_tx, error);

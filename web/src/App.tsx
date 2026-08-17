@@ -125,6 +125,7 @@ export default function App() {
   const [agentArgs, setAgentArgs] = useState("")
   const [renameName, setRenameName] = useState("")
   const [installCommand, setInstallCommand] = useState("")
+  const [connectCommand, setConnectCommand] = useState("")
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
   const [currentRole, setCurrentRole] = useState<Member["role"]>("member")
@@ -254,8 +255,8 @@ export default function App() {
   async function openInstall() {
     if (!workspaceId) return
     try {
-      const data = await api<{ command: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bootstrap`, { method: "POST", body: "{}" })
-      setInstallCommand(data.command); setInstallOpen(true)
+      const data = await api<{ install_command: string; connect_command: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bootstrap`, { method: "POST", body: "{}" })
+      setInstallCommand(data.install_command); setConnectCommand(data.connect_command); setInstallOpen(true)
     } catch (reason) { showError(reason) }
   }
 
@@ -405,7 +406,7 @@ export default function App() {
 
     <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start an agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Kind"><Select value={agentKind} onValueChange={setAgentKind}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="codex">codex</SelectItem><SelectItem value="claude">claude</SelectItem><SelectItem value="command">command</SelectItem></SelectContent></Select></Field><Field label="Name"><Input value={agentName} onChange={(event) => setAgentName(event.target.value)} required /></Field><Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field><Field label="Arguments, one per line"><Textarea rows={3} value={agentArgs} onChange={(event) => setAgentArgs(event.target.value)} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId}>Create agent</Button></DialogFooter></form></DialogContent></Dialog>
 
-    <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Run this command on the machine you want to connect.</DialogDescription></DialogHeader><Textarea readOnly value={installCommand} className="min-h-28 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button><Button onClick={() => copy(installCommand)}><Copy />Copy command</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 

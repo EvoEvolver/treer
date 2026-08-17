@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
-use treer_protocol::{AgentServerSnapshot, ApiError, ProtocolError, ServerInfo, WorkspaceInfo};
+use treer_protocol::{
+    format_machine_enrollment_key, parse_machine_enrollment_key, AgentServerSnapshot, ApiError,
+    ProtocolError, ServerInfo, WorkspaceInfo,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -825,8 +828,14 @@ impl AuthStore {
         workspace_id: &str,
         created_by: &str,
     ) -> Result<String, AuthFailure> {
-        let enrollment_id = format!("enr_{}", Uuid::new_v4().simple());
+        let enrollment_id = Uuid::new_v4().simple().to_string();
         let secret = random_secret();
+        let enrollment = format_machine_enrollment_key(workspace_id, &enrollment_id, &secret)
+            .map_err(|error| AuthFailure::internal("machine_enrollment_error", error.message))?;
+        let identifier = enrollment
+            .split_once('.')
+            .map(|(identifier, _)| identifier)
+            .ok_or_else(invalid_machine_enrollment)?;
         let secret_hash = hash_password(&secret)?;
         let now = Utc::now();
         let expires_at = now + Duration::minutes(MACHINE_ENROLLMENT_TTL_MINUTES);
@@ -835,7 +844,7 @@ impl AuthStore {
              enrollment_id, workspace_id, secret_hash, created_at, expires_at, created_by) \
              VALUES(?, ?, ?, ?, ?, ?)",
         )
-        .bind(&enrollment_id)
+        .bind(identifier)
         .bind(workspace_id)
         .bind(secret_hash)
         .bind(now.to_rfc3339())
@@ -844,32 +853,35 @@ impl AuthStore {
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        Ok(format!("{enrollment_id}.{secret}"))
+        Ok(enrollment)
     }
 
     pub async fn claim_machine_enrollment(
         &self,
         token: &str,
     ) -> Result<MachineEnrollmentClaim, AuthFailure> {
-        let (enrollment_id, secret) =
-            parse_credential(token, "enr_").map_err(|_| invalid_machine_enrollment())?;
+        let enrollment =
+            parse_machine_enrollment_key(token).map_err(|_| invalid_machine_enrollment())?;
         let now = Utc::now();
         let row = sqlx::query(
             "SELECT workspace_id, secret_hash, created_by \
              FROM machine_enrollments \
              WHERE enrollment_id = ? AND used_at IS NULL AND expires_at > ?",
         )
-        .bind(enrollment_id)
+        .bind(&enrollment.identifier)
         .bind(now.to_rfc3339())
         .fetch_optional(&self.pool)
         .await
         .map_err(AuthFailure::database)?
         .ok_or_else(invalid_machine_enrollment)?;
         let secret_hash: String = row.get("secret_hash");
-        if !verify_password(secret, &secret_hash) {
+        if !verify_password(&enrollment.secret, &secret_hash) {
             return Err(invalid_machine_enrollment());
         }
         let workspace_id: String = row.get("workspace_id");
+        if workspace_id != enrollment.workspace_id {
+            return Err(invalid_machine_enrollment());
+        }
         let created_by: String = row.get("created_by");
         let server_id = format!("srv_{}", Uuid::new_v4().simple());
         let machine_secret = random_secret();
@@ -881,7 +893,7 @@ impl AuthStore {
         )
         .bind(now.to_rfc3339())
         .bind(&server_id)
-        .bind(enrollment_id)
+        .bind(&enrollment.identifier)
         .bind(now.to_rfc3339())
         .execute(&mut *transaction)
         .await
@@ -1831,6 +1843,12 @@ mod tests {
             .create_machine_enrollment("workspace-a", "admin")
             .await
             .expect("create enrollment");
+        assert_eq!(
+            parse_machine_enrollment_key(&enrollment)
+                .expect("parse enrollment")
+                .workspace_id,
+            "workspace-a"
+        );
         let claim = store
             .claim_machine_enrollment(&enrollment)
             .await
