@@ -33,6 +33,13 @@ struct Args {
         help = "Directory containing <platform>/treer[-agent-server] binaries"
     )]
     artifacts_dir: PathBuf,
+    #[arg(
+        long,
+        env = "TREER_RELEASE_ARTIFACT_BASE_URL",
+        default_value = "https://github.com/EvoEvolver/treer/releases/latest/download/",
+        help = "Fallback URL for platform binaries absent from the local artifact directory"
+    )]
+    release_artifact_base_url: Url,
     #[arg(long, env = "ADMIN_PASSWORD")]
     admin_password: Option<String>,
     #[arg(
@@ -68,7 +75,11 @@ async fn main() -> anyhow::Result<()> {
     )?;
     require_secure_public_url(&public_url, args.disable_auth)?;
     let database_path = database_path(args.database_path, args.railway_volume_mount_path);
-    let bootstrap = api::BootstrapConfig::new(public_url.clone(), args.artifacts_dir);
+    let bootstrap = api::BootstrapConfig::new(
+        public_url.clone(),
+        args.artifacts_dir,
+        args.release_artifact_base_url,
+    );
     let auth = auth::AuthStore::open(
         &database_path,
         admin_password,

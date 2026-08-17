@@ -32,7 +32,10 @@ or deployed servers.
 places the current platform's `treer-agent-host`, `treer-agent-server`, and
 `treer` binaries under `dist/<platform>` for the proxy to serve. Release
 deployments should stage all required Linux and macOS platform directories or
-set `--artifacts-dir` to an equivalent artifact tree.
+set `--artifacts-dir` to an equivalent artifact tree. When a platform artifact
+is not present locally, the Proxy redirects to the latest Treer GitHub Release;
+override its base with `TREER_RELEASE_ARTIFACT_BASE_URL` when mirroring release
+assets elsewhere.
 
 The `Build macOS ARM64 artifacts` GitHub workflow builds `darwin-aarch64`
 binaries on a native Apple Silicon runner. Manual runs retain the files as a

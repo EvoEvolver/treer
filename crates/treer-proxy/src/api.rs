@@ -5,7 +5,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, Path, Query, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
@@ -32,13 +32,27 @@ const XTERM_FIT_JS: &str = include_str!("../../../web/vendor/addon-fit.js");
 pub struct BootstrapConfig {
     public_url: Url,
     artifacts_dir: PathBuf,
+    release_artifact_base_url: Url,
 }
 
 impl BootstrapConfig {
-    pub fn new(public_url: Url, artifacts_dir: PathBuf) -> Self {
+    pub fn new(
+        public_url: Url,
+        artifacts_dir: PathBuf,
+        mut release_artifact_base_url: Url,
+    ) -> Self {
+        let mut path = release_artifact_base_url
+            .path()
+            .trim_end_matches('/')
+            .to_string();
+        path.push('/');
+        release_artifact_base_url.set_path(&path);
+        release_artifact_base_url.set_query(None);
+        release_artifact_base_url.set_fragment(None);
         Self {
             public_url,
             artifacts_dir,
+            release_artifact_base_url,
         }
     }
 }
@@ -257,18 +271,49 @@ async fn download_artifact(
         ));
     }
     let path = config.artifacts_dir.join(&platform).join(&binary);
-    let data = tokio::fs::read(&path).await.map_err(|error| {
-        tracing::warn!(path = %path.display(), %error, "bootstrap artifact unavailable");
-        ApiFailure::not_found("artifact_not_found", "artifact not found")
-    })?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/octet-stream"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        data,
-    )
-        .into_response())
+    match tokio::fs::read(&path).await {
+        Ok(data) => Ok((
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            data,
+        )
+            .into_response()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let release_url = release_artifact_url(&config, &platform, &binary)?;
+            tracing::info!(
+                path = %path.display(),
+                release = %release_url,
+                "redirecting missing bootstrap artifact to release"
+            );
+            Ok(Redirect::temporary(release_url.as_str()).into_response())
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "bootstrap artifact unavailable");
+            Err(ApiFailure::not_found(
+                "artifact_not_found",
+                "artifact not found",
+            ))
+        }
+    }
+}
+
+fn release_artifact_url(
+    config: &BootstrapConfig,
+    platform: &str,
+    binary: &str,
+) -> Result<Url, ApiFailure> {
+    config
+        .release_artifact_base_url
+        .join(&format!("{binary}-{platform}"))
+        .map_err(|error| {
+            ProtocolError::new(
+                "artifact_url_error",
+                format!("failed to build release artifact URL: {error}"),
+            )
+            .into()
+        })
 }
 
 fn install_script_url(public_url: &Url) -> Url {
@@ -810,6 +855,8 @@ mod tests {
         BootstrapConfig::new(
             Url::parse("https://treer.example/").expect("valid URL"),
             PathBuf::from("dist"),
+            Url::parse("https://github.example/releases/latest/download")
+                .expect("valid release URL"),
         )
     }
 
@@ -844,6 +891,40 @@ mod tests {
         assert!(valid_artifact_component("linux-aarch64"));
         assert!(!valid_artifact_component("../linux-aarch64"));
         assert!(!valid_artifact_component("linux/aarch64"));
+    }
+
+    #[test]
+    fn release_artifact_names_match_tagged_assets() {
+        let config = test_config();
+        let url = release_artifact_url(&config, "darwin-aarch64", "treer-agent-host")
+            .unwrap_or_else(|_| panic!("release artifact URL"));
+        assert_eq!(
+            url.as_str(),
+            "https://github.example/releases/latest/download/treer-agent-host-darwin-aarch64"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_local_artifacts_redirect_to_the_release() {
+        let mut config = test_config();
+        config.artifacts_dir = std::env::temp_dir().join(format!(
+            "treer-missing-artifacts-{}",
+            Uuid::new_v4().simple()
+        ));
+        let response = download_artifact(
+            Extension(config),
+            Path(("darwin-aarch64".to_string(), "treer".to_string())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("missing artifact should redirect"));
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://github.example/releases/latest/download/treer-darwin-aarch64")
+        );
     }
 
     #[test]
