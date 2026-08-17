@@ -176,8 +176,18 @@ async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: Ma
                         send_error(&outgoing_tx, error.into_parts().1);
                         continue;
                     }
-                    if let Err(error) = auth.apply_agent_names(&mut snapshot).await {
-                        send_error(&outgoing_tx, error.into_parts().1);
+                    let deleted_agents = match auth.apply_agent_names(&mut snapshot).await {
+                        Ok(deleted_agents) => deleted_agents,
+                        Err(error) => {
+                            send_error(&outgoing_tx, error.into_parts().1);
+                            continue;
+                        }
+                    };
+                    if let Err(error) = state
+                        .restore_deleted_agents(&snapshot.server.workspace_id, deleted_agents)
+                        .await
+                    {
+                        send_error(&outgoing_tx, error);
                         continue;
                     }
                     if let Err(error) = state.apply_snapshot(connection_id, snapshot).await {

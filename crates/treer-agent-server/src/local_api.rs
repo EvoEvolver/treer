@@ -74,6 +74,18 @@ impl LocalApiState {
             .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
         decode(response).await
     }
+
+    async fn delete(&self, suffix: &str) -> Result<Value, LocalApiError> {
+        let mut request = self.client.delete(self.proxy_url(suffix)?);
+        if let Some(token) = &self.machine_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
+        decode(response).await
+    }
 }
 
 pub fn router(state: LocalApiState) -> Router {
@@ -85,7 +97,10 @@ pub fn router(state: LocalApiState) -> Router {
             axum::routing::patch(rename_machine),
         )
         .route("/api/agents", get(list_agents).post(create_agent))
-        .route("/api/agents/{agent_id}", get(get_agent).patch(rename_agent))
+        .route(
+            "/api/agents/{agent_id}",
+            get(get_agent).patch(rename_agent).delete(delete_agent),
+        )
         .route("/api/agents/{agent_id}/prompt", post(prompt_agent))
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
@@ -161,6 +176,13 @@ async fn rename_agent(
             )
             .await?,
     ))
+}
+
+async fn delete_agent(
+    State(state): State<LocalApiState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(state.delete(&format!("agents/{agent_id}")).await?))
 }
 
 async fn prompt_agent(

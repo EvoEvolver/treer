@@ -210,6 +210,20 @@ impl AuthStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS deleted_agents (\
+             agent_id TEXT PRIMARY KEY, \
+             workspace_id TEXT NOT NULL, \
+             deleted_at TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS deleted_agents_workspace_id \
+             ON deleted_agents(workspace_id)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -280,7 +294,7 @@ impl AuthStore {
     pub async fn apply_agent_names(
         &self,
         snapshot: &mut AgentServerSnapshot,
-    ) -> Result<(), AuthFailure> {
+    ) -> Result<Vec<String>, AuthFailure> {
         let rows = sqlx::query("SELECT agent_id, name FROM agent_names WHERE workspace_id = ?")
             .bind(&snapshot.server.workspace_id)
             .fetch_all(&self.pool)
@@ -295,6 +309,46 @@ impl AuthStore {
                 agent.name.clone_from(name);
             }
         }
+        let deleted = sqlx::query_scalar::<_, String>(
+            "SELECT agent_id FROM deleted_agents WHERE workspace_id = ?",
+        )
+        .bind(&snapshot.server.workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let deleted_set: std::collections::HashSet<_> =
+            deleted.iter().map(String::as_str).collect();
+        snapshot
+            .agents
+            .retain(|agent| !deleted_set.contains(agent.agent_id.as_str()));
+        Ok(deleted)
+    }
+
+    pub async fn delete_agent(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+    ) -> Result<(), AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO deleted_agents(agent_id, workspace_id, deleted_at) \
+             VALUES(?, ?, ?) \
+             ON CONFLICT(agent_id) DO UPDATE SET \
+             workspace_id = excluded.workspace_id, deleted_at = excluded.deleted_at",
+        )
+        .bind(agent_id)
+        .bind(workspace_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM agent_names WHERE agent_id = ? AND workspace_id = ?")
+            .bind(agent_id)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(())
     }
 
@@ -1047,6 +1101,18 @@ mod tests {
 
         assert_eq!(snapshot.server.name, "build-machine");
         assert_eq!(snapshot.agents[0].name, "reviewer");
+
+        store
+            .delete_agent("workspace-a", "agent-a")
+            .await
+            .expect("persist deletion");
+        snapshot.agents[0].name = "original-agent".to_string();
+        let deleted = store
+            .apply_agent_names(&mut snapshot)
+            .await
+            .expect("apply deletion");
+        assert_eq!(deleted, ["agent-a"]);
+        assert!(snapshot.agents.is_empty());
     }
 
     #[test]

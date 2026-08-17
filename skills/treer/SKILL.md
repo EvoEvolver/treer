@@ -114,6 +114,13 @@ treer agent get reviewer
 treer agent read reviewer --lines 120
 ```
 
+Delete an agent only when its process and workspace entry should both be
+removed. Deletion is persistent and is different from merely stopping it:
+
+```bash
+treer agent delete reviewer
+```
+
 ## Send terminal keys intentionally
 
 Use `prompt` for normal messages. Use `send-keys` only for interactive terminal
@@ -139,3 +146,4 @@ validates every key before sending any bytes.
 - Do not claim reliable task delivery, durable mailboxes, or strict turn
   correlation; the current collaboration surface is terminal-oriented.
 - Use `treer agent stop <target>` only when terminating that process is intended.
+- Use `treer agent delete <target>` only when permanent removal is intended.

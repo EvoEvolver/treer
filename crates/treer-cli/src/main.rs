@@ -83,6 +83,8 @@ enum Command {
     },
     #[command(about = "Rename an agent (compatibility alias for `agent rename`)")]
     Rename { target: String, name: String },
+    #[command(about = "Delete an agent (compatibility alias for `agent delete`)")]
+    Delete { target: String },
     #[command(about = "Stop an agent (compatibility alias for `agent stop`)")]
     Stop { target: String },
 }
@@ -95,6 +97,8 @@ enum AgentCommand {
     Get { target: String },
     #[command(about = "Rename an agent")]
     Rename { target: String, name: String },
+    #[command(about = "Stop and permanently remove an agent")]
+    Delete { target: String },
     #[command(about = "Submit a prompt to another agent")]
     Prompt {
         target: String,
@@ -319,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Read { target, lines } => read_agent(&client, &target, lines).await?,
         Command::Rename { target, name } => rename_agent(&client, &target, name).await?,
+        Command::Delete { target } => delete_agent(&client, &target).await?,
         Command::Stop { target } => stop_agent(&client, &target).await?,
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -330,6 +335,7 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
         AgentCommand::List => client.value(Method::GET, "api/agents", None).await,
         AgentCommand::Get { target } => Ok(serde_json::to_value(client.get_agent(&target).await?)?),
         AgentCommand::Rename { target, name } => rename_agent(client, &target, name).await,
+        AgentCommand::Delete { target } => delete_agent(client, &target).await,
         AgentCommand::Prompt { target, text, wait } => {
             prompt_and_maybe_wait(client, &target, text, wait).await
         }
@@ -413,6 +419,17 @@ async fn rename_agent(client: &ApiClient, target: &str, name: String) -> anyhow:
             Method::PATCH,
             &format!("api/agents/{}", path_segment(&target)),
             Some(serde_json::to_value(RenameRequest { name })?),
+        )
+        .await
+}
+
+async fn delete_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
+    let target = normalize_target(target)?;
+    client
+        .value(
+            Method::DELETE,
+            &format!("api/agents/{}", path_segment(&target)),
+            None,
         )
         .await
 }

@@ -55,7 +55,7 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}",
-            get(get_agent).patch(rename_agent),
+            get(get_agent).patch(rename_agent).delete(delete_agent),
         )
         .route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
@@ -105,7 +105,7 @@ pub fn router(state: AppState, bootstrap: BootstrapConfig, auth_store: AuthStore
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}",
-            get(get_agent).patch(rename_agent),
+            get(get_agent).patch(rename_agent).delete(delete_agent),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -458,6 +458,29 @@ async fn rename_agent(
         state
             .rename_agent(&workspace_id, &agent.agent_id, name)
             .await?,
+    )?))
+}
+
+async fn delete_agent(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, target)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    if !agent.status.is_terminal() {
+        state
+            .send_command(
+                &workspace_id,
+                &agent.server_id,
+                AgentCommand::Stop {
+                    agent_id: agent.agent_id.clone(),
+                },
+            )
+            .await?;
+    }
+    auth.delete_agent(&workspace_id, &agent.agent_id).await?;
+    Ok(Json(serde_json::to_value(
+        state.delete_agent(&workspace_id, &agent.agent_id).await?,
     )?))
 }
 

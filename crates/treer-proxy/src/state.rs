@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -54,6 +54,7 @@ struct PendingCommand {
 struct TerminalSession {
     workspace_id: String,
     server_id: String,
+    agent_id: String,
     outgoing: mpsc::UnboundedSender<SocketFrame>,
     last_revision: Option<u64>,
 }
@@ -63,6 +64,7 @@ struct WorkspaceState {
     revision: u64,
     servers: HashMap<String, ServerInfo>,
     agents: HashMap<String, AgentInfo>,
+    deleted_agents: HashSet<String>,
 }
 
 impl WorkspaceState {
@@ -111,6 +113,7 @@ impl AppState {
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
+                deleted_agents: HashSet::new(),
             })
             .info
             .clone()
@@ -140,6 +143,7 @@ impl AppState {
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
+                deleted_agents: HashSet::new(),
             },
         );
         Ok(info)
@@ -243,6 +247,9 @@ impl AppState {
                 .retain(|_, agent| agent.server_id != server_id);
             for mut agent in agents {
                 if agent.workspace_id == snapshot_workspace_id && agent.server_id == server_id {
+                    if workspace.deleted_agents.contains(&agent.agent_id) {
+                        continue;
+                    }
                     if let Some(name) = names.get(&agent.agent_id) {
                         agent.name.clone_from(name);
                     }
@@ -298,6 +305,9 @@ impl AppState {
             let workspace = workspaces
                 .get_mut(&workspace_id)
                 .ok_or_else(|| ProtocolError::new("workspace_not_found", &workspace_id))?;
+            if workspace.deleted_agents.contains(&agent.agent_id) {
+                return Ok(());
+            }
             if let Some(current) = workspace.agents.get(&agent.agent_id) {
                 agent.name.clone_from(&current.name);
             }
@@ -316,6 +326,53 @@ impl AppState {
         };
         let _ = self.inner.events.send(event);
         Ok(())
+    }
+
+    pub async fn restore_deleted_agents(
+        &self,
+        workspace_id: &str,
+        agent_ids: impl IntoIterator<Item = String>,
+    ) -> Result<(), ProtocolError> {
+        let mut workspaces = self.inner.workspaces.write().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+        for agent_id in agent_ids {
+            workspace.agents.remove(&agent_id);
+            workspace.deleted_agents.insert(agent_id);
+        }
+        Ok(())
+    }
+
+    pub async fn delete_agent(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let (agent, event) = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+            let agent = workspace
+                .agents
+                .remove(agent_id)
+                .ok_or_else(|| ProtocolError::new("agent_not_found", agent_id))?;
+            workspace.deleted_agents.insert(agent_id.to_string());
+            workspace.revision = workspace.revision.saturating_add(1);
+            let event = WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: workspace_id.to_string(),
+                event: "agent.deleted".to_string(),
+                data: serde_json::to_value(&agent).map_err(|error| {
+                    ProtocolError::new("encode_error", format!("failed to encode event: {error}"))
+                })?,
+            };
+            (agent, event)
+        };
+        let _ = self.inner.events.send(event);
+        self.close_agent_terminals(workspace_id, agent_id).await;
+        Ok(agent)
     }
 
     pub async fn resolve_server(
@@ -591,6 +648,7 @@ impl AppState {
             TerminalSession {
                 workspace_id: workspace_id.to_string(),
                 server_id,
+                agent_id: agent.agent_id.clone(),
                 outgoing,
                 last_revision: None,
             },
@@ -610,6 +668,29 @@ impl AppState {
             return Err(error);
         }
         Ok(session_id)
+    }
+
+    async fn close_agent_terminals(&self, workspace_id: &str, agent_id: &str) {
+        let sessions = self
+            .inner
+            .terminal_sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, session)| {
+                session.workspace_id == workspace_id && session.agent_id == agent_id
+            })
+            .map(|(session_id, session)| (session_id.clone(), session.outgoing.clone()))
+            .collect::<Vec<_>>();
+        for (session_id, outgoing) in sessions {
+            send_terminal_to_browser(
+                &outgoing,
+                &TerminalServerMessage::Closed {
+                    reason: Some("agent deleted".to_string()),
+                },
+            );
+            self.detach_terminal(&session_id).await;
+        }
     }
 
     pub async fn terminal_input(
@@ -1104,6 +1185,62 @@ mod tests {
         let snapshot = state.snapshot("alpha").await.expect("workspace snapshot");
         assert_eq!(snapshot.servers[0].name, "renamed-machine");
         assert_eq!(snapshot.agents[0].name, "renamed-agent");
+    }
+
+    #[tokio::test]
+    async fn deleted_agents_ignore_controller_snapshots_and_events() {
+        let state = AppState::new();
+        let server = test_server();
+        let connection_id = Uuid::new_v4();
+        let (outgoing, _messages) = mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), connection_id, outgoing)
+            .await
+            .expect("register server");
+        state
+            .apply_snapshot(
+                connection_id,
+                AgentServerSnapshot {
+                    server: server.clone(),
+                    agents: vec![test_agent("agent-1", "helper")],
+                },
+            )
+            .await
+            .expect("initial snapshot");
+        state
+            .delete_agent("alpha", "agent-1")
+            .await
+            .expect("delete agent");
+
+        state
+            .apply_snapshot(
+                connection_id,
+                AgentServerSnapshot {
+                    server,
+                    agents: vec![test_agent("agent-1", "helper")],
+                },
+            )
+            .await
+            .expect("replacement snapshot");
+        state
+            .apply_agent_event(connection_id, test_agent("agent-1", "helper"))
+            .await
+            .expect("late agent event");
+
+        assert!(state
+            .snapshot("alpha")
+            .await
+            .expect("workspace snapshot")
+            .agents
+            .is_empty());
+        assert_eq!(
+            state
+                .resolve_agent("alpha", "agent-1")
+                .await
+                .expect_err("deleted agent must stay hidden")
+                .code,
+            "agent_not_found"
+        );
     }
 
     #[tokio::test]

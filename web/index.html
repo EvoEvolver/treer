@@ -116,6 +116,7 @@
     dialog::backdrop { background: rgba(16, 26, 23, .48); backdrop-filter: blur(3px); }
     dialog form { padding: 24px; }
     dialog h2 { font-size: 18px; line-height: 1.25; margin: 0 0 18px; }
+    .dialog-copy { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
     dialog .actions { justify-content: flex-end; }
     #installCommand { min-height: 88px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
     #inviteUrl { min-height: 74px; resize: none; font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.45; }
@@ -167,7 +168,7 @@
       <div id="agentTable"></div>
       <div class="terminal-bar">
         <div class="terminal-identity"><span id="terminalName">Terminal</span><span id="terminalMeta"></span></div>
-        <div class="terminal-actions"><span id="terminalStatus">not attached</span><button id="renameAgent" disabled>Rename</button><button id="reconnectTerminal" disabled>Reconnect</button><button class="danger" id="stopAgent" disabled>Stop</button></div>
+        <div class="terminal-actions"><span id="terminalStatus">not attached</span><button id="renameAgent" disabled>Rename</button><button id="reconnectTerminal" disabled>Reconnect</button><button class="danger" id="stopAgent" disabled>Stop</button><button class="danger" id="deleteAgent" disabled>Delete</button></div>
       </div>
       <div id="terminalHost"><div class="terminal-empty">Select an agent to attach</div></div>
     </section>
@@ -215,6 +216,14 @@
       <input id="renameTarget" type="hidden">
       <div class="field"><label for="renameName">Name</label><input id="renameName" maxlength="80" required></div>
       <div class="actions"><button type="button" id="cancelRename">Cancel</button><button class="primary" type="submit">Rename</button></div>
+    </form>
+  </dialog>
+  <dialog id="deleteDialog">
+    <form id="deleteForm">
+      <h2>Delete agent</h2>
+      <p class="dialog-copy">Delete <strong id="deleteName"></strong> and stop its process? This agent will not return after reconnecting.</p>
+      <input id="deleteTarget" type="hidden">
+      <div class="actions"><button type="button" id="cancelDelete">Cancel</button><button class="danger" type="submit">Delete</button></div>
     </form>
   </dialog>
   <dialog id="inviteDialog">
@@ -275,6 +284,10 @@
       if (!state.selected && state.snapshot.agents.length) state.selected = state.snapshot.agents[0].agent_id;
       render();
       if (state.selected && terminalState.agentId !== state.selected) openTerminal(state.selected);
+      if (!state.selected && terminalState.agentId) {
+        disposeTerminal();
+        $('terminalHost').innerHTML = '<div class="terminal-empty">Select an agent to attach</div>';
+      }
     }
     function render() {
       const snapshot = state.snapshot; if (!snapshot) return;
@@ -305,6 +318,7 @@
       $('renameAgent').disabled = !agent;
       $('reconnectTerminal').disabled = !agent;
       $('stopAgent').disabled = !agent || ['exited', 'failed'].includes(agent.status);
+      $('deleteAgent').disabled = !agent;
     }
     function selectAgent(agentId) {
       if (state.selected === agentId && terminalState.agentId === agentId) { terminalState.terminal?.focus(); return; }
@@ -427,6 +441,21 @@
         await refresh();
       } catch (error) { alert(error.message); }
     }
+    function showDelete(agent) {
+      $('deleteTarget').value = agent.agent_id;
+      $('deleteName').textContent = agent.name;
+      $('deleteDialog').showModal();
+      $('cancelDelete').focus();
+    }
+    async function submitDelete(event) {
+      event.preventDefault();
+      const target = encodeURIComponent($('deleteTarget').value);
+      try {
+        await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/agents/${target}`, { method: 'DELETE' });
+        $('deleteDialog').close();
+        await refresh();
+      } catch (error) { alert(error.message); }
+    }
     async function showInstall() {
       try {
         const data = await api(`/api/workspaces/${encodeURIComponent(state.workspace)}/bootstrap`, { method: 'POST', body: '{}' });
@@ -484,6 +513,12 @@
     $('renameAgent').onclick = () => {
       const agent = state.snapshot?.agents.find(item => item.agent_id === state.selected);
       if (agent) showRename('agent', agent.agent_id, agent.name);
+    };
+    $('cancelDelete').onclick = () => $('deleteDialog').close();
+    $('deleteForm').onsubmit = submitDelete;
+    $('deleteAgent').onclick = () => {
+      const agent = state.snapshot?.agents.find(item => item.agent_id === state.selected);
+      if (agent) showDelete(agent);
     };
     $('reconnectTerminal').onclick = () => { if (state.selected) openTerminal(state.selected); };
     $('stopAgent').onclick = stopAgent;
