@@ -200,6 +200,19 @@ Agent proxy URLs carry the agent ID through SOCKS5 authentication, so network
 policy requests already identify their originating agent; local machine shells
 fall back to a machine-level subject.
 
+Managed agents can control workspace discovery records through the local Agent
+Server without receiving Proxy credentials:
+
+```bash
+treer virtual-host list
+treer virtual-host add api.internal build-machine --target-port 8080
+treer virtual-host delete api.internal
+```
+
+The Agent Server forwards the caller identity under its machine credential, and
+the Proxy evaluates these as `virtual_host.list`, `virtual_host.create`, and
+`virtual_host.delete`. They currently inherit the allow-all default.
+
 `build-machine.treer` connects to `127.0.0.1` on that machine.
 `host.via.build-machine.treer` connects to `host` from that machine. The first
 prototype supplies a standard SOCKS5 layer; programs that ignore proxy

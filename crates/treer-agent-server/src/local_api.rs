@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::extract::ws::{Message as BrowserMessage, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,8 +14,8 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
-    ApiError, CreateAgentRequest, InputAgentRequest, PromptAgentRequest, ProtocolError,
-    RenameRequest, TerminalServerMessage,
+    ApiError, CreateAgentRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
+    PromptAgentRequest, ProtocolError, RenameRequest, TerminalServerMessage, AGENT_ID_HEADER,
 };
 use url::Url;
 
@@ -69,52 +69,75 @@ impl LocalApiState {
         Ok(url)
     }
 
-    async fn get(&self, suffix: &str) -> Result<Value, LocalApiError> {
-        let mut request = self.client.get(self.proxy_url(suffix)?);
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        suffix: &str,
+        body: Option<&Value>,
+        source_agent_id: Option<&str>,
+    ) -> Result<Value, LocalApiError> {
+        let mut request = self.client.request(method, self.proxy_url(suffix)?);
         if let Some(token) = &self.machine_token {
             request = request.bearer_auth(token);
+        }
+        if let Some(agent_id) = source_agent_id {
+            request = request.header(AGENT_ID_HEADER, agent_id);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
         }
         let response = request
             .send()
             .await
             .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
         decode(response).await
+    }
+
+    async fn get(&self, suffix: &str) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::GET, suffix, None, None).await
+    }
+
+    async fn get_as(
+        &self,
+        suffix: &str,
+        source_agent_id: Option<&str>,
+    ) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::GET, suffix, None, source_agent_id)
+            .await
     }
 
     async fn post(&self, suffix: &str, body: &Value) -> Result<Value, LocalApiError> {
-        let mut request = self.client.post(self.proxy_url(suffix)?).json(body);
-        if let Some(token) = &self.machine_token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .send()
+        self.request(reqwest::Method::POST, suffix, Some(body), None)
             .await
-            .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
-        decode(response).await
+    }
+
+    async fn post_as(
+        &self,
+        suffix: &str,
+        body: &Value,
+        source_agent_id: Option<&str>,
+    ) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::POST, suffix, Some(body), source_agent_id)
+            .await
     }
 
     async fn patch(&self, suffix: &str, body: &Value) -> Result<Value, LocalApiError> {
-        let mut request = self.client.patch(self.proxy_url(suffix)?).json(body);
-        if let Some(token) = &self.machine_token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .send()
+        self.request(reqwest::Method::PATCH, suffix, Some(body), None)
             .await
-            .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
-        decode(response).await
     }
 
     async fn delete(&self, suffix: &str) -> Result<Value, LocalApiError> {
-        let mut request = self.client.delete(self.proxy_url(suffix)?);
-        if let Some(token) = &self.machine_token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .send()
+        self.request(reqwest::Method::DELETE, suffix, None, None)
             .await
-            .map_err(|err| LocalApiError::bad_gateway(err.to_string()))?;
-        decode(response).await
+    }
+
+    async fn delete_as(
+        &self,
+        suffix: &str,
+        source_agent_id: Option<&str>,
+    ) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::DELETE, suffix, None, source_agent_id)
+            .await
     }
 }
 
@@ -127,6 +150,14 @@ pub fn router(state: LocalApiState) -> Router {
             axum::routing::patch(rename_machine).delete(delete_machine),
         )
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route(
+            "/api/virtual-hosts",
+            get(list_virtual_network_hosts).post(create_virtual_network_host),
+        )
+        .route(
+            "/api/virtual-hosts/{hostname}",
+            axum::routing::delete(delete_virtual_network_host),
+        )
         .route(
             "/api/agents/{agent_id}",
             get(get_agent).patch(rename_agent).delete(delete_agent),
@@ -156,6 +187,67 @@ async fn discovery(State(state): State<LocalApiState>) -> Result<Json<Value>, Lo
 
 async fn list_agents(State(state): State<LocalApiState>) -> Result<Json<Value>, LocalApiError> {
     Ok(Json(state.get("agents").await?))
+}
+
+async fn list_virtual_network_hosts(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .get_as("virtual-hosts", Some(source_agent_id(&headers)?))
+            .await?,
+    ))
+}
+
+async fn create_virtual_network_host(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateVirtualNetworkHostRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .post_as(
+                "virtual-hosts",
+                &serde_json::to_value(request)
+                    .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+                Some(source_agent_id(&headers)?),
+            )
+            .await?,
+    ))
+}
+
+async fn delete_virtual_network_host(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(hostname): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .delete_as(
+                &format!("virtual-hosts/{hostname}"),
+                Some(source_agent_id(&headers)?),
+            )
+            .await?,
+    ))
+}
+
+fn source_agent_id(headers: &HeaderMap) -> Result<&str, LocalApiError> {
+    let agent_id = headers
+        .get(AGENT_ID_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map_err(|_| LocalApiError::bad_request("invalid agent identity".to_string()))
+        })
+        .transpose()
+        .map(|value| value.filter(|value| !value.is_empty()))?;
+    agent_id.ok_or_else(|| {
+        LocalApiError::bad_request(
+            "virtual-host commands require a managed agent identity".to_string(),
+        )
+    })
 }
 
 async fn get_agent(
@@ -490,5 +582,21 @@ impl LocalApiError {
 impl IntoResponse for LocalApiError {
     fn into_response(self) -> Response {
         (self.status, Json(ApiError { error: self.error })).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_agent_identity_is_required_and_validated() {
+        let mut headers = HeaderMap::new();
+        assert!(source_agent_id(&headers).is_err());
+        headers.insert(AGENT_ID_HEADER, " agent-a ".parse().expect("agent header"));
+        assert_eq!(
+            source_agent_id(&headers).unwrap_or_else(|_| panic!("valid identity")),
+            "agent-a"
+        );
     }
 }

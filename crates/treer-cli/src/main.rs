@@ -13,9 +13,9 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
-    AgentInfo, AgentStatus, CreateAgentRequest, InputAgentRequest, RenameRequest, ServerInfo,
-    ServerStatus, TerminalClientMessage, TerminalServerMessage, TransferBinaryFrame,
-    TransferServerMessage, TransferStats, WorkspaceSnapshot,
+    AgentInfo, AgentStatus, CreateAgentRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
+    RenameRequest, ServerInfo, ServerStatus, TerminalClientMessage, TerminalServerMessage,
+    TransferBinaryFrame, TransferServerMessage, TransferStats, WorkspaceSnapshot, AGENT_ID_HEADER,
 };
 use treer_transfer::TransferReceiver;
 use url::Url;
@@ -57,6 +57,11 @@ enum Command {
     Machine {
         #[command(subcommand)]
         command: MachineCommand,
+    },
+    #[command(about = "Manage workspace virtual hosts", visible_alias = "vhost")]
+    VirtualHost {
+        #[command(subcommand)]
+        command: VirtualHostCommand,
     },
     #[command(about = "Show the current managed agent identity")]
     Whoami,
@@ -166,6 +171,23 @@ enum MachineCommand {
     Delete { target: String },
 }
 
+#[derive(Debug, Subcommand)]
+enum VirtualHostCommand {
+    #[command(about = "List workspace virtual hosts")]
+    List,
+    #[command(about = "Map a virtual hostname to a workspace machine")]
+    Add {
+        hostname: String,
+        machine: String,
+        #[arg(long, default_value = "127.0.0.1")]
+        target_host: String,
+        #[arg(long)]
+        target_port: Option<u16>,
+    },
+    #[command(about = "Delete a workspace virtual host")]
+    Delete { hostname: String },
+}
+
 #[derive(Debug, clap::Args)]
 struct PromptWaitArgs {
     #[arg(
@@ -208,6 +230,7 @@ impl WaitStatus {
 struct ApiClient {
     http: reqwest::Client,
     base: Url,
+    source_agent_id: Option<String>,
 }
 
 impl ApiClient {
@@ -215,6 +238,7 @@ impl ApiClient {
         Self {
             http: reqwest::Client::new(),
             base,
+            source_agent_id: std::env::var("TREER_AGENT_ID").ok(),
         }
     }
 
@@ -229,6 +253,9 @@ impl ApiClient {
             .join(path)
             .context("failed to build request URL")?;
         let mut request = self.http.request(method, url);
+        if let Some(agent_id) = &self.source_agent_id {
+            request = request.header(AGENT_ID_HEADER, agent_id);
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -336,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::Machine { command } => run_machine_command(&client, command).await?,
+        Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
         Command::Whoami => {
             let agent_id = std::env::var("TREER_AGENT_ID").context(
                 "TREER_AGENT_ID is not set; `treer whoami` must run inside a managed agent",
@@ -420,6 +448,43 @@ async fn run_machine_command(client: &ApiClient, command: MachineCommand) -> any
     match command {
         MachineCommand::Rename { target, name } => rename_machine(client, &target, name).await,
         MachineCommand::Delete { target } => delete_machine(client, &target).await,
+    }
+}
+
+async fn run_virtual_host_command(
+    client: &ApiClient,
+    command: VirtualHostCommand,
+) -> anyhow::Result<Value> {
+    match command {
+        VirtualHostCommand::List => client.value(Method::GET, "api/virtual-hosts", None).await,
+        VirtualHostCommand::Add {
+            hostname,
+            machine,
+            target_host,
+            target_port,
+        } => {
+            client
+                .value(
+                    Method::POST,
+                    "api/virtual-hosts",
+                    Some(serde_json::to_value(CreateVirtualNetworkHostRequest {
+                        hostname,
+                        destination_server_id: machine,
+                        target_host,
+                        target_port,
+                    })?),
+                )
+                .await
+        }
+        VirtualHostCommand::Delete { hostname } => {
+            client
+                .value(
+                    Method::DELETE,
+                    &format!("api/virtual-hosts/{}", path_segment(&hostname)),
+                    None,
+                )
+                .await
+        }
     }
 }
 
@@ -1228,6 +1293,44 @@ mod tests {
             Some(Command::Machine {
                 command: MachineCommand::Delete { target }
             }) if target == "srv_test"
+        ));
+    }
+
+    #[test]
+    fn virtual_host_commands_parse() {
+        let add = Args::try_parse_from([
+            "treer",
+            "virtual-host",
+            "add",
+            "api.internal",
+            "builder",
+            "--target-host",
+            "127.0.0.1",
+            "--target-port",
+            "8080",
+        ])
+        .expect("virtual host add should parse");
+        assert!(matches!(
+            add.command,
+            Some(Command::VirtualHost {
+                command: VirtualHostCommand::Add {
+                    hostname,
+                    machine,
+                    target_host,
+                    target_port: Some(8080),
+                }
+            }) if hostname == "api.internal"
+                && machine == "builder"
+                && target_host == "127.0.0.1"
+        ));
+
+        let delete = Args::try_parse_from(["treer", "vhost", "delete", "api.internal"])
+            .expect("virtual host alias should parse");
+        assert!(matches!(
+            delete.command,
+            Some(Command::VirtualHost {
+                command: VirtualHostCommand::Delete { hostname }
+            }) if hostname == "api.internal"
         ));
     }
 

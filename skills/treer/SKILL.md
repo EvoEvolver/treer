@@ -28,6 +28,7 @@ The installed binary is the authority for syntax:
 treer --help
 treer agent --help
 treer machine --help
+treer virtual-host --help
 treer ssh --help
 treer scp --help
 ```
@@ -72,6 +73,39 @@ treer machine rename self build-machine
 ```
 
 Names are workspace-visible labels; agent IDs and server IDs do not change.
+
+## Manage virtual hosts
+
+Virtual hosts are workspace service-discovery records. They let every process
+using `TREER_NETWORK_PROXY` reach a service by a stable hostname without
+publishing the destination machine's port.
+
+Inspect existing records before changing them:
+
+```bash
+treer virtual-host list
+```
+
+Add a record using a machine ID or unique machine name. The target host is
+resolved from that machine, and omitting the target port preserves the port
+requested by the client:
+
+```bash
+treer virtual-host add api.internal build-machine --target-port 8080
+treer virtual-host add git.internal build-machine \
+  --target-host 127.0.0.1 --target-port 3000
+```
+
+Delete only the named discovery record; this does not stop the destination
+service or remove its machine:
+
+```bash
+treer virtual-host delete api.internal
+```
+
+These commands operate only in `TREER_WORKSPACE_ID`. The Proxy evaluates them
+as separate `virtual_host.list`, `virtual_host.create`, and
+`virtual_host.delete` policy actions.
 
 ## Access another workspace machine
 

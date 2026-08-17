@@ -16,13 +16,17 @@ use treer_protocol::{
     AgentCommand, ApiError, CreateAgentRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
     MachineEnrollmentResponse, PromptAgentRequest, ProtocolError, RenameRequest,
     TerminalClientMessage, TerminalServerMessage, TransferServerMessage, WorkspaceEvent,
+    AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
 
 use crate::agent_socket;
-use crate::auth::{self, AuthStore, CurrentSession};
-use crate::policy::PolicyEngine;
+use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
+use crate::policy::{
+    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_VIRTUAL_HOST_CREATE,
+    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_VIRTUAL_HOST,
+};
 use crate::state::{AppState, ShellOptions, SocketFrame, TransferDirection, TransferOptions};
 
 const INDEX_HTML: &str = include_str!("../../../web/dist/index.html");
@@ -81,6 +85,14 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
             axum::routing::patch(rename_server).delete(delete_server),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/virtual-hosts",
+            get(agent_list_virtual_network_hosts).post(agent_create_virtual_network_host),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/virtual-hosts/{hostname}",
+            axum::routing::delete(agent_delete_virtual_network_host),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -526,6 +538,158 @@ async fn delete_virtual_network_host(
     auth.delete_virtual_network_host(&workspace_id, &hostname)
         .await?;
     Ok(Json(json!({ "deleted": true })))
+}
+
+async fn agent_list_virtual_network_hosts(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            ACTION_VIRTUAL_HOST_LIST,
+            PolicyResource::new(RESOURCE_VIRTUAL_HOST, "*"),
+        ))
+        .await?;
+    list_virtual_network_hosts(Extension(auth), Path(workspace_id)).await
+}
+
+async fn agent_create_virtual_network_host(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(mut request): Json<CreateVirtualNetworkHostRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    request.hostname = auth::normalize_virtual_hostname(&request.hostname)?;
+    let destination = state
+        .resolve_server(&workspace_id, &request.destination_server_id)
+        .await?;
+    request.destination_server_id = destination.server_id;
+    let resource = virtual_host_policy_resource(
+        &request.hostname,
+        &request.destination_server_id,
+        &request.target_host,
+        request.target_port,
+    );
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_VIRTUAL_HOST_CREATE,
+            resource,
+        ))
+        .await?;
+    let host = auth
+        .create_virtual_network_host(&workspace_id, &policy_actor_name(&subject), request)
+        .await?;
+    Ok(Json(json!({ "host": host })))
+}
+
+async fn agent_delete_virtual_network_host(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, hostname)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let host = auth
+        .resolve_virtual_network_host(&workspace_id, &hostname)
+        .await?
+        .ok_or_else(|| {
+            ApiFailure::not_found("virtual_host_not_found", "virtual host does not exist")
+        })?;
+    let resource = virtual_host_policy_resource(
+        &host.hostname,
+        &host.destination_server_id,
+        &host.target_host,
+        host.target_port,
+    );
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            ACTION_VIRTUAL_HOST_DELETE,
+            resource,
+        ))
+        .await?;
+    auth.delete_virtual_network_host(&workspace_id, &host.hostname)
+        .await?;
+    Ok(Json(json!({ "deleted": true, "hostname": host.hostname })))
+}
+
+async fn agent_policy_subject(
+    state: &AppState,
+    machine: &MachineSession,
+    headers: &HeaderMap,
+    workspace_id: &str,
+) -> Result<PolicySubject, ApiFailure> {
+    let agent_id = headers
+        .get(AGENT_ID_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map_err(|_| ProtocolError::new("invalid_agent_identity", "agent ID is invalid"))
+        })
+        .transpose()?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ProtocolError::new(
+                "invalid_agent_identity",
+                "managed agent identity is required",
+            )
+        })?;
+    let agent = state.resolve_agent(workspace_id, agent_id).await?;
+    if machine
+        .server_id
+        .as_ref()
+        .is_some_and(|server_id| server_id != &agent.server_id)
+    {
+        return Err(ProtocolError::new(
+            "policy_subject_mismatch",
+            "agent does not belong to the authenticated machine",
+        )
+        .into());
+    }
+    Ok(PolicySubject::Agent {
+        server_id: agent.server_id,
+        agent_id: agent.agent_id,
+    })
+}
+
+fn policy_actor_name(subject: &PolicySubject) -> String {
+    match subject {
+        PolicySubject::Agent { agent_id, .. } => format!("agent:{agent_id}"),
+        PolicySubject::Machine { server_id } => format!("machine:{server_id}"),
+    }
+}
+
+fn virtual_host_policy_resource(
+    hostname: &str,
+    destination_server_id: &str,
+    target_host: &str,
+    target_port: Option<u16>,
+) -> PolicyResource {
+    let resource = PolicyResource::new(RESOURCE_VIRTUAL_HOST, hostname)
+        .with_attribute("destination_server_id", destination_server_id)
+        .with_attribute("target_host", target_host);
+    if let Some(port) = target_port {
+        resource.with_attribute("target_port", port.to_string())
+    } else {
+        resource
+    }
 }
 
 async fn list_agents(
@@ -1113,10 +1277,13 @@ impl From<ProtocolError> for ApiFailure {
         let status = match error.code.as_str() {
             "workspace_not_found" | "server_not_found" | "agent_not_found" => StatusCode::NOT_FOUND,
             "workspace_exists" | "agent_ambiguous" | "server_ambiguous" => StatusCode::CONFLICT,
+            "policy_denied" | "policy_subject_mismatch" => StatusCode::FORBIDDEN,
             "server_offline" | "no_online_server" | "ssh_unsupported" | "scp_unsupported" => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
-            "invalid_name" | "invalid_request" => StatusCode::BAD_REQUEST,
+            "invalid_agent_identity" | "invalid_name" | "invalid_request" => {
+                StatusCode::BAD_REQUEST
+            }
             _ => StatusCode::BAD_GATEWAY,
         };
         Self { status, error }
@@ -1152,6 +1319,54 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::process::{Command, Stdio};
+
+    async fn state_with_managed_agent() -> AppState {
+        let state = AppState::new();
+        let now = chrono::Utc::now();
+        let server = treer_protocol::ServerInfo {
+            server_id: "machine-a".to_string(),
+            workspace_id: "default".to_string(),
+            name: "machine-a".to_string(),
+            hostname: "machine-a".to_string(),
+            root: "/tmp".to_string(),
+            labels: Default::default(),
+            status: treer_protocol::ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+        let agent = treer_protocol::AgentInfo {
+            agent_id: "agent-a".to_string(),
+            workspace_id: "default".to_string(),
+            server_id: "machine-a".to_string(),
+            kind: "command".to_string(),
+            name: "agent-a".to_string(),
+            cwd: ".".to_string(),
+            status: treer_protocol::AgentStatus::Idle,
+            pid: None,
+            started_at: now,
+            updated_at: now,
+            exited_at: None,
+            exit_code: None,
+            output_revision: 0,
+        };
+        let connection_id = Uuid::new_v4();
+        let (outgoing, _incoming) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), connection_id, outgoing)
+            .await
+            .expect("register server");
+        state
+            .apply_snapshot(
+                connection_id,
+                treer_protocol::AgentServerSnapshot {
+                    server,
+                    agents: vec![agent],
+                },
+            )
+            .await
+            .expect("apply agent snapshot");
+        state
+    }
 
     fn test_config() -> BootstrapConfig {
         BootstrapConfig::new(
@@ -1273,5 +1488,103 @@ mod tests {
         assert!(normalize_display_name("  ".to_string()).is_err());
         assert!(normalize_display_name("bad\nname".to_string()).is_err());
         assert!(normalize_display_name("x".repeat(81)).is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_policy_subject_is_bound_to_authenticated_machine() {
+        let state = state_with_managed_agent().await;
+        let machine = MachineSession {
+            server_id: Some("machine-a".to_string()),
+            workspace_id: Some("default".to_string()),
+        };
+        let missing = agent_policy_subject(&state, &machine, &HeaderMap::new(), "default")
+            .await
+            .expect_err("agent identity is required");
+        assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+        assert_eq!(missing.error.code, "invalid_agent_identity");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+        let subject = agent_policy_subject(&state, &machine, &headers, "default")
+            .await
+            .unwrap_or_else(|error| panic!("matching subject: {}", error.error.message));
+        assert_eq!(
+            subject,
+            PolicySubject::Agent {
+                server_id: "machine-a".to_string(),
+                agent_id: "agent-a".to_string(),
+            }
+        );
+
+        let error = agent_policy_subject(
+            &state,
+            &MachineSession {
+                server_id: Some("machine-b".to_string()),
+                workspace_id: Some("default".to_string()),
+            },
+            &headers,
+            "default",
+        )
+        .await
+        .expect_err("foreign machine must not claim the agent");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.error.code, "policy_subject_mismatch");
+    }
+
+    #[tokio::test]
+    async fn managed_agent_can_create_list_and_delete_virtual_hosts() {
+        let state = state_with_managed_agent().await;
+        let auth = AuthStore::in_memory("admin-password").await;
+        let policy = PolicyEngine::allow_all();
+        let machine = MachineSession {
+            server_id: Some("machine-a".to_string()),
+            workspace_id: Some("default".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+
+        let created = agent_create_virtual_network_host(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(machine.clone()),
+            headers.clone(),
+            Path("default".to_string()),
+            Json(CreateVirtualNetworkHostRequest {
+                hostname: "API.Internal".to_string(),
+                destination_server_id: "machine-a".to_string(),
+                target_host: "127.0.0.1".to_string(),
+                target_port: Some(8080),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("create virtual host: {}", error.error.message));
+        assert_eq!(created.0["host"]["hostname"], "api.internal");
+        assert_eq!(created.0["host"]["created_by"], "agent:agent-a");
+
+        let listed = agent_list_virtual_network_hosts(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(machine.clone()),
+            headers.clone(),
+            Path("default".to_string()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("list virtual hosts: {}", error.error.message));
+        assert_eq!(listed.0["hosts"].as_array().map(Vec::len), Some(1));
+
+        let deleted = agent_delete_virtual_network_host(
+            State(state),
+            Extension(auth),
+            Extension(policy),
+            Extension(machine),
+            headers,
+            Path(("default".to_string(), "api.internal".to_string())),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("delete virtual host: {}", error.error.message));
+        assert_eq!(deleted.0["deleted"], true);
+        assert_eq!(deleted.0["hostname"], "api.internal");
     }
 }

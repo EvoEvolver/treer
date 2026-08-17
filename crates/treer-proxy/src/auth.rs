@@ -143,7 +143,7 @@ impl AuthStore {
     }
 
     #[cfg(test)]
-    async fn in_memory(admin_password: &str) -> Self {
+    pub(crate) async fn in_memory(admin_password: &str) -> Self {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1688,7 +1688,7 @@ fn workspace_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceInfo, Aut
     })
 }
 
-fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFailure> {
+pub(crate) fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFailure> {
     let hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
     let labels_valid = !hostname.is_empty()
         && hostname.len() <= 253

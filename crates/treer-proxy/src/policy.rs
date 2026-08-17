@@ -6,7 +6,11 @@ use std::sync::Arc;
 use treer_protocol::ProtocolError;
 
 pub const ACTION_NETWORK_CONNECT: &str = "network.connect";
+pub const ACTION_VIRTUAL_HOST_LIST: &str = "virtual_host.list";
+pub const ACTION_VIRTUAL_HOST_CREATE: &str = "virtual_host.create";
+pub const ACTION_VIRTUAL_HOST_DELETE: &str = "virtual_host.delete";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
+pub const RESOURCE_VIRTUAL_HOST: &str = "virtual_host";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySubject {
@@ -21,6 +25,21 @@ pub struct PolicyResource {
     pub attributes: BTreeMap<String, String>,
 }
 
+impl PolicyResource {
+    pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+            attributes: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.insert(key.into(), value.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyRequest {
     pub workspace_id: String,
@@ -30,6 +49,20 @@ pub struct PolicyRequest {
 }
 
 impl PolicyRequest {
+    pub fn new(
+        workspace_id: impl Into<String>,
+        subject: PolicySubject,
+        action: impl Into<String>,
+        resource: PolicyResource,
+    ) -> Self {
+        Self {
+            workspace_id: workspace_id.into(),
+            subject,
+            action: action.into(),
+            resource,
+        }
+    }
+
     pub fn network_connect(
         workspace_id: &str,
         source_server_id: &str,
@@ -54,16 +87,16 @@ impl PolicyRequest {
                 agent_id: agent_id.to_string(),
             },
         );
-        Self {
-            workspace_id: workspace_id.to_string(),
+        Self::new(
+            workspace_id,
             subject,
-            action: ACTION_NETWORK_CONNECT.to_string(),
-            resource: PolicyResource {
+            ACTION_NETWORK_CONNECT,
+            PolicyResource {
                 kind: RESOURCE_NETWORK_ENDPOINT.to_string(),
                 id: format!("{destination_server_id}:{host}:{port}"),
                 attributes,
             },
-        }
+        )
     }
 }
 
@@ -229,6 +262,28 @@ mod tests {
             PolicySubject::Machine {
                 server_id: "source-machine".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn generic_requests_support_future_actions_and_resource_attributes() {
+        let request = PolicyRequest::new(
+            "workspace-a",
+            PolicySubject::Agent {
+                server_id: "machine-a".to_string(),
+                agent_id: "agent-a".to_string(),
+            },
+            ACTION_VIRTUAL_HOST_CREATE,
+            PolicyResource::new(RESOURCE_VIRTUAL_HOST, "api.internal")
+                .with_attribute("destination_server_id", "machine-b")
+                .with_attribute("target_port", "8080"),
+        );
+        assert_eq!(request.action, ACTION_VIRTUAL_HOST_CREATE);
+        assert_eq!(request.resource.kind, RESOURCE_VIRTUAL_HOST);
+        assert_eq!(request.resource.id, "api.internal");
+        assert_eq!(
+            request.resource.attributes["destination_server_id"],
+            "machine-b"
         );
     }
 }
