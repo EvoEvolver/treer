@@ -16,7 +16,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentServerSnapshot, ApiError,
-    ProtocolError, ServerInfo, WorkspaceInfo,
+    CreateNetworkPolicyRequest, CreateVirtualNetworkHostRequest, NetworkPolicy, ProtocolError,
+    ServerInfo, VirtualNetworkHost, WorkspaceInfo,
 };
 use url::Url;
 use uuid::Uuid;
@@ -304,6 +305,47 @@ impl AuthStore {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS workspaces_organization_id \
              ON workspaces(organization_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS network_policies (\
+             policy_id TEXT PRIMARY KEY, \
+             workspace_id TEXT NOT NULL, \
+             source_server_id TEXT, \
+             destination_server_id TEXT NOT NULL, \
+             target_host TEXT NOT NULL, \
+             port_start INTEGER NOT NULL, \
+             port_end INTEGER NOT NULL, \
+             created_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL, \
+             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS network_policies_workspace_id \
+             ON network_policies(workspace_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS virtual_network_hosts (\
+             workspace_id TEXT NOT NULL, \
+             hostname TEXT NOT NULL COLLATE NOCASE, \
+             destination_server_id TEXT NOT NULL, \
+             target_host TEXT NOT NULL, \
+             target_port INTEGER, \
+             created_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL, \
+             PRIMARY KEY(workspace_id, hostname), \
+             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS virtual_network_hosts_destination \
+             ON virtual_network_hosts(workspace_id, destination_server_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -605,6 +647,251 @@ impl AuthStore {
         })
     }
 
+    pub async fn list_network_policies(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<NetworkPolicy>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT policy_id, workspace_id, source_server_id, destination_server_id, \
+             target_host, port_start, port_end, created_at, created_by \
+             FROM network_policies WHERE workspace_id = ? ORDER BY created_at, policy_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(network_policy_from_row).collect()
+    }
+
+    pub async fn list_virtual_network_hosts(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<VirtualNetworkHost>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
+             created_at, created_by FROM virtual_network_hosts \
+             WHERE workspace_id = ? ORDER BY hostname COLLATE NOCASE",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter()
+            .map(virtual_network_host_from_row)
+            .collect()
+    }
+
+    pub async fn resolve_virtual_network_host(
+        &self,
+        workspace_id: &str,
+        hostname: &str,
+    ) -> Result<Option<VirtualNetworkHost>, AuthFailure> {
+        let hostname = match normalize_virtual_hostname(hostname) {
+            Ok(hostname) => hostname,
+            Err(_) => return Ok(None),
+        };
+        sqlx::query(
+            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
+             created_at, created_by FROM virtual_network_hosts \
+             WHERE workspace_id = ? AND hostname = ? COLLATE NOCASE",
+        )
+        .bind(workspace_id)
+        .bind(hostname)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .map(virtual_network_host_from_row)
+        .transpose()
+    }
+
+    pub async fn create_virtual_network_host(
+        &self,
+        workspace_id: &str,
+        username: &str,
+        request: CreateVirtualNetworkHostRequest,
+    ) -> Result<VirtualNetworkHost, AuthFailure> {
+        let hostname = normalize_virtual_hostname(&request.hostname)?;
+        let target_host = request.target_host.trim();
+        if target_host.is_empty() || target_host.len() > 253 {
+            return Err(AuthFailure::bad_request(
+                "invalid_virtual_host",
+                "target_host must be a non-empty hostname or address",
+            ));
+        }
+        if request.target_port == Some(0) {
+            return Err(AuthFailure::bad_request(
+                "invalid_virtual_host",
+                "target_port must be between 1 and 65535",
+            ));
+        }
+        let record = VirtualNetworkHost {
+            workspace_id: workspace_id.to_string(),
+            hostname,
+            destination_server_id: request.destination_server_id,
+            target_host: target_host.to_string(),
+            target_port: request.target_port,
+            created_at: Utc::now(),
+            created_by: username.to_string(),
+        };
+        let result = sqlx::query(
+            "INSERT INTO virtual_network_hosts(\
+             workspace_id, hostname, destination_server_id, target_host, target_port, \
+             created_at, created_by) VALUES(?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&record.workspace_id)
+        .bind(&record.hostname)
+        .bind(&record.destination_server_id)
+        .bind(&record.target_host)
+        .bind(record.target_port.map(i64::from))
+        .bind(record.created_at.to_rfc3339())
+        .bind(&record.created_by)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(record),
+            Err(error)
+                if error
+                    .as_database_error()
+                    .is_some_and(|error| error.is_unique_violation()) =>
+            {
+                Err(AuthFailure::conflict(
+                    "virtual_host_exists",
+                    "virtual hostname already exists in this workspace",
+                ))
+            }
+            Err(error) => Err(AuthFailure::database(error)),
+        }
+    }
+
+    pub async fn delete_virtual_network_host(
+        &self,
+        workspace_id: &str,
+        hostname: &str,
+    ) -> Result<(), AuthFailure> {
+        let hostname = normalize_virtual_hostname(hostname)?;
+        let result = sqlx::query(
+            "DELETE FROM virtual_network_hosts WHERE workspace_id = ? AND hostname = ? COLLATE NOCASE",
+        )
+        .bind(workspace_id)
+        .bind(hostname)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if result.rows_affected() == 0 {
+            return Err(AuthFailure::not_found(
+                "virtual_host_not_found",
+                "virtual host does not exist",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn create_network_policy(
+        &self,
+        workspace_id: &str,
+        username: &str,
+        request: CreateNetworkPolicyRequest,
+    ) -> Result<NetworkPolicy, AuthFailure> {
+        if request.port_start == 0 {
+            return Err(AuthFailure::bad_request(
+                "invalid_network_policy",
+                "port_start must be between 1 and 65535",
+            ));
+        }
+        let port_end = request.port_end.unwrap_or(request.port_start);
+        if port_end < request.port_start {
+            return Err(AuthFailure::bad_request(
+                "invalid_network_policy",
+                "port_end must not be less than port_start",
+            ));
+        }
+        let target_host = request.target_host.trim();
+        if target_host.is_empty() || target_host.len() > 253 {
+            return Err(AuthFailure::bad_request(
+                "invalid_network_policy",
+                "target_host must be a non-empty hostname, address, or *",
+            ));
+        }
+        let policy = NetworkPolicy {
+            policy_id: format!("netpol_{}", Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            source_server_id: request.source_server_id,
+            destination_server_id: request.destination_server_id,
+            target_host: target_host.to_string(),
+            port_start: request.port_start,
+            port_end,
+            created_at: Utc::now(),
+            created_by: username.to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO network_policies(\
+             policy_id, workspace_id, source_server_id, destination_server_id, target_host, \
+             port_start, port_end, created_at, created_by) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&policy.policy_id)
+        .bind(&policy.workspace_id)
+        .bind(&policy.source_server_id)
+        .bind(&policy.destination_server_id)
+        .bind(&policy.target_host)
+        .bind(i64::from(policy.port_start))
+        .bind(i64::from(policy.port_end))
+        .bind(policy.created_at.to_rfc3339())
+        .bind(&policy.created_by)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(policy)
+    }
+
+    pub async fn delete_network_policy(
+        &self,
+        workspace_id: &str,
+        policy_id: &str,
+    ) -> Result<(), AuthFailure> {
+        let result =
+            sqlx::query("DELETE FROM network_policies WHERE workspace_id = ? AND policy_id = ?")
+                .bind(workspace_id)
+                .bind(policy_id)
+                .execute(&self.pool)
+                .await
+                .map_err(AuthFailure::database)?;
+        if result.rows_affected() == 0 {
+            return Err(AuthFailure::not_found(
+                "network_policy_not_found",
+                "network policy does not exist",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn network_policy_allows(
+        &self,
+        workspace_id: &str,
+        source_server_id: &str,
+        destination_server_id: &str,
+        target_host: &str,
+        port: u16,
+    ) -> Result<bool, AuthFailure> {
+        let allowed = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM network_policies \
+             WHERE workspace_id = ? \
+             AND (source_server_id IS NULL OR source_server_id = ?) \
+             AND destination_server_id = ? \
+             AND (target_host = '*' OR target_host = ?) \
+             AND port_start <= ? AND port_end >= ?)",
+        )
+        .bind(workspace_id)
+        .bind(source_server_id)
+        .bind(destination_server_id)
+        .bind(target_host)
+        .bind(i64::from(port))
+        .bind(i64::from(port))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(allowed != 0)
+    }
+
     async fn membership_role(
         &self,
         organization_id: &str,
@@ -805,6 +1092,24 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "DELETE FROM network_policies WHERE workspace_id = ? \
+             AND (source_server_id = ? OR destination_server_id = ?)",
+        )
+        .bind(workspace_id)
+        .bind(server_id)
+        .bind(server_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "DELETE FROM virtual_network_hosts WHERE workspace_id = ? AND destination_server_id = ?",
+        )
+        .bind(workspace_id)
+        .bind(server_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         for agent_id in agent_ids {
             sqlx::query("DELETE FROM agent_names WHERE agent_id = ? AND workspace_id = ?")
                 .bind(agent_id)
@@ -1537,6 +1842,100 @@ fn workspace_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceInfo, Aut
     })
 }
 
+fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFailure> {
+    let mut hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    if let Some(value) = hostname.strip_suffix(".treer") {
+        hostname = value.trim_end_matches('.').to_string();
+    }
+    let valid = !hostname.is_empty()
+        && hostname.len() <= 253
+        && hostname.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label != "via"
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        });
+    if !valid {
+        return Err(AuthFailure::bad_request(
+            "invalid_virtual_hostname",
+            "hostname must contain valid DNS labels; the reserved label via is not allowed",
+        ));
+    }
+    Ok(hostname)
+}
+
+fn virtual_network_host_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<VirtualNetworkHost, AuthFailure> {
+    let created_at = row
+        .get::<String, _>("created_at")
+        .parse()
+        .map_err(|error| {
+            AuthFailure::internal(
+                "database_error",
+                format!("virtual network host has invalid created_at: {error}"),
+            )
+        })?;
+    let target_port = row
+        .get::<Option<i64>, _>("target_port")
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|_| {
+            AuthFailure::internal(
+                "database_error",
+                "virtual network host has invalid target_port".to_string(),
+            )
+        })?;
+    Ok(VirtualNetworkHost {
+        workspace_id: row.get("workspace_id"),
+        hostname: row.get("hostname"),
+        destination_server_id: row.get("destination_server_id"),
+        target_host: row.get("target_host"),
+        target_port,
+        created_at,
+        created_by: row.get("created_by"),
+    })
+}
+
+fn network_policy_from_row(row: sqlx::sqlite::SqliteRow) -> Result<NetworkPolicy, AuthFailure> {
+    let created_at = row
+        .get::<String, _>("created_at")
+        .parse()
+        .map_err(|error| {
+            AuthFailure::internal(
+                "database_error",
+                format!("network policy has invalid created_at: {error}"),
+            )
+        })?;
+    let port_start = u16::try_from(row.get::<i64, _>("port_start")).map_err(|_| {
+        AuthFailure::internal(
+            "database_error",
+            "network policy has invalid port_start".to_string(),
+        )
+    })?;
+    let port_end = u16::try_from(row.get::<i64, _>("port_end")).map_err(|_| {
+        AuthFailure::internal(
+            "database_error",
+            "network policy has invalid port_end".to_string(),
+        )
+    })?;
+    Ok(NetworkPolicy {
+        policy_id: row.get("policy_id"),
+        workspace_id: row.get("workspace_id"),
+        source_server_id: row.get("source_server_id"),
+        destination_server_id: row.get("destination_server_id"),
+        target_host: row.get("target_host"),
+        port_start,
+        port_end,
+        created_at,
+        created_by: row.get("created_by"),
+    })
+}
+
 fn hash_password(password: &str) -> Result<String, AuthFailure> {
     let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
         .map_err(|error| AuthFailure::internal("password_hash_error", error.to_string()))?;
@@ -1616,7 +2015,136 @@ impl IntoResponse for AuthFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use treer_protocol::{AgentInfo, AgentStatus, ServerStatus};
+    use treer_protocol::{
+        AgentInfo, AgentStatus, CreateNetworkPolicyRequest, CreateVirtualNetworkHostRequest,
+        ServerStatus,
+    };
+
+    #[tokio::test]
+    async fn virtual_network_hosts_are_normalized_resolved_and_cleaned_up() {
+        let mut store = AuthStore::in_memory("owner-password").await;
+        let record = store
+            .create_virtual_network_host(
+                "default",
+                "admin",
+                CreateVirtualNetworkHostRequest {
+                    hostname: "API.Dev.TREER.".to_string(),
+                    destination_server_id: "destination".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: Some(8080),
+                },
+            )
+            .await
+            .expect("create virtual host");
+        assert_eq!(record.hostname, "api.dev");
+        assert_eq!(
+            store
+                .resolve_virtual_network_host("default", "API.DEV")
+                .await
+                .expect("resolve virtual host"),
+            Some(record.clone())
+        );
+        assert!(store
+            .create_virtual_network_host(
+                "default",
+                "admin",
+                CreateVirtualNetworkHostRequest {
+                    hostname: "api.dev".to_string(),
+                    destination_server_id: "destination".to_string(),
+                    target_host: "localhost".to_string(),
+                    target_port: None,
+                },
+            )
+            .await
+            .is_err());
+        assert!(store
+            .create_virtual_network_host(
+                "default",
+                "admin",
+                CreateVirtualNetworkHostRequest {
+                    hostname: "host.via.machine".to_string(),
+                    destination_server_id: "destination".to_string(),
+                    target_host: "localhost".to_string(),
+                    target_port: None,
+                },
+            )
+            .await
+            .is_err());
+        store.disabled = true;
+        store
+            .delete_machine("default", "destination", &[])
+            .await
+            .expect("delete destination machine");
+        assert!(store
+            .list_virtual_network_hosts("default")
+            .await
+            .expect("list virtual hosts")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn network_policies_match_source_destination_host_and_port() {
+        let mut store = AuthStore::in_memory("owner-password").await;
+        let policy = store
+            .create_network_policy(
+                "default",
+                "admin",
+                CreateNetworkPolicyRequest {
+                    source_server_id: Some("source".to_string()),
+                    destination_server_id: "destination".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    port_start: 8000,
+                    port_end: Some(8010),
+                },
+            )
+            .await
+            .expect("create network policy");
+        assert!(store
+            .network_policy_allows("default", "source", "destination", "127.0.0.1", 8005,)
+            .await
+            .expect("policy lookup"));
+        assert!(!store
+            .network_policy_allows("default", "other", "destination", "127.0.0.1", 8005,)
+            .await
+            .expect("source mismatch"));
+        assert!(!store
+            .network_policy_allows("default", "source", "destination", "localhost", 8005,)
+            .await
+            .expect("host mismatch"));
+        store
+            .delete_network_policy("default", &policy.policy_id)
+            .await
+            .expect("delete policy");
+        assert!(store
+            .list_network_policies("default")
+            .await
+            .expect("list policies")
+            .is_empty());
+        store
+            .create_network_policy(
+                "default",
+                "admin",
+                CreateNetworkPolicyRequest {
+                    source_server_id: None,
+                    destination_server_id: "destination".to_string(),
+                    target_host: "*".to_string(),
+                    port_start: 1,
+                    port_end: Some(u16::MAX),
+                },
+            )
+            .await
+            .expect("create machine policy");
+        store.disabled = true;
+        store
+            .delete_machine("default", "destination", &[])
+            .await
+            .expect("delete machine");
+        assert!(store
+            .list_network_policies("default")
+            .await
+            .expect("list policies after machine deletion")
+            .is_empty());
+    }
 
     #[tokio::test]
     async fn invitation_registration_and_login_round_trip() {

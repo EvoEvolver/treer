@@ -1,6 +1,7 @@
 mod controller;
 mod host_client;
 mod local_api;
+mod network;
 mod proxy;
 mod service;
 
@@ -150,7 +151,14 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     let hostname = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| server_id.clone());
-    let agent_server_url = format!("http://127.0.0.1:{}", args.listen.port());
+    let listener = tokio::net::TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("failed to bind local API at {}", args.listen))?;
+    let listen_address = listener.local_addr()?;
+    let network = network::NetworkRuntime::bind_near(listen_address)
+        .await
+        .context("failed to bind local network proxy")?;
+    let agent_server_url = format!("http://127.0.0.1:{}", listen_address.port());
     let (host, host_events) = HostClient::connect(&args.host_socket).await?;
     let sync = host.sync(std::collections::BTreeMap::new()).await?;
     let (runtime, mut host_disconnected) = ControllerRuntime::from_sync(
@@ -162,6 +170,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
             server_id: server_id.clone(),
             workspace_root: root.clone(),
             agent_server_url,
+            network_proxy_url: network.proxy_url(),
             treer_binary: sibling_treer_binary(),
         },
     )
@@ -175,8 +184,13 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         root.display().to_string(),
     );
 
-    let proxy_client =
-        proxy::ProxyClient::new(proxy_ws, args.machine_token.clone(), server, runtime);
+    let proxy_client = proxy::ProxyClient::new(
+        proxy_ws,
+        args.machine_token.clone(),
+        server,
+        runtime,
+        network.clone(),
+    );
     let proxy_task = tokio::spawn(proxy_client.run_forever());
 
     let local_state = local_api::LocalApiState::new(
@@ -186,11 +200,9 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         args.machine_token,
     );
     let app = local_api::router(local_state);
-    let listener = tokio::net::TcpListener::bind(args.listen)
-        .await
-        .with_context(|| format!("failed to bind local API at {}", args.listen))?;
     info!(
-        address = %args.listen,
+        address = %listen_address,
+        network_proxy = %network.listen_address(),
         %server_id,
         workspace = %args.workspace,
         root = %root.display(),

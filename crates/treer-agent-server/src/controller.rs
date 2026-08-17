@@ -49,6 +49,7 @@ pub struct ControllerConfig {
     pub server_id: String,
     pub workspace_root: PathBuf,
     pub agent_server_url: String,
+    pub network_proxy_url: String,
     pub treer_binary: Option<PathBuf>,
 }
 
@@ -58,6 +59,7 @@ struct ControllerInner {
     server_id: String,
     workspace_root: PathBuf,
     agent_server_url: String,
+    network_proxy_url: String,
     treer_binary: Option<PathBuf>,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
@@ -113,6 +115,7 @@ impl ControllerRuntime {
                 server_id: config.server_id,
                 workspace_root: config.workspace_root,
                 agent_server_url: config.agent_server_url,
+                network_proxy_url: config.network_proxy_url,
                 treer_binary: config.treer_binary,
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
@@ -380,6 +383,18 @@ impl ControllerRuntime {
             (
                 "TREER_AGENT_SERVER_URL".to_string(),
                 self.inner.agent_server_url.clone(),
+            ),
+            (
+                "ALL_PROXY".to_string(),
+                self.inner.network_proxy_url.clone(),
+            ),
+            (
+                "all_proxy".to_string(),
+                self.inner.network_proxy_url.clone(),
+            ),
+            (
+                "TREER_NETWORK_PROXY".to_string(),
+                self.inner.network_proxy_url.clone(),
             ),
         ]);
         if let Some(agent_id) = agent_id {

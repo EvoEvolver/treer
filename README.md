@@ -166,6 +166,38 @@ Codex and Claude agents start inside the user's interactive shell before their
 commands are entered through the PTY. This loads shell configuration such as
 `.bashrc` or `.zshrc` before command lookup.
 
+## Workspace network
+
+Every Controller exposes a loopback SOCKS5 proxy and injects its URL into new
+agents as `ALL_PROXY`, `all_proxy`, and `TREER_NETWORK_PROXY`. TCP streams are
+multiplexed as binary frames over the Controller's existing `/agent/connect`
+WebSocket; no machine needs an inbound port. Each stream has an independent
+flow-control window, and terminal, transfer, and network frames share the same
+authenticated connection.
+
+Network access is denied until a workspace network policy permits a source
+machine, destination machine, target host, and port range. Policies can be
+managed from the Machines tab. The same panel can create workspace-scoped
+virtual hosts. A record maps a stable `.treer` name to a machine, target host,
+and optional target port. For example, mapping `api.treer` to `build-machine`,
+`127.0.0.1`, port `8080` makes this work without exposing port 8080:
+
+```bash
+curl http://api.treer/
+curl http://build-machine.treer:8080/
+curl http://git.internal.via.build-machine.treer:3000/
+```
+
+The network policy must allow the mapped destination, target host, and target
+port. Deleting a machine also deletes virtual hosts and policies that point to
+it. Virtual host labels are case-insensitive; `via` is reserved for direct
+routing.
+
+`build-machine.treer` connects to `127.0.0.1` on that machine.
+`host.via.build-machine.treer` connects to `host` from that machine. The first
+prototype supplies a standard SOCKS5 layer; programs that ignore proxy
+environment variables must be configured to use `TREER_NETWORK_PROXY`.
+
 ## Agent collaboration
 
 The `treer` binary talks to the local agent server by default. Managed agents

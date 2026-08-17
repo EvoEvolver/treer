@@ -7,6 +7,7 @@ import {
   FolderKanban,
   LogOut,
   MoreHorizontal,
+  Network,
   Pencil,
   Plus,
   RotateCw,
@@ -17,7 +18,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, websocketUrl, type Agent, type Machine, type Member, type Organization, type Snapshot, type User, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, websocketUrl, type Agent, type Machine, type Member, type NetworkPolicy, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -113,6 +114,7 @@ export default function App() {
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
+  const [networkOpen, setNetworkOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
@@ -129,6 +131,17 @@ export default function App() {
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
   const [currentRole, setCurrentRole] = useState<Member["role"]>("member")
+  const [networkPolicies, setNetworkPolicies] = useState<NetworkPolicy[]>([])
+  const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
+  const [virtualHostname, setVirtualHostname] = useState("")
+  const [virtualDestination, setVirtualDestination] = useState("")
+  const [virtualTargetHost, setVirtualTargetHost] = useState("127.0.0.1")
+  const [virtualTargetPort, setVirtualTargetPort] = useState("")
+  const [networkSource, setNetworkSource] = useState("*")
+  const [networkDestination, setNetworkDestination] = useState("")
+  const [networkHost, setNetworkHost] = useState("127.0.0.1")
+  const [networkPortStart, setNetworkPortStart] = useState("")
+  const [networkPortEnd, setNetworkPortEnd] = useState("")
 
   const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : "Something went wrong"), [])
 
@@ -319,6 +332,81 @@ export default function App() {
     } catch (reason) { showError(reason) }
   }
 
+  async function loadNetworkPolicies() {
+    if (!workspaceId) return
+    const data = await api<{ policies: NetworkPolicy[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/network-policies`)
+    setNetworkPolicies(data.policies)
+  }
+
+  async function loadVirtualHosts() {
+    if (!workspaceId) return
+    const data = await api<{ hosts: VirtualNetworkHost[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts`)
+    setVirtualHosts(data.hosts)
+  }
+
+  async function openNetwork() {
+    try {
+      await Promise.all([loadNetworkPolicies(), loadVirtualHosts()])
+      const firstMachine = snapshot?.servers[0]?.server_id ?? ""
+      setNetworkDestination(firstMachine)
+      setVirtualDestination(firstMachine)
+      setNetworkOpen(true)
+    } catch (reason) { showError(reason) }
+  }
+
+  async function createVirtualHost(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts`, {
+        method: "POST",
+        body: JSON.stringify({
+          hostname: virtualHostname,
+          destination_server_id: virtualDestination,
+          target_host: virtualTargetHost,
+          target_port: virtualTargetPort ? Number(virtualTargetPort) : null,
+        }),
+      })
+      setVirtualHostname(""); setVirtualTargetPort("")
+      await loadVirtualHosts()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function deleteVirtualHost(hostname: string) {
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(hostname)}`, { method: "DELETE" })
+      await loadVirtualHosts()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function createNetworkPolicy(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/network-policies`, {
+        method: "POST",
+        body: JSON.stringify({
+          source_server_id: networkSource === "*" ? null : networkSource,
+          destination_server_id: networkDestination,
+          target_host: networkHost,
+          port_start: Number(networkPortStart),
+          port_end: networkPortEnd ? Number(networkPortEnd) : null,
+        }),
+      })
+      setNetworkPortStart(""); setNetworkPortEnd("")
+      await loadNetworkPolicies()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function deleteNetworkPolicy(policyId: string) {
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/network-policies/${encodeURIComponent(policyId)}`, { method: "DELETE" })
+      await loadNetworkPolicies()
+    } catch (reason) { showError(reason) }
+  }
+
   async function copy(value: string) {
     try { await navigator.clipboard.writeText(value) }
     catch { showError("Unable to copy to the clipboard") }
@@ -353,7 +441,7 @@ export default function App() {
           </TabsList>
           <TabsContent value="machines" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></div>
+              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><div className="flex items-center"><IconButton label="Network policies" className="size-7" onClick={openNetwork} disabled={!workspaceId}><Network /></IconButton><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></div></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
                 {snapshot?.servers.map((machine) => <MachineItem key={machine.server_id} machine={machine} onRename={() => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDelete={() => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} />)}
                 {snapshot && !snapshot.servers.length && <EmptyState icon={<Server />} label="No machines connected" />}
@@ -407,6 +495,8 @@ export default function App() {
     <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start an agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Kind"><Select value={agentKind} onValueChange={setAgentKind}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="codex">codex</SelectItem><SelectItem value="claude">claude</SelectItem><SelectItem value="command">command</SelectItem></SelectContent></Select></Field><Field label="Name"><Input value={agentName} onChange={(event) => setAgentName(event.target.value)} required /></Field><Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field><Field label="Arguments, one per line"><Textarea rows={3} value={agentArgs} onChange={(event) => setAgentArgs(event.target.value)} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId}>Create agent</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
+
+    <Dialog open={networkOpen} onOpenChange={setNetworkOpen}><DialogContent className="max-h-[90dvh] max-w-2xl overflow-y-auto"><DialogHeader><DialogTitle>Workspace network</DialogTitle><DialogDescription>{workspace?.name ?? "Workspace"}</DialogDescription></DialogHeader><section className="space-y-3"><h3 className="text-xs font-semibold">Virtual hosts</h3><div className="max-h-40 divide-y overflow-auto border-y">{virtualHosts.map((host) => <div key={host.hostname} className="grid min-h-12 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2"><div className="min-w-0 text-xs"><div className="truncate font-mono font-medium">{host.hostname}.treer</div><div className="mt-1 truncate text-[10px] text-muted-foreground">{machineName(snapshot?.servers.find((item) => item.server_id === host.destination_server_id), host.destination_server_id)} · {host.target_host}:{host.target_port ?? "requested port"}</div></div><IconButton label={`Delete ${host.hostname}.treer`} className="text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></div>)}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div><form onSubmit={createVirtualHost} className="grid gap-3 sm:grid-cols-2"><Field label="Virtual hostname"><div className="relative"><Input className="pr-14 font-mono" value={virtualHostname} onChange={(event) => setVirtualHostname(event.target.value)} placeholder="api" required /><span className="pointer-events-none absolute inset-y-0 right-3 flex items-center font-mono text-xs text-muted-foreground">.treer</span></div></Field><Field label="Machine"><Select value={virtualDestination} onValueChange={setVirtualDestination} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Target host"><Input value={virtualTargetHost} onChange={(event) => setVirtualTargetHost(event.target.value)} required /></Field><Field label="Target port"><Input type="number" min="1" max="65535" placeholder="Keep requested port" value={virtualTargetPort} onChange={(event) => setVirtualTargetPort(event.target.value)} /></Field><DialogFooter className="sm:col-span-2"><Button type="submit" disabled={!virtualHostname || !virtualDestination}><Plus />Add host</Button></DialogFooter></form></section><section className="space-y-3 border-t pt-4"><h3 className="text-xs font-semibold">Policies</h3><div className="max-h-40 divide-y overflow-auto border-y">{networkPolicies.map((policy) => <div key={policy.policy_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2"><div className="min-w-0 text-xs"><div className="truncate font-medium">{policy.source_server_id ? machineName(snapshot?.servers.find((item) => item.server_id === policy.source_server_id), policy.source_server_id) : "Any machine"} → {machineName(snapshot?.servers.find((item) => item.server_id === policy.destination_server_id), policy.destination_server_id)}</div><div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{policy.target_host}:{policy.port_start}{policy.port_end !== policy.port_start && `-${policy.port_end}`}</div></div><IconButton label="Delete network policy" className="text-destructive" onClick={() => deleteNetworkPolicy(policy.policy_id)}><Trash2 /></IconButton></div>)}{!networkPolicies.length && <EmptyState icon={<Network />} label="No network policies" />}</div><form onSubmit={createNetworkPolicy} className="grid gap-3 sm:grid-cols-2"><Field label="Source"><Select value={networkSource} onValueChange={setNetworkSource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="*">Any machine</SelectItem>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Destination"><Select value={networkDestination} onValueChange={setNetworkDestination} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Target host"><Input value={networkHost} onChange={(event) => setNetworkHost(event.target.value)} required /></Field><div className="grid grid-cols-2 gap-2"><Field label="First port"><Input type="number" min="1" max="65535" value={networkPortStart} onChange={(event) => setNetworkPortStart(event.target.value)} required /></Field><Field label="Last port"><Input type="number" min="1" max="65535" placeholder={networkPortStart || "Same"} value={networkPortEnd} onChange={(event) => setNetworkPortEnd(event.target.value)} /></Field></div><DialogFooter className="sm:col-span-2"><Button type="submit" disabled={!networkDestination || !networkPortStart}><Plus />Add policy</Button></DialogFooter></form></section></DialogContent></Dialog>
 
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 

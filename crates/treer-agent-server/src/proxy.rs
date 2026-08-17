@@ -15,12 +15,13 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
-    ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind,
-    TransferBinaryFrame, TransferStats, PROTOCOL_VERSION,
+    NetworkBinaryFrame, ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame,
+    TerminalBinaryKind, TransferBinaryFrame, TransferStats, PROTOCOL_VERSION,
 };
 use url::Url;
 
 use crate::controller::ControllerRuntime;
+use crate::network::NetworkRuntime;
 use treer_transfer::TransferReceiver;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -52,6 +53,7 @@ pub struct ProxyClient {
     pub machine_token: Option<String>,
     pub server: ServerInfo,
     pub runtime: ControllerRuntime,
+    pub network: NetworkRuntime,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
 }
 
@@ -61,12 +63,14 @@ impl ProxyClient {
         machine_token: Option<String>,
         server: ServerInfo,
         runtime: ControllerRuntime,
+        network: NetworkRuntime,
     ) -> Self {
         Self {
             proxy_ws,
             machine_token,
             server,
             runtime,
+            network,
             command_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -78,6 +82,7 @@ impl ProxyClient {
                 Ok(()) => warn!("proxy connection closed"),
                 Err(err) => warn!(error = %format_args!("{err:#}"), "proxy connection failed"),
             }
+            self.network.reset_all().await;
             self.runtime.cleanup_transient_shells().await;
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(5));
@@ -256,6 +261,10 @@ impl ProxyClient {
                         error,
                     }).await?;
                 }
+                frame = self.network.next_outgoing() => {
+                    let frame = frame.ok_or_else(|| anyhow!("network runtime stopped"))?;
+                    send_network_binary(&mut outgoing, frame).await?;
+                }
                 message = incoming.next() => {
                     let Some(message) = message else {
                         return Err(anyhow!("proxy closed the websocket"));
@@ -264,6 +273,14 @@ impl ProxyClient {
                     let Message::Text(text) = message else {
                         match message {
                             Message::Binary(encoded) => {
+                                if NetworkBinaryFrame::is_network_frame(&encoded) {
+                                    let frame = NetworkBinaryFrame::decode(&encoded)
+                                        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+                                    if let Err(error) = self.network.handle_incoming(frame).await {
+                                        warn!(%error, "failed to handle network frame");
+                                    }
+                                    continue;
+                                }
                                 if TransferBinaryFrame::is_transfer_frame(&encoded) {
                                     let frame = TransferBinaryFrame::decode(&encoded)
                                         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
@@ -611,6 +628,7 @@ pub fn server_info(
             ("arch".to_string(), std::env::consts::ARCH.to_string()),
             ("treer.ssh".to_string(), "1".to_string()),
             ("treer.scp".to_string(), "1".to_string()),
+            ("treer.network".to_string(), "1".to_string()),
         ]),
         status: ServerStatus::Online,
         connected_at: now,
@@ -656,4 +674,18 @@ where
         .send(Message::Binary(encoded.into()))
         .await
         .context("failed to send transfer binary frame")
+}
+
+async fn send_network_binary<S>(outgoing: &mut S, frame: NetworkBinaryFrame) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    let encoded = frame
+        .encode()
+        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    outgoing
+        .send(Message::Binary(encoded.into()))
+        .await
+        .context("failed to send network binary frame")
 }

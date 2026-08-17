@@ -6,8 +6,9 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use treer_protocol::{
-    AgentServerMessage, ProtocolError, ProxyMessage, TerminalBinaryFrame, TerminalBinaryKind,
-    TransferBinaryFrame, PROTOCOL_VERSION,
+    AgentServerMessage, NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest,
+    NetworkOpenRequest, ProtocolError, ProxyMessage, TerminalBinaryFrame, TerminalBinaryKind,
+    TransferBinaryFrame, VirtualNetworkHost, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
 
@@ -51,6 +52,40 @@ async fn handle(socket: WebSocket, state: AppState, auth: AuthStore, machine: Ma
         let Message::Text(text) = message else {
             match message {
                 Message::Binary(encoded) => {
+                    if NetworkBinaryFrame::is_network_frame(&encoded) {
+                        let frame = match NetworkBinaryFrame::decode(&encoded) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                send_error(&outgoing_tx, error);
+                                continue;
+                            }
+                        };
+                        let Some((workspace_id, server_id)) = identity.as_ref() else {
+                            send_network_reset(&outgoing_tx, &frame.stream_id, identity_error());
+                            continue;
+                        };
+                        let stream_id = frame.stream_id.clone();
+                        let result = if frame.kind == NetworkBinaryKind::Open {
+                            route_network_open(
+                                &state,
+                                &auth,
+                                workspace_id,
+                                server_id,
+                                connection_id,
+                                frame,
+                            )
+                            .await
+                        } else {
+                            state
+                                .relay_network_frame(workspace_id, server_id, connection_id, frame)
+                                .await
+                                .map_err(|error| (stream_id, error))
+                        };
+                        if let Err((stream_id, error)) = result {
+                            send_network_reset(&outgoing_tx, &stream_id, error);
+                        }
+                        continue;
+                    }
                     if TransferBinaryFrame::is_transfer_frame(&encoded) {
                         let frame = match TransferBinaryFrame::decode(&encoded) {
                             Ok(frame) => frame,
@@ -357,6 +392,127 @@ fn identity_error() -> ProtocolError {
     )
 }
 
+async fn route_network_open(
+    state: &AppState,
+    auth: &AuthStore,
+    workspace_id: &str,
+    source_server_id: &str,
+    connection_id: Uuid,
+    mut frame: NetworkBinaryFrame,
+) -> Result<(), (String, ProtocolError)> {
+    let stream_id = frame.stream_id.clone();
+    let request: NetworkOpenRequest = serde_json::from_slice(&frame.payload).map_err(|error| {
+        (
+            stream_id.clone(),
+            ProtocolError::new("invalid_network_open", error.to_string()),
+        )
+    })?;
+    if request.port == 0 || request.host.is_empty() {
+        return Err((
+            stream_id,
+            ProtocolError::new(
+                "invalid_network_open",
+                "target host and non-zero port are required",
+            ),
+        ));
+    }
+    let virtual_host = auth
+        .resolve_virtual_network_host(workspace_id, &request.destination)
+        .await
+        .map_err(|error| (stream_id.clone(), error.into_parts().1))?;
+    let (destination_target, target_host, target_port) =
+        resolve_network_target(&request, virtual_host);
+    let destination = state
+        .resolve_server(workspace_id, &destination_target)
+        .await
+        .map_err(|error| (stream_id.clone(), error))?;
+    let allowed = auth
+        .network_policy_allows(
+            workspace_id,
+            source_server_id,
+            &destination.server_id,
+            &target_host,
+            target_port,
+        )
+        .await
+        .map_err(|error| (stream_id.clone(), error.into_parts().1))?;
+    if !allowed {
+        return Err((
+            stream_id,
+            ProtocolError::new(
+                "network_policy_denied",
+                format!(
+                    "network policy denies {} -> {}:{} on {}",
+                    source_server_id, target_host, target_port, destination.server_id
+                ),
+            ),
+        ));
+    }
+    frame.payload = serde_json::to_vec(&NetworkConnectRequest {
+        source_server_id: source_server_id.to_string(),
+        source_agent_id: request.source_agent_id,
+        host: target_host,
+        port: target_port,
+    })
+    .map_err(|error| {
+        (
+            frame.stream_id.clone(),
+            ProtocolError::new("encode_error", error.to_string()),
+        )
+    })?;
+    state
+        .open_network_stream(
+            workspace_id,
+            source_server_id,
+            connection_id,
+            &destination.server_id,
+            frame,
+        )
+        .await
+        .map_err(|error| (stream_id, error))
+}
+
+fn resolve_network_target(
+    request: &NetworkOpenRequest,
+    virtual_host: Option<VirtualNetworkHost>,
+) -> (String, String, u16) {
+    virtual_host.map_or_else(
+        || {
+            (
+                request.destination.clone(),
+                request.host.clone(),
+                request.port,
+            )
+        },
+        |record| {
+            (
+                record.destination_server_id,
+                record.target_host,
+                record.target_port.unwrap_or(request.port),
+            )
+        },
+    )
+}
+
+fn send_network_reset(
+    outgoing: &mpsc::UnboundedSender<SocketFrame>,
+    stream_id: &str,
+    error: ProtocolError,
+) {
+    let payload = serde_json::to_vec(&error).unwrap_or_default();
+    let frame = NetworkBinaryFrame {
+        kind: NetworkBinaryKind::Reset,
+        stream_id: stream_id.to_string(),
+        payload,
+    };
+    match frame.encode() {
+        Ok(encoded) => {
+            let _ = outgoing.send(SocketFrame::Binary(encoded));
+        }
+        Err(error) => send_error(outgoing, error),
+    }
+}
+
 fn send_error(outgoing: &mpsc::UnboundedSender<SocketFrame>, error: ProtocolError) {
     send_message(outgoing, &ProxyMessage::Error { error });
 }
@@ -367,5 +523,39 @@ fn send_message(outgoing: &mpsc::UnboundedSender<SocketFrame>, message: &ProxyMe
             let _ = outgoing.send(SocketFrame::Text(encoded));
         }
         Err(err) => warn!(%err, "failed to encode proxy message"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[test]
+    fn virtual_host_replaces_destination_host_and_optional_port() {
+        let request = NetworkOpenRequest {
+            destination: "api".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 80,
+            source_agent_id: None,
+        };
+        let record = VirtualNetworkHost {
+            workspace_id: "default".to_string(),
+            hostname: "api".to_string(),
+            destination_server_id: "server-b".to_string(),
+            target_host: "localhost".to_string(),
+            target_port: Some(8080),
+            created_at: Utc::now(),
+            created_by: "admin".to_string(),
+        };
+        assert_eq!(
+            resolve_network_target(&request, Some(record)),
+            ("server-b".to_string(), "localhost".to_string(), 8080)
+        );
+        assert_eq!(
+            resolve_network_target(&request, None),
+            ("api".to_string(), "127.0.0.1".to_string(), 80)
+        );
     }
 }
