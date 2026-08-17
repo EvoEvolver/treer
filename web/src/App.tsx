@@ -185,9 +185,9 @@ export default function App() {
     let socket: WebSocket | null = null
     let timer: number | undefined
     refreshSnapshot().catch(showError)
-    const connect = () => {
+    const connect = (initial = false) => {
       if (disposed) return
-      setConnection("connecting")
+      if (initial) setConnection("connecting")
       socket = new WebSocket(websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/events`))
       socket.onopen = () => { if (!disposed) setConnection("live") }
       socket.onmessage = (event) => {
@@ -199,10 +199,10 @@ export default function App() {
       socket.onclose = () => {
         if (disposed) return
         setConnection("reconnecting")
-        timer = window.setTimeout(connect, 1200)
+        timer = window.setTimeout(() => connect(false), 1200)
       }
     }
-    connect()
+    connect(true)
     return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
   }, [workspaceId, refreshSnapshot, showError])
 
@@ -392,7 +392,7 @@ export default function App() {
         <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className="grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]">
             <div className="flex min-w-0 items-center justify-between gap-4 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><span className="inline-flex shrink-0 items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span></div>
-            <div className="min-h-0"><TerminalPane key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} /></div>
+            <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} /></div>
           </div>
         </div>
       </section>

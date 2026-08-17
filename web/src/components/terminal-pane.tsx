@@ -27,8 +27,12 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
     let socket: WebSocket | null = null
     let reconnectTimer: number | undefined
     let resizeTimer: number | undefined
+    let reconnectAttempt = 0
+    let reconnectAllowed = true
+    let lastHostWidth = 0
+    let lastHostHeight = 0
     const terminal = new Terminal({
-      cursorBlink: true,
+      cursorBlink: false,
       cursorStyle: "block",
       fontFamily: "SFMono-Regular, Menlo, Monaco, Consolas, monospace",
       fontSize: 13,
@@ -61,10 +65,20 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
       }
     }
 
-    const connect = () => {
+    const fitIfHostChanged = () => {
+      const { width, height } = host.getBoundingClientRect()
+      if (Math.abs(width - lastHostWidth) < 0.5 && Math.abs(height - lastHostHeight) < 0.5) return
+      lastHostWidth = width
+      lastHostHeight = height
+      fit.fit()
+      sendResize()
+    }
+
+    const connect = (initial = false) => {
       if (disposed) return
       window.clearTimeout(reconnectTimer)
-      onStatusChange("connecting")
+      reconnectAllowed = true
+      if (initial) onStatusChange("connecting")
       socket = new WebSocket(websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/terminal?cols=${terminal.cols}&rows=${terminal.rows}`))
       socket.binaryType = "arraybuffer"
       const currentSocket = socket
@@ -76,26 +90,32 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
         }
         const message = JSON.parse(event.data) as { type: string; reason?: string; error?: { message?: string } }
         if (message.type === "ready") {
+          reconnectAttempt = 0
           terminal.reset()
           onStatusChange("live")
           terminal.focus()
         } else if (message.type === "closed") {
-          onStatusChange(message.reason === "agent server disconnected" ? "reconnecting" : "closed")
-          if (message.reason && message.reason !== "agent server disconnected") terminal.writeln(`\r\n\x1b[31m[treer] ${message.reason}\x1b[0m`)
+          reconnectAllowed = message.reason === "agent server disconnected"
+          onStatusChange(reconnectAllowed ? "reconnecting" : "closed")
+          if (message.reason && !reconnectAllowed) terminal.writeln(`\r\n\x1b[31m[treer] ${message.reason}\x1b[0m`)
         } else if (message.type === "error") {
+          reconnectAllowed = false
           onStatusChange("error")
           terminal.writeln(`\r\n\x1b[31m[treer] ${message.error?.message ?? "terminal error"}\x1b[0m`)
         }
       }
-      currentSocket.onerror = () => { if (!disposed && socket === currentSocket) onStatusChange("error") }
+      currentSocket.onerror = () => {}
       currentSocket.onclose = () => {
         if (disposed || socket !== currentSocket) return
         if (!active) {
           onStatusChange("closed")
           return
         }
+        if (!reconnectAllowed) return
         onStatusChange("reconnecting")
-        reconnectTimer = window.setTimeout(connect, 700)
+        const delay = Math.min(1_000 * 2 ** reconnectAttempt, 10_000)
+        reconnectAttempt += 1
+        reconnectTimer = window.setTimeout(() => connect(false), delay)
       }
     }
 
@@ -106,15 +126,14 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
       window.clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => {
         if (disposed) return
-        fit.fit()
-        sendResize()
+        fitIfHostChanged()
       }, 60)
     })
     observer.observe(host)
     requestAnimationFrame(() => {
       if (disposed) return
-      fit.fit()
-      connect()
+      fitIfHostChanged()
+      connect(true)
     })
 
     return () => {
@@ -130,5 +149,5 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
 
   if (!workspaceId) return <div className="grid h-full place-items-center text-xs text-zinc-500">No workspace selected</div>
   if (!agentId) return <div className="grid h-full place-items-center text-xs text-zinc-500">Select an agent to attach</div>
-  return <div ref={hostRef} className="h-full min-h-0 w-full overflow-hidden p-3" />
+  return <div ref={hostRef} className="h-full min-h-0 min-w-0 w-full max-w-full overflow-hidden p-3" />
 }
