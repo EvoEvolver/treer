@@ -285,7 +285,7 @@ fn bootstrap_commands(public_url: &Url, enrollment_key: &str) -> (String, String
     let script_url = install_script_url(public_url);
     let install_command = format!("curl -fsSL {} | sh", shell_quote(script_url.as_str()));
     let connect_command = format!(
-        "TREER_ENROLLMENT_KEY={} \"$HOME/.local/libexec/treer/treer-agent-server\" connect --proxy {}",
+        "TREER_ENROLLMENT_KEY={} treer-agent-server connect --proxy {}",
         shell_quote(enrollment_key),
         shell_quote(public_url.as_str()),
     );
@@ -433,9 +433,10 @@ chmod 755 "$tmp_dir/treer" "$tmp_dir/treer-agent-host" "$tmp_dir/treer-agent-ser
 mv "$tmp_dir/treer" "$install_dir/treer"
 mv "$tmp_dir/treer-agent-host" "$server_dir/treer-agent-host"
 mv "$tmp_dir/treer-agent-server" "$server_dir/treer-agent-server"
+ln -sf "$server_dir/treer-agent-server" "$install_dir/treer-agent-server"
 
 echo "treer: binaries installed"
-echo "treer: add $install_dir to PATH to use the treer command"
+echo "treer: add $install_dir to PATH to use treer and treer-agent-server"
 echo "treer: run the workspace connection command from the Proxy UI next"
 "#,
         artifact_base = shell_quote(artifact_base.as_str().trim_end_matches('/')),
@@ -1397,7 +1398,7 @@ mod tests {
         assert!(!install.contains("enr_"));
         assert!(!install.contains("connect"));
         assert!(connect.contains(key));
-        assert!(connect.contains("treer-agent-server\" connect --proxy"));
+        assert!(connect.contains("treer-agent-server connect --proxy"));
         assert!(!connect.contains("install.sh"));
     }
 
@@ -1409,6 +1410,9 @@ mod tests {
         assert!(script.contains("platform=linux-aarch64"));
         assert!(script.contains(".local/libexec/treer"));
         assert!(script.contains("treer-agent-host"));
+        assert!(script.contains(
+            "ln -sf \"$server_dir/treer-agent-server\" \"$install_dir/treer-agent-server\""
+        ));
         assert!(script.contains("https://treer.example/artifacts"));
         assert!(!script.contains("service --workspace"));
         assert!(!script.contains("machine_token"));

@@ -31,6 +31,8 @@ struct Args {
 enum Command {
     #[command(about = "Connect this machine to a Proxy workspace")]
     Connect(ConnectArgs),
+    #[command(about = "Download and hot-activate the latest Controller and treer CLI")]
+    Update(UpdateArgs),
     #[command(hide = true, about = "Run from a saved service configuration")]
     Run {
         #[arg(long)]
@@ -38,6 +40,12 @@ enum Command {
     },
     #[command(about = "Manage the host agent-server service")]
     Service(ServiceArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+struct UpdateArgs {
+    #[arg(long, default_value = "default")]
+    workspace: String,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -117,6 +125,7 @@ async fn main() -> Result<()> {
     match args.command {
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
+        Some(Command::Update(update)) => service::update(&update.workspace).await,
         Some(Command::Run { config }) => {
             let config = service::ServiceConfig::load(&config)?;
             run_server(ServerArgs {
@@ -356,21 +365,8 @@ fn load_or_create_server_id(root: &Path) -> Result<String> {
 }
 
 fn sibling_treer_binary() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("TREER_BIN").map(PathBuf::from) {
-        if path.is_file() {
-            return Some(path);
-        }
-    }
     let executable = std::env::current_exe().ok()?;
-    let candidate = executable.with_file_name(format!("treer{}", std::env::consts::EXE_SUFFIX));
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    let local_dir = executable.parent()?.parent()?.parent()?;
-    let candidate = local_dir
-        .join("bin")
-        .join(format!("treer{}", std::env::consts::EXE_SUFFIX));
-    candidate.is_file().then_some(candidate)
+    service::installed_treer_binary(&executable)
 }
 
 #[cfg(test)]
@@ -417,6 +413,17 @@ mod tests {
                 .workspace_id,
             "workspace-a"
         );
+    }
+
+    #[test]
+    fn update_command_accepts_a_workspace() {
+        let args =
+            Args::try_parse_from(["treer-agent-server", "update", "--workspace", "workspace-a"])
+                .expect("parse update command");
+        let Some(Command::Update(update)) = args.command else {
+            panic!("expected update command");
+        };
+        assert_eq!(update.workspace, "workspace-a");
     }
 
     #[tokio::test]

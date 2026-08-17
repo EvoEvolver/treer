@@ -51,9 +51,11 @@ public and reusable:
 curl -fsSL 'https://PROXY_HOST/install.sh' | sh
 ```
 
-The script detects the target platform, installs `treer` to `~/.local/bin` and
-the Host and Controller binaries to `~/.local/libexec/treer`. It does not contain
-a credential, create workspace configuration, register a service, or start a
+The script detects the target platform, installs `treer` to `~/.local/bin`, and
+puts the Host and Controller binaries in `~/.local/libexec/treer`. It also exposes
+`treer-agent-server` in `~/.local/bin` as a symlink to the Controller, so both
+commands are available from the same PATH entry. It does not contain a
+credential, create workspace configuration, register a service, or start a
 process. Override `TREER_INSTALL_DIR` or `TREER_AGENT_SERVER_INSTALL_DIR` when
 needed.
 
@@ -61,7 +63,7 @@ The separate connection command contains a 10-minute, single-use enrollment key:
 
 ```bash
 TREER_ENROLLMENT_KEY='enr_v1_...' \
-  "$HOME/.local/libexec/treer/treer-agent-server" connect \
+  treer-agent-server connect \
   --proxy 'https://PROXY_HOST/'
 ```
 
@@ -73,11 +75,22 @@ and linger enabled; macOS uses a per-user LaunchAgent with `KeepAlive`. Override
 needed. The first available loopback port starting at `8790` is saved per
 workspace.
 
-Installing replacement binaries does not restart a running service.
-`service restart-controller` activates an updated Controller without restarting
-the Host. The updated Host binary takes effect on the next full service restart.
-Existing agents, PTYs, and buffered terminal output stay alive during a
-Controller restart while the browser reconnects.
+Pull and hot-activate the latest Controller and agent-facing CLI with one command:
+
+```bash
+treer-agent-server update --workspace default
+```
+
+`update` downloads the current platform's `treer-agent-server` and `treer`
+artifacts from the configured Proxy, validates both executables, and replaces
+them atomically. It asks the stable Host to restart only the Controller and waits
+for a new Controller epoch to become healthy. If activation fails, both binaries
+are restored and the old Controller is restarted. The Host, existing agents,
+PTYs, and buffered terminal output remain alive while the browser reconnects.
+
+The long-lived `treer-agent-host` is deliberately not part of this hot update.
+Installing a newer Host still requires a full service restart, which terminates
+the agents and PTYs owned by that Host.
 
 The enrollment key can be used once and contains a versioned encoding of its
 workspace ID. The Proxy verifies that embedded workspace against its enrollment
@@ -91,19 +104,19 @@ The host administrator manages the service through the agent-server binary, not
 the agent-facing `treer` command:
 
 ```bash
-server="$HOME/.local/libexec/treer/treer-agent-server"
-"$server" service status
-"$server" service logs --follow
-"$server" service restart-controller
-"$server" service stop
-"$server" service start
-"$server" service restart
-"$server" service uninstall
+treer-agent-server update --workspace default
+treer-agent-server service status
+treer-agent-server service logs --follow
+treer-agent-server service restart-controller
+treer-agent-server service stop
+treer-agent-server service start
+treer-agent-server service restart
+treer-agent-server service uninstall
 ```
 
-`restart-controller` is the normal hot-update operation and preserves running
-agents. `restart` restarts the long-lived Host itself and therefore terminates
-the agents and PTYs owned by that Host.
+`restart-controller` activates a Controller binary installed manually and
+preserves running agents. `restart` restarts the long-lived Host itself and
+therefore terminates the agents and PTYs owned by that Host.
 
 Add `--workspace WORKSPACE_ID` after `service` when managing a workspace other
 than `default`. On Linux, installation prints an actionable warning if systemd

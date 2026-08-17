@@ -18,6 +18,7 @@ use treer_protocol::{
     PromptAgentRequest, ProtocolError, RenameRequest, TerminalServerMessage, AGENT_ID_HEADER,
 };
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct LocalApiState {
@@ -25,6 +26,7 @@ pub struct LocalApiState {
     proxy_http: Url,
     workspace_id: String,
     server_id: String,
+    controller_epoch: String,
     machine_token: Option<String>,
 }
 
@@ -40,6 +42,7 @@ impl LocalApiState {
             proxy_http,
             workspace_id,
             server_id,
+            controller_epoch: Uuid::new_v4().to_string(),
             machine_token,
         }
     }
@@ -178,6 +181,7 @@ async fn health(State(state): State<LocalApiState>) -> Json<Value> {
         "service": "treer-agent-server",
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
+        "controller_epoch": state.controller_epoch,
     }))
 }
 
