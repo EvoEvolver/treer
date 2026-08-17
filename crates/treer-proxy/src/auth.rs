@@ -1843,26 +1843,25 @@ fn workspace_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceInfo, Aut
 }
 
 fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFailure> {
-    let mut hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
-    if let Some(value) = hostname.strip_suffix(".treer") {
-        hostname = value.trim_end_matches('.').to_string();
-    }
-    let valid = !hostname.is_empty()
+    let hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    let labels_valid = !hostname.is_empty()
         && hostname.len() <= 253
         && hostname.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
-                && label != "via"
                 && !label.starts_with('-')
                 && !label.ends_with('-')
                 && label
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         });
-    if !valid {
+    let conflicts_with_direct_route = hostname
+        .strip_suffix(".treer")
+        .is_some_and(|route| route.contains(".via."));
+    if !labels_valid || conflicts_with_direct_route {
         return Err(AuthFailure::bad_request(
             "invalid_virtual_hostname",
-            "hostname must contain valid DNS labels; the reserved label via is not allowed",
+            "hostname must contain valid DNS labels and must not conflict with a Treer via route",
         ));
     }
     Ok(hostname)
@@ -2028,7 +2027,7 @@ mod tests {
                 "default",
                 "admin",
                 CreateVirtualNetworkHostRequest {
-                    hostname: "API.Dev.TREER.".to_string(),
+                    hostname: "API.Dev.Example.".to_string(),
                     destination_server_id: "destination".to_string(),
                     target_host: "127.0.0.1".to_string(),
                     target_port: Some(8080),
@@ -2036,10 +2035,10 @@ mod tests {
             )
             .await
             .expect("create virtual host");
-        assert_eq!(record.hostname, "api.dev");
+        assert_eq!(record.hostname, "api.dev.example");
         assert_eq!(
             store
-                .resolve_virtual_network_host("default", "API.DEV")
+                .resolve_virtual_network_host("default", "API.DEV.EXAMPLE")
                 .await
                 .expect("resolve virtual host"),
             Some(record.clone())
@@ -2049,7 +2048,7 @@ mod tests {
                 "default",
                 "admin",
                 CreateVirtualNetworkHostRequest {
-                    hostname: "api.dev".to_string(),
+                    hostname: "api.dev.example".to_string(),
                     destination_server_id: "destination".to_string(),
                     target_host: "localhost".to_string(),
                     target_port: None,
@@ -2062,7 +2061,7 @@ mod tests {
                 "default",
                 "admin",
                 CreateVirtualNetworkHostRequest {
-                    hostname: "host.via.machine".to_string(),
+                    hostname: "host.via.machine.treer".to_string(),
                     destination_server_id: "destination".to_string(),
                     target_host: "localhost".to_string(),
                     target_port: None,
@@ -2070,6 +2069,19 @@ mod tests {
             )
             .await
             .is_err());
+        store
+            .create_virtual_network_host(
+                "default",
+                "admin",
+                CreateVirtualNetworkHostRequest {
+                    hostname: "git.via.example".to_string(),
+                    destination_server_id: "destination".to_string(),
+                    target_host: "localhost".to_string(),
+                    target_port: None,
+                },
+            )
+            .await
+            .expect("via label outside a Treer direct route is valid");
         store.disabled = true;
         store
             .delete_machine("default", "destination", &[])

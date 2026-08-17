@@ -280,25 +280,26 @@ async fn read_socks_request(socket: &mut TcpStream) -> anyhow::Result<SocksRoute
             socket.read_exact(&mut value).await?;
             String::from_utf8(value).context("SOCKS destination is not UTF-8")?
         }
-        _ => return Err(anyhow!("Treer destinations must use a .treer hostname")),
+        _ => return Err(anyhow!("Treer destinations must use a hostname")),
     };
     let port = socket.read_u16().await?;
     parse_route(&domain, port)
 }
 
 fn parse_route(domain: &str, port: u16) -> anyhow::Result<SocksRoute> {
-    let route = domain
-        .strip_suffix(".treer")
-        .ok_or_else(|| anyhow!("Treer destinations must end in .treer"))?;
-    if route.is_empty() {
-        return Err(anyhow!("Treer destination machine is empty"));
+    let route = domain.trim_end_matches('.').to_ascii_lowercase();
+    if route.is_empty() || route.len() > 253 {
+        return Err(anyhow!("Treer destination hostname is invalid"));
     }
-    let (host, destination) = match route.rsplit_once(".via.") {
+    let (host, destination) = match route
+        .strip_suffix(".treer")
+        .and_then(|route| route.rsplit_once(".via."))
+    {
         Some((host, destination)) if !host.is_empty() && !destination.is_empty() => {
             (host.to_string(), destination.to_string())
         }
         Some(_) => return Err(anyhow!("invalid Treer via hostname")),
-        None => ("127.0.0.1".to_string(), route.to_string()),
+        None => ("127.0.0.1".to_string(), route),
     };
     Ok(SocksRoute {
         destination,
@@ -410,10 +411,13 @@ mod tests {
     #[test]
     fn parses_local_and_via_routes() {
         let local = parse_route("build-machine.treer", 8080).expect("local route");
-        assert_eq!(local.destination, "build-machine");
+        assert_eq!(local.destination, "build-machine.treer");
         assert_eq!(local.host, "127.0.0.1");
         let via = parse_route("git.internal.via.build-machine.treer", 22).expect("via route");
         assert_eq!(via.destination, "build-machine");
         assert_eq!(via.host, "git.internal");
+        let virtual_host = parse_route("API.Internal.", 80).expect("virtual host route");
+        assert_eq!(virtual_host.destination, "api.internal");
+        assert_eq!(virtual_host.host, "127.0.0.1");
     }
 }

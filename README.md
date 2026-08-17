@@ -178,19 +178,20 @@ authenticated connection.
 Network access is denied until a workspace network policy permits a source
 machine, destination machine, target host, and port range. Policies can be
 managed from the Machines tab. The same panel can create workspace-scoped
-virtual hosts. A record maps a stable `.treer` name to a machine, target host,
-and optional target port. For example, mapping `api.treer` to `build-machine`,
+virtual hosts. A record maps any valid hostname to a machine, target host,
+and optional target port. For example, mapping `api.internal` to `build-machine`,
 `127.0.0.1`, port `8080` makes this work without exposing port 8080:
 
 ```bash
-curl http://api.treer/
+curl http://api.internal/
 curl http://build-machine.treer:8080/
 curl http://git.internal.via.build-machine.treer:3000/
 ```
 
 The network policy must allow the mapped destination, target host, and target
 port. Deleting a machine also deletes virtual hosts and policies that point to
-it. Virtual host labels are case-insensitive; `via` is reserved for direct
+it. Virtual host names are exact and case-insensitive; they do not require a
+`.treer` suffix. Names matching `host.via.machine.treer` are reserved for direct
 routing.
 
 `build-machine.treer` connects to `127.0.0.1` on that machine.

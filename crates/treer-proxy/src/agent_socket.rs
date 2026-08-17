@@ -479,7 +479,11 @@ fn resolve_network_target(
     virtual_host.map_or_else(
         || {
             (
-                request.destination.clone(),
+                request
+                    .destination
+                    .strip_suffix(".treer")
+                    .unwrap_or(&request.destination)
+                    .to_string(),
                 request.host.clone(),
                 request.port,
             )
@@ -556,6 +560,16 @@ mod tests {
         assert_eq!(
             resolve_network_target(&request, None),
             ("api".to_string(), "127.0.0.1".to_string(), 80)
+        );
+        let machine_request = NetworkOpenRequest {
+            destination: "build-machine.treer".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            source_agent_id: None,
+        };
+        assert_eq!(
+            resolve_network_target(&machine_request, None),
+            ("build-machine".to_string(), "127.0.0.1".to_string(), 8080)
         );
     }
 }
