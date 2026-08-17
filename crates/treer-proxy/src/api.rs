@@ -355,7 +355,6 @@ workspace_root=${{TREER_WORKSPACE_ROOT:-$(pwd)}}
 install_dir=${{TREER_INSTALL_DIR:-"${{HOME:?HOME is required}}/.local/bin"}}
 server_dir=${{TREER_AGENT_SERVER_INSTALL_DIR:-"${{HOME}}/.local/libexec/treer"}}
 state_dir=${{TREER_STATE_DIR:-"${{HOME}}/.local/state/treer"}}
-listen=${{TREER_AGENT_SERVER_LISTEN:-127.0.0.1:8790}}
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64|Linux-amd64) platform=linux-x86_64 ;;
@@ -409,13 +408,19 @@ if [ -f "$pid_file" ]; then
   rm -f "$pid_file"
 fi
 
+if [ -n "${{TREER_AGENT_SERVER_LISTEN:-}}" ]; then
+  set -- --listen "$TREER_AGENT_SERVER_LISTEN"
+else
+  set --
+fi
+
 TREER_STATE_DIR="$state_dir" TREER_MACHINE_TOKEN="$machine_token" \
   "$server_dir/treer-agent-server" \
   service --workspace "$workspace" install \
   --proxy "$proxy_url" \
   --server-id "$server_id" \
   --root "$workspace_root" \
-  --listen "$listen"
+  "$@"
 
 echo "treer: workspace $workspace at $workspace_root"
 echo "treer: add $install_dir to PATH to use the treer command"
@@ -850,6 +855,10 @@ impl IntoResponse for ApiFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::process::{Command, Stdio};
 
     fn test_config() -> BootstrapConfig {
         BootstrapConfig::new(
@@ -881,9 +890,31 @@ mod tests {
         assert!(script.contains("--proxy \"$proxy_url\""));
         assert!(script.contains("--server-id \"$server_id\""));
         assert!(script.contains("TREER_MACHINE_TOKEN=\"$machine_token\""));
+        assert!(script.contains("set -- --listen \"$TREER_AGENT_SERVER_LISTEN\""));
+        assert!(!script.contains("TREER_AGENT_SERVER_LISTEN:-127.0.0.1:8790"));
         assert!(script.contains("workspace='default'"));
         assert!(script.contains("https://treer.example/artifacts"));
         assert!(!script.contains("nohup"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_installer_has_valid_shell_syntax() {
+        let config = test_config();
+        let script =
+            render_install_script(&config.public_url, "default", "srv_test", "srv_test.secret");
+        let mut child = Command::new("sh")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("start shell parser");
+        child
+            .stdin
+            .take()
+            .expect("shell stdin")
+            .write_all(script.as_bytes())
+            .expect("write installer");
+        assert!(child.wait().expect("wait for shell parser").success());
     }
 
     #[test]

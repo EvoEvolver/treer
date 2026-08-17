@@ -24,15 +24,22 @@ pub struct LocalApiState {
     client: reqwest::Client,
     proxy_http: Url,
     workspace_id: String,
+    server_id: String,
     machine_token: Option<String>,
 }
 
 impl LocalApiState {
-    pub fn new(proxy_http: Url, workspace_id: String, machine_token: Option<String>) -> Self {
+    pub fn new(
+        proxy_http: Url,
+        workspace_id: String,
+        server_id: String,
+        machine_token: Option<String>,
+    ) -> Self {
         Self {
             client: reqwest::Client::new(),
             proxy_http,
             workspace_id,
+            server_id,
             machine_token,
         }
     }
@@ -137,6 +144,7 @@ async fn health(State(state): State<LocalApiState>) -> Json<Value> {
         "status": "ok",
         "service": "treer-agent-server",
         "workspace_id": state.workspace_id,
+        "server_id": state.server_id,
     }))
 }
 

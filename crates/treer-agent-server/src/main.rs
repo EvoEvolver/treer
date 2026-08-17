@@ -79,12 +79,8 @@ struct ServiceInstallArgs {
     machine_token: String,
     #[arg(long, env = "TREER_WORKSPACE_ROOT", default_value = ".")]
     root: PathBuf,
-    #[arg(
-        long,
-        env = "TREER_AGENT_SERVER_LISTEN",
-        default_value = "127.0.0.1:8790"
-    )]
-    listen: SocketAddr,
+    #[arg(long, env = "TREER_AGENT_SERVER_LISTEN")]
+    listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, ClapArgs)]
@@ -137,7 +133,7 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Command::Service(service_args)) => {
-            run_service_command(service_args)?;
+            run_service_command(service_args).await?;
             Ok(())
         }
     }
@@ -180,8 +176,12 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         proxy::ProxyClient::new(proxy_ws, args.machine_token.clone(), server, runtime);
     let proxy_task = tokio::spawn(proxy_client.run_forever());
 
-    let local_state =
-        local_api::LocalApiState::new(proxy_http, args.workspace.clone(), args.machine_token);
+    let local_state = local_api::LocalApiState::new(
+        proxy_http,
+        args.workspace.clone(),
+        server_id.clone(),
+        args.machine_token,
+    );
     let app = local_api::router(local_state);
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
@@ -204,10 +204,13 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     result
 }
 
-fn run_service_command(args: ServiceArgs) -> Result<()> {
+async fn run_service_command(args: ServiceArgs) -> Result<()> {
     match args.command {
         ServiceCommand::Install(install) => {
-            require_loopback_listen(install.listen)?;
+            if let Some(listen) = install.listen {
+                require_loopback_listen(listen)?;
+            }
+            let listen = service::resolve_listen(&args.workspace, install.listen).await?;
             let host_socket = service::host_socket_path(&args.workspace)?;
             service::install(service::ServiceConfig {
                 proxy: install.proxy.to_string(),
@@ -217,7 +220,7 @@ fn run_service_command(args: ServiceArgs) -> Result<()> {
                 root: std::fs::canonicalize(&install.root).with_context(|| {
                     format!("invalid workspace root {}", install.root.display())
                 })?,
-                listen: install.listen.to_string(),
+                listen: listen.to_string(),
                 host_socket,
             })
         }

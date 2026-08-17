@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
@@ -34,12 +35,10 @@ struct Args {
         help = "Print the bundled agent skill and exit"
     )]
     skill: bool,
-    #[arg(
-        long,
-        env = "TREER_AGENT_SERVER_URL",
-        default_value = "http://127.0.0.1:8790"
-    )]
-    url: Url,
+    #[arg(long, env = "TREER_AGENT_SERVER_URL")]
+    url: Option<Url>,
+    #[arg(long, env = "TREER_WORKSPACE_ID", default_value = "default")]
+    workspace: String,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -294,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
     let command = args
         .command
         .context("a command is required; run `treer --help` for usage")?;
-    let client = ApiClient::new(args.url);
+    let client = ApiClient::new(resolve_server_url(args.url, &args.workspace)?);
     let value = match command {
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::Machine { command } => run_machine_command(&client, command).await?,
@@ -619,6 +618,54 @@ fn path_segment(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
+fn resolve_server_url(configured: Option<Url>, workspace: &str) -> anyhow::Result<Url> {
+    if let Some(configured) = configured {
+        return Ok(configured);
+    }
+
+    if let Some(config_path) = local_controller_config(workspace) {
+        if config_path.is_file() {
+            let bytes = std::fs::read(&config_path)
+                .with_context(|| format!("failed to read {}", config_path.display()))?;
+            let config: LocalControllerConfig = serde_json::from_slice(&bytes)
+                .with_context(|| format!("invalid controller config {}", config_path.display()))?;
+            return Url::parse(&format!("http://{}", config.listen))
+                .context("invalid local agent server address");
+        }
+    }
+
+    Url::parse("http://127.0.0.1:8790").context("invalid default agent server URL")
+}
+
+#[derive(serde::Deserialize)]
+struct LocalControllerConfig {
+    listen: String,
+}
+
+fn local_controller_config(workspace: &str) -> Option<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(
+        config_home
+            .join("treer/agent-servers")
+            .join(format!("{}-controller.json", workspace_key(workspace))),
+    )
+}
+
+fn workspace_key(workspace: &str) -> String {
+    workspace
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn default_wait_statuses(statuses: Vec<WaitStatus>) -> Vec<WaitStatus> {
     if statuses.is_empty() {
         vec![
@@ -693,6 +740,11 @@ mod tests {
     #[test]
     fn path_targets_are_percent_encoded() {
         assert_eq!(path_segment("review agent"), "review%20agent");
+    }
+
+    #[test]
+    fn workspace_names_map_to_service_config_names() {
+        assert_eq!(workspace_key("team one/alpha"), "team_one_alpha");
     }
 
     #[test]

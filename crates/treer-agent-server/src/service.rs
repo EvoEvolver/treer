@@ -1,12 +1,16 @@
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use treer_host_protocol::HostDaemonConfig;
+
+const FIRST_AUTOMATIC_PORT: u16 = 8790;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -36,6 +40,69 @@ impl ServiceConfig {
         let bytes = serde_json::to_vec_pretty(self).context("failed to encode service config")?;
         write_atomic(path, &bytes)
     }
+}
+
+pub async fn resolve_listen(workspace: &str, requested: Option<SocketAddr>) -> Result<SocketAddr> {
+    validate_workspace(workspace)?;
+    if let Some(requested) = requested {
+        return Ok(requested);
+    }
+
+    let paths = ServicePaths::new(workspace)?;
+    if paths.config.is_file() {
+        let installed = ServiceConfig::load(&paths.config)?;
+        let address = installed
+            .listen
+            .parse::<SocketAddr>()
+            .context("invalid listen address in installed service config")?;
+        if address_is_available(address)
+            || local_api_matches(&address, &installed.workspace, &installed.server_id).await
+        {
+            return Ok(address);
+        }
+    }
+
+    allocate_loopback_address()
+}
+
+fn allocate_loopback_address() -> Result<SocketAddr> {
+    for port in FIRST_AUTOMATIC_PORT..=u16::MAX {
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        if address_is_available(address) {
+            return Ok(address);
+        }
+    }
+
+    bail!("no available loopback port from {FIRST_AUTOMATIC_PORT} through 65535")
+}
+
+fn address_is_available(address: SocketAddr) -> bool {
+    TcpListener::bind(address).is_ok()
+}
+
+async fn local_api_matches(address: &SocketAddr, workspace: &str, server_id: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return false;
+    };
+    let Ok(response) = client
+        .get(format!("http://{address}/api/health"))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    let Ok(value) = response.json::<serde_json::Value>().await else {
+        return false;
+    };
+    value.get("service").and_then(|value| value.as_str()) == Some("treer-agent-server")
+        && value.get("workspace_id").and_then(|value| value.as_str()) == Some(workspace)
+        && value
+            .get("server_id")
+            .and_then(|value| value.as_str())
+            .is_none_or(|value| value == server_id)
 }
 
 pub fn install(mut config: ServiceConfig) -> Result<()> {
@@ -69,6 +136,7 @@ pub fn install(mut config: ServiceConfig) -> Result<()> {
     } else {
         println!("treer: agent Host service installed and started");
     }
+    println!("treer: local API listening on {}", config.listen);
     println!(
         "treer: status: \"{}\" service --workspace {} status",
         paths.executable.display(),
@@ -645,11 +713,47 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
 
     #[test]
     fn workspace_keys_are_safe_for_service_names() {
         assert_eq!(workspace_key("team one/alpha"), "team_one_alpha");
         assert_eq!(workspace_key("default"), "default");
+    }
+
+    #[test]
+    fn automatic_address_is_available_to_bind() {
+        let address = allocate_loopback_address().expect("allocate local API address");
+        let _listener = TcpListener::bind(address).expect("allocated address should be available");
+        assert!(address.ip().is_loopback());
+    }
+
+    #[tokio::test]
+    async fn local_api_identity_distinguishes_the_installed_controller() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind health server");
+        let address = listener.local_addr().expect("health server address");
+        let app = Router::new().route(
+            "/api/health",
+            get(|| async {
+                Json(json!({
+                    "status": "ok",
+                    "service": "treer-agent-server",
+                    "workspace_id": "default",
+                    "server_id": "srv_test",
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        assert!(local_api_matches(&address, "default", "srv_test").await);
+        assert!(!local_api_matches(&address, "other", "srv_test").await);
+        assert!(!local_api_matches(&address, "default", "srv_other").await);
+
+        server.abort();
     }
 
     #[test]

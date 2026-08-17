@@ -57,7 +57,9 @@ starts the Host using the current directory as its workspace root. Linux uses a
 systemd user service with restart and linger enabled; macOS uses a per-user
 LaunchAgent with `KeepAlive`. Override `TREER_WORKSPACE_ROOT`,
 `TREER_INSTALL_DIR`, `TREER_AGENT_SERVER_INSTALL_DIR`, `TREER_STATE_DIR`, or
-`TREER_AGENT_SERVER_LISTEN` when needed.
+`TREER_AGENT_SERVER_LISTEN` when needed. By default, installation selects the
+first available loopback port starting at `8790` and saves it per workspace.
+Reinstalling or hot-updating a healthy Controller preserves that port.
 
 Running the bootstrap command again replaces the installed binaries on disk and
 asks the existing Host process to restart only the Controller. The updated Host
