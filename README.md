@@ -29,6 +29,8 @@ and comparisons with Herdr and AgentENV.
 Start the proxy and web control plane:
 
 ```bash
+just test-db-up
+export DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
 just stage-artifacts
 cargo run -p treer-proxy -- \
   --disable-auth \
@@ -168,10 +170,11 @@ email or preferred name without changing their stable identity or organization
 access. Organization owners and administrators can also rename their
 organization.
 
-Users, invitations, user sessions, and separate administrator sessions are
-stored in SQLite. Local runs default to `.treer/proxy.db`; set
-`TREER_DATABASE_PATH` to put it elsewhere. Changing `ADMIN_PASSWORD` changes
-the administrator's next login password without rewriting user accounts.
+Users, invitations, sessions, organizations, machine credentials, services,
+and workload signing keys are stored in PostgreSQL. The Proxy requires
+`DATABASE_URL`; `just test-db-up` starts the local Docker database used by the
+test suite. Changing `ADMIN_PASSWORD` changes the administrator's next login
+password without rewriting user accounts.
 
 ## Railway
 
@@ -180,15 +183,12 @@ deployable as a Railway service. Railway's injected `PORT` and
 `RAILWAY_PUBLIC_DOMAIN` are detected automatically.
 
 1. Create a Railway service from this GitHub repository.
-2. Set the required `ADMIN_PASSWORD` service variable.
-3. Generate a public domain for the service.
-4. Attach a Railway Volume at `/data` so the SQLite users and invitations
-   survive deployments.
+2. Add a Railway PostgreSQL service and expose its `DATABASE_URL` to Treer.
+3. Set the required `ADMIN_PASSWORD` service variable.
+4. Generate a public domain for the service.
 
 The image builds and serves Linux agent binaries for its own CPU architecture.
-Set `TREER_PROXY_PUBLIC_URL` only when overriding the Railway-generated domain,
-and set `TREER_DATABASE_PATH` only when using a volume mount other than
-`/data`.
+Set `TREER_PROXY_PUBLIC_URL` only when overriding the Railway-generated domain.
 
 Open `http://PROXY_HOST:8787` to discover servers, create agents, and attach to
 their live terminals. The browser terminal supports ANSI colors, alternate
@@ -282,7 +282,7 @@ Virtual-host changes are active without a Proxy or Agent Server restart. The
 Proxy updates its in-memory routing table and immediately broadcasts a full,
 revisioned snapshot to every online Controller in that workspace. A Controller
 receives a fresh snapshot after every WebSocket registration and ignores stale
-revisions on the same connection. The Proxy also reloads SQLite and broadcasts
+revisions on the same connection. The Proxy also reloads PostgreSQL and broadcasts
 snapshots every 30 seconds, which repairs missed or out-of-band changes.
 
 Deleting an online machine sends a confirmed shutdown command over its existing
@@ -358,7 +358,7 @@ treer identity token api --json
 ```
 
 Tokens use Ed25519, expire after 60 seconds, and contain the Agent, machine,
-workspace, and service IDs. The signing key remains in Proxy SQLite storage.
+workspace, and service IDs. The signing key remains in Proxy PostgreSQL storage.
 Services can cache the public key set from `/.well-known/jwks.json` and verify
 tokens locally, or submit a token and expected service ID to
 `POST /.treer/identity/verify`:

@@ -97,13 +97,13 @@ Browser-to-service tunneling strips cookies, authorization headers, proxy
 authorization, and response `Set-Cookie` before forwarding, but this is not
 end-to-end confidentiality from the Proxy.
 
-The workload signing private key is stored in the Proxy SQLite database. Its
+The workload signing private key is stored in the Proxy PostgreSQL database. Its
 Ed25519 public key is intentionally exposed through `/.well-known/jwks.json`;
 the online verify endpoint exposes only claims already contained in a supplied
 valid token. Tokens are not automatically attached to HTTP or generic TCP
 traffic.
 
-Durable identity data is stored in SQLite. Live connections, pending commands,
+Durable identity data is stored in PostgreSQL. Live connections, pending commands,
 terminal streams, transfers, and tunnels are held in process memory. Current
 availability and routing assume one active Proxy instance.
 

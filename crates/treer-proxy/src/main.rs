@@ -51,12 +51,10 @@ struct Args {
         help = "Disable login and use a local administrator session"
     )]
     disable_auth: bool,
-    #[arg(long, env = "TREER_DATABASE_PATH")]
-    database_path: Option<PathBuf>,
+    #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
+    database_url: String,
     #[arg(long, env = "RAILWAY_PUBLIC_DOMAIN", hide = true)]
     railway_public_domain: Option<String>,
-    #[arg(long, env = "RAILWAY_VOLUME_MOUNT_PATH", hide = true)]
-    railway_volume_mount_path: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -78,20 +76,19 @@ async fn main() -> anyhow::Result<()> {
     if !args.disable_auth && public_url.scheme() != "https" {
         warn!(%public_url, "authenticated proxy is using an insecure HTTP public URL");
     }
-    let database_path = database_path(args.database_path, args.railway_volume_mount_path);
     let bootstrap = api::BootstrapConfig::new(
         public_url.clone(),
         args.artifacts_dir,
         args.release_artifact_base_url,
     );
     let auth = auth::AuthStore::open(
-        &database_path,
+        &args.database_url,
         admin_password,
         public_url.clone(),
         args.disable_auth,
     )
     .await
-    .with_context(|| format!("failed to open database at {}", database_path.display()))?;
+    .context("failed to connect to PostgreSQL")?;
     let state = AppState::new();
     for workspace in auth
         .all_workspaces()
@@ -110,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
-    info!(address = %listen, %public_url, database = %database_path.display(), auth_disabled = args.disable_auth, "treer proxy listening");
+    info!(address = %listen, %public_url, database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
     axum::serve(listener, app)
         .await
         .context("proxy server failed")
@@ -128,14 +125,6 @@ fn listen_address(configured: Option<SocketAddr>, port: Option<u16>) -> SocketAd
     configured.unwrap_or_else(|| match port {
         Some(port) => SocketAddr::from(([0, 0, 0, 0], port)),
         None => SocketAddr::from(([127, 0, 0, 1], 8787)),
-    })
-}
-
-fn database_path(configured: Option<PathBuf>, railway_volume: Option<PathBuf>) -> PathBuf {
-    configured.unwrap_or_else(|| {
-        railway_volume
-            .map(|path| path.join("treer.db"))
-            .unwrap_or_else(|| PathBuf::from(".treer/proxy.db"))
     })
 }
 
@@ -198,14 +187,10 @@ mod tests {
     }
 
     #[test]
-    fn railway_environment_selects_public_bind_and_storage() {
+    fn railway_environment_selects_public_bind() {
         assert_eq!(
             listen_address(None, Some(4321)),
             "0.0.0.0:4321".parse().expect("valid address")
-        );
-        assert_eq!(
-            database_path(None, Some(PathBuf::from("/data"))),
-            PathBuf::from("/data/treer.db")
         );
         let url = public_url(
             None,

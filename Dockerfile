@@ -39,7 +39,6 @@ COPY --from=builder /out/bin/treer-proxy /usr/local/bin/treer-proxy
 COPY --from=builder /out/dist /app/dist
 
 ENV TREER_ARTIFACTS_DIR=/app/dist
-ENV TREER_DATABASE_PATH=/data/treer.db
 EXPOSE 8080
 
 ENTRYPOINT ["treer-proxy"]

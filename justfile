@@ -1,5 +1,11 @@
 set shell := ["zsh", "-cu"]
 
+test-db-up:
+    if docker inspect treer-postgres-test >/dev/null 2>&1; then docker start treer-postgres-test >/dev/null; else docker run --name treer-postgres-test -e POSTGRES_PASSWORD=treer -e POSTGRES_USER=treer -e POSTGRES_DB=treer_test -p 127.0.0.1:55432:5432 -d postgres:17-alpine >/dev/null; fi
+
+test-db-down:
+    docker rm -f treer-postgres-test
+
 fmt:
     cargo fmt --all
 

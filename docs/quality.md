@@ -12,8 +12,12 @@ regression.
 Run the complete local gate from the repository root:
 
 ```bash
+just test-db-up
 just check
 ```
+
+Proxy tests use isolated schemas in the Docker PostgreSQL instance. Override
+`TREER_TEST_DATABASE_URL` when using a different local test database.
 
 It executes:
 
@@ -85,5 +89,5 @@ repeated bottleneck or blocks the current product tier.
 | Documentation/index change | `node scripts/check-docs.mjs` |
 
 Periodic maintenance should compare routes, protocol types, launch flags, and
-database migrations with the maintained docs, then correct drift in small
+the database schema with the maintained docs, then correct drift in small
 changes. Do not grow AGENTS.md or PLAN.md as catch-all knowledge stores.

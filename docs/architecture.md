@@ -17,7 +17,7 @@ flowchart TB
 
     subgraph Central[Central control plane]
         Proxy["treer-proxy<br/>auth, metadata, routing"]
-        DB[(SQLite)]
+        DB[(PostgreSQL)]
         Web[Embedded React application]
         Proxy <--> DB
         Proxy --> Web
@@ -40,7 +40,7 @@ flowchart TB
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
-| [`treer-proxy`](../crates/treer-proxy/src/main.rs) | Public API, user auth, workload token signing, SQLite metadata, workspace projection, command and stream routing | Local process lifetime |
+| [`treer-proxy`](../crates/treer-proxy/src/main.rs) | Public API, user auth, workload token signing, PostgreSQL metadata, workspace projection, command and stream routing | Local process lifetime |
 | [`treer-agent-server`](../crates/treer-agent-server/src/main.rs) | Machine Controller, local API, Agent definitions, state detection, Proxy link, network bridge | Durable PTY ownership |
 | [`treer-agent-host`](../crates/treer-agent-host/src/main.rs) | Stable child processes, Controller supervision, idempotent mutation cache | Users, workspaces, Agent brands, product policy |
 | [`treer-agent-runtime`](../crates/treer-agent-runtime/src/lib.rs) | PTY lifecycle, raw input/output, bounded replay, root-relative working directories | Distributed routing or identity |
@@ -62,7 +62,7 @@ flowchart TB
 - Enrolled machines establish outbound connections to the Proxy.
 - Remote working directories and file paths are resolved beneath the machine's
   configured workspace root. This path rule is not filesystem sandboxing.
-- Durable identity metadata lives in SQLite; live routing and streams are
+- Durable identity metadata lives in PostgreSQL; live routing and streams are
   currently single-Proxy in-memory state.
 - The web build is embedded into `treer-proxy`; frontend API changes and Proxy
   routes must be changed and verified together.
@@ -79,7 +79,7 @@ flowchart TB
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
 | Host to child process | PTY raw bytes | Host process ownership |
 
-SQLite persists users, organizations, memberships, sessions, invitations,
+PostgreSQL persists users, organizations, memberships, sessions, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, machine services, and virtual hosts. Connected Controllers, pending commands, workspace
 projections, terminal legs, transfers, and network tunnels are held in Proxy

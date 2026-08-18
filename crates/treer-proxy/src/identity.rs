@@ -180,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn tokens_are_signed_audience_bound_and_persistent() {
-        let auth = AuthStore::in_memory("admin").await;
+        let auth = AuthStore::for_test("admin").await;
         let public_url = Url::parse("https://treer.example/").expect("public URL");
         let first = IdentityIssuer::load(&auth, &public_url)
             .await
@@ -212,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_tokens_are_inactive() {
-        let auth = AuthStore::in_memory("admin").await;
+        let auth = AuthStore::for_test("admin").await;
         let issuer = IdentityIssuer::load(
             &auth,
             &Url::parse("https://treer.example/").expect("public URL"),

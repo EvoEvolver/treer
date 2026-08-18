@@ -2087,7 +2087,7 @@ mod tests {
 
     #[tokio::test]
     async fn trailing_slash_browser_tunnel_route_is_registered() {
-        let auth = AuthStore::in_memory("admin-password").await;
+        let auth = AuthStore::for_test("admin-password").await;
         let identity = IdentityIssuer::load(
             &auth,
             &Url::parse("https://treer.example/").expect("public URL"),
@@ -2123,7 +2123,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_enrollment_requests_without_identity_remain_supported() {
-        let auth = AuthStore::in_memory("admin-password").await;
+        let auth = AuthStore::for_test("admin-password").await;
         let enrollment = auth
             .create_machine_enrollment("default", "admin")
             .await
@@ -2295,7 +2295,7 @@ mod tests {
     #[tokio::test]
     async fn agent_identity_tokens_use_the_canonical_service_audience() {
         let state = state_with_managed_agent().await;
-        let auth = AuthStore::in_memory("admin-password").await;
+        let auth = AuthStore::for_test("admin-password").await;
         let service = auth
             .create_machine_service(
                 "default",
@@ -2363,7 +2363,7 @@ mod tests {
     #[tokio::test]
     async fn managed_agent_can_manage_services_and_virtual_hosts() {
         let state = state_with_managed_agent().await;
-        let auth = AuthStore::in_memory("admin-password").await;
+        let auth = AuthStore::for_test("admin-password").await;
         let policy = PolicyEngine::allow_all();
         let machine = MachineSession {
             server_id: Some("machine-a".to_string()),
@@ -2452,7 +2452,7 @@ mod tests {
 
     #[tokio::test]
     async fn browser_tunnel_rejects_tcp_services_before_opening_a_stream() {
-        let auth = AuthStore::in_memory("admin-password").await;
+        let auth = AuthStore::for_test("admin-password").await;
         let service = auth
             .create_machine_service(
                 "default",
@@ -2514,7 +2514,7 @@ mod tests {
             .await
             .expect("register controller");
 
-        let auth = AuthStore::in_memory("admin-password").await;
+        let auth = AuthStore::for_test("admin-password").await;
         let service = auth
             .create_machine_service(
                 "default",

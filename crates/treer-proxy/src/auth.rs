@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -13,8 +12,8 @@ use axum::Json;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Row};
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentServerSnapshot, ApiError,
     CreateMachineServiceRequest, CreateVirtualNetworkHostRequest, MachineService,
@@ -34,7 +33,7 @@ const DEFAULT_ORGANIZATION_NAME: &str = "Default organization";
 
 #[derive(Clone)]
 pub struct AuthStore {
-    pool: SqlitePool,
+    pool: PgPool,
     admin_password: Arc<str>,
     public_url: Url,
     disabled: bool,
@@ -153,26 +152,14 @@ pub struct UpdateMemberRoleRequest {
 
 impl AuthStore {
     pub async fn open(
-        path: &Path,
+        database_url: &str,
         admin_password: String,
         public_url: Url,
         disabled: bool,
     ) -> anyhow::Result<Self> {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .foreign_keys(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(database_url)
             .await?;
         let store = Self {
             pool,
@@ -183,18 +170,40 @@ impl AuthStore {
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
         };
-        store.migrate().await?;
+        store.initialize_schema().await?;
         store.refresh_virtual_network_hosts().await?;
         Ok(store)
     }
 
     #[cfg(test)]
-    pub(crate) async fn in_memory(admin_password: &str) -> Self {
-        let pool = SqlitePoolOptions::new()
+    pub(crate) async fn for_test(admin_password: &str) -> Self {
+        let database_url = std::env::var("TREER_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://treer:treer@127.0.0.1:55432/treer_test".to_string());
+        let schema = format!("test_{}", Uuid::new_v4().simple());
+        let setup_pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect("sqlite::memory:")
+            .connect(&database_url)
             .await
-            .expect("in-memory database");
+            .expect("connect to test PostgreSQL; start the documented Docker test database");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&setup_pool)
+            .await
+            .expect("create isolated test schema");
+        setup_pool.close().await;
+
+        let search_path = format!("SET search_path TO {schema}");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |connection, _| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    sqlx::query(&search_path).execute(connection).await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("connect to isolated test schema");
         let store = Self {
             pool,
             admin_password: admin_password.to_string().into(),
@@ -204,7 +213,10 @@ impl AuthStore {
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
         };
-        store.migrate().await.expect("database migration");
+        store
+            .initialize_schema()
+            .await
+            .expect("initialize database schema");
         store
             .refresh_virtual_network_hosts()
             .await
@@ -212,338 +224,33 @@ impl AuthStore {
         store
     }
 
-    async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS proxy_secrets (\
-             name TEXT PRIMARY KEY, \
-             value BLOB NOT NULL, \
-             created_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS users (\
-             id TEXT PRIMARY KEY, \
-             username TEXT NOT NULL COLLATE NOCASE UNIQUE, \
-             password_hash TEXT NOT NULL, \
-             created_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_column("users", "email", "TEXT").await?;
-        self.ensure_column("users", "preferred_name", "TEXT")
+    async fn initialize_schema(&self) -> anyhow::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('treer_schema'))")
+            .execute(&mut *transaction)
             .await?;
-        sqlx::query(
-            "UPDATE users SET email = CASE \
-             WHEN instr(username, '@') > 1 THEN lower(username) \
-             ELSE lower(username) || '@legacy.local' END \
-             WHERE email IS NULL",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query("UPDATE users SET preferred_name = username WHERE preferred_name IS NULL")
-            .execute(&self.pool)
+        sqlx::raw_sql(include_str!("schema.sql"))
+            .execute(&mut *transaction)
             .await?;
-        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email COLLATE NOCASE)")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS invitations (\
-             token TEXT PRIMARY KEY, \
-             created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, \
-             used_at TEXT, \
-             used_by TEXT)",
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_column("invitations", "organization_id", "TEXT")
-            .await?;
-        self.ensure_column("invitations", "role", "TEXT").await?;
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS invitations_pending_owner \
-             ON invitations(organization_id) WHERE role = 'owner' AND used_at IS NULL",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS sessions (\
-             token TEXT PRIMARY KEY, \
-             username TEXT NOT NULL, \
-             is_admin INTEGER NOT NULL, \
-             created_at TEXT NOT NULL, \
-             expires_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_column("sessions", "user_id", "TEXT").await?;
-        sqlx::query(
-            "UPDATE sessions SET user_id = (SELECT id FROM users \
-             WHERE users.username = sessions.username COLLATE NOCASE) \
-             WHERE user_id IS NULL",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query("DELETE FROM sessions WHERE user_id IS NULL")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS admin_sessions (\
-             token TEXT PRIMARY KEY, \
-             created_at TEXT NOT NULL, \
-             expires_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at)")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS machine_enrollments (\
-             enrollment_id TEXT PRIMARY KEY, \
-             workspace_id TEXT NOT NULL, \
-             secret_hash TEXT NOT NULL, \
-             created_at TEXT NOT NULL, \
-             expires_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, \
-             used_at TEXT, \
-             server_id TEXT)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS machines (\
-             server_id TEXT PRIMARY KEY, \
-             workspace_id TEXT NOT NULL, \
-             secret_hash TEXT NOT NULL, \
-             created_at TEXT NOT NULL, \
-             enrolled_by TEXT NOT NULL, \
-             revoked_at TEXT)",
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_column("machines", "installation_id", "TEXT")
-            .await?;
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS machines_workspace_installation \
-             ON machines(workspace_id, installation_id) WHERE installation_id IS NOT NULL",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS machine_names (\
-             server_id TEXT PRIMARY KEY, \
-             workspace_id TEXT NOT NULL, \
-             name TEXT NOT NULL, \
-             updated_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS agent_names (\
-             agent_id TEXT PRIMARY KEY, \
-             workspace_id TEXT NOT NULL, \
-             name TEXT NOT NULL, \
-             updated_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_names_workspace_id \
-             ON agent_names(workspace_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS deleted_agents (\
-             agent_id TEXT PRIMARY KEY, \
-             workspace_id TEXT NOT NULL, \
-             deleted_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS deleted_agents_workspace_id \
-             ON deleted_agents(workspace_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS organizations (\
-             organization_id TEXT PRIMARY KEY, \
-             name TEXT NOT NULL, \
-             created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS organization_members (\
-             organization_id TEXT NOT NULL, \
-             username TEXT NOT NULL COLLATE NOCASE, \
-             role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')), \
-             joined_at TEXT NOT NULL, \
-             PRIMARY KEY(organization_id, username), \
-             FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE)",
-        )
-        .execute(&self.pool)
-        .await?;
-        self.ensure_column("organization_members", "user_id", "TEXT")
-            .await?;
-        sqlx::query(
-            "UPDATE organization_members SET user_id = (SELECT id FROM users \
-             WHERE users.username = organization_members.username COLLATE NOCASE) \
-             WHERE user_id IS NULL",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query("DELETE FROM organization_members WHERE user_id IS NULL")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS organization_members_user_id \
-             ON organization_members(organization_id, user_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS organization_members_username \
-             ON organization_members(username COLLATE NOCASE)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS workspaces (\
-             workspace_id TEXT PRIMARY KEY, \
-             organization_id TEXT NOT NULL, \
-             name TEXT NOT NULL, \
-             created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, \
-             FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (\
-             name TEXT PRIMARY KEY, \
-             applied_at TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS workspaces_organization_id \
-             ON workspaces(organization_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS machine_services (\
-             service_id TEXT PRIMARY KEY, \
-             workspace_id TEXT NOT NULL, \
-             name TEXT NOT NULL COLLATE NOCASE, \
-             server_id TEXT NOT NULL, \
-             target_host TEXT NOT NULL, \
-             target_port INTEGER NOT NULL, \
-             protocol TEXT NOT NULL, \
-             created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, \
-             updated_at TEXT NOT NULL, \
-             updated_by TEXT NOT NULL, \
-             UNIQUE(workspace_id, name), \
-             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS machine_services_server \
-             ON machine_services(workspace_id, server_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS virtual_network_hosts (\
-             workspace_id TEXT NOT NULL, \
-             hostname TEXT NOT NULL COLLATE NOCASE, \
-             service_id TEXT NOT NULL, \
-             created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, \
-             PRIMARY KEY(workspace_id, hostname), \
-             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE, \
-             FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE)",
-        )
-        .execute(&self.pool)
-        .await?;
-        self.migrate_virtual_network_hosts_to_services().await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS virtual_network_hosts_service \
-             ON virtual_network_hosts(workspace_id, service_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "INSERT OR IGNORE INTO organizations(organization_id, name, created_at, created_by) \
-             VALUES(?, ?, ?, 'admin')",
+            "INSERT INTO organizations(organization_id, name, created_at, created_by) \
+             VALUES($1, $2, $3, 'admin') ON CONFLICT DO NOTHING",
         )
         .bind(DEFAULT_ORGANIZATION_ID)
         .bind(DEFAULT_ORGANIZATION_NAME)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        let legacy_members_migrated = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM schema_migrations WHERE name = 'organization_members_v1'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            != 0;
-        if !legacy_members_migrated {
-            let mut transaction = self.pool.begin().await?;
-            sqlx::query(
-                "INSERT OR IGNORE INTO organization_members(organization_id, username, user_id, role, joined_at) \
-                 SELECT ?, username, id, 'member', ? FROM users",
-            )
-            .bind(DEFAULT_ORGANIZATION_ID)
-            .bind(&now)
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "INSERT INTO schema_migrations(name, applied_at) \
-                 VALUES('organization_members_v1', ?)",
-            )
-            .bind(&now)
-            .execute(&mut *transaction)
-            .await?;
-            transaction.commit().await?;
-        }
         sqlx::query(
-            "INSERT OR IGNORE INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
-             VALUES('default', ?, 'Default', ?, 'admin')",
+            "INSERT INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
+             VALUES('default', $1, 'Default', $2, 'admin') ON CONFLICT DO NOTHING",
         )
         .bind(DEFAULT_ORGANIZATION_ID)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "INSERT OR IGNORE INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
-             SELECT workspace_id, ?, workspace_id, ?, 'migration' FROM (\
-               SELECT workspace_id FROM machines \
-               UNION SELECT workspace_id FROM machine_enrollments \
-               UNION SELECT workspace_id FROM machine_names \
-               UNION SELECT workspace_id FROM agent_names\
-             )",
-        )
-        .bind(DEFAULT_ORGANIZATION_ID)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "UPDATE invitations SET organization_id = ?, role = 'member' \
-             WHERE organization_id IS NULL OR role IS NULL",
-        )
-        .bind(DEFAULT_ORGANIZATION_ID)
-        .execute(&self.pool)
-        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -552,121 +259,20 @@ impl AuthStore {
         name: &str,
         candidate: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
-        sqlx::query("INSERT OR IGNORE INTO proxy_secrets(name, value, created_at) VALUES(?, ?, ?)")
-            .bind(name)
-            .bind(candidate)
-            .bind(Utc::now().to_rfc3339())
-            .execute(&self.pool)
-            .await?;
-        sqlx::query_scalar("SELECT value FROM proxy_secrets WHERE name = ?")
+        sqlx::query(
+            "INSERT INTO proxy_secrets(name, value, created_at) VALUES($1, $2, $3) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(name)
+        .bind(candidate)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        sqlx::query_scalar("SELECT value FROM proxy_secrets WHERE name = $1")
             .bind(name)
             .fetch_one(&self.pool)
             .await
             .map_err(Into::into)
-    }
-
-    async fn ensure_column(
-        &self,
-        table: &str,
-        column: &str,
-        definition: &str,
-    ) -> anyhow::Result<()> {
-        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
-            .fetch_all(&self.pool)
-            .await?;
-        if !rows
-            .iter()
-            .any(|row| row.get::<String, _>("name") == column)
-        {
-            sqlx::query(&format!(
-                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-            ))
-            .execute(&self.pool)
-            .await?;
-        }
-        Ok(())
-    }
-
-    async fn migrate_virtual_network_hosts_to_services(&self) -> anyhow::Result<()> {
-        let columns = sqlx::query("PRAGMA table_info(virtual_network_hosts)")
-            .fetch_all(&self.pool)
-            .await?;
-        if columns
-            .iter()
-            .any(|row| row.get::<String, _>("name") == "service_id")
-        {
-            return Ok(());
-        }
-
-        let rows = sqlx::query(
-            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
-             created_at, created_by FROM virtual_network_hosts",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("DROP TABLE IF EXISTS virtual_network_hosts_v2")
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE virtual_network_hosts_v2 (\
-             workspace_id TEXT NOT NULL, \
-             hostname TEXT NOT NULL COLLATE NOCASE, \
-             service_id TEXT NOT NULL, \
-             created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, \
-             PRIMARY KEY(workspace_id, hostname), \
-             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE, \
-             FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE)",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        for row in rows {
-            let service_id = format!("svc_{}", Uuid::new_v4().simple());
-            let workspace_id: String = row.get("workspace_id");
-            let hostname: String = row.get("hostname");
-            let created_at: String = row.get("created_at");
-            let created_by: String = row.get("created_by");
-            let target_port = row.get::<Option<i64>, _>("target_port").unwrap_or(80);
-            sqlx::query(
-                "INSERT INTO machine_services(\
-                 service_id, workspace_id, name, server_id, target_host, target_port, protocol, \
-                 created_at, created_by, updated_at, updated_by) \
-                 VALUES(?, ?, ?, ?, ?, ?, 'http', ?, ?, ?, ?)",
-            )
-            .bind(&service_id)
-            .bind(&workspace_id)
-            .bind(&hostname)
-            .bind(row.get::<String, _>("destination_server_id"))
-            .bind(row.get::<String, _>("target_host"))
-            .bind(target_port)
-            .bind(&created_at)
-            .bind(&created_by)
-            .bind(&created_at)
-            .bind(&created_by)
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "INSERT INTO virtual_network_hosts_v2(\
-                 workspace_id, hostname, service_id, created_at, created_by) \
-                 VALUES(?, ?, ?, ?, ?)",
-            )
-            .bind(workspace_id)
-            .bind(hostname)
-            .bind(service_id)
-            .bind(created_at)
-            .bind(created_by)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        sqlx::query("DROP TABLE virtual_network_hosts")
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("ALTER TABLE virtual_network_hosts_v2 RENAME TO virtual_network_hosts")
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(())
     }
 
     pub async fn all_workspaces(&self) -> Result<Vec<WorkspaceInfo>, AuthFailure> {
@@ -686,7 +292,7 @@ impl AuthStore {
         let rows = if self.disabled {
             sqlx::query(
                 "SELECT organization_id, name, created_at, 'owner' AS role \
-                 FROM organizations ORDER BY name COLLATE NOCASE, organization_id",
+                 FROM organizations ORDER BY lower(name), organization_id",
             )
             .fetch_all(&self.pool)
             .await
@@ -695,8 +301,8 @@ impl AuthStore {
                 "SELECT o.organization_id, o.name, o.created_at, m.role \
                  FROM organizations o \
                  JOIN organization_members m ON m.organization_id = o.organization_id \
-                 WHERE m.user_id = ? \
-                 ORDER BY o.name COLLATE NOCASE, o.organization_id",
+                 WHERE m.user_id = $1 \
+                 ORDER BY lower(o.name), o.organization_id",
             )
             .bind(user_id)
             .fetch_all(&self.pool)
@@ -725,7 +331,7 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query(
             "INSERT INTO organizations(organization_id, name, created_at, created_by) \
-             VALUES(?, ?, ?, ?)",
+             VALUES($1, $2, $3, $4)",
         )
         .bind(&organization_id)
         .bind(&name)
@@ -735,8 +341,8 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         sqlx::query(
-            "INSERT INTO organization_members(organization_id, username, user_id, role, joined_at) \
-             SELECT ?, email, id, 'owner', ? FROM users WHERE id = ?",
+            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+             SELECT $1, id, 'owner', $2 FROM users WHERE id = $3",
         )
         .bind(&organization_id)
         .bind(&now)
@@ -761,7 +367,7 @@ impl AuthStore {
     ) -> Result<OrganizationInfo, AuthFailure> {
         let role = self.require_manager(organization_id, user_id).await?;
         let name = validate_resource_name(name, "organization")?;
-        let result = sqlx::query("UPDATE organizations SET name = ? WHERE organization_id = ?")
+        let result = sqlx::query("UPDATE organizations SET name = $1 WHERE organization_id = $2")
             .bind(&name)
             .bind(organization_id)
             .execute(&self.pool)
@@ -773,7 +379,7 @@ impl AuthStore {
                 "organization does not exist",
             ));
         }
-        let row = sqlx::query("SELECT created_at FROM organizations WHERE organization_id = ?")
+        let row = sqlx::query("SELECT created_at FROM organizations WHERE organization_id = $1")
             .bind(organization_id)
             .fetch_one(&self.pool)
             .await
@@ -794,7 +400,7 @@ impl AuthStore {
              AND i.role = 'owner' AND i.used_at IS NULL) AS initial_invitation_pending \
              FROM organizations o LEFT JOIN organization_members m \
              ON m.organization_id = o.organization_id \
-             GROUP BY o.organization_id, o.name ORDER BY o.name COLLATE NOCASE",
+             GROUP BY o.organization_id, o.name ORDER BY lower(o.name)",
         )
         .fetch_all(&self.pool)
         .await
@@ -806,7 +412,7 @@ impl AuthStore {
                 name: row.get("name"),
                 member_count: row.get("member_count"),
                 owner_count: row.get("owner_count"),
-                initial_invitation_pending: row.get::<i64, _>("initial_invitation_pending") != 0,
+                initial_invitation_pending: row.get("initial_invitation_pending"),
             })
             .collect())
     }
@@ -832,7 +438,7 @@ impl AuthStore {
         user_id: &str,
     ) -> Result<(), AuthFailure> {
         let organization_id = sqlx::query_scalar::<_, String>(
-            "SELECT organization_id FROM workspaces WHERE workspace_id = ?",
+            "SELECT organization_id FROM workspaces WHERE workspace_id = $1",
         )
         .bind(workspace_id)
         .fetch_optional(&self.pool)
@@ -854,9 +460,9 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT u.id AS user_id, u.email, u.preferred_name, m.role, m.joined_at \
              FROM organization_members m JOIN users u ON u.id = m.user_id \
-             WHERE m.organization_id = ? \
+             WHERE m.organization_id = $1 \
              ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, \
-             u.preferred_name COLLATE NOCASE, u.email COLLATE NOCASE",
+             lower(u.preferred_name), lower(u.email)",
         )
         .bind(organization_id)
         .fetch_all(&self.pool)
@@ -883,7 +489,7 @@ impl AuthStore {
             .await?;
         let rows = sqlx::query(
             "SELECT workspace_id, name, created_at FROM workspaces \
-             WHERE organization_id = ? ORDER BY name COLLATE NOCASE, workspace_id",
+             WHERE organization_id = $1 ORDER BY lower(name), workspace_id",
         )
         .bind(organization_id)
         .fetch_all(&self.pool)
@@ -905,7 +511,7 @@ impl AuthStore {
         let now = Utc::now();
         sqlx::query(
             "INSERT INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
-             VALUES(?, ?, ?, ?, ?)",
+             VALUES($1, $2, $3, $4, $5)",
         )
         .bind(workspace_id)
         .bind(organization_id)
@@ -938,8 +544,8 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
              protocol, created_at, created_by, updated_at, updated_by \
-             FROM machine_services WHERE workspace_id = ? \
-             ORDER BY name COLLATE NOCASE, service_id",
+             FROM machine_services WHERE workspace_id = $1 \
+             ORDER BY lower(name), service_id",
         )
         .bind(workspace_id)
         .fetch_all(&self.pool)
@@ -956,7 +562,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
              protocol, created_at, created_by, updated_at, updated_by \
-             FROM machine_services WHERE workspace_id = ? AND service_id = ?",
+             FROM machine_services WHERE workspace_id = $1 AND service_id = $2",
         )
         .bind(workspace_id)
         .bind(target)
@@ -968,7 +574,7 @@ impl AuthStore {
             None => sqlx::query(
                 "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
                  protocol, created_at, created_by, updated_at, updated_by \
-                 FROM machine_services WHERE workspace_id = ? AND name = ? COLLATE NOCASE",
+                 FROM machine_services WHERE workspace_id = $1 AND lower(name) = lower($2)",
             )
             .bind(workspace_id)
             .bind(target.trim())
@@ -1013,7 +619,7 @@ impl AuthStore {
         sqlx::query(
             "INSERT INTO machine_services(\
              service_id, workspace_id, name, server_id, target_host, target_port, protocol, \
-             created_at, created_by, updated_at, updated_by) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             created_at, created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(&service.service_id)
         .bind(&service.workspace_id)
@@ -1077,9 +683,9 @@ impl AuthStore {
             ));
         }
         sqlx::query(
-            "UPDATE machine_services SET name = ?, server_id = ?, target_host = ?, \
-             target_port = ?, protocol = ?, updated_at = ?, updated_by = ? \
-             WHERE workspace_id = ? AND service_id = ?",
+            "UPDATE machine_services SET name = $1, server_id = $2, target_host = $3, \
+             target_port = $4, protocol = $5, updated_at = $6, updated_by = $7 \
+             WHERE workspace_id = $8 AND service_id = $9",
         )
         .bind(&service.name)
         .bind(&service.server_id)
@@ -1124,7 +730,7 @@ impl AuthStore {
     ) -> Result<MachineService, AuthFailure> {
         let _update = self.virtual_hosts_update.lock().await;
         let service = self.resolve_machine_service(workspace_id, target).await?;
-        sqlx::query("DELETE FROM machine_services WHERE workspace_id = ? AND service_id = ?")
+        sqlx::query("DELETE FROM machine_services WHERE workspace_id = $1 AND service_id = $2")
             .bind(workspace_id)
             .bind(&service.service_id)
             .execute(&self.pool)
@@ -1173,7 +779,7 @@ impl AuthStore {
     pub async fn create_virtual_network_host(
         &self,
         workspace_id: &str,
-        username: &str,
+        created_by: &str,
         request: CreateVirtualNetworkHostRequest,
     ) -> Result<VirtualNetworkHost, AuthFailure> {
         let _update = self.virtual_hosts_update.lock().await;
@@ -1190,11 +796,11 @@ impl AuthStore {
             target_host: service.target_host,
             target_port: Some(service.target_port),
             created_at: Utc::now(),
-            created_by: username.to_string(),
+            created_by: created_by.to_string(),
         };
         let result = sqlx::query(
             "INSERT INTO virtual_network_hosts(\
-             workspace_id, hostname, service_id, created_at, created_by) VALUES(?, ?, ?, ?, ?)",
+             workspace_id, hostname, service_id, created_at, created_by) VALUES($1, $2, $3, $4, $5)",
         )
         .bind(&record.workspace_id)
         .bind(&record.hostname)
@@ -1236,7 +842,7 @@ impl AuthStore {
         let _update = self.virtual_hosts_update.lock().await;
         let hostname = normalize_virtual_hostname(hostname)?;
         let result = sqlx::query(
-            "DELETE FROM virtual_network_hosts WHERE workspace_id = ? AND hostname = ? COLLATE NOCASE",
+            "DELETE FROM virtual_network_hosts WHERE workspace_id = $1 AND hostname = $2",
         )
         .bind(workspace_id)
         .bind(&hostname)
@@ -1306,7 +912,7 @@ impl AuthStore {
     ) -> Result<Option<String>, AuthFailure> {
         if self.disabled {
             let exists = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM organizations WHERE organization_id = ?",
+                "SELECT COUNT(*) FROM organizations WHERE organization_id = $1",
             )
             .bind(organization_id)
             .fetch_one(&self.pool)
@@ -1316,7 +922,7 @@ impl AuthStore {
         }
         sqlx::query_scalar(
             "SELECT role FROM organization_members \
-             WHERE organization_id = ? AND user_id = ?",
+             WHERE organization_id = $1 AND user_id = $2",
         )
         .bind(organization_id)
         .bind(user_id)
@@ -1351,7 +957,7 @@ impl AuthStore {
     ) -> Result<(), AuthFailure> {
         sqlx::query(
             "INSERT INTO machine_names(server_id, workspace_id, name, updated_at) \
-             VALUES(?, ?, ?, ?) \
+             VALUES($1, $2, $3, $4) \
              ON CONFLICT(server_id) DO UPDATE SET \
              workspace_id = excluded.workspace_id, name = excluded.name, \
              updated_at = excluded.updated_at",
@@ -1374,7 +980,7 @@ impl AuthStore {
     ) -> Result<(), AuthFailure> {
         sqlx::query(
             "INSERT INTO agent_names(agent_id, workspace_id, name, updated_at) \
-             VALUES(?, ?, ?, ?) \
+             VALUES($1, $2, $3, $4) \
              ON CONFLICT(agent_id) DO UPDATE SET \
              workspace_id = excluded.workspace_id, name = excluded.name, \
              updated_at = excluded.updated_at",
@@ -1394,7 +1000,7 @@ impl AuthStore {
             server.name.clone_from(&server.hostname);
         }
         let name = sqlx::query_scalar::<_, String>(
-            "SELECT name FROM machine_names WHERE server_id = ? AND workspace_id = ?",
+            "SELECT name FROM machine_names WHERE server_id = $1 AND workspace_id = $2",
         )
         .bind(&server.server_id)
         .bind(&server.workspace_id)
@@ -1411,7 +1017,7 @@ impl AuthStore {
         &self,
         snapshot: &mut AgentServerSnapshot,
     ) -> Result<Vec<String>, AuthFailure> {
-        let rows = sqlx::query("SELECT agent_id, name FROM agent_names WHERE workspace_id = ?")
+        let rows = sqlx::query("SELECT agent_id, name FROM agent_names WHERE workspace_id = $1")
             .bind(&snapshot.server.workspace_id)
             .fetch_all(&self.pool)
             .await
@@ -1426,7 +1032,7 @@ impl AuthStore {
             }
         }
         let deleted = sqlx::query_scalar::<_, String>(
-            "SELECT agent_id FROM deleted_agents WHERE workspace_id = ?",
+            "SELECT agent_id FROM deleted_agents WHERE workspace_id = $1",
         )
         .bind(&snapshot.server.workspace_id)
         .fetch_all(&self.pool)
@@ -1448,7 +1054,7 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query(
             "INSERT INTO deleted_agents(agent_id, workspace_id, deleted_at) \
-             VALUES(?, ?, ?) \
+             VALUES($1, $2, $3) \
              ON CONFLICT(agent_id) DO UPDATE SET \
              workspace_id = excluded.workspace_id, deleted_at = excluded.deleted_at",
         )
@@ -1458,7 +1064,7 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM agent_names WHERE agent_id = ? AND workspace_id = ?")
+        sqlx::query("DELETE FROM agent_names WHERE agent_id = $1 AND workspace_id = $2")
             .bind(agent_id)
             .bind(workspace_id)
             .execute(&mut *transaction)
@@ -1478,8 +1084,8 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         if !self.disabled {
             let update = sqlx::query(
-                "UPDATE machines SET revoked_at = ? \
-                 WHERE server_id = ? AND workspace_id = ? AND revoked_at IS NULL",
+                "UPDATE machines SET revoked_at = $1 \
+                 WHERE server_id = $2 AND workspace_id = $3 AND revoked_at IS NULL",
             )
             .bind(Utc::now().to_rfc3339())
             .bind(server_id)
@@ -1494,26 +1100,26 @@ impl AuthStore {
                 ));
             }
         }
-        sqlx::query("DELETE FROM machine_names WHERE server_id = ? AND workspace_id = ?")
+        sqlx::query("DELETE FROM machine_names WHERE server_id = $1 AND workspace_id = $2")
             .bind(server_id)
             .bind(workspace_id)
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM machine_services WHERE workspace_id = ? AND server_id = ?")
+        sqlx::query("DELETE FROM machine_services WHERE workspace_id = $1 AND server_id = $2")
             .bind(workspace_id)
             .bind(server_id)
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
         for agent_id in agent_ids {
-            sqlx::query("DELETE FROM agent_names WHERE agent_id = ? AND workspace_id = ?")
+            sqlx::query("DELETE FROM agent_names WHERE agent_id = $1 AND workspace_id = $2")
                 .bind(agent_id)
                 .bind(workspace_id)
                 .execute(&mut *transaction)
                 .await
                 .map_err(AuthFailure::database)?;
-            sqlx::query("DELETE FROM deleted_agents WHERE agent_id = ? AND workspace_id = ?")
+            sqlx::query("DELETE FROM deleted_agents WHERE agent_id = $1 AND workspace_id = $2")
                 .bind(agent_id)
                 .bind(workspace_id)
                 .execute(&mut *transaction)
@@ -1547,7 +1153,7 @@ impl AuthStore {
         sqlx::query(
             "INSERT INTO machine_enrollments(\
              enrollment_id, workspace_id, secret_hash, created_at, expires_at, created_by) \
-             VALUES(?, ?, ?, ?, ?, ?)",
+             VALUES($1, $2, $3, $4, $5, $6)",
         )
         .bind(identifier)
         .bind(workspace_id)
@@ -1586,7 +1192,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT workspace_id, secret_hash, created_by \
              FROM machine_enrollments \
-             WHERE enrollment_id = ? AND used_at IS NULL AND expires_at > ?",
+             WHERE enrollment_id = $1 AND used_at IS NULL AND expires_at > $2",
         )
         .bind(&enrollment.identifier)
         .bind(now.to_rfc3339())
@@ -1608,7 +1214,7 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let existing_server_id = if let Some(installation_id) = installation_id.as_deref() {
             sqlx::query_scalar::<_, String>(
-                "SELECT server_id FROM machines WHERE workspace_id = ? AND installation_id = ?",
+                "SELECT server_id FROM machines WHERE workspace_id = $1 AND installation_id = $2",
             )
             .bind(&workspace_id)
             .bind(installation_id)
@@ -1622,8 +1228,8 @@ impl AuthStore {
             .clone()
             .unwrap_or_else(|| format!("srv_{}", Uuid::new_v4().simple()));
         let update = sqlx::query(
-            "UPDATE machine_enrollments SET used_at = ?, server_id = ? \
-             WHERE enrollment_id = ? AND used_at IS NULL AND expires_at > ?",
+            "UPDATE machine_enrollments SET used_at = $1, server_id = $2 \
+             WHERE enrollment_id = $3 AND used_at IS NULL AND expires_at > $4",
         )
         .bind(now.to_rfc3339())
         .bind(&server_id)
@@ -1637,8 +1243,8 @@ impl AuthStore {
         }
         if existing_server_id.is_some() {
             sqlx::query(
-                "UPDATE machines SET secret_hash = ?, enrolled_by = ?, revoked_at = NULL \
-                 WHERE server_id = ? AND workspace_id = ?",
+                "UPDATE machines SET secret_hash = $1, enrolled_by = $2, revoked_at = NULL \
+                 WHERE server_id = $3 AND workspace_id = $4",
             )
             .bind(machine_secret_hash)
             .bind(&created_by)
@@ -1651,7 +1257,7 @@ impl AuthStore {
             sqlx::query(
                 "INSERT INTO machines(\
                  server_id, workspace_id, installation_id, secret_hash, created_at, enrolled_by) \
-                 VALUES(?, ?, ?, ?, ?, ?)",
+                 VALUES($1, $2, $3, $4, $5, $6)",
             )
             .bind(&server_id)
             .bind(&workspace_id)
@@ -1666,7 +1272,7 @@ impl AuthStore {
         if let Some(machine_name) = machine_name {
             sqlx::query(
                 "INSERT INTO machine_names(server_id, workspace_id, name, updated_at) \
-                 VALUES(?, ?, ?, ?) ON CONFLICT(server_id) DO UPDATE SET \
+                 VALUES($1, $2, $3, $4) ON CONFLICT(server_id) DO UPDATE SET \
                  workspace_id = excluded.workspace_id, name = excluded.name, updated_at = excluded.updated_at",
             )
             .bind(&server_id)
@@ -1708,9 +1314,9 @@ impl AuthStore {
         let now = Utc::now().to_rfc3339();
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let update = sqlx::query(
-            "UPDATE machines SET installation_id = ? \
-             WHERE workspace_id = ? AND server_id = ? AND revoked_at IS NULL \
-             AND (installation_id IS NULL OR installation_id = ?)",
+            "UPDATE machines SET installation_id = $1 \
+             WHERE workspace_id = $2 AND server_id = $3 AND revoked_at IS NULL \
+             AND (installation_id IS NULL OR installation_id = $4)",
         )
         .bind(&installation_id)
         .bind(workspace_id)
@@ -1740,7 +1346,7 @@ impl AuthStore {
         }
         sqlx::query(
             "INSERT INTO machine_names(server_id, workspace_id, name, updated_at) \
-             VALUES(?, ?, ?, ?) ON CONFLICT(server_id) DO UPDATE SET \
+             VALUES($1, $2, $3, $4) ON CONFLICT(server_id) DO UPDATE SET \
              workspace_id = excluded.workspace_id, name = excluded.name, updated_at = excluded.updated_at",
         )
         .bind(server_id)
@@ -1767,7 +1373,7 @@ impl AuthStore {
         let (server_id, secret) = parse_credential(token, "srv_")?;
         let row = sqlx::query(
             "SELECT workspace_id, secret_hash FROM machines \
-             WHERE server_id = ? AND revoked_at IS NULL",
+             WHERE server_id = $1 AND revoked_at IS NULL",
         )
         .bind(server_id)
         .fetch_optional(&self.pool)
@@ -1799,10 +1405,8 @@ impl AuthStore {
         }
         let row = sqlx::query(
             "SELECT id, email, preferred_name, password_hash FROM users \
-             WHERE email = ? COLLATE NOCASE OR \
-             (email LIKE '%@legacy.local' AND username = ? COLLATE NOCASE)",
+             WHERE lower(email) = lower($1)",
         )
-        .bind(&identifier)
         .bind(&identifier)
         .fetch_optional(&self.pool)
         .await
@@ -1833,17 +1437,16 @@ impl AuthStore {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let now = Utc::now();
         let expires_at = now + Duration::days(SESSION_TTL_DAYS);
-        sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
+        sqlx::query("DELETE FROM sessions WHERE expires_at <= $1")
             .bind(now.to_rfc3339())
             .execute(&self.pool)
             .await
             .map_err(AuthFailure::database)?;
         sqlx::query(
-            "INSERT INTO sessions(token, username, user_id, is_admin, created_at, expires_at) \
-             VALUES(?, ?, ?, 0, ?, ?)",
+            "INSERT INTO sessions(token, user_id, created_at, expires_at) \
+             VALUES($1, $2, $3, $4)",
         )
         .bind(&token)
-        .bind(&email)
         .bind(&user_id)
         .bind(now.to_rfc3339())
         .bind(expires_at.to_rfc3339())
@@ -1862,7 +1465,7 @@ impl AuthStore {
         let now = Utc::now().to_rfc3339();
         let row = sqlx::query(
             "SELECT u.id, u.email, u.preferred_name FROM sessions s \
-             JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?",
+             JOIN users u ON u.id = s.user_id WHERE s.token = $1 AND s.expires_at > $2",
         )
         .bind(token)
         .bind(now)
@@ -1878,7 +1481,7 @@ impl AuthStore {
     }
 
     async fn logout(&self, token: &str) -> Result<(), AuthFailure> {
-        sqlx::query("DELETE FROM sessions WHERE token = ?")
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
             .execute(&self.pool)
             .await
@@ -1894,7 +1497,7 @@ impl AuthStore {
     ) -> Result<CurrentSession, AuthFailure> {
         let email = normalize_email(email)?;
         let preferred_name = validate_preferred_name(preferred_name)?;
-        sqlx::query("UPDATE users SET email = ?, preferred_name = ? WHERE id = ?")
+        sqlx::query("UPDATE users SET email = $1, preferred_name = $2 WHERE id = $3")
             .bind(&email)
             .bind(&preferred_name)
             .bind(user_id)
@@ -1928,12 +1531,12 @@ impl AuthStore {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let now = Utc::now();
         let expires_at = now + Duration::hours(ADMIN_SESSION_TTL_HOURS);
-        sqlx::query("DELETE FROM admin_sessions WHERE expires_at <= ?")
+        sqlx::query("DELETE FROM admin_sessions WHERE expires_at <= $1")
             .bind(now.to_rfc3339())
             .execute(&self.pool)
             .await
             .map_err(AuthFailure::database)?;
-        sqlx::query("INSERT INTO admin_sessions(token, created_at, expires_at) VALUES(?, ?, ?)")
+        sqlx::query("INSERT INTO admin_sessions(token, created_at, expires_at) VALUES($1, $2, $3)")
             .bind(&token)
             .bind(now.to_rfc3339())
             .bind(expires_at.to_rfc3339())
@@ -1945,7 +1548,7 @@ impl AuthStore {
 
     async fn admin_session(&self, token: &str) -> Result<Option<AdminSession>, AuthFailure> {
         let exists = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM admin_sessions WHERE token = ? AND expires_at > ?",
+            "SELECT COUNT(*) FROM admin_sessions WHERE token = $1 AND expires_at > $2",
         )
         .bind(token)
         .bind(Utc::now().to_rfc3339())
@@ -1958,7 +1561,7 @@ impl AuthStore {
     }
 
     async fn admin_logout(&self, token: &str) -> Result<(), AuthFailure> {
-        sqlx::query("DELETE FROM admin_sessions WHERE token = ?")
+        sqlx::query("DELETE FROM admin_sessions WHERE token = $1")
             .bind(token)
             .execute(&self.pool)
             .await
@@ -1976,7 +1579,7 @@ impl AuthStore {
         sqlx::query(
             "INSERT INTO invitations(\
              token, created_at, created_by, organization_id, role) \
-             VALUES(?, ?, ?, ?, 'member')",
+             VALUES($1, $2, $3, $4, 'member')",
         )
         .bind(&token)
         .bind(Utc::now().to_rfc3339())
@@ -1997,8 +1600,8 @@ impl AuthStore {
     ) -> Result<(String, Url), AuthFailure> {
         let owner_count = sqlx::query_scalar::<_, i64>(
             "SELECT (SELECT COUNT(*) FROM organization_members \
-             WHERE organization_id = ? AND role = 'owner') + \
-             (SELECT COUNT(*) FROM invitations WHERE organization_id = ? \
+             WHERE organization_id = $1 AND role = 'owner') + \
+             (SELECT COUNT(*) FROM invitations WHERE organization_id = $2 \
              AND role = 'owner' AND used_at IS NULL)",
         )
         .bind(organization_id)
@@ -2013,7 +1616,7 @@ impl AuthStore {
             ));
         }
         let exists = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM organizations WHERE organization_id = ?",
+            "SELECT COUNT(*) FROM organizations WHERE organization_id = $1",
         )
         .bind(organization_id)
         .fetch_one(&self.pool)
@@ -2028,7 +1631,7 @@ impl AuthStore {
         let token = format!("inv_{}", Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO invitations(token, created_at, created_by, organization_id, role) \
-             VALUES(?, ?, 'platform-admin', ?, 'owner')",
+             VALUES($1, $2, 'platform-admin', $3, 'owner')",
         )
         .bind(&token)
         .bind(Utc::now().to_rfc3339())
@@ -2065,8 +1668,8 @@ impl AuthStore {
             ));
         }
         let result = sqlx::query(
-            "UPDATE organization_members SET role = ? \
-             WHERE organization_id = ? AND user_id = ? AND role != 'owner'",
+            "UPDATE organization_members SET role = $1 \
+             WHERE organization_id = $2 AND user_id = $3 AND role != 'owner'",
         )
         .bind(role)
         .bind(organization_id)
@@ -2102,7 +1705,7 @@ impl AuthStore {
         }
         sqlx::query(
             "DELETE FROM organization_members \
-             WHERE organization_id = ? AND user_id = ?",
+             WHERE organization_id = $1 AND user_id = $2",
         )
         .bind(organization_id)
         .bind(target_user_id)
@@ -2128,7 +1731,7 @@ impl AuthStore {
             ));
         }
         let invitation = sqlx::query(
-            "SELECT organization_id, role FROM invitations WHERE token = ? AND used_at IS NULL",
+            "SELECT organization_id, role FROM invitations WHERE token = $1 AND used_at IS NULL",
         )
         .bind(invite)
         .fetch_optional(&self.pool)
@@ -2147,11 +1750,10 @@ impl AuthStore {
         let user_id = format!("usr_{}", Uuid::new_v4().simple());
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "INSERT INTO users(id, username, email, preferred_name, password_hash, created_at) \
-             VALUES(?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users(id, email, preferred_name, password_hash, created_at) \
+             VALUES($1, $2, $3, $4, $5)",
         )
         .bind(&user_id)
-        .bind(&email)
         .bind(&email)
         .bind(&preferred_name)
         .bind(password_hash)
@@ -2169,7 +1771,7 @@ impl AuthStore {
             }
         })?;
         let result = sqlx::query(
-            "UPDATE invitations SET used_at = ?, used_by = ? WHERE token = ? AND used_at IS NULL",
+            "UPDATE invitations SET used_at = $1, used_by = $2 WHERE token = $3 AND used_at IS NULL",
         )
         .bind(&now)
         .bind(&user_id)
@@ -2184,11 +1786,10 @@ impl AuthStore {
             ));
         }
         sqlx::query(
-            "INSERT INTO organization_members(organization_id, username, user_id, role, joined_at) \
-             VALUES(?, ?, ?, ?, ?)",
+            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+             VALUES($1, $2, $3, $4)",
         )
         .bind(organization_id)
-        .bind(&email)
         .bind(&user_id)
         .bind(role)
         .bind(&now)
@@ -2644,7 +2245,7 @@ fn validate_installation_id(value: &str) -> Result<String, AuthFailure> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn workspace_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceInfo, AuthFailure> {
+fn workspace_from_row(row: sqlx::postgres::PgRow) -> Result<WorkspaceInfo, AuthFailure> {
     let created_at: String = row.get("created_at");
     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
         .map(|value| value.with_timezone(&Utc))
@@ -2662,7 +2263,7 @@ fn workspace_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceInfo, Aut
     })
 }
 
-fn machine_service_from_row(row: sqlx::sqlite::SqliteRow) -> Result<MachineService, AuthFailure> {
+fn machine_service_from_row(row: sqlx::postgres::PgRow) -> Result<MachineService, AuthFailure> {
     let target_port = u16::try_from(row.get::<i64, _>("target_port")).map_err(|error| {
         AuthFailure::internal(
             "database_error",
@@ -2701,7 +2302,7 @@ fn machine_service_from_row(row: sqlx::sqlite::SqliteRow) -> Result<MachineServi
 }
 
 fn parse_database_timestamp(
-    row: &sqlx::sqlite::SqliteRow,
+    row: &sqlx::postgres::PgRow,
     column: &str,
     resource: &str,
 ) -> Result<chrono::DateTime<Utc>, AuthFailure> {
@@ -2759,7 +2360,7 @@ pub(crate) fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFail
 }
 
 fn virtual_network_host_from_row(
-    row: sqlx::sqlite::SqliteRow,
+    row: sqlx::postgres::PgRow,
 ) -> Result<VirtualNetworkHost, AuthFailure> {
     let created_at = row
         .get::<String, _>("created_at")
@@ -2896,7 +2497,7 @@ mod tests {
 
     #[tokio::test]
     async fn virtual_network_hosts_are_normalized_resolved_and_cleaned_up() {
-        let mut store = AuthStore::in_memory("owner-password").await;
+        let mut store = AuthStore::for_test("owner-password").await;
         let initial = store
             .virtual_network_hosts_snapshot("default")
             .await
@@ -2996,7 +2597,7 @@ mod tests {
 
     #[tokio::test]
     async fn machine_service_updates_refresh_aliases_and_delete_cascades() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let service = store
             .create_machine_service(
                 "default",
@@ -3055,97 +2656,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_virtual_hosts_migrate_to_machine_services() {
-        let path = std::env::temp_dir().join(format!(
-            "treer-service-migration-{}.sqlite",
-            Uuid::new_v4().simple()
-        ));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(&path)
-                    .create_if_missing(true),
-            )
+    async fn schema_initialization_is_idempotent() {
+        let store = AuthStore::for_test("owner-password").await;
+        store
+            .initialize_schema()
             .await
-            .expect("open legacy database");
-        sqlx::query(
-            "CREATE TABLE organizations(organization_id TEXT PRIMARY KEY, name TEXT NOT NULL, \
-             created_at TEXT NOT NULL, created_by TEXT NOT NULL)",
-        )
-        .execute(&pool)
-        .await
-        .expect("create organizations");
-        sqlx::query(
-            "INSERT INTO organizations VALUES('org_default', 'Default organization', \
-             '2026-08-18T00:00:00Z', 'admin')",
-        )
-        .execute(&pool)
-        .await
-        .expect("insert organization");
-        sqlx::query(
-            "CREATE TABLE workspaces(workspace_id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, \
-             name TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL)",
-        )
-        .execute(&pool)
-        .await
-        .expect("create workspaces");
-        sqlx::query(
-            "INSERT INTO workspaces VALUES('default', 'org_default', 'Default', \
-             '2026-08-18T00:00:00Z', 'admin')",
-        )
-        .execute(&pool)
-        .await
-        .expect("insert workspace");
-        sqlx::query(
-            "CREATE TABLE virtual_network_hosts(\
-             workspace_id TEXT NOT NULL, hostname TEXT NOT NULL, destination_server_id TEXT NOT NULL, \
-             target_host TEXT NOT NULL, target_port INTEGER, created_at TEXT NOT NULL, \
-             created_by TEXT NOT NULL, PRIMARY KEY(workspace_id, hostname))",
-        )
-        .execute(&pool)
-        .await
-        .expect("create legacy virtual hosts");
-        sqlx::query(
-            "INSERT INTO virtual_network_hosts VALUES(\
-             'default', 'legacy.internal', 'machine-a', '127.0.0.1', 9000, \
-             '2026-08-18T00:00:00Z', 'admin')",
-        )
-        .execute(&pool)
-        .await
-        .expect("insert legacy virtual host");
-        pool.close().await;
-
-        let store = AuthStore::open(
-            &path,
-            "password".to_string(),
-            Url::parse("https://treer.example/").expect("public URL"),
-            true,
-        )
-        .await
-        .expect("migrate legacy database");
-        let services = store
-            .list_machine_services("default")
-            .await
-            .expect("list migrated services");
-        assert_eq!(services.len(), 1);
-        assert_eq!(services[0].server_id, "machine-a");
-        assert_eq!(services[0].target_port, 9000);
-        let alias = store
-            .resolve_virtual_network_host("default", "legacy.internal")
-            .await
-            .expect("resolve migrated alias")
-            .expect("migrated alias");
-        assert_eq!(alias.service_id, services[0].service_id);
-        store.pool.close().await;
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+            .expect("repeat schema initialization");
+        assert_eq!(
+            store
+                .all_workspaces()
+                .await
+                .expect("load seeded workspace")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn invitation_registration_and_login_round_trip() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let admin = store
             .admin_login("owner-password")
             .await
@@ -3190,7 +2719,7 @@ mod tests {
 
     #[tokio::test]
     async fn organization_roles_control_members_and_share_workspaces() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
         let organization = store
             .create_organization(&owner.user_id, "Engineering")
@@ -3271,7 +2800,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_access_is_limited_to_organization_members() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
         let (invite, _) = store
             .create_invitation(DEFAULT_ORGANIZATION_ID, &owner.user_id)
@@ -3303,34 +2832,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restarting_does_not_restore_removed_legacy_members() {
-        let store = AuthStore::in_memory("owner-password").await;
-        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
-        let (invite, _) = store
-            .create_invitation(DEFAULT_ORGANIZATION_ID, &owner.user_id)
-            .await
-            .expect("invite alice");
-        let alice = store
-            .register(&invite, "alice@example.com", "Alice", "password123")
-            .await
-            .expect("register alice");
-        store
-            .remove_member(DEFAULT_ORGANIZATION_ID, &owner.user_id, &alice.user_id)
-            .await
-            .expect("remove alice");
-
-        store.migrate().await.expect("repeat migration");
-
-        assert!(store
-            .membership_role(DEFAULT_ORGANIZATION_ID, &alice.user_id)
-            .await
-            .expect("membership lookup")
-            .is_none());
-    }
-
-    #[tokio::test]
     async fn logout_invalidates_the_session() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let session = bootstrap_owner(&store, "owner@example.com", "Owner").await;
         assert!(store
             .session(&session.token)
@@ -3360,7 +2863,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_auth_injects_a_local_user() {
-        let mut store = AuthStore::in_memory("owner-password").await;
+        let mut store = AuthStore::for_test("owner-password").await;
         store.disabled = true;
         let session = authenticate_request(&store, &HeaderMap::new())
             .await
@@ -3371,7 +2874,7 @@ mod tests {
 
     #[tokio::test]
     async fn machine_enrollment_is_single_use_and_binds_identity() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let enrollment = store
             .create_machine_enrollment("workspace-a", "admin")
             .await
@@ -3407,7 +2910,7 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_enrollment_reuses_installation_identity_and_rotates_credentials() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let installation_id = "mid_0123456789abcdef0123456789abcdef";
         let first_enrollment = store
             .create_machine_enrollment("workspace-a", "admin")
@@ -3436,7 +2939,7 @@ mod tests {
 
         assert_eq!(first.server_id, second.server_id);
         let machine_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM machines WHERE workspace_id = ? AND installation_id = ?",
+            "SELECT COUNT(*) FROM machines WHERE workspace_id = $1 AND installation_id = $2",
         )
         .bind("workspace-a")
         .bind(installation_id)
@@ -3445,7 +2948,7 @@ mod tests {
         .expect("count machines");
         assert_eq!(machine_count, 1);
         let stored_name = sqlx::query_scalar::<_, String>(
-            "SELECT name FROM machine_names WHERE workspace_id = ? AND server_id = ?",
+            "SELECT name FROM machine_names WHERE workspace_id = $1 AND server_id = $2",
         )
         .bind("workspace-a")
         .bind(&second.server_id)
@@ -3472,7 +2975,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_machine_can_bind_an_installation_identity_for_migration() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let first_enrollment = store
             .create_machine_enrollment("workspace-a", "admin")
             .await
@@ -3519,13 +3022,13 @@ mod tests {
 
     #[tokio::test]
     async fn machine_authentication_rejects_missing_credentials() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         assert!(store.authenticate_machine(&HeaderMap::new()).await.is_err());
     }
 
     #[tokio::test]
     async fn deleting_machine_revokes_credential_and_cleans_names() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         let enrollment = store
             .create_machine_enrollment("workspace-a", "admin")
             .await
@@ -3556,13 +3059,13 @@ mod tests {
 
         assert!(store.authenticate_machine(&headers).await.is_err());
         let machine_name =
-            sqlx::query_scalar::<_, String>("SELECT name FROM machine_names WHERE server_id = ?")
+            sqlx::query_scalar::<_, String>("SELECT name FROM machine_names WHERE server_id = $1")
                 .bind(&claim.server_id)
                 .fetch_optional(&store.pool)
                 .await
                 .expect("query machine name");
         let agent_name =
-            sqlx::query_scalar::<_, String>("SELECT name FROM agent_names WHERE agent_id = ?")
+            sqlx::query_scalar::<_, String>("SELECT name FROM agent_names WHERE agent_id = $1")
                 .bind("agent-a")
                 .fetch_optional(&store.pool)
                 .await
@@ -3573,7 +3076,7 @@ mod tests {
 
     #[tokio::test]
     async fn persisted_names_are_applied_to_controller_snapshots() {
-        let store = AuthStore::in_memory("owner-password").await;
+        let store = AuthStore::for_test("owner-password").await;
         store
             .set_machine_name("workspace-a", "server-a", "build-machine")
             .await
