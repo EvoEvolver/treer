@@ -31,6 +31,10 @@ pub struct ChildArgs {
     socket_transfer_fd: i32,
     #[arg(long)]
     notify: PathBuf,
+    #[arg(long)]
+    nsswitch: PathBuf,
+    #[arg(long)]
+    resolv_conf: PathBuf,
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
@@ -53,6 +57,9 @@ pub async fn run(args: ExecArgs) -> Result<()> {
     require_command(&args.command)?;
     let mut sandbox_dir = SandboxDirectory::create()?;
     let notify = sandbox_dir.path().join("agent.sock");
+    let nsswitch = sandbox_dir.path().join("nsswitch.conf");
+    let resolv_conf = sandbox_dir.path().join("resolv.conf");
+    write_namespace_resolver_files(&nsswitch, &resolv_conf)?;
     let listener = UnixListener::bind(&notify)
         .with_context(|| format!("failed to create sandbox notifier {}", notify.display()))?;
     let (transfer_socket, remote_fd) = tun2proxy::socket_transfer::create_transfer_socket_pair()
@@ -78,6 +85,10 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         .arg(remote_fd.as_raw_fd().to_string())
         .arg("--notify")
         .arg(&notify)
+        .arg("--nsswitch")
+        .arg(&nsswitch)
+        .arg("--resolv-conf")
+        .arg(&resolv_conf)
         .arg("--")
         .args(&args.command)
         .kill_on_drop(true);
@@ -132,6 +143,7 @@ pub async fn run(args: ExecArgs) -> Result<()> {
 
 pub async fn run_child(args: ChildArgs) -> Result<()> {
     require_command(&args.command)?;
+    mount_namespace_resolver_files(&args.nsswitch, &args.resolv_conf).await?;
     let mut proxy = args.network_proxy;
     if let Some(rest) = proxy.strip_prefix("socks5h://") {
         proxy = format!("socks5://{rest}");
@@ -156,6 +168,70 @@ pub async fn run_child(args: ChildArgs) -> Result<()> {
     .await
     .context("transparent network runtime failed")?;
     Ok(())
+}
+
+fn write_namespace_resolver_files(nsswitch: &Path, resolv_conf: &Path) -> Result<()> {
+    let installed = match std::fs::read_to_string("/etc/nsswitch.conf") {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).context("failed to read /etc/nsswitch.conf"),
+    };
+    std::fs::write(nsswitch, sandbox_nsswitch(&installed))
+        .with_context(|| format!("failed to write {}", nsswitch.display()))?;
+    std::fs::write(
+        resolv_conf,
+        "# Routed to tun2proxy's virtual DNS inside the agent namespace.\nnameserver 8.8.8.8\noptions attempts:1 timeout:1\n",
+    )
+    .with_context(|| format!("failed to write {}", resolv_conf.display()))?;
+    Ok(())
+}
+
+fn sandbox_nsswitch(installed: &str) -> String {
+    let mut output = String::new();
+    let mut replaced = false;
+    for line in installed.lines() {
+        let is_hosts = line
+            .split_once(':')
+            .is_some_and(|(database, _)| database.trim() == "hosts");
+        if is_hosts {
+            if !replaced {
+                output.push_str("hosts: files dns\n");
+                replaced = true;
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !replaced {
+        output.push_str("hosts: files dns\n");
+    }
+    output
+}
+
+async fn mount_namespace_resolver_files(nsswitch: &Path, resolv_conf: &Path) -> Result<()> {
+    run_mount(["--make-rprivate".as_ref(), Path::new("/")]).await?;
+    run_mount(["--bind".as_ref(), nsswitch, Path::new("/etc/nsswitch.conf")]).await?;
+    run_mount([
+        "--bind".as_ref(),
+        resolv_conf,
+        Path::new("/etc/resolv.conf"),
+    ])
+    .await?;
+    Ok(())
+}
+
+async fn run_mount<const N: usize>(args: [&Path; N]) -> Result<()> {
+    let status = Command::new("mount")
+        .args(args)
+        .status()
+        .await
+        .context("transparent networking requires mount(8) from util-linux")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("failed to configure agent namespace resolver: mount exited with {status}")
+    }
 }
 
 async fn prepare_namespace_proxy_route(proxy_ip: IpAddr) -> Result<()> {
@@ -273,6 +349,8 @@ impl SandboxDirectory {
             return;
         }
         let _ = std::fs::remove_file(self.path.join("agent.sock"));
+        let _ = std::fs::remove_file(self.path.join("nsswitch.conf"));
+        let _ = std::fs::remove_file(self.path.join("resolv.conf"));
         let _ = std::fs::remove_dir(&self.path);
         self.cleaned = true;
     }
@@ -281,5 +359,30 @@ impl SandboxDirectory {
 impl Drop for SandboxDirectory {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_nsswitch_bypasses_mdns_and_preserves_other_databases() {
+        let installed = "passwd: files systemd\nhosts: files mdns4_minimal [NOTFOUND=return] dns myhostname\ngroup: files systemd\n";
+
+        let configured = sandbox_nsswitch(installed);
+
+        assert_eq!(
+            configured,
+            "passwd: files systemd\nhosts: files dns\ngroup: files systemd\n"
+        );
+    }
+
+    #[test]
+    fn sandbox_nsswitch_adds_a_hosts_database_when_missing() {
+        assert_eq!(
+            sandbox_nsswitch("passwd: files\n"),
+            "passwd: files\nhosts: files dns\n"
+        );
     }
 }

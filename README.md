@@ -195,6 +195,13 @@ passed into the namespace; this keeps the Proxy WebSocket and machine egress
 outside the sandbox. Linux requires `unshare(1)` from `util-linux` and a kernel
 that permits unprivileged user namespaces.
 
+The namespace bind-mounts private resolver configuration with `hosts: files
+dns` and a non-loopback nameserver. This bypasses host NSS plugins such as mDNS
+that may reject workspace virtual-host suffixes before a DNS packet reaches the
+TUN adapter. `tun2proxy` answers those DNS requests from its virtual pool and
+restores the original hostname for Treer routing. The host's `/etc` files are
+not modified, and virtual-host changes remain dynamic.
+
 In transparent mode the Controller clears the standard HTTP(S) and all-protocol
 proxy environment variables, because its loopback SOCKS listener is outside the
 agent network namespace and normal application traffic must enter the TUN
