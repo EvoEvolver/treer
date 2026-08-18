@@ -176,6 +176,10 @@ pub fn router(
             any(proxy_virtual_network_host_root),
         )
         .route(
+            "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/",
+            any(proxy_virtual_network_host_root),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/{*path}",
             any(proxy_virtual_network_host_path),
         )
@@ -1575,6 +1579,7 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::process::{Command, Stdio};
+    use tower::ServiceExt;
 
     async fn state_with_managed_agent() -> AppState {
         let state = AppState::new();
@@ -1631,6 +1636,26 @@ mod tests {
             Url::parse("https://github.example/releases/latest/download")
                 .expect("valid release URL"),
         )
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_browser_tunnel_route_is_registered() {
+        let app = router(
+            AppState::new(),
+            test_config(),
+            AuthStore::in_memory("admin-password").await,
+            PolicyEngine::allow_all(),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workspaces/default/virtual-hosts/self.test/proxy/")
+                    .body(Body::empty())
+                    .expect("tunnel request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]
