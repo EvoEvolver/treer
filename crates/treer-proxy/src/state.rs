@@ -52,7 +52,7 @@ struct Inner {
     pending: Mutex<HashMap<String, PendingCommand>>,
     terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
     transfer_sessions: Mutex<HashMap<String, TransferSession>>,
-    network_streams: Mutex<HashMap<String, NetworkStream>>,
+    network_streams: Mutex<HashMap<NetworkStreamKey, NetworkStreamLeg>>,
     events: broadcast::Sender<WorkspaceEvent>,
 }
 
@@ -90,12 +90,23 @@ struct TransferSession {
     outgoing: mpsc::Sender<SocketFrame>,
 }
 
-struct NetworkStream {
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct NetworkStreamKey {
     workspace_id: String,
-    source_server_id: String,
-    destination_server_id: String,
-    source_closed: bool,
-    destination_closed: bool,
+    server_id: String,
+    stream_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkStreamRole {
+    Source,
+    Destination,
+}
+
+struct NetworkStreamLeg {
+    peer: NetworkStreamKey,
+    role: NetworkStreamRole,
+    closed: bool,
 }
 
 struct WorkspaceState {
@@ -1379,7 +1390,7 @@ impl AppState {
         source_server_id: &str,
         connection_id: Uuid,
         destination_server_id: &str,
-        frame: NetworkBinaryFrame,
+        mut frame: NetworkBinaryFrame,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, source_server_id, connection_id)
             .await?;
@@ -1393,32 +1404,46 @@ impl AppState {
             .server_outgoing(workspace_id, destination_server_id)
             .await
             .ok_or_else(|| ProtocolError::new("server_offline", destination_server_id))?;
+        let source = NetworkStreamKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: source_server_id.to_string(),
+            stream_id: frame.stream_id.clone(),
+        };
+        let destination = NetworkStreamKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: destination_server_id.to_string(),
+            stream_id: format!("net_{}", Uuid::new_v4().simple()),
+        };
         {
             let mut streams = self.inner.network_streams.lock().await;
-            if streams.contains_key(&frame.stream_id) {
+            if streams.contains_key(&source) || streams.contains_key(&destination) {
                 return Err(ProtocolError::new(
                     "network_stream_exists",
                     "network stream ID is already in use",
                 ));
             }
             streams.insert(
-                frame.stream_id.clone(),
-                NetworkStream {
-                    workspace_id: workspace_id.to_string(),
-                    source_server_id: source_server_id.to_string(),
-                    destination_server_id: destination_server_id.to_string(),
-                    source_closed: false,
-                    destination_closed: false,
+                source.clone(),
+                NetworkStreamLeg {
+                    peer: destination.clone(),
+                    role: NetworkStreamRole::Source,
+                    closed: false,
+                },
+            );
+            streams.insert(
+                destination.clone(),
+                NetworkStreamLeg {
+                    peer: source.clone(),
+                    role: NetworkStreamRole::Destination,
+                    closed: false,
                 },
             );
         }
+        frame.stream_id.clone_from(&destination.stream_id);
         let encoded = frame.encode()?;
         if outgoing.send(SocketFrame::Binary(encoded)).is_err() {
-            self.inner
-                .network_streams
-                .lock()
-                .await
-                .remove(&frame.stream_id);
+            let mut streams = self.inner.network_streams.lock().await;
+            remove_network_stream(&mut streams, &source);
             return Err(ProtocolError::new("server_offline", destination_server_id));
         }
         Ok(())
@@ -1429,7 +1454,7 @@ impl AppState {
         workspace_id: &str,
         server_id: &str,
         connection_id: Uuid,
-        frame: NetworkBinaryFrame,
+        mut frame: NetworkBinaryFrame,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
@@ -1439,61 +1464,44 @@ impl AppState {
                 "open frame cannot be relayed as an existing stream",
             ));
         }
+        let key = NetworkStreamKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            stream_id: frame.stream_id.clone(),
+        };
         let (peer, remove) = {
             let mut streams = self.inner.network_streams.lock().await;
             let stream = streams
-                .get_mut(&frame.stream_id)
+                .get_mut(&key)
                 .ok_or_else(|| ProtocolError::new("network_stream_not_found", &frame.stream_id))?;
-            if stream.workspace_id != workspace_id {
-                return Err(ProtocolError::new(
-                    "network_stream_identity_mismatch",
-                    &frame.stream_id,
-                ));
-            }
-            let from_source = stream.source_server_id == server_id;
-            let from_destination = stream.destination_server_id == server_id;
-            if !from_source && !from_destination {
-                return Err(ProtocolError::new(
-                    "network_stream_identity_mismatch",
-                    &frame.stream_id,
-                ));
-            }
-            if frame.kind == NetworkBinaryKind::Opened && !from_destination {
+            if frame.kind == NetworkBinaryKind::Opened
+                && stream.role != NetworkStreamRole::Destination
+            {
                 return Err(ProtocolError::new(
                     "invalid_network_frame",
                     "only the destination can open a network stream",
                 ));
             }
             if frame.kind == NetworkBinaryKind::HalfClose {
-                if from_source {
-                    stream.source_closed = true;
-                } else {
-                    stream.destination_closed = true;
-                }
+                stream.closed = true;
             }
+            let peer = stream.peer.clone();
             let remove = frame.kind == NetworkBinaryKind::Reset
-                || (stream.source_closed && stream.destination_closed);
-            let peer = if from_source {
-                stream.destination_server_id.clone()
-            } else {
-                stream.source_server_id.clone()
-            };
+                || (stream.closed && streams.get(&peer).is_some_and(|peer| peer.closed));
             if remove {
-                streams.remove(&frame.stream_id);
+                remove_network_stream(&mut streams, &key);
             }
             (peer, remove)
         };
+        frame.stream_id.clone_from(&peer.stream_id);
         let outgoing = self
-            .server_outgoing(workspace_id, &peer)
+            .server_outgoing(workspace_id, &peer.server_id)
             .await
-            .ok_or_else(|| ProtocolError::new("server_offline", &peer))?;
+            .ok_or_else(|| ProtocolError::new("server_offline", &peer.server_id))?;
         if outgoing.send(SocketFrame::Binary(frame.encode()?)).is_err() && !remove {
-            self.inner
-                .network_streams
-                .lock()
-                .await
-                .remove(&frame.stream_id);
-            return Err(ProtocolError::new("server_offline", peer));
+            let mut streams = self.inner.network_streams.lock().await;
+            remove_network_stream(&mut streams, &key);
+            return Err(ProtocolError::new("server_offline", peer.server_id));
         }
         Ok(())
     }
@@ -1501,40 +1509,34 @@ impl AppState {
     async fn close_server_network_streams(&self, workspace_id: &str, server_id: &str) {
         let routes = {
             let mut streams = self.inner.network_streams.lock().await;
-            let ids = streams
-                .iter()
-                .filter(|(_, stream)| {
-                    stream.workspace_id == workspace_id
-                        && (stream.source_server_id == server_id
-                            || stream.destination_server_id == server_id)
-                })
-                .map(|(stream_id, _)| stream_id.clone())
+            let keys = streams
+                .keys()
+                .filter(|key| key.workspace_id == workspace_id && key.server_id == server_id)
+                .cloned()
                 .collect::<Vec<_>>();
-            ids.into_iter()
-                .filter_map(|stream_id| {
-                    streams.remove(&stream_id).map(|stream| {
-                        let peer = if stream.source_server_id == server_id {
-                            stream.destination_server_id
-                        } else {
-                            stream.source_server_id
-                        };
-                        (stream_id, peer)
-                    })
-                })
-                .collect::<Vec<_>>()
+            let mut routes = Vec::new();
+            for key in keys {
+                let Some(stream) = remove_network_stream(&mut streams, &key) else {
+                    continue;
+                };
+                if stream.peer.server_id != server_id {
+                    routes.push(stream.peer);
+                }
+            }
+            routes
         };
         let payload = serde_json::to_vec(&ProtocolError::new(
             "server_offline",
             "network peer disconnected",
         ))
         .unwrap_or_default();
-        for (stream_id, peer) in routes {
-            let Some(outgoing) = self.server_outgoing(workspace_id, &peer).await else {
+        for peer in routes {
+            let Some(outgoing) = self.server_outgoing(workspace_id, &peer.server_id).await else {
                 continue;
             };
             let frame = NetworkBinaryFrame {
                 kind: NetworkBinaryKind::Reset,
-                stream_id,
+                stream_id: peer.stream_id,
                 payload: payload.clone(),
             };
             if let Ok(encoded) = frame.encode() {
@@ -1677,6 +1679,15 @@ impl AppState {
     }
 }
 
+fn remove_network_stream(
+    streams: &mut HashMap<NetworkStreamKey, NetworkStreamLeg>,
+    key: &NetworkStreamKey,
+) -> Option<NetworkStreamLeg> {
+    let stream = streams.remove(key)?;
+    streams.remove(&stream.peer);
+    Some(stream)
+}
+
 fn send_proxy_message(
     outgoing: &mpsc::UnboundedSender<SocketFrame>,
     message: &ProxyMessage,
@@ -1729,6 +1740,16 @@ mod tests {
             SocketFrame::Text(text) => text,
             SocketFrame::Binary(_) => panic!("expected text socket frame"),
             SocketFrame::Close => panic!("expected text socket frame"),
+        }
+    }
+
+    fn expect_network(frame: SocketFrame) -> NetworkBinaryFrame {
+        match frame {
+            SocketFrame::Binary(encoded) => {
+                NetworkBinaryFrame::decode(&encoded).expect("decode network frame")
+            }
+            SocketFrame::Text(_) => panic!("expected binary network frame"),
+            SocketFrame::Close => panic!("expected binary network frame"),
         }
     }
 
@@ -2326,6 +2347,116 @@ mod tests {
                 .expect("shutdown accepted"),
             serde_json::json!({"accepted": true})
         );
+    }
+
+    #[tokio::test]
+    async fn same_machine_network_streams_use_distinct_leg_ids() {
+        let state = AppState::new();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(test_server(), connection_id, server_tx)
+            .await
+            .expect("register controller");
+
+        let source_stream_id = "net_source".to_string();
+        state
+            .open_network_stream(
+                "alpha",
+                "server",
+                connection_id,
+                "server",
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Open,
+                    stream_id: source_stream_id.clone(),
+                    payload: b"connect".to_vec(),
+                },
+            )
+            .await
+            .expect("open same-machine stream");
+
+        let destination_open =
+            expect_network(server_rx.recv().await.expect("destination open frame"));
+        assert_eq!(destination_open.kind, NetworkBinaryKind::Open);
+        assert_ne!(destination_open.stream_id, source_stream_id);
+        assert_eq!(destination_open.payload, b"connect");
+        let destination_stream_id = destination_open.stream_id;
+        assert_eq!(state.inner.network_streams.lock().await.len(), 2);
+
+        state
+            .relay_network_frame(
+                "alpha",
+                "server",
+                connection_id,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Opened,
+                    stream_id: destination_stream_id.clone(),
+                    payload: Vec::new(),
+                },
+            )
+            .await
+            .expect("relay destination opened frame");
+        let source_opened = expect_network(server_rx.recv().await.expect("source opened frame"));
+        assert_eq!(source_opened.kind, NetworkBinaryKind::Opened);
+        assert_eq!(source_opened.stream_id, source_stream_id);
+
+        state
+            .relay_network_frame(
+                "alpha",
+                "server",
+                connection_id,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Data,
+                    stream_id: source_stream_id.clone(),
+                    payload: b"request".to_vec(),
+                },
+            )
+            .await
+            .expect("relay source data");
+        let destination_data =
+            expect_network(server_rx.recv().await.expect("destination data frame"));
+        assert_eq!(destination_data.stream_id, destination_stream_id);
+        assert_eq!(destination_data.payload, b"request");
+
+        state
+            .relay_network_frame(
+                "alpha",
+                "server",
+                connection_id,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Data,
+                    stream_id: destination_stream_id.clone(),
+                    payload: b"response".to_vec(),
+                },
+            )
+            .await
+            .expect("relay destination data");
+        let source_data = expect_network(server_rx.recv().await.expect("source data frame"));
+        assert_eq!(source_data.stream_id, source_stream_id);
+        assert_eq!(source_data.payload, b"response");
+
+        for (stream_id, expected_peer_id) in [
+            (source_stream_id.clone(), destination_stream_id.clone()),
+            (destination_stream_id, source_stream_id.clone()),
+        ] {
+            state
+                .relay_network_frame(
+                    "alpha",
+                    "server",
+                    connection_id,
+                    NetworkBinaryFrame {
+                        kind: NetworkBinaryKind::HalfClose,
+                        stream_id,
+                        payload: Vec::new(),
+                    },
+                )
+                .await
+                .expect("relay half-close");
+            let close = expect_network(server_rx.recv().await.expect("peer half-close frame"));
+            assert_eq!(close.kind, NetworkBinaryKind::HalfClose);
+            assert_eq!(close.stream_id, expected_peer_id);
+        }
+        assert!(state.inner.network_streams.lock().await.is_empty());
     }
 
     #[tokio::test]

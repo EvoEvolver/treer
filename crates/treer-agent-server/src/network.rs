@@ -432,7 +432,16 @@ fn decode_reset(frame: &NetworkBinaryFrame) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+
+    async fn next_frame(runtime: &NetworkRuntime) -> NetworkBinaryFrame {
+        tokio::time::timeout(Duration::from_secs(2), runtime.next_outgoing())
+            .await
+            .expect("network frame timeout")
+            .expect("network runtime stopped")
+    }
 
     #[test]
     fn parses_local_and_via_routes() {
@@ -485,5 +494,115 @@ mod tests {
         let route = server.await.expect("SOCKS server task");
         assert_eq!(route.destination, "api.internal");
         assert_eq!(route.source_agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn distinct_leg_ids_support_same_machine_tcp_round_trip() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind target server");
+        let target_port = target.local_addr().expect("target address").port();
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.expect("accept target connection");
+            let mut request = [0_u8; 18];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read target request");
+            assert_eq!(&request, b"GET / HTTP/1.0\r\n\r\n");
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("write target response");
+        });
+
+        let api_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reserve API port");
+        let api_address = api_reservation.local_addr().expect("API address");
+        drop(api_reservation);
+        let runtime = NetworkRuntime::bind_near(api_address)
+            .await
+            .expect("bind network runtime");
+        let mut client = TcpStream::connect(runtime.listen_address())
+            .await
+            .expect("connect SOCKS client");
+        client.write_all(&[5, 1, 0]).await.expect("SOCKS greeting");
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).await.expect("SOCKS method");
+        assert_eq!(method, [5, 0]);
+        client
+            .write_all(&[
+                5, 1, 0, 3, 8, b't', b'e', b's', b't', b'.', b'a', b'p', b'i', 0, 80,
+            ])
+            .await
+            .expect("SOCKS connect request");
+
+        let source_open = next_frame(&runtime).await;
+        assert_eq!(source_open.kind, NetworkBinaryKind::Open);
+        let source_stream_id = source_open.stream_id;
+        let destination_stream_id = "net_destination".to_string();
+        assert_ne!(source_stream_id, destination_stream_id);
+        runtime
+            .handle_incoming(NetworkBinaryFrame {
+                kind: NetworkBinaryKind::Open,
+                stream_id: destination_stream_id.clone(),
+                payload: serde_json::to_vec(&NetworkConnectRequest {
+                    source_server_id: "server".to_string(),
+                    source_agent_id: None,
+                    host: Ipv4Addr::LOCALHOST.to_string(),
+                    port: target_port,
+                })
+                .expect("encode destination request"),
+            })
+            .await
+            .expect("open destination leg");
+        let mut destination_opened = next_frame(&runtime).await;
+        assert_eq!(destination_opened.kind, NetworkBinaryKind::Opened);
+        assert_eq!(destination_opened.stream_id, destination_stream_id);
+        destination_opened.stream_id.clone_from(&source_stream_id);
+        runtime
+            .handle_incoming(destination_opened)
+            .await
+            .expect("open source leg");
+
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).await.expect("SOCKS reply");
+        assert_eq!(reply[1], 0);
+
+        let relay_runtime = runtime.clone();
+        let relay_source_id = source_stream_id.clone();
+        let relay_destination_id = destination_stream_id.clone();
+        let relay = tokio::spawn(async move {
+            loop {
+                let mut frame = next_frame(&relay_runtime).await;
+                if frame.stream_id == relay_source_id {
+                    frame.stream_id.clone_from(&relay_destination_id);
+                } else if frame.stream_id == relay_destination_id {
+                    frame.stream_id.clone_from(&relay_source_id);
+                } else {
+                    panic!("unexpected network stream {}", frame.stream_id);
+                }
+                relay_runtime
+                    .handle_incoming(frame)
+                    .await
+                    .expect("relay same-machine frame");
+            }
+        });
+
+        client
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .await
+            .expect("write HTTP request");
+        client.shutdown().await.expect("half-close HTTP request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .expect("HTTP response timeout")
+            .expect("read HTTP response");
+        assert!(response.ends_with(b"\r\n\r\nok"));
+
+        target_task.await.expect("target task");
+        relay.abort();
     }
 }
