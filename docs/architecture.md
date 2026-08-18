@@ -40,7 +40,7 @@ flowchart TB
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
-| [`treer-proxy`](../crates/treer-proxy/src/main.rs) | Public API, user auth, SQLite metadata, workspace projection, command and stream routing | Local process lifetime |
+| [`treer-proxy`](../crates/treer-proxy/src/main.rs) | Public API, user auth, workload token signing, SQLite metadata, workspace projection, command and stream routing | Local process lifetime |
 | [`treer-agent-server`](../crates/treer-agent-server/src/main.rs) | Machine Controller, local API, Agent definitions, state detection, Proxy link, network bridge | Durable PTY ownership |
 | [`treer-agent-host`](../crates/treer-agent-host/src/main.rs) | Stable child processes, Controller supervision, idempotent mutation cache | Users, workspaces, Agent brands, product policy |
 | [`treer-agent-runtime`](../crates/treer-agent-runtime/src/lib.rs) | PTY lifecycle, raw input/output, bounded replay, root-relative working directories | Distributed routing or identity |
@@ -75,13 +75,13 @@ flowchart TB
 | --- | --- | --- |
 | Browser to Proxy | HTTP/JSON and WebSocket frames | User or admin session cookie |
 | Controller to Proxy | Persistent WebSocket, JSON and binary frames | Workspace-bound machine Bearer credential |
-| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; upstream uses machine credential |
+| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; workload-token requests require the Agent credential |
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
 | Host to child process | PTY raw bytes | Host process ownership |
 
 SQLite persists users, organizations, memberships, sessions, invitations,
-workspaces, enrollment records, machine credentials, display names, machine
-services, and virtual hosts. Connected Controllers, pending commands, workspace
+workspaces, enrollment records, machine credentials, the workload signing key,
+display names, machine services, and virtual hosts. Connected Controllers, pending commands, workspace
 projections, terminal legs, transfers, and network tunnels are held in Proxy
 memory and do not yet support horizontal routing across Proxy replicas.
 
@@ -110,6 +110,15 @@ Managed Agent coordination starts at the source machine's loopback API, crosses
 the Proxy under that machine's credential, and reaches the target Controller
 and Host. The source Agent does not need the destination address or a Proxy
 credential.
+
+Each managed Agent also receives a random workload credential in its process
+environment and Host-owned metadata. For `treer identity token`, the Controller
+matches that credential to the Agent, forwards the request under its machine
+credential, and the Proxy resolves the requested machine service, evaluates the
+`identity.token.issue` policy action, and signs a 60-second Ed25519 JWT bound to
+the stable service ID. Services validate through the Proxy JWKS document or the
+online verify endpoint. Tokens are requested explicitly and are never injected
+into arbitrary virtual-network traffic.
 
 ## Network and transfer paths
 

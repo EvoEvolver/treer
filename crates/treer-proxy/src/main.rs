@@ -1,6 +1,7 @@
 mod agent_socket;
 mod api;
 mod auth;
+mod identity;
 pub mod policy;
 mod state;
 
@@ -100,8 +101,12 @@ async fn main() -> anyhow::Result<()> {
         state.ensure_workspace_info(workspace).await;
     }
     let policy = policy::PolicyEngine::allow_all();
+    let identity = identity::IdentityIssuer::load(&auth, &public_url)
+        .await
+        .context("failed to initialize workload identity issuer")?;
     api::spawn_virtual_network_host_refresh(state.clone(), auth.clone());
-    let app = api::router(state, bootstrap, auth, policy).layer(TraceLayer::new_for_http());
+    let app =
+        api::router(state, bootstrap, auth, policy, identity).layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;

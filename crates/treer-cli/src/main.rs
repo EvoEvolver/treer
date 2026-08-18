@@ -16,8 +16,9 @@ use treer_protocol::{
     AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, InputAgentRequest, MachineServiceProtocol, RenameRequest,
     ServerInfo, ServerStatus, TerminalClientMessage, TerminalServerMessage, TransferBinaryFrame,
-    TransferServerMessage, TransferStats, UpdateMachineServiceRequest, WorkspaceSnapshot,
-    AGENT_ID_HEADER,
+    TransferServerMessage, TransferStats, UpdateMachineServiceRequest,
+    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
+    AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use treer_transfer::TransferReceiver;
 use url::Url;
@@ -69,6 +70,11 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    #[command(about = "Obtain a short-lived identity token for a workspace service")]
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommand,
     },
     #[command(about = "Show the current managed agent identity")]
     Whoami,
@@ -224,6 +230,17 @@ enum ServiceCommand {
     Delete { target: String },
 }
 
+#[derive(Debug, Subcommand)]
+enum IdentityCommand {
+    #[command(about = "Print an audience-bound Bearer token")]
+    Token {
+        #[arg(value_name = "SERVICE")]
+        audience: String,
+        #[arg(long, help = "Print the complete JSON token response")]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliServiceProtocol {
     Tcp,
@@ -282,6 +299,7 @@ struct ApiClient {
     http: reqwest::Client,
     base: Url,
     source_agent_id: Option<String>,
+    workload_credential: Option<String>,
 }
 
 impl ApiClient {
@@ -290,6 +308,7 @@ impl ApiClient {
             http: reqwest::Client::new(),
             base,
             source_agent_id: std::env::var("TREER_AGENT_ID").ok(),
+            workload_credential: std::env::var("TREER_WORKLOAD_CREDENTIAL").ok(),
         }
     }
 
@@ -306,6 +325,9 @@ impl ApiClient {
         let mut request = self.http.request(method, url);
         if let Some(agent_id) = &self.source_agent_id {
             request = request.header(AGENT_ID_HEADER, agent_id);
+        }
+        if let Some(credential) = &self.workload_credential {
+            request = request.header(WORKLOAD_CREDENTIAL_HEADER, credential);
         }
         if let Some(body) = body {
             request = request.json(&body);
@@ -416,6 +438,24 @@ async fn main() -> anyhow::Result<()> {
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
         Command::Service { command } => run_service_command(&client, command).await?,
+        Command::Identity { command } => {
+            let IdentityCommand::Token { audience, json } = command;
+            let response: WorkloadIdentityTokenResponse = client
+                .request(
+                    Method::POST,
+                    "api/identity/token",
+                    Some(serde_json::to_value(WorkloadIdentityTokenRequest {
+                        audience,
+                    })?),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!("{}", response.access_token);
+            }
+            return Ok(());
+        }
         Command::Whoami => whoami(&client).await?,
         Command::Discover => discover(&client).await?,
         Command::List => client.value(Method::GET, "api/agents", None).await?,
@@ -1591,6 +1631,21 @@ mod tests {
                     ..
                 }
             }) if name == "api" && machine == "builder"
+        ));
+    }
+
+    #[test]
+    fn identity_token_command_parses() {
+        let args = Args::try_parse_from(["treer", "identity", "token", "api"])
+            .expect("identity token should parse");
+        assert!(matches!(
+            args.command,
+            Some(Command::Identity {
+                command: IdentityCommand::Token {
+                    audience,
+                    json: false,
+                }
+            }) if audience == "api"
         ));
     }
 

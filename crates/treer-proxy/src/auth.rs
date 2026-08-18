@@ -214,6 +214,14 @@ impl AuthStore {
 
     async fn migrate(&self) -> anyhow::Result<()> {
         sqlx::query(
+            "CREATE TABLE IF NOT EXISTS proxy_secrets (\
+             name TEXT PRIMARY KEY, \
+             value BLOB NOT NULL, \
+             created_at TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS users (\
              id TEXT PRIMARY KEY, \
              username TEXT NOT NULL COLLATE NOCASE UNIQUE, \
@@ -537,6 +545,24 @@ impl AuthStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub(crate) async fn load_or_create_proxy_secret(
+        &self,
+        name: &str,
+        candidate: &[u8],
+    ) -> anyhow::Result<Vec<u8>> {
+        sqlx::query("INSERT OR IGNORE INTO proxy_secrets(name, value, created_at) VALUES(?, ?, ?)")
+            .bind(name)
+            .bind(candidate)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        sqlx::query_scalar("SELECT value FROM proxy_secrets WHERE name = ?")
+            .bind(name)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Into::into)
     }
 
     async fn ensure_column(

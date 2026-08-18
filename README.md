@@ -197,9 +197,10 @@ input, replay, and live output remain raw bytes from the Host through the
 Controller and Proxy to the browser. The Host socket uses length-prefixed binary
 frames, and both WebSocket hops use binary frames instead of Base64 JSON payloads.
 Agents inherit `TREER_WORKSPACE_ID`,
-`TREER_SERVER_ID`, `TREER_AGENT_ID`, and `TREER_AGENT_SERVER_URL`; they can use
-the local agent server API to discover or control other agents in the same
-workspace.
+`TREER_SERVER_ID`, `TREER_AGENT_ID`, `TREER_AGENT_SERVER_URL`, and a private
+workload credential; they can use the local agent server API to discover or
+control other agents in the same workspace. The credential is consumed by the
+CLI and should not be printed or forwarded directly.
 
 ## Host and Controller
 
@@ -343,6 +344,33 @@ treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
 treer agent send-keys reviewer ctrl-c
 ```
+
+## Workload identity
+
+A managed Agent can request a short-lived Proxy-signed Bearer token for a
+registered machine service. The audience accepts a service ID or unique service
+name and is canonicalized to the stable `service_id`:
+
+```bash
+TOKEN="$(treer identity token api)"
+curl -H "Authorization: Bearer $TOKEN" http://api.internal/
+treer identity token api --json
+```
+
+Tokens use Ed25519, expire after 60 seconds, and contain the Agent, machine,
+workspace, and service IDs. The signing key remains in Proxy SQLite storage.
+Services can cache the public key set from `/.well-known/jwks.json` and verify
+tokens locally, or submit a token and expected service ID to
+`POST /.treer/identity/verify`:
+
+```json
+{"token":"eyJ...","audience":"svc_..."}
+```
+
+The verify endpoint returns `{"active":false}` for an invalid, expired, or
+wrong-audience token. Treer does not inject these credentials into network
+traffic; the Agent and target application explicitly participate in the
+authentication exchange.
 
 On the machine running an Agent Server, `treer agent attach <target>` opens the
 agent's live PTY in the current native terminal. Input, colors, cursor control,

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 use tracing::warn;
 use treer_host_protocol::{
@@ -15,6 +16,7 @@ use treer_protocol::{
     AgentInfo, AgentStatus, CreateAgentRequest, ProtocolError, ReadAgentOutputResponse,
     VirtualNetworkHostsSnapshot,
 };
+use uuid::Uuid;
 
 use crate::host_client::{HostClient, HostEvents};
 
@@ -39,6 +41,8 @@ struct AgentMetadata {
     kind: String,
     name: String,
     cwd: String,
+    #[serde(default)]
+    workload_credential: String,
 }
 
 #[derive(Clone)]
@@ -75,6 +79,7 @@ struct ControllerInner {
 
 struct ControllerAgent {
     info: AgentInfo,
+    workload_credential: String,
     text: String,
     bracketed_paste: bool,
     last_output: Instant,
@@ -243,6 +248,7 @@ impl ControllerRuntime {
             ));
         }
         let launch = resolve_launch(&request)?;
+        let workload_credential = new_workload_credential();
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
             workspace_id: self.inner.workspace_id.clone(),
@@ -250,8 +256,9 @@ impl ControllerRuntime {
             kind: request.kind,
             name: request.name,
             cwd: request.cwd.clone(),
+            workload_credential: workload_credential.clone(),
         };
-        let env = self.process_environment(Some(&agent_id));
+        let env = self.process_environment(Some((&agent_id, &workload_credential)));
         let launch = sandbox_launch(
             self.inner.sandbox_executable.as_deref(),
             &agent_network_proxy_url(&self.inner.network_proxy_url, &agent_id),
@@ -413,10 +420,10 @@ impl ControllerRuntime {
         }
     }
 
-    fn process_environment(&self, agent_id: Option<&str>) -> BTreeMap<String, String> {
-        let network_proxy_url = agent_id.map_or_else(
+    fn process_environment(&self, agent: Option<(&str, &str)>) -> BTreeMap<String, String> {
+        let network_proxy_url = agent.map_or_else(
             || self.inner.network_proxy_url.clone(),
-            |agent_id| agent_network_proxy_url(&self.inner.network_proxy_url, agent_id),
+            |(agent_id, _)| agent_network_proxy_url(&self.inner.network_proxy_url, agent_id),
         );
         let mut env = BTreeMap::from([
             (
@@ -433,8 +440,12 @@ impl ControllerRuntime {
             network_proxy_url,
             self.inner.sandbox_executable.is_some(),
         ));
-        if let Some(agent_id) = agent_id {
+        if let Some((agent_id, workload_credential)) = agent {
             env.insert("TREER_AGENT_ID".to_string(), agent_id.to_string());
+            env.insert(
+                "TREER_WORKLOAD_CREDENTIAL".to_string(),
+                workload_credential.to_string(),
+            );
         }
         if let Some(treer_binary) = &self.inner.treer_binary {
             env.insert("TREER_BIN".to_string(), treer_binary.display().to_string());
@@ -449,6 +460,30 @@ impl ControllerRuntime {
             }
         }
         env
+    }
+
+    pub fn authenticate_agent(
+        &self,
+        agent_id: &str,
+        workload_credential: &str,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let agents = self
+            .inner
+            .agents
+            .read()
+            .map_err(|_| ProtocolError::new("state_error", "agent registry lock poisoned"))?;
+        let agent = agents
+            .get(agent_id)
+            .ok_or_else(|| ProtocolError::new("agent_not_found", agent_id))?
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "agent lock poisoned"))?;
+        if !workload_credential_matches(&agent.workload_credential, workload_credential) {
+            return Err(ProtocolError::new(
+                "invalid_workload_credential",
+                "workload credential does not match the managed agent",
+            ));
+        }
+        Ok(agent.info.clone())
     }
 
     pub async fn prompt(
@@ -660,6 +695,7 @@ impl ControllerRuntime {
         };
         let agent = Arc::new(Mutex::new(ControllerAgent {
             info: info.clone(),
+            workload_credential: metadata.workload_credential,
             text,
             bracketed_paste: process.bracketed_paste,
             last_output: Instant::now(),
@@ -820,6 +856,16 @@ impl ControllerRuntime {
             }
         });
     }
+}
+
+fn new_workload_credential() -> String {
+    format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn workload_credential_matches(expected: &str, supplied: &str) -> bool {
+    !expected.is_empty()
+        && expected.len() == supplied.len()
+        && expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() == 1
 }
 
 fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolError> {
@@ -1080,6 +1126,34 @@ mod tests {
             detect_status("Working (esc to interrupt)\nAllow command?"),
             Some(AgentStatus::Blocked)
         );
+    }
+
+    #[test]
+    fn workload_credentials_are_unique_and_compared_exactly() {
+        let first = new_workload_credential();
+        let second = new_workload_credential();
+        assert!(first.starts_with("wlc_"));
+        assert_eq!(first.len(), 68);
+        assert_ne!(first, second);
+        assert!(workload_credential_matches(&first, &first));
+        assert!(!workload_credential_matches(&first, &second));
+        assert!(!workload_credential_matches("", ""));
+    }
+
+    #[test]
+    fn host_metadata_preserves_the_workload_credential_for_controller_restarts() {
+        let metadata = AgentMetadata {
+            agent_id: "agent-a".to_string(),
+            workspace_id: "workspace-a".to_string(),
+            server_id: "server-a".to_string(),
+            kind: "command".to_string(),
+            name: "agent-a".to_string(),
+            cwd: ".".to_string(),
+            workload_credential: "wlc_secret".to_string(),
+        };
+        let encoded = serde_json::to_string(&metadata).expect("encode metadata");
+        let restored: AgentMetadata = serde_json::from_str(&encoded).expect("restore metadata");
+        assert_eq!(restored.workload_credential, "wlc_secret");
     }
 
     #[test]

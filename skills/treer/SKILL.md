@@ -136,6 +136,24 @@ These commands operate only in `TREER_WORKSPACE_ID`. Service and virtual-host
 operations have separate policy actions. Changes take effect immediately for
 online Controllers; reconnect and periodic full snapshots provide recovery.
 
+## Authenticate to an identity-aware service
+
+When a registered service explicitly accepts Treer workload identity, request
+a short-lived Bearer token using its service ID or unique name:
+
+```bash
+TOKEN="$(treer identity token api)"
+curl -H "Authorization: Bearer $TOKEN" http://api.internal/
+```
+
+The token audience is the stable service ID even when the command uses a name.
+Use `treer identity token api --json` only when the service ID or expiry metadata
+is needed. Do not print, log, persist, or send the injected
+`TREER_WORKLOAD_CREDENTIAL`; only the local Controller consumes it. Tokens
+expire after 60 seconds, so request one immediately before use. Treer does not
+automatically add the token to virtual-network requests, and services that do
+not implement Treer identity continue to work unchanged.
+
 ## Access another workspace machine
 
 Use `treer ssh` to start a transient shell on an online machine in the current

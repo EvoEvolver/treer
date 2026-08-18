@@ -16,10 +16,13 @@ use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
     ApiError, CreateAgentRequest, CreateMachineServiceRequest, CreateVirtualNetworkHostRequest,
     InputAgentRequest, PromptAgentRequest, ProtocolError, RenameRequest, TerminalServerMessage,
-    UpdateMachineServiceRequest, AGENT_ID_HEADER,
+    UpdateMachineServiceRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
+    WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
+
+use crate::controller::ControllerRuntime;
 
 #[derive(Clone)]
 pub struct LocalApiState {
@@ -29,6 +32,7 @@ pub struct LocalApiState {
     server_id: String,
     controller_epoch: String,
     machine_token: Option<String>,
+    runtime: ControllerRuntime,
 }
 
 impl LocalApiState {
@@ -37,6 +41,7 @@ impl LocalApiState {
         workspace_id: String,
         server_id: String,
         machine_token: Option<String>,
+        runtime: ControllerRuntime,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -45,6 +50,7 @@ impl LocalApiState {
             server_id,
             controller_epoch: Uuid::new_v4().to_string(),
             machine_token,
+            runtime,
         }
     }
 
@@ -159,6 +165,7 @@ pub fn router(state: LocalApiState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/discovery", get(discovery))
+        .route("/api/identity/token", post(issue_identity_token))
         .route(
             "/api/machines/{server_id}",
             axum::routing::patch(rename_machine).delete(delete_machine),
@@ -210,6 +217,25 @@ async fn health(State(state): State<LocalApiState>) -> Json<Value> {
 
 async fn discovery(State(state): State<LocalApiState>) -> Result<Json<Value>, LocalApiError> {
     Ok(Json(state.get("snapshot").await?))
+}
+
+async fn issue_identity_token(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<WorkloadIdentityTokenRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let (agent_id, workload_credential) = workload_identity(&headers)?;
+    state
+        .runtime
+        .authenticate_agent(agent_id, workload_credential)
+        .map_err(LocalApiError::unauthorized)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("identity/token", &body, Some(agent_id))
+            .await?,
+    ))
 }
 
 async fn list_agents(State(state): State<LocalApiState>) -> Result<Json<Value>, LocalApiError> {
@@ -347,11 +373,24 @@ fn source_agent_id(headers: &HeaderMap) -> Result<&str, LocalApiError> {
         })
         .transpose()
         .map(|value| value.filter(|value| !value.is_empty()))?;
-    agent_id.ok_or_else(|| {
-        LocalApiError::bad_request(
-            "virtual-host commands require a managed agent identity".to_string(),
-        )
-    })
+    agent_id
+        .ok_or_else(|| LocalApiError::bad_request("managed agent identity is required".to_string()))
+}
+
+fn workload_identity(headers: &HeaderMap) -> Result<(&str, &str), LocalApiError> {
+    let agent_id = source_agent_id(headers)?;
+    let credential = headers
+        .get(WORKLOAD_CREDENTIAL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            LocalApiError::unauthorized(ProtocolError::new(
+                "workload_credential_required",
+                "managed agent workload credential is required",
+            ))
+        })?;
+    Ok((agent_id, credential))
 }
 
 async fn get_agent(
@@ -681,6 +720,13 @@ impl LocalApiError {
             error: ProtocolError::new("invalid_request", message),
         }
     }
+
+    fn unauthorized(error: ProtocolError) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            error,
+        }
+    }
 }
 
 impl IntoResponse for LocalApiError {
@@ -701,6 +747,21 @@ mod tests {
         assert_eq!(
             source_agent_id(&headers).unwrap_or_else(|_| panic!("valid identity")),
             "agent-a"
+        );
+    }
+
+    #[test]
+    fn workload_identity_requires_both_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+        assert!(workload_identity(&headers).is_err());
+        headers.insert(
+            WORKLOAD_CREDENTIAL_HEADER,
+            "wlc_secret".parse().expect("credential header"),
+        );
+        assert_eq!(
+            workload_identity(&headers).unwrap_or_else(|_| panic!("workload identity")),
+            ("agent-a", "wlc_secret")
         );
     }
 }

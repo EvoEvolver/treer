@@ -7,6 +7,7 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
+pub const WORKLOAD_CREDENTIAL_HEADER: &str = "x-treer-workload-credential";
 pub const TERMINAL_BINARY_VERSION: u8 = 1;
 const TERMINAL_BINARY_HEADER_LEN: usize = 12;
 pub const TRANSFER_BINARY_VERSION: u8 = 1;
@@ -92,6 +93,46 @@ pub struct WorkspaceSnapshot {
     pub workspace: WorkspaceInfo,
     pub servers: Vec<ServerInfo>,
     pub agents: Vec<AgentInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadIdentityTokenRequest {
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadIdentityTokenResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
+    pub expires_at: DateTime<Utc>,
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadIdentityClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub workspace_id: String,
+    pub machine_id: String,
+    pub service_id: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadIdentityVerifyRequest {
+    pub token: String,
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadIdentityVerifyResponse {
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims: Option<WorkloadIdentityClaims>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1071,6 +1112,25 @@ mod tests {
                 "hostname": "api.internal",
                 "service_id": "svc_api"
             })
+        );
+    }
+
+    #[test]
+    fn workload_identity_requests_have_stable_wire_shapes() {
+        let token = WorkloadIdentityTokenRequest {
+            audience: "api".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(token).expect("serialize token request"),
+            serde_json::json!({ "audience": "api" })
+        );
+        let inactive = WorkloadIdentityVerifyResponse {
+            active: false,
+            claims: None,
+        };
+        assert_eq!(
+            serde_json::to_value(inactive).expect("serialize verification"),
+            serde_json::json!({ "active": false })
         );
     }
 

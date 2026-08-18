@@ -228,7 +228,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         proxy_ws,
         args.machine_token.clone(),
         server,
-        runtime,
+        runtime.clone(),
         network.clone(),
     );
     let proxy_task = tokio::spawn(proxy_client.run_forever());
@@ -238,6 +238,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         args.workspace.clone(),
         server_id.clone(),
         args.machine_token,
+        runtime,
     );
     let app = local_api::router(local_state);
     info!(

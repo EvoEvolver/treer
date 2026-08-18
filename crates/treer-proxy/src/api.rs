@@ -19,18 +19,20 @@ use treer_protocol::{
     CreateVirtualNetworkHostRequest, InputAgentRequest, MachineEnrollmentRequest,
     MachineEnrollmentResponse, MachineService, PromptAgentRequest, ProtocolError, RenameRequest,
     TerminalClientMessage, TerminalServerMessage, TransferServerMessage,
-    UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkspaceEvent, AGENT_ID_HEADER,
+    UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
+    WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
 
 use crate::agent_socket;
 use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
+use crate::identity::IdentityIssuer;
 use crate::policy::{
-    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_SERVICE_CREATE,
-    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
-    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
-    RESOURCE_MACHINE_SERVICE, RESOURCE_VIRTUAL_HOST,
+    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_IDENTITY_TOKEN_ISSUE,
+    ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE,
+    ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE,
+    ACTION_VIRTUAL_HOST_LIST, RESOURCE_MACHINE_SERVICE, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, ShellOptions, SocketFrame, TransferDirection, TransferOptions};
 
@@ -44,6 +46,13 @@ pub struct BootstrapConfig {
     public_url: Url,
     artifacts_dir: PathBuf,
     release_artifact_base_url: Url,
+}
+
+#[derive(Clone)]
+struct WorkloadIdentityApi {
+    auth: AuthStore,
+    policy: PolicyEngine,
+    issuer: IdentityIssuer,
 }
 
 impl BootstrapConfig {
@@ -73,12 +82,22 @@ pub fn router(
     bootstrap: BootstrapConfig,
     auth_store: AuthStore,
     policy: PolicyEngine,
+    identity: IdentityIssuer,
 ) -> Router {
+    let workload_identity = WorkloadIdentityApi {
+        auth: auth_store.clone(),
+        policy: policy.clone(),
+        issuer: identity.clone(),
+    };
     let agent_control = Router::new()
         .route("/agent/machine/identity", post(bind_machine_identity))
         .route(
             "/agent/workspaces/{workspace_id}/snapshot",
             get(workspace_snapshot),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/identity/token",
+            post(agent_issue_identity_token),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents",
@@ -283,6 +302,8 @@ pub fn router(
         .route("/assets/xterm.css", get(xterm_css))
         .route("/assets/addon-fit.js", get(xterm_fit_js))
         .route("/api/health", get(health))
+        .route("/.well-known/jwks.json", get(workload_identity_jwks))
+        .route("/.treer/identity/verify", post(verify_workload_identity))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/register", post(auth::register))
         .route("/api/admin/login", post(auth::admin_login))
@@ -292,6 +313,8 @@ pub fn router(
         .merge(admin)
         .layer(Extension(bootstrap))
         .layer(Extension(policy))
+        .layer(Extension(identity))
+        .layer(Extension(workload_identity))
         .layer(Extension(auth_store))
         .with_state(state)
 }
@@ -323,6 +346,73 @@ async fn xterm_fit_js() -> impl IntoResponse {
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "service": "treer-proxy" }))
+}
+
+async fn workload_identity_jwks(Extension(identity): Extension<IdentityIssuer>) -> Response {
+    (
+        [(header::CACHE_CONTROL, "public, max-age=300")],
+        Json(identity.jwks()),
+    )
+        .into_response()
+}
+
+async fn verify_workload_identity(
+    Extension(identity): Extension<IdentityIssuer>,
+    Json(request): Json<WorkloadIdentityVerifyRequest>,
+) -> Response {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(identity.verify(&request.token, request.audience.trim())),
+    )
+        .into_response()
+}
+
+async fn agent_issue_identity_token(
+    State(state): State<AppState>,
+    Extension(identity_api): Extension<WorkloadIdentityApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<WorkloadIdentityTokenRequest>,
+) -> Result<Response, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let service = identity_api
+        .auth
+        .resolve_machine_service(&workspace_id, request.audience.trim())
+        .await?;
+    identity_api
+        .policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_IDENTITY_TOKEN_ISSUE,
+            machine_service_policy_resource(
+                &service.service_id,
+                &service.name,
+                &service.server_id,
+                &service.target_host,
+                service.target_port,
+            ),
+        ))
+        .await?;
+    let PolicySubject::Agent {
+        server_id,
+        agent_id,
+    } = subject
+    else {
+        return Err(ApiFailure::internal(
+            "identity_subject_error",
+            "identity token subject was not an agent",
+        ));
+    };
+    let token = identity_api
+        .issuer
+        .issue(&workspace_id, &server_id, &agent_id, &service.service_id)
+        .map_err(|error| {
+            tracing::error!(%error, "failed to sign workload identity token");
+            ApiFailure::internal("identity_signing_failed", "failed to sign identity token")
+        })?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(token)).into_response())
 }
 
 async fn bootstrap_info(
@@ -1880,6 +1970,13 @@ impl ApiFailure {
             error: ProtocolError::new(code, message),
         }
     }
+
+    fn internal(code: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: ProtocolError::new(code, message),
+        }
+    }
 }
 
 impl From<ProtocolError> for ApiFailure {
@@ -1990,11 +2087,19 @@ mod tests {
 
     #[tokio::test]
     async fn trailing_slash_browser_tunnel_route_is_registered() {
+        let auth = AuthStore::in_memory("admin-password").await;
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://treer.example/").expect("public URL"),
+        )
+        .await
+        .expect("identity issuer");
         let app = router(
             AppState::new(),
             test_config(),
-            AuthStore::in_memory("admin-password").await,
+            auth,
             PolicyEngine::allow_all(),
+            identity,
         );
         let response = app
             .oneshot(
@@ -2185,6 +2290,74 @@ mod tests {
         .expect_err("foreign machine must not claim the agent");
         assert_eq!(error.status, StatusCode::FORBIDDEN);
         assert_eq!(error.error.code, "policy_subject_mismatch");
+    }
+
+    #[tokio::test]
+    async fn agent_identity_tokens_use_the_canonical_service_audience() {
+        let state = state_with_managed_agent().await;
+        let auth = AuthStore::in_memory("admin-password").await;
+        let service = auth
+            .create_machine_service(
+                "default",
+                "test",
+                CreateMachineServiceRequest {
+                    name: "api".to_string(),
+                    server_id: "machine-a".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 8080,
+                    protocol: treer_protocol::MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create service");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://treer.example/").expect("public URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let machine = MachineSession {
+            server_id: Some("machine-a".to_string()),
+            workspace_id: Some("default".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+
+        let response = agent_issue_identity_token(
+            State(state),
+            Extension(WorkloadIdentityApi {
+                auth,
+                policy: PolicyEngine::allow_all(),
+                issuer: identity.clone(),
+            }),
+            Extension(machine),
+            headers,
+            Path("default".to_string()),
+            Json(WorkloadIdentityTokenRequest {
+                audience: "api".to_string(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("issue identity token: {}", error.error.message));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read token response");
+        let token: treer_protocol::WorkloadIdentityTokenResponse =
+            serde_json::from_slice(&body).expect("decode token response");
+        assert_eq!(token.audience, service.service_id);
+        let verified = identity.verify(&token.access_token, &service.service_id);
+        assert!(verified.active);
+        let claims = verified.claims.expect("verified claims");
+        assert_eq!(claims.sub, "agent-a");
+        assert_eq!(claims.machine_id, "machine-a");
     }
 
     #[tokio::test]

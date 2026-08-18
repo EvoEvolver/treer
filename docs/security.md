@@ -43,6 +43,9 @@ The following statements are grounded in current behavior:
   health probing, and routing do not cause Treer to own or sandbox the external
   service process.
 - The Proxy is open source and can be self-hosted, inspected, and replaced.
+- Managed Agents can exchange their private workload credential for a
+  60-second, Ed25519-signed token bound to one registered service. The Proxy
+  resolves the stable Agent, machine, workspace, and service IDs before signing.
 
 These properties support the product phrase: **local custody, scoped
 coordination, open control plane**.
@@ -73,6 +76,8 @@ members share a broad operational surface.
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
 | Machine Bearer credential | One machine record and workspace | Controller operations are attributed primarily to the machine |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
+| Agent workload credential | One managed Agent process | Same-account host processes may be able to inspect another process environment or Host metadata |
+| Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
 
 Codex and Claude currently inherit the authenticated CLI state of the operating
@@ -91,6 +96,12 @@ Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy
 authorization, and response `Set-Cookie` before forwarding, but this is not
 end-to-end confidentiality from the Proxy.
+
+The workload signing private key is stored in the Proxy SQLite database. Its
+Ed25519 public key is intentionally exposed through `/.well-known/jwks.json`;
+the online verify endpoint exposes only claims already contained in a supplied
+valid token. Tokens are not automatically attached to HTTP or generic TCP
+traffic.
 
 Durable identity data is stored in SQLite. Live connections, pending commands,
 terminal streams, transfers, and tunnels are held in process memory. Current

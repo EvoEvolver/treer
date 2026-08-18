@@ -6,6 +6,7 @@ use std::sync::Arc;
 use treer_protocol::ProtocolError;
 
 pub const ACTION_NETWORK_CONNECT: &str = "network.connect";
+pub const ACTION_IDENTITY_TOKEN_ISSUE: &str = "identity.token.issue";
 pub const ACTION_SERVICE_LIST: &str = "service.list";
 pub const ACTION_SERVICE_CREATE: &str = "service.create";
 pub const ACTION_SERVICE_UPDATE: &str = "service.update";
