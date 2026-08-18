@@ -184,7 +184,8 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     let network = network::NetworkRuntime::bind_near(listen_address)
         .await
         .context("failed to bind local network proxy")?;
-    let agent_server_url = format!("http://127.0.0.1:{}", listen_address.port());
+    let sandbox_executable = transparent_network_executable()?;
+    let agent_server_url = agent_server_url(listen_address, sandbox_executable.is_some());
     let (host, host_events) = HostClient::connect(&args.host_socket).await?;
     let sync = host.sync(std::collections::BTreeMap::new()).await?;
     let (runtime, mut host_disconnected) = ControllerRuntime::from_sync(
@@ -198,7 +199,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
             agent_server_url,
             network_proxy_url: network.proxy_url(),
             treer_binary: sibling_treer_binary(),
-            sandbox_executable: transparent_network_executable()?,
+            sandbox_executable,
         },
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -244,6 +245,15 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     };
     proxy_task.abort();
     result
+}
+
+fn agent_server_url(listen_address: SocketAddr, transparent: bool) -> String {
+    let host = if transparent {
+        network::SANDBOX_LOCAL_API_HOST
+    } else {
+        "127.0.0.1"
+    };
+    format!("http://{host}:{}", listen_address.port())
 }
 
 fn transparent_network_executable() -> Result<Option<PathBuf>> {
@@ -423,6 +433,16 @@ mod tests {
         assert!(
             require_loopback_listen("192.0.2.1:8790".parse().expect("public address")).is_err()
         );
+    }
+
+    #[test]
+    fn transparent_agents_use_the_sandbox_local_api_route() {
+        let address = "127.0.0.1:8790".parse().expect("local API address");
+        assert_eq!(
+            agent_server_url(address, true),
+            "http://treer-agent-server.invalid:8790"
+        );
+        assert_eq!(agent_server_url(address, false), "http://127.0.0.1:8790");
     }
 
     #[test]

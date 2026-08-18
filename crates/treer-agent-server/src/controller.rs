@@ -1053,8 +1053,16 @@ fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap
     if transparent {
         // The Controller's loopback is outside the agent network namespace.
         // Proxy-aware applications must use the TUN path instead of dialing it directly.
-        env.insert("ALL_PROXY".to_string(), String::new());
-        env.insert("all_proxy".to_string(), String::new());
+        for name in [
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+        ] {
+            env.insert(name.to_string(), String::new());
+        }
     } else {
         env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
         env.insert("all_proxy".to_string(), network_proxy_url);
@@ -1169,6 +1177,10 @@ mod tests {
 
         assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(""));
         assert_eq!(env.get("all_proxy").map(String::as_str), Some(""));
+        assert_eq!(env.get("HTTP_PROXY").map(String::as_str), Some(""));
+        assert_eq!(env.get("http_proxy").map(String::as_str), Some(""));
+        assert_eq!(env.get("HTTPS_PROXY").map(String::as_str), Some(""));
+        assert_eq!(env.get("https_proxy").map(String::as_str), Some(""));
         assert_eq!(
             env.get("TREER_NETWORK_PROXY").map(String::as_str),
             Some("socks5h://agent-a:treer@127.0.0.1:8791")

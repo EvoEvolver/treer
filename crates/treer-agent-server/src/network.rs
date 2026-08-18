@@ -17,6 +17,7 @@ const STREAM_CHANNEL_CAPACITY: usize = 32;
 const OUTGOING_CHANNEL_CAPACITY: usize = 128;
 const INITIAL_WINDOW: usize = 256 * 1024;
 const MAX_CHUNK: usize = 16 * 1024;
+pub const SANDBOX_LOCAL_API_HOST: &str = "treer-agent-server.invalid";
 
 #[derive(Clone)]
 pub struct NetworkRuntime {
@@ -25,6 +26,7 @@ pub struct NetworkRuntime {
 
 struct NetworkInner {
     listen_address: SocketAddr,
+    local_api_address: SocketAddr,
     outgoing: mpsc::Sender<NetworkBinaryFrame>,
     outgoing_rx: Mutex<mpsc::Receiver<NetworkBinaryFrame>>,
     streams: Mutex<HashMap<String, mpsc::Sender<NetworkBinaryFrame>>>,
@@ -38,6 +40,7 @@ impl NetworkRuntime {
         let runtime = Self {
             inner: Arc::new(NetworkInner {
                 listen_address,
+                local_api_address: api_address,
                 outgoing,
                 outgoing_rx: Mutex::new(outgoing_rx),
                 streams: Mutex::new(HashMap::new()),
@@ -126,6 +129,17 @@ impl NetworkRuntime {
                 return;
             }
         };
+        if route.destination == SANDBOX_LOCAL_API_HOST
+            && route.port == self.inner.local_api_address.port()
+        {
+            let local_api_address = self.inner.local_api_address;
+            tokio::spawn(async move {
+                if let Err(error) = bridge_local_api(socket, local_api_address).await {
+                    debug!(%error, "local agent API stream closed");
+                }
+            });
+            return;
+        }
         let stream_id = format!("net_{}", Uuid::new_v4().simple());
         let (incoming, incoming_rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
         self.inner
@@ -225,6 +239,19 @@ impl NetworkRuntime {
             .await
             .map_err(|_| anyhow!("network transport closed"))
     }
+}
+
+async fn bridge_local_api(mut socket: TcpStream, address: SocketAddr) -> anyhow::Result<()> {
+    let mut local_api = match TcpStream::connect(address).await {
+        Ok(socket) => socket,
+        Err(error) => {
+            let _ = write_socks_reply(&mut socket, 0x05).await;
+            return Err(error).with_context(|| format!("failed to connect to local API {address}"));
+        }
+    };
+    write_socks_reply(&mut socket, 0).await?;
+    tokio::io::copy_bidirectional(&mut socket, &mut local_api).await?;
+    Ok(())
 }
 
 struct SocksRoute {
@@ -443,6 +470,32 @@ mod tests {
             .expect("network runtime stopped")
     }
 
+    async fn request_domain(client: &mut TcpStream, domain: &str, port: u16) {
+        client.write_all(&[5, 1, 0]).await.expect("SOCKS greeting");
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).await.expect("SOCKS method");
+        assert_eq!(method, [5, 0]);
+        let domain = domain.as_bytes();
+        client
+            .write_all(&[
+                5,
+                1,
+                0,
+                3,
+                u8::try_from(domain.len()).expect("domain length"),
+            ])
+            .await
+            .expect("SOCKS connect header");
+        client
+            .write_all(domain)
+            .await
+            .expect("SOCKS connect domain");
+        client
+            .write_all(&port.to_be_bytes())
+            .await
+            .expect("SOCKS connect port");
+    }
+
     #[test]
     fn parses_domains_without_implicit_machine_routes() {
         let virtual_host = parse_route("API.Internal.", 80).expect("virtual host route");
@@ -491,6 +544,60 @@ mod tests {
         let route = server.await.expect("SOCKS server task");
         assert_eq!(route.destination, "api.internal");
         assert_eq!(route.source_agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_local_api_stays_on_the_source_machine() {
+        let local_api = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind local API");
+        let local_api_address = local_api.local_addr().expect("local API address");
+        let local_api_task = tokio::spawn(async move {
+            let (mut socket, _) = local_api.accept().await.expect("accept local API request");
+            let mut request = [0_u8; 18];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read local API request");
+            assert_eq!(&request, b"GET / HTTP/1.0\r\n\r\n");
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("write local API response");
+        });
+        let runtime = NetworkRuntime::bind_near(local_api_address)
+            .await
+            .expect("bind network runtime");
+        let mut client = TcpStream::connect(runtime.listen_address())
+            .await
+            .expect("connect SOCKS client");
+        request_domain(
+            &mut client,
+            SANDBOX_LOCAL_API_HOST,
+            local_api_address.port(),
+        )
+        .await;
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).await.expect("SOCKS reply");
+        assert_eq!(reply[1], 0);
+
+        client
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .await
+            .expect("write local API request");
+        client.shutdown().await.expect("finish local API request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .expect("local API response timeout")
+            .expect("read local API response");
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), runtime.next_outgoing())
+                .await
+                .is_err()
+        );
+        local_api_task.await.expect("local API task");
     }
 
     #[tokio::test]
