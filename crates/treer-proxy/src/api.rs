@@ -1847,4 +1847,132 @@ mod tests {
         assert_eq!(deleted.0["deleted"], true);
         assert_eq!(deleted.0["hostname"], "api.internal");
     }
+
+    #[tokio::test]
+    async fn browser_tunnel_forwards_http_without_leaking_gateway_credentials() {
+        let state = AppState::new();
+        let now = chrono::Utc::now();
+        let server = treer_protocol::ServerInfo {
+            server_id: "machine-a".to_string(),
+            workspace_id: "default".to_string(),
+            name: "machine-a".to_string(),
+            hostname: "machine-a".to_string(),
+            root: "/tmp".to_string(),
+            labels: Default::default(),
+            status: treer_protocol::ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server(server, connection_id, server_tx)
+            .await
+            .expect("register controller");
+
+        let auth = AuthStore::in_memory("admin-password").await;
+        auth.create_virtual_network_host(
+            "default",
+            "test-user",
+            CreateVirtualNetworkHostRequest {
+                hostname: "app.internal".to_string(),
+                destination_server_id: "machine-a".to_string(),
+                target_host: "127.0.0.1".to_string(),
+                target_port: Some(8080),
+            },
+        )
+        .await
+        .expect("create virtual host");
+
+        let controller_state = state.clone();
+        let controller = tokio::spawn(async move {
+            let open = match server_rx.recv().await.expect("network open") {
+                SocketFrame::Binary(encoded) => {
+                    treer_protocol::NetworkBinaryFrame::decode(&encoded).expect("decode open")
+                }
+                _ => panic!("expected network open"),
+            };
+            assert_eq!(open.kind, treer_protocol::NetworkBinaryKind::Open);
+            controller_state
+                .relay_network_frame(
+                    "default",
+                    "machine-a",
+                    connection_id,
+                    treer_protocol::NetworkBinaryFrame {
+                        kind: treer_protocol::NetworkBinaryKind::Opened,
+                        stream_id: open.stream_id.clone(),
+                        payload: Vec::new(),
+                    },
+                )
+                .await
+                .expect("open stream");
+
+            let request = loop {
+                let frame = match server_rx.recv().await.expect("HTTP request frame") {
+                    SocketFrame::Binary(encoded) => {
+                        treer_protocol::NetworkBinaryFrame::decode(&encoded).expect("decode data")
+                    }
+                    _ => continue,
+                };
+                if frame.kind == treer_protocol::NetworkBinaryKind::Data {
+                    break String::from_utf8(frame.payload).expect("HTTP request text");
+                }
+            };
+            assert!(request.starts_with("GET /status?full=1 HTTP/1.1\r\n"));
+            assert!(request.contains("host: app.internal\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("cookie:"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+
+            controller_state
+                .relay_network_frame(
+                    "default",
+                    "machine-a",
+                    connection_id,
+                    treer_protocol::NetworkBinaryFrame {
+                        kind: treer_protocol::NetworkBinaryKind::Data,
+                        stream_id: open.stream_id.clone(),
+                        payload: b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\nSet-Cookie: internal=secret\r\n\r\nhello".to_vec(),
+                    },
+                )
+                .await
+                .expect("send HTTP response");
+            controller_state
+                .relay_network_frame(
+                    "default",
+                    "machine-a",
+                    connection_id,
+                    treer_protocol::NetworkBinaryFrame {
+                        kind: treer_protocol::NetworkBinaryKind::HalfClose,
+                        stream_id: open.stream_id,
+                        payload: Vec::new(),
+                    },
+                )
+                .await
+                .expect("close response");
+        });
+
+        let request = Request::builder()
+            .uri("/ignored?full=1")
+            .header(header::COOKIE, "treer_session=secret")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("browser request");
+        let response = proxy_virtual_network_host(
+            state,
+            auth,
+            "default".to_string(),
+            "app.internal".to_string(),
+            "status".to_string(),
+            request,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("tunnel request: {}", error.error.message));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("read tunnel response");
+        assert_eq!(&body[..], b"hello");
+        controller.await.expect("join controller");
+    }
 }

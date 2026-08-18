@@ -2744,6 +2744,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_network_streams_bridge_data_and_close_cleanly() {
+        let state = AppState::new();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(test_server(), connection_id, server_tx)
+            .await
+            .expect("register controller");
+
+        let opening_state = state.clone();
+        let opening = tokio::spawn(async move {
+            opening_state
+                .open_browser_network_stream("alpha", "server", "127.0.0.1", 8080)
+                .await
+        });
+        let open = expect_network(server_rx.recv().await.expect("browser open frame"));
+        assert_eq!(open.kind, NetworkBinaryKind::Open);
+        let request: NetworkConnectRequest =
+            serde_json::from_slice(&open.payload).expect("decode browser connect request");
+        assert_eq!(request.host, "127.0.0.1");
+        assert_eq!(request.port, 8080);
+        assert_eq!(request.source_server_id, "browser");
+
+        state
+            .relay_network_frame(
+                "alpha",
+                "server",
+                connection_id,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Opened,
+                    stream_id: open.stream_id.clone(),
+                    payload: Vec::new(),
+                },
+            )
+            .await
+            .expect("open browser stream");
+        let mut browser = opening
+            .await
+            .expect("join browser open")
+            .expect("browser stream");
+
+        browser.write_all(b"request").await.expect("write request");
+        let request_data = expect_network(server_rx.recv().await.expect("request data frame"));
+        assert_eq!(request_data.kind, NetworkBinaryKind::Data);
+        assert_eq!(request_data.stream_id, open.stream_id);
+        assert_eq!(request_data.payload, b"request");
+
+        state
+            .relay_network_frame(
+                "alpha",
+                "server",
+                connection_id,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Data,
+                    stream_id: open.stream_id.clone(),
+                    payload: b"response".to_vec(),
+                },
+            )
+            .await
+            .expect("relay response");
+        let mut response = [0_u8; 8];
+        browser
+            .read_exact(&mut response)
+            .await
+            .expect("read response");
+        assert_eq!(&response, b"response");
+        let window = expect_network(server_rx.recv().await.expect("window update"));
+        assert_eq!(window.kind, NetworkBinaryKind::WindowUpdate);
+
+        state
+            .relay_network_frame(
+                "alpha",
+                "server",
+                connection_id,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::HalfClose,
+                    stream_id: open.stream_id.clone(),
+                    payload: Vec::new(),
+                },
+            )
+            .await
+            .expect("relay remote close");
+        browser.shutdown().await.expect("close browser stream");
+        let close = expect_network(server_rx.recv().await.expect("browser close frame"));
+        assert_eq!(close.kind, NetworkBinaryKind::HalfClose);
+        tokio::task::yield_now().await;
+        assert!(state.inner.browser_network_streams.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
         let state = AppState::new();
         let server = test_server();
