@@ -12,6 +12,18 @@ sessions, while machines enroll with short-lived one-time links and then use a
 workspace-bound machine credential. See [PLAN.md](PLAN.md) for architecture,
 protocol, and delivery milestones.
 
+## Documentation
+
+Start with [docs/README.md](docs/README.md) for the maintained product,
+architecture, security, and quality map. Repository-development agents should
+use [AGENTS.md](AGENTS.md) as the short navigation layer. Managed agents use the
+separate [embedded Treer skill](skills/treer/SKILL.md) for runtime CLI
+operations.
+
+The dated [source-level project review](docs/research/2026-08-18-project-review.md)
+contains the original technology survey, detailed information-flow diagrams,
+and comparisons with Herdr and AgentENV.
+
 ## Run the prototype
 
 Start the proxy and web control plane:
