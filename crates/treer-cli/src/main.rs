@@ -364,13 +364,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
-        Command::Whoami => {
-            let agent_id = std::env::var("TREER_AGENT_ID").context(
-                "TREER_AGENT_ID is not set; `treer whoami` must run inside a managed agent",
-            )?;
-            serde_json::to_value(client.get_agent(&agent_id).await?)?
-        }
-        Command::Discover => client.value(Method::GET, "api/discovery", None).await?,
+        Command::Whoami => whoami(&client).await?,
+        Command::Discover => discover(&client).await?,
         Command::List => client.value(Method::GET, "api/agents", None).await?,
         Command::Create {
             server,
@@ -406,6 +401,74 @@ async fn main() -> anyhow::Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+async fn whoami(client: &ApiClient) -> anyhow::Result<Value> {
+    let agent_id = std::env::var("TREER_AGENT_ID")
+        .context("TREER_AGENT_ID is not set; `treer whoami` must run inside a managed agent")?;
+    let server_id = std::env::var("TREER_SERVER_ID")
+        .context("TREER_SERVER_ID is not set; managed agent identity is incomplete")?;
+    let snapshot: WorkspaceSnapshot = client.request(Method::GET, "api/discovery", None).await?;
+    let (machine, agent) = resolve_self(&snapshot, &agent_id, &server_id)?;
+    Ok(json!({
+        "workspace": snapshot.workspace,
+        "machine": machine,
+        "agent": agent,
+    }))
+}
+
+async fn discover(client: &ApiClient) -> anyhow::Result<Value> {
+    let snapshot: WorkspaceSnapshot = client.request(Method::GET, "api/discovery", None).await?;
+    let agent_id = std::env::var("TREER_AGENT_ID").ok();
+    let server_id = std::env::var("TREER_SERVER_ID").ok();
+    discovery_value(snapshot, agent_id.as_deref(), server_id.as_deref())
+}
+
+fn discovery_value(
+    snapshot: WorkspaceSnapshot,
+    agent_id: Option<&str>,
+    server_id: Option<&str>,
+) -> anyhow::Result<Value> {
+    let self_value = match (agent_id, server_id) {
+        (Some(agent_id), Some(server_id)) => {
+            let (machine, agent) = resolve_self(&snapshot, agent_id, server_id)?;
+            json!({ "machine": machine, "agent": agent })
+        }
+        (None, None) => Value::Null,
+        _ => bail!("managed agent identity is incomplete; TREER_AGENT_ID and TREER_SERVER_ID must both be set"),
+    };
+    let mut value = serde_json::to_value(snapshot)?;
+    value
+        .as_object_mut()
+        .context("workspace discovery response is not an object")?
+        .insert("self".to_string(), self_value);
+    Ok(value)
+}
+
+fn resolve_self(
+    snapshot: &WorkspaceSnapshot,
+    agent_id: &str,
+    server_id: &str,
+) -> anyhow::Result<(ServerInfo, AgentInfo)> {
+    let agent = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.agent_id == agent_id)
+        .with_context(|| format!("current agent {agent_id} is missing from workspace discovery"))?;
+    if agent.server_id != server_id {
+        bail!(
+            "current agent {agent_id} belongs to machine {}, not injected machine {server_id}",
+            agent.server_id
+        );
+    }
+    let machine = snapshot
+        .servers
+        .iter()
+        .find(|machine| machine.server_id == server_id)
+        .with_context(|| {
+            format!("current machine {server_id} is missing from workspace discovery")
+        })?;
+    Ok((machine.clone(), agent.clone()))
 }
 
 async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow::Result<Value> {
@@ -1247,6 +1310,52 @@ mod tests {
     #[test]
     fn path_targets_are_percent_encoded() {
         assert_eq!(path_segment("review agent"), "review%20agent");
+    }
+
+    #[test]
+    fn discovery_marks_the_current_agent_and_machine() {
+        let snapshot: WorkspaceSnapshot = serde_json::from_value(json!({
+            "revision": 1,
+            "workspace": {
+                "workspace_id": "workspace-a",
+                "name": "Workspace A",
+                "created_at": "2026-08-17T00:00:00Z"
+            },
+            "servers": [{
+                "server_id": "server-a",
+                "workspace_id": "workspace-a",
+                "name": "builder",
+                "hostname": "build-host",
+                "root": "/workspace",
+                "labels": {},
+                "status": "online",
+                "connected_at": "2026-08-17T00:00:00Z",
+                "last_seen_at": "2026-08-17T00:00:00Z"
+            }],
+            "agents": [{
+                "agent_id": "agent-a",
+                "workspace_id": "workspace-a",
+                "server_id": "server-a",
+                "kind": "codex",
+                "name": "reviewer",
+                "cwd": ".",
+                "status": "idle",
+                "started_at": "2026-08-17T00:00:00Z",
+                "updated_at": "2026-08-17T00:00:00Z",
+                "output_revision": 0
+            }]
+        }))
+        .expect("valid workspace snapshot");
+
+        let value = discovery_value(snapshot.clone(), Some("agent-a"), Some("server-a"))
+            .expect("resolve current identity");
+        assert_eq!(value["self"]["agent"]["name"], "reviewer");
+        assert_eq!(value["self"]["machine"]["name"], "builder");
+        assert_eq!(
+            discovery_value(snapshot.clone(), None, None).expect("unmanaged discovery")["self"],
+            Value::Null
+        );
+        assert!(resolve_self(&snapshot, "agent-a", "server-other").is_err());
     }
 
     #[test]

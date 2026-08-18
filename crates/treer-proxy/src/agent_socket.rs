@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, State, WebSocketUpgrade};
 use axum::http::HeaderMap;
@@ -227,12 +229,20 @@ async fn handle(
                     .await
                 {
                     Ok(workspace_revision) => {
-                        identity = Some((workspace_id, server_id));
+                        identity = Some((workspace_id.clone(), server_id));
                         let response = ProxyMessage::Registered {
                             protocol: PROTOCOL_VERSION,
                             workspace_revision,
                         };
                         send_message(&outgoing_tx, &response);
+                        match crate::api::virtual_network_hosts_snapshot(&auth, &workspace_id).await
+                        {
+                            Ok(snapshot) => send_message(
+                                &outgoing_tx,
+                                &ProxyMessage::VirtualNetworkHosts { snapshot },
+                            ),
+                            Err(error) => send_error(&outgoing_tx, error.into_parts().1),
+                        }
                     }
                     Err(error) => send_error(&outgoing_tx, error),
                 }
@@ -426,12 +436,15 @@ async fn route_network_open(
             ),
         ));
     }
-    let virtual_host = auth
-        .resolve_virtual_network_host(workspace_id, &request.destination)
-        .await
-        .map_err(|error| (stream_id.clone(), error.into_parts().1))?;
+    let virtual_host = if request.destination.parse::<IpAddr>().is_ok() {
+        None
+    } else {
+        auth.resolve_virtual_network_host(workspace_id, &request.destination)
+            .await
+            .map_err(|error| (stream_id.clone(), error.into_parts().1))?
+    };
     let (destination_target, target_host, target_port) =
-        resolve_network_target(&request, virtual_host);
+        resolve_network_target(&request, virtual_host, source_server_id);
     let destination = state
         .resolve_server(workspace_id, &destination_target)
         .await
@@ -490,15 +503,12 @@ async fn route_network_open(
 fn resolve_network_target(
     request: &NetworkOpenRequest,
     virtual_host: Option<VirtualNetworkHost>,
+    source_server_id: &str,
 ) -> (String, String, u16) {
     virtual_host.map_or_else(
         || {
             (
-                request
-                    .destination
-                    .strip_suffix(".treer")
-                    .unwrap_or(&request.destination)
-                    .to_string(),
+                source_server_id.to_string(),
                 request.host.clone(),
                 request.port,
             )
@@ -569,22 +579,12 @@ mod tests {
             created_by: "admin".to_string(),
         };
         assert_eq!(
-            resolve_network_target(&request, Some(record)),
+            resolve_network_target(&request, Some(record), "server-a"),
             ("server-b".to_string(), "localhost".to_string(), 8080)
         );
         assert_eq!(
-            resolve_network_target(&request, None),
-            ("api".to_string(), "127.0.0.1".to_string(), 80)
-        );
-        let machine_request = NetworkOpenRequest {
-            destination: "build-machine.treer".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 8080,
-            source_agent_id: None,
-        };
-        assert_eq!(
-            resolve_network_target(&machine_request, None),
-            ("build-machine".to_string(), "127.0.0.1".to_string(), 8080)
+            resolve_network_target(&request, None, "server-a"),
+            ("server-a".to_string(), "127.0.0.1".to_string(), 80)
         );
     }
 }

@@ -584,6 +584,13 @@ pub struct VirtualNetworkHost {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VirtualNetworkHostsSnapshot {
+    pub workspace_id: String,
+    pub revision: u64,
+    pub hosts: Vec<VirtualNetworkHost>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateVirtualNetworkHostRequest {
     pub hostname: String,
     pub destination_server_id: String,
@@ -695,6 +702,9 @@ pub enum ProxyMessage {
     Registered {
         protocol: u32,
         workspace_revision: u64,
+    },
+    VirtualNetworkHosts {
+        snapshot: VirtualNetworkHostsSnapshot,
     },
     Command {
         envelope: CommandEnvelope,
@@ -924,6 +934,29 @@ mod tests {
         let json = serde_json::to_value(message).expect("serialize command");
         assert_eq!(json["type"], "command");
         assert_eq!(json["envelope"]["command"]["action"], "stop");
+    }
+
+    #[test]
+    fn virtual_host_snapshot_wire_shape_carries_revision() {
+        let message = ProxyMessage::VirtualNetworkHosts {
+            snapshot: VirtualNetworkHostsSnapshot {
+                workspace_id: "default".to_string(),
+                revision: 42,
+                hosts: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(message).expect("serialize virtual hosts"),
+            serde_json::json!({
+                "type": "virtual_network_hosts",
+                "snapshot": {
+                    "workspace_id": "default",
+                    "revision": 42,
+                    "hosts": []
+                }
+            })
+        );
     }
 
     #[test]

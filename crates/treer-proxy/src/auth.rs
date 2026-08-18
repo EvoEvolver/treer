@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -35,6 +36,9 @@ pub struct AuthStore {
     admin_password: Arc<str>,
     public_url: Url,
     disabled: bool,
+    virtual_hosts: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, VirtualNetworkHost>>>>,
+    virtual_hosts_update: Arc<tokio::sync::Mutex<()>>,
+    virtual_hosts_revision: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
@@ -173,8 +177,12 @@ impl AuthStore {
             admin_password: admin_password.into(),
             public_url,
             disabled,
+            virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
+            virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
         };
         store.migrate().await?;
+        store.refresh_virtual_network_hosts().await?;
         Ok(store)
     }
 
@@ -190,8 +198,15 @@ impl AuthStore {
             admin_password: admin_password.to_string().into(),
             public_url: Url::parse("https://treer.example/").expect("valid URL"),
             disabled: false,
+            virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
+            virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
         };
         store.migrate().await.expect("database migration");
+        store
+            .refresh_virtual_network_hosts()
+            .await
+            .expect("load virtual hosts");
         store
     }
 
@@ -778,18 +793,15 @@ impl AuthStore {
         &self,
         workspace_id: &str,
     ) -> Result<Vec<VirtualNetworkHost>, AuthFailure> {
-        let rows = sqlx::query(
-            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
-             created_at, created_by FROM virtual_network_hosts \
-             WHERE workspace_id = ? ORDER BY hostname COLLATE NOCASE",
-        )
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        rows.into_iter()
-            .map(virtual_network_host_from_row)
-            .collect()
+        let mut hosts = self
+            .virtual_hosts
+            .read()
+            .await
+            .get(workspace_id)
+            .map(|hosts| hosts.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        hosts.sort_by(|left, right| left.hostname.cmp(&right.hostname));
+        Ok(hosts)
     }
 
     pub async fn resolve_virtual_network_host(
@@ -801,18 +813,13 @@ impl AuthStore {
             Ok(hostname) => hostname,
             Err(_) => return Ok(None),
         };
-        sqlx::query(
-            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
-             created_at, created_by FROM virtual_network_hosts \
-             WHERE workspace_id = ? AND hostname = ? COLLATE NOCASE",
-        )
-        .bind(workspace_id)
-        .bind(hostname)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?
-        .map(virtual_network_host_from_row)
-        .transpose()
+        Ok(self
+            .virtual_hosts
+            .read()
+            .await
+            .get(workspace_id)
+            .and_then(|hosts| hosts.get(&hostname))
+            .cloned())
     }
 
     pub async fn create_virtual_network_host(
@@ -821,6 +828,7 @@ impl AuthStore {
         username: &str,
         request: CreateVirtualNetworkHostRequest,
     ) -> Result<VirtualNetworkHost, AuthFailure> {
+        let _update = self.virtual_hosts_update.lock().await;
         let hostname = normalize_virtual_hostname(&request.hostname)?;
         let target_host = request.target_host.trim();
         if target_host.is_empty() || target_host.len() > 253 {
@@ -859,7 +867,16 @@ impl AuthStore {
         .execute(&self.pool)
         .await;
         match result {
-            Ok(_) => Ok(record),
+            Ok(_) => {
+                self.virtual_hosts
+                    .write()
+                    .await
+                    .entry(workspace_id.to_string())
+                    .or_default()
+                    .insert(record.hostname.clone(), record.clone());
+                self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+                Ok(record)
+            }
             Err(error)
                 if error
                     .as_database_error()
@@ -879,12 +896,13 @@ impl AuthStore {
         workspace_id: &str,
         hostname: &str,
     ) -> Result<(), AuthFailure> {
+        let _update = self.virtual_hosts_update.lock().await;
         let hostname = normalize_virtual_hostname(hostname)?;
         let result = sqlx::query(
             "DELETE FROM virtual_network_hosts WHERE workspace_id = ? AND hostname = ? COLLATE NOCASE",
         )
         .bind(workspace_id)
-        .bind(hostname)
+        .bind(&hostname)
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
@@ -894,7 +912,53 @@ impl AuthStore {
                 "virtual host does not exist",
             ));
         }
+        if let Some(hosts) = self.virtual_hosts.write().await.get_mut(workspace_id) {
+            hosts.remove(&hostname);
+        }
+        self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    pub async fn refresh_virtual_network_hosts(&self) -> anyhow::Result<()> {
+        let _update = self.virtual_hosts_update.lock().await;
+        let rows = sqlx::query(
+            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
+             created_at, created_by FROM virtual_network_hosts",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut refreshed = HashMap::<String, HashMap<String, VirtualNetworkHost>>::new();
+        for row in rows {
+            let host = virtual_network_host_from_row(row)
+                .map_err(|error| anyhow::anyhow!(error.into_parts().1.message))?;
+            refreshed
+                .entry(host.workspace_id.clone())
+                .or_default()
+                .insert(host.hostname.clone(), host);
+        }
+        *self.virtual_hosts.write().await = refreshed;
+        self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub async fn virtual_network_hosts_snapshot(
+        &self,
+        workspace_id: &str,
+    ) -> Result<treer_protocol::VirtualNetworkHostsSnapshot, AuthFailure> {
+        let _update = self.virtual_hosts_update.lock().await;
+        let mut hosts = self
+            .virtual_hosts
+            .read()
+            .await
+            .get(workspace_id)
+            .map(|hosts| hosts.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        hosts.sort_by(|left, right| left.hostname.cmp(&right.hostname));
+        Ok(treer_protocol::VirtualNetworkHostsSnapshot {
+            workspace_id: workspace_id.to_string(),
+            revision: self.virtual_hosts_revision.load(Ordering::SeqCst),
+            hosts,
+        })
     }
 
     async fn membership_role(
@@ -1072,6 +1136,7 @@ impl AuthStore {
         server_id: &str,
         agent_ids: &[String],
     ) -> Result<(), AuthFailure> {
+        let _update = self.virtual_hosts_update.lock().await;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         if !self.disabled {
             let update = sqlx::query(
@@ -1120,6 +1185,10 @@ impl AuthStore {
                 .map_err(AuthFailure::database)?;
         }
         transaction.commit().await.map_err(AuthFailure::database)?;
+        if let Some(hosts) = self.virtual_hosts.write().await.get_mut(workspace_id) {
+            hosts.retain(|_, host| host.destination_server_id != server_id);
+        }
+        self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -2139,13 +2208,10 @@ pub(crate) fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFail
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         });
-    let conflicts_with_direct_route = hostname
-        .strip_suffix(".treer")
-        .is_some_and(|route| route.contains(".via."));
-    if !labels_valid || conflicts_with_direct_route {
+    if !labels_valid {
         return Err(AuthFailure::bad_request(
             "invalid_virtual_hostname",
-            "hostname must contain valid DNS labels and must not conflict with a Treer via route",
+            "hostname must contain valid DNS labels",
         ));
     }
     Ok(hostname)
@@ -2279,6 +2345,10 @@ mod tests {
     #[tokio::test]
     async fn virtual_network_hosts_are_normalized_resolved_and_cleaned_up() {
         let mut store = AuthStore::in_memory("owner-password").await;
+        let initial = store
+            .virtual_network_hosts_snapshot("default")
+            .await
+            .expect("initial virtual-host snapshot");
         let record = store
             .create_virtual_network_host(
                 "default",
@@ -2292,6 +2362,12 @@ mod tests {
             )
             .await
             .expect("create virtual host");
+        let created = store
+            .virtual_network_hosts_snapshot("default")
+            .await
+            .expect("created virtual-host snapshot");
+        assert!(created.revision > initial.revision);
+        assert_eq!(created.hosts, std::slice::from_ref(&record));
         assert_eq!(record.hostname, "api.dev.example");
         assert_eq!(
             store
@@ -2313,7 +2389,7 @@ mod tests {
             )
             .await
             .is_err());
-        assert!(store
+        store
             .create_virtual_network_host(
                 "default",
                 "admin",
@@ -2325,7 +2401,7 @@ mod tests {
                 },
             )
             .await
-            .is_err());
+            .expect("virtual host names have no reserved routing suffixes");
         store
             .create_virtual_network_host(
                 "default",
@@ -2344,11 +2420,12 @@ mod tests {
             .delete_machine("default", "destination", &[])
             .await
             .expect("delete destination machine");
-        assert!(store
-            .list_virtual_network_hosts("default")
+        let deleted = store
+            .virtual_network_hosts_snapshot("default")
             .await
-            .expect("list virtual hosts")
-            .is_empty());
+            .expect("deleted virtual-host snapshot");
+        assert!(deleted.revision > created.revision);
+        assert!(deleted.hosts.is_empty());
     }
 
     #[tokio::test]

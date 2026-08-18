@@ -3,6 +3,8 @@ mod host_client;
 mod local_api;
 mod network;
 mod proxy;
+#[cfg(target_os = "linux")]
+mod sandbox;
 mod service;
 
 use std::net::SocketAddr;
@@ -40,6 +42,15 @@ enum Command {
     },
     #[command(about = "Manage the host agent-server service")]
     Service(ServiceArgs),
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    SandboxExec(sandbox::ExecArgs),
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    SandboxChild(sandbox::ChildArgs),
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    SandboxAgent(sandbox::AgentArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -146,6 +157,12 @@ async fn main() -> Result<()> {
             run_service_command(service_args).await?;
             Ok(())
         }
+        #[cfg(target_os = "linux")]
+        Some(Command::SandboxExec(sandbox_args)) => sandbox::run(sandbox_args).await,
+        #[cfg(target_os = "linux")]
+        Some(Command::SandboxChild(sandbox_args)) => sandbox::run_child(sandbox_args).await,
+        #[cfg(target_os = "linux")]
+        Some(Command::SandboxAgent(sandbox_args)) => sandbox::run_agent(sandbox_args).await,
     }
 }
 
@@ -181,6 +198,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
             agent_server_url,
             network_proxy_url: network.proxy_url(),
             treer_binary: sibling_treer_binary(),
+            sandbox_executable: transparent_network_executable()?,
         },
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -226,6 +244,26 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     };
     proxy_task.abort();
     result
+}
+
+fn transparent_network_executable() -> Result<Option<PathBuf>> {
+    let mode = std::env::var("TREER_NETWORK_MODE").unwrap_or_else(|_| {
+        if cfg!(target_os = "linux") {
+            "transparent".to_string()
+        } else {
+            "proxy-env".to_string()
+        }
+    });
+    match mode.as_str() {
+        "proxy-env" => Ok(None),
+        "transparent" if cfg!(target_os = "linux") => std::env::current_exe()
+            .context("failed to locate Controller executable for network sandbox")
+            .map(Some),
+        "transparent" => anyhow::bail!(
+            "transparent network mode is currently supported only on Linux; use a Linux container"
+        ),
+        _ => anyhow::bail!("TREER_NETWORK_MODE must be transparent or proxy-env"),
+    }
 }
 
 async fn run_service_command(args: ServiceArgs) -> Result<()> {

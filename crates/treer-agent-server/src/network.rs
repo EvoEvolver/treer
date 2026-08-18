@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
@@ -279,17 +279,27 @@ async fn read_socks_request(socket: &mut TcpStream) -> anyhow::Result<SocksRoute
     if request[0] != 5 || request[1] != 1 {
         return Err(anyhow!("only SOCKS5 CONNECT is supported"));
     }
-    let domain = match request[3] {
+    let destination = match request[3] {
         3 => {
             let length = socket.read_u8().await?;
             let mut value = vec![0_u8; usize::from(length)];
             socket.read_exact(&mut value).await?;
             String::from_utf8(value).context("SOCKS destination is not UTF-8")?
         }
-        _ => return Err(anyhow!("Treer destinations must use a hostname")),
+        1 => {
+            let mut value = [0_u8; 4];
+            socket.read_exact(&mut value).await?;
+            Ipv4Addr::from(value).to_string()
+        }
+        4 => {
+            let mut value = [0_u8; 16];
+            socket.read_exact(&mut value).await?;
+            Ipv6Addr::from(value).to_string()
+        }
+        _ => return Err(anyhow!("unsupported SOCKS destination type")),
     };
     let port = socket.read_u16().await?;
-    let mut route = parse_route(&domain, port)?;
+    let mut route = parse_route(&destination, port)?;
     route.source_agent_id = source_agent_id;
     Ok(route)
 }
@@ -316,19 +326,9 @@ fn parse_route(domain: &str, port: u16) -> anyhow::Result<SocksRoute> {
     if route.is_empty() || route.len() > 253 {
         return Err(anyhow!("Treer destination hostname is invalid"));
     }
-    let (host, destination) = match route
-        .strip_suffix(".treer")
-        .and_then(|route| route.rsplit_once(".via."))
-    {
-        Some((host, destination)) if !host.is_empty() && !destination.is_empty() => {
-            (host.to_string(), destination.to_string())
-        }
-        Some(_) => return Err(anyhow!("invalid Treer via hostname")),
-        None => ("127.0.0.1".to_string(), route),
-    };
     Ok(SocksRoute {
-        destination,
-        host,
+        destination: route.clone(),
+        host: route,
         port,
         source_agent_id: None,
     })
@@ -444,16 +444,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_local_and_via_routes() {
-        let local = parse_route("build-machine.treer", 8080).expect("local route");
-        assert_eq!(local.destination, "build-machine.treer");
-        assert_eq!(local.host, "127.0.0.1");
-        let via = parse_route("git.internal.via.build-machine.treer", 22).expect("via route");
-        assert_eq!(via.destination, "build-machine");
-        assert_eq!(via.host, "git.internal");
+    fn parses_domains_without_implicit_machine_routes() {
         let virtual_host = parse_route("API.Internal.", 80).expect("virtual host route");
         assert_eq!(virtual_host.destination, "api.internal");
-        assert_eq!(virtual_host.host, "127.0.0.1");
+        assert_eq!(virtual_host.host, "api.internal");
+        let ordinary = parse_route("github.com", 443).expect("ordinary route");
+        assert_eq!(ordinary.destination, "github.com");
+        assert_eq!(ordinary.host, "github.com");
     }
 
     #[tokio::test]

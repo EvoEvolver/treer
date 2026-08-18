@@ -4,6 +4,7 @@ import {
   ChevronRight,
   CirclePlus,
   Copy,
+  ExternalLink,
   FolderKanban,
   KeyRound,
   LogOut,
@@ -35,6 +36,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
+type MainView = "terminal" | "network"
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 type DeleteTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 
@@ -163,13 +165,14 @@ function WorkspaceApp() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionState>("connecting")
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
+  const [mainView, setMainView] = useState<MainView>("terminal")
   const [error, setError] = useState<string | null>(null)
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
-  const [virtualHostsOpen, setVirtualHostsOpen] = useState(false)
+  const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [renameOrganizationOpen, setRenameOrganizationOpen] = useState(false)
@@ -414,18 +417,38 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
-  async function loadVirtualHosts() {
-    if (!workspaceId) return
+  const loadVirtualHosts = useCallback(async () => {
+    if (!workspaceId) {
+      setVirtualHosts([])
+      return
+    }
     const data = await api<{ hosts: VirtualNetworkHost[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts`)
     setVirtualHosts(data.hosts)
+  }, [workspaceId])
+
+  useEffect(() => {
+    if (mainView === "network") loadVirtualHosts().catch(showError)
+  }, [mainView, loadVirtualHosts, showError])
+
+  function openNetwork() {
+    setMainView("network")
   }
 
-  async function openVirtualHosts() {
+  function openCreateVirtualHost() {
+    const firstMachine = snapshot?.servers[0]?.server_id ?? ""
+    setVirtualDestination((current) => current || firstMachine)
+    setCreateVirtualHostOpen(true)
+  }
+
+  function openVirtualHost(hostname: string) {
+    if (!workspaceId) return
+    const url = `/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(hostname)}/proxy/`
+    window.open(url, "_blank", "noopener,noreferrer")
+  }
+
+  async function refreshVirtualHosts() {
     try {
       await loadVirtualHosts()
-      const firstMachine = snapshot?.servers[0]?.server_id ?? ""
-      setVirtualDestination(firstMachine)
-      setVirtualHostsOpen(true)
     } catch (reason) { showError(reason) }
   }
 
@@ -444,6 +467,7 @@ function WorkspaceApp() {
       })
       setVirtualHostname(""); setVirtualTargetPort("")
       await loadVirtualHosts()
+      setCreateVirtualHostOpen(false)
     } catch (reason) { showError(reason) }
   }
 
@@ -481,6 +505,9 @@ function WorkspaceApp() {
           <Select value={workspaceId ?? undefined} onValueChange={setWorkspaceId} disabled={!organizationId}><SelectTrigger className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-black/[.04]"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
           <IconButton label="Create workspace" disabled={!organizationId} onClick={() => setCreateWorkspaceOpen(true)}><Plus /></IconButton>
         </div>
+        <div className="px-2 pb-2">
+          <Button variant={mainView === "network" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openNetwork} disabled={!workspaceId}><Network className="size-3.5" />Network</Button>
+        </div>
 
         <Tabs defaultValue="agents" className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <TabsList className="mx-2 grid h-auto grid-cols-2 bg-black/[.04] p-0.5">
@@ -489,7 +516,7 @@ function WorkspaceApp() {
           </TabsList>
           <TabsContent value="machines" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><div className="flex items-center"><IconButton label="Virtual hosts" className="size-7" onClick={openVirtualHosts} disabled={!workspaceId}><Network /></IconButton><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></div></div>
+              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
                 {snapshot?.servers.map((machine) => <MachineItem key={machine.server_id} machine={machine} onRename={() => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDelete={() => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} />)}
                 {snapshot && !snapshot.servers.length && <EmptyState icon={<Server />} label="No machines connected" />}
@@ -500,7 +527,7 @@ function WorkspaceApp() {
             <div className="flex h-full min-h-0 flex-col">
               <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openCreateAgent} disabled={!workspaceId || !onlineMachines.length}><Plus className="size-3.5" />New</Button></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
-                {snapshot?.agents.map((agent) => <AgentItem key={agent.agent_id} agent={agent} machine={snapshot.servers.find((item) => item.server_id === agent.server_id)} selected={agent.agent_id === selectedAgentId} onClick={() => setSelectedAgentId(agent.agent_id)} />)}
+                {snapshot?.agents.map((agent) => <AgentItem key={agent.agent_id} agent={agent} machine={snapshot.servers.find((item) => item.server_id === agent.server_id)} selected={mainView === "terminal" && agent.agent_id === selectedAgentId} onClick={() => { setSelectedAgentId(agent.agent_id); setMainView("terminal") }} />)}
                 {snapshot && !snapshot.agents.length && <EmptyState icon={<TerminalSquare />} label="No agents in this workspace" />}
               </div>
             </div>
@@ -518,20 +545,20 @@ function WorkspaceApp() {
 
       <section className="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]">
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
-          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{selectedAgent?.name ?? "Terminal"}</strong></div>
-          <div className="flex shrink-0 items-center gap-0.5">
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "network" ? "Network" : selectedAgent?.name ?? "Terminal"}</strong></div>
+          {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
             <IconButton label="Reconnect terminal" disabled={!selectedAgent} onClick={() => { setSelectedAgentId(null); requestAnimationFrame(() => setSelectedAgentId(selectedAgent?.agent_id ?? null)) }}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={stopAgent}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
-          </div>
+          </div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshVirtualHosts}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openCreateVirtualHost} disabled={!snapshot?.servers.length}><Plus />Add host</Button></div>}
         </header>
-        <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
+        {mainView === "terminal" ? <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className="grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]">
             <div className="flex min-w-0 items-center justify-between gap-4 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><span className="inline-flex shrink-0 items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} /></div>
           </div>
-        </div>
+        </div> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{virtualHosts.length} {virtualHosts.length === 1 ? "host" : "hosts"}</span></div><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="min-w-0 truncate text-left font-mono text-xs font-medium hover:underline" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">{host.target_host}:{host.target_port ?? 80}</span><span className="col-start-1 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="row-span-2 row-start-1 flex items-center justify-end gap-1 sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></div></div>}
       </section>
     </main>
 
@@ -548,7 +575,7 @@ function WorkspaceApp() {
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={virtualHostsOpen} onOpenChange={setVirtualHostsOpen}><DialogContent className="max-h-[90dvh] max-w-xl overflow-y-auto"><DialogHeader><DialogTitle>Virtual hosts</DialogTitle><DialogDescription>{workspace?.name ?? "Workspace"}</DialogDescription></DialogHeader><div className="max-h-56 divide-y overflow-auto border-y">{virtualHosts.map((host) => <div key={host.hostname} className="grid min-h-12 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2"><div className="min-w-0 text-xs"><div className="truncate font-mono font-medium">{host.hostname}</div><div className="mt-1 truncate text-[10px] text-muted-foreground">{machineName(snapshot?.servers.find((item) => item.server_id === host.destination_server_id), host.destination_server_id)} · {host.target_host}:{host.target_port ?? "requested port"}</div></div><IconButton label={`Delete ${host.hostname}`} className="text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></div>)}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div><form onSubmit={createVirtualHost} className="grid gap-3 border-t pt-4 sm:grid-cols-2"><Field label="Virtual hostname"><Input className="font-mono" value={virtualHostname} onChange={(event) => setVirtualHostname(event.target.value)} placeholder="api.internal" required /></Field><Field label="Machine"><Select value={virtualDestination} onValueChange={setVirtualDestination} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Target host"><Input value={virtualTargetHost} onChange={(event) => setVirtualTargetHost(event.target.value)} required /></Field><Field label="Target port"><Input type="number" min="1" max="65535" placeholder="Keep requested port" value={virtualTargetPort} onChange={(event) => setVirtualTargetPort(event.target.value)} /></Field><DialogFooter className="sm:col-span-2"><Button type="submit" disabled={!virtualHostname || !virtualDestination}><Plus />Add host</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createVirtualHostOpen} onOpenChange={setCreateVirtualHostOpen}><DialogContent className="max-w-xl"><form onSubmit={createVirtualHost} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>Add virtual host</DialogTitle><DialogDescription>{workspace?.name ?? "Workspace"}</DialogDescription></DialogHeader><Field label="Virtual hostname"><Input className="font-mono" value={virtualHostname} onChange={(event) => setVirtualHostname(event.target.value)} placeholder="app.internal" required autoFocus /></Field><Field label="Machine"><Select value={virtualDestination} onValueChange={setVirtualDestination} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Target host"><Input className="font-mono" value={virtualTargetHost} onChange={(event) => setVirtualTargetHost(event.target.value)} required /></Field><Field label="HTTP port"><Input type="number" min="1" max="65535" placeholder="80" value={virtualTargetPort} onChange={(event) => setVirtualTargetPort(event.target.value)} /></Field><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setCreateVirtualHostOpen(false)}>Cancel</Button><Button type="submit" disabled={!virtualHostname || !virtualDestination}><Plus />Add host</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 

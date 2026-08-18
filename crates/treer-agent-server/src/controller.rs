@@ -13,6 +13,7 @@ use treer_host_protocol::{
 };
 use treer_protocol::{
     AgentInfo, AgentStatus, CreateAgentRequest, ProtocolError, ReadAgentOutputResponse,
+    VirtualNetworkHostsSnapshot,
 };
 
 use crate::host_client::{HostClient, HostEvents};
@@ -52,6 +53,7 @@ pub struct ControllerConfig {
     pub agent_server_url: String,
     pub network_proxy_url: String,
     pub treer_binary: Option<PathBuf>,
+    pub sandbox_executable: Option<PathBuf>,
 }
 
 struct ControllerInner {
@@ -62,11 +64,13 @@ struct ControllerInner {
     agent_server_url: String,
     network_proxy_url: String,
     treer_binary: Option<PathBuf>,
+    sandbox_executable: Option<PathBuf>,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
     terminal_events: broadcast::Sender<TerminalOutput>,
     process_events: broadcast::Sender<HostProcessInfo>,
     transient_shells: RwLock<HashSet<String>>,
+    virtual_hosts: RwLock<Option<VirtualNetworkHostsSnapshot>>,
 }
 
 struct ControllerAgent {
@@ -118,11 +122,13 @@ impl ControllerRuntime {
                 agent_server_url: config.agent_server_url,
                 network_proxy_url: config.network_proxy_url,
                 treer_binary: config.treer_binary,
+                sandbox_executable: config.sandbox_executable,
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
                 terminal_events,
                 process_events,
                 transient_shells: RwLock::new(HashSet::new()),
+                virtual_hosts: RwLock::new(None),
             }),
         };
         let replays: HashMap<_, _> = replay
@@ -177,6 +183,37 @@ impl ControllerRuntime {
         self.inner.process_events.subscribe()
     }
 
+    pub fn replace_virtual_hosts(
+        &self,
+        snapshot: VirtualNetworkHostsSnapshot,
+    ) -> Result<bool, ProtocolError> {
+        if snapshot.workspace_id != self.inner.workspace_id {
+            return Err(ProtocolError::new(
+                "workspace_mismatch",
+                "virtual-host snapshot belongs to another workspace",
+            ));
+        }
+        let mut current =
+            self.inner.virtual_hosts.write().map_err(|_| {
+                ProtocolError::new("state_error", "virtual-host cache lock poisoned")
+            })?;
+        if !should_replace_virtual_hosts(current.as_ref(), &snapshot) {
+            return Ok(false);
+        }
+        *current = Some(snapshot);
+        Ok(true)
+    }
+
+    pub fn reset_virtual_hosts(&self) -> Result<(), ProtocolError> {
+        *self
+            .inner
+            .virtual_hosts
+            .write()
+            .map_err(|_| ProtocolError::new("state_error", "virtual-host cache lock poisoned"))? =
+            None;
+        Ok(())
+    }
+
     pub fn workspace_root(&self) -> &std::path::Path {
         &self.inner.workspace_root
     }
@@ -215,6 +252,11 @@ impl ControllerRuntime {
             cwd: request.cwd.clone(),
         };
         let env = self.process_environment(Some(&agent_id));
+        let launch = sandbox_launch(
+            self.inner.sandbox_executable.as_deref(),
+            &agent_network_proxy_url(&self.inner.network_proxy_url, &agent_id),
+            launch,
+        );
         let response = self
             .inner
             .host
@@ -839,6 +881,36 @@ fn shell_agent_launch(
     }
 }
 
+fn sandbox_launch(
+    executable: Option<&std::path::Path>,
+    network_proxy_url: &str,
+    launch: AgentLaunch,
+) -> AgentLaunch {
+    let Some(executable) = executable else {
+        return launch;
+    };
+    let mut args = vec![
+        "sandbox-exec".to_string(),
+        "--network-proxy".to_string(),
+        network_proxy_url.to_string(),
+        "--".to_string(),
+        launch.command,
+    ];
+    args.extend(launch.args);
+    AgentLaunch {
+        command: executable.display().to_string(),
+        args,
+        initial_writes: launch.initial_writes,
+    }
+}
+
+fn should_replace_virtual_hosts(
+    current: Option<&VirtualNetworkHostsSnapshot>,
+    incoming: &VirtualNetworkHostsSnapshot,
+) -> bool {
+    current.is_none_or(|current| incoming.revision > current.revision)
+}
+
 fn interactive_shell() -> String {
     std::env::var("SHELL")
         .ok()
@@ -1074,5 +1146,60 @@ mod tests {
         let url = url::Url::parse(&url).expect("agent proxy URL");
         assert_eq!(url.username(), "agent-a");
         assert_eq!(url.password(), Some("treer"));
+    }
+
+    #[test]
+    fn transparent_sandbox_preserves_launch_and_initial_input() {
+        let initial_writes = vec![HostWrite {
+            data: b"codex\r".to_vec(),
+            delay_ms: 500,
+        }];
+        let launch = sandbox_launch(
+            Some(std::path::Path::new("/opt/treer-agent-server")),
+            "socks5h://agent-a:treer@127.0.0.1:8791",
+            AgentLaunch {
+                command: "/bin/bash".to_string(),
+                args: vec!["-i".to_string()],
+                initial_writes: initial_writes.clone(),
+            },
+        );
+
+        assert_eq!(launch.command, "/opt/treer-agent-server");
+        assert_eq!(
+            launch.args,
+            [
+                "sandbox-exec",
+                "--network-proxy",
+                "socks5h://agent-a:treer@127.0.0.1:8791",
+                "--",
+                "/bin/bash",
+                "-i"
+            ]
+        );
+        assert_eq!(launch.initial_writes, initial_writes);
+    }
+
+    #[test]
+    fn virtual_host_snapshots_only_move_forward_on_one_connection() {
+        let current = VirtualNetworkHostsSnapshot {
+            workspace_id: "default".to_string(),
+            revision: 8,
+            hosts: Vec::new(),
+        };
+        assert!(!should_replace_virtual_hosts(Some(&current), &current));
+        assert!(!should_replace_virtual_hosts(
+            Some(&current),
+            &VirtualNetworkHostsSnapshot {
+                revision: 7,
+                ..current.clone()
+            }
+        ));
+        assert!(should_replace_virtual_hosts(
+            Some(&current),
+            &VirtualNetworkHostsSnapshot {
+                revision: 9,
+                ..current.clone()
+            }
+        ));
     }
 }

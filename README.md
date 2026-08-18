@@ -187,12 +187,24 @@ commands are entered through the PTY. This loads shell configuration such as
 
 ## Workspace network
 
-Every Controller exposes a loopback SOCKS5 proxy and injects its URL into new
-agents as `ALL_PROXY`, `all_proxy`, and `TREER_NETWORK_PROXY`. TCP streams are
-multiplexed as binary frames over the Controller's existing `/agent/connect`
-WebSocket; no machine needs an inbound port. Each stream has an independent
-flow-control window, and terminal, transfer, and network frames share the same
-authenticated connection.
+On Linux, each managed agent runs in a rootless user and network namespace. A
+TUN adapter captures its TCP traffic and sends it to the Controller's loopback
+SOCKS5 endpoint, so applications do not need to support proxy environment
+variables. Namespace sockets are created by the parent Controller process and
+passed into the namespace; this keeps the Proxy WebSocket and machine egress
+outside the sandbox. Linux requires `unshare(1)` from `util-linux` and a kernel
+that permits unprivileged user namespaces.
+
+The Controller still injects `ALL_PROXY`, `all_proxy`, and
+`TREER_NETWORK_PROXY` for diagnostics and compatibility. Set
+`TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
+transparent namespace wrapper. Native macOS currently uses this compatibility
+mode; use a Linux container when transparent capture is required.
+
+TCP streams are multiplexed as binary frames over the Controller's existing
+`/agent/connect` WebSocket; no machine needs an inbound port. Each stream has an
+independent flow-control window, and terminal, transfer, and network frames
+share the same authenticated connection.
 
 Network access is allowed by default. Workspace virtual hosts are service
 discovery records, independent from authorization: a record maps any valid
@@ -202,14 +214,20 @@ managed from the Machines tab. For example, mapping `api.internal` to `build-mac
 
 ```bash
 curl http://api.internal/
-curl http://build-machine.treer:8080/
-curl http://git.internal.via.build-machine.treer:3000/
 ```
 
 Deleting a machine also deletes virtual hosts that point to it. Virtual host
-names are exact and case-insensitive; they do not require a
-`.treer` suffix. Names matching `host.via.machine.treer` are reserved for direct
-routing.
+names are exact and case-insensitive; no suffix or naming convention is
+reserved. Only explicitly configured records are treated as workspace virtual
+hosts. Other hostnames and IP addresses use ordinary outbound access through
+the source machine, subject to the same network policy boundary.
+
+Virtual-host changes are active without a Proxy or Agent Server restart. The
+Proxy updates its in-memory routing table and immediately broadcasts a full,
+revisioned snapshot to every online Controller in that workspace. A Controller
+receives a fresh snapshot after every WebSocket registration and ignores stale
+revisions on the same connection. The Proxy also reloads SQLite and broadcasts
+snapshots every 30 seconds, which repairs missed or out-of-band changes.
 
 Deleting an online machine sends a confirmed shutdown command over its existing
 Controller WebSocket before revoking the machine credential. A capable
@@ -239,16 +257,14 @@ The Agent Server forwards the caller identity under its machine credential, and
 the Proxy evaluates these as `virtual_host.list`, `virtual_host.create`, and
 `virtual_host.delete`. They currently inherit the allow-all default.
 
-`build-machine.treer` connects to `127.0.0.1` on that machine.
-`host.via.build-machine.treer` connects to `host` from that machine. The first
-prototype supplies a standard SOCKS5 layer; programs that ignore proxy
-environment variables must be configured to use `TREER_NETWORK_PROXY`.
-
 ## Agent collaboration
 
 The `treer` binary talks to the local agent server by default. Managed agents
 receive its location in `PATH` and `TREER_BIN`, so they can discover and contact
-peers without knowing the proxy address.
+peers without knowing the proxy address. `treer whoami` returns the current
+workspace, agent, and machine records. `treer discover` includes those current
+agent and machine records under `self` so callers can distinguish themselves
+from peers without matching names.
 
 ```bash
 treer whoami

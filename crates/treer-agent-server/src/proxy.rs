@@ -365,7 +365,20 @@ impl ProxyClient {
                     let message: ProxyMessage = serde_json::from_str(&text)
                         .context("failed to decode proxy message")?;
                     match message {
-                        ProxyMessage::Registered { .. } => {}
+                        ProxyMessage::Registered { .. } => {
+                            if let Err(error) = self.runtime.reset_virtual_hosts() {
+                                warn!(code = %error.code, message = %error.message, "failed to reset virtual-host snapshot");
+                            }
+                        }
+                        ProxyMessage::VirtualNetworkHosts { snapshot } => {
+                            let revision = snapshot.revision;
+                            let count = snapshot.hosts.len();
+                            match self.runtime.replace_virtual_hosts(snapshot) {
+                                Ok(true) => info!(revision, count, "virtual hosts refreshed"),
+                                Ok(false) => tracing::debug!(revision, "ignored stale virtual-host snapshot"),
+                                Err(error) => warn!(code = %error.code, message = %error.message, "rejected virtual-host snapshot"),
+                            }
+                        }
                         ProxyMessage::Error { error } => warn!(code = %error.code, message = %error.message, "proxy rejected a message"),
                         ProxyMessage::Command { envelope } => {
                             let result = self.execute(envelope).await;

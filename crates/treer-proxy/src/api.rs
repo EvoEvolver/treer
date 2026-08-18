@@ -2,21 +2,23 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, Path, Query, State, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode, Uri, Version};
 use axum::middleware;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use treer_protocol::{
     AgentCommand, ApiError, CreateAgentRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
     MachineEnrollmentResponse, PromptAgentRequest, ProtocolError, RenameRequest,
-    TerminalClientMessage, TerminalServerMessage, TransferServerMessage, WorkspaceEvent,
-    AGENT_ID_HEADER,
+    TerminalClientMessage, TerminalServerMessage, TransferServerMessage,
+    VirtualNetworkHostsSnapshot, WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -168,6 +170,14 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}",
             axum::routing::delete(delete_virtual_network_host),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy",
+            any(proxy_virtual_network_host_root),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/{*path}",
+            any(proxy_virtual_network_host_path),
         )
         .route(
             "/api/workspaces/{workspace_id}/servers/{server_id}",
@@ -435,6 +445,14 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "treer: unsupported platform $(uname -s)/$(uname -m)" >&2; exit 1 ;;
 esac
 
+case "$platform" in
+  linux-*)
+    if ! command -v unshare >/dev/null 2>&1; then
+      echo "treer: warning: transparent agent networking requires unshare(1) from util-linux" >&2
+    fi
+    ;;
+esac
+
 if command -v curl >/dev/null 2>&1; then
   fetch() {{ curl -fsSL "$1" -o "$2"; }}
 elif command -v wget >/dev/null 2>&1; then
@@ -552,16 +570,145 @@ async fn create_virtual_network_host(
     let host = auth
         .create_virtual_network_host(&workspace_id, &session.user_id, request)
         .await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "host": host })))
 }
 
 async fn delete_virtual_network_host(
+    State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Path((workspace_id, hostname)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     auth.delete_virtual_network_host(&workspace_id, &hostname)
         .await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "deleted": true })))
+}
+
+async fn proxy_virtual_network_host_root(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, hostname)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    proxy_virtual_network_host(state, auth, workspace_id, hostname, String::new(), request).await
+}
+
+async fn proxy_virtual_network_host_path(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, hostname, path)): Path<(String, String, String)>,
+    request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    proxy_virtual_network_host(state, auth, workspace_id, hostname, path, request).await
+}
+
+async fn proxy_virtual_network_host(
+    state: AppState,
+    auth: AuthStore,
+    workspace_id: String,
+    hostname: String,
+    path: String,
+    mut request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    let host = auth
+        .resolve_virtual_network_host(&workspace_id, &hostname)
+        .await?
+        .ok_or_else(|| ApiFailure::not_found("virtual_host_not_found", &hostname))?;
+    let stream = state
+        .open_browser_network_stream(
+            &workspace_id,
+            &host.destination_server_id,
+            &host.target_host,
+            host.target_port.unwrap_or(80),
+        )
+        .await?;
+
+    let query = request.uri().query();
+    let target = if path.is_empty() {
+        query.map_or_else(|| "/".to_string(), |query| format!("/?{query}"))
+    } else {
+        query.map_or_else(|| format!("/{path}"), |query| format!("/{path}?{query}"))
+    };
+    *request.uri_mut() = target
+        .parse::<Uri>()
+        .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
+    *request.version_mut() = Version::HTTP_11;
+
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    let downstream_upgrade = upgraded.then(|| hyper::upgrade::on(&mut request));
+    sanitize_tunnel_request_headers(request.headers_mut(), upgraded, &host.hostname)?;
+
+    let io = TokioIo::new(stream);
+    let (mut sender, connection) = hyper::client::conn::http1::handshake::<_, Body>(io)
+        .await
+        .map_err(|error| ApiFailure::bad_gateway("tunnel_handshake_failed", &error.to_string()))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.with_upgrades().await {
+            tracing::debug!(%error, "virtual host tunnel connection closed");
+        }
+    });
+    let mut response = sender
+        .send_request(request)
+        .await
+        .map_err(|error| ApiFailure::bad_gateway("tunnel_request_failed", &error.to_string()))?;
+
+    let target_upgrade = (response.status() == StatusCode::SWITCHING_PROTOCOLS)
+        .then(|| hyper::upgrade::on(&mut response));
+    sanitize_tunnel_response_headers(response.headers_mut(), target_upgrade.is_some());
+    if let (Some(downstream), Some(target)) = (downstream_upgrade, target_upgrade) {
+        tokio::spawn(async move {
+            let Ok(downstream) = downstream.await else {
+                return;
+            };
+            let Ok(target) = target.await else { return };
+            let mut downstream = TokioIo::new(downstream);
+            let mut target = TokioIo::new(target);
+            let _ = tokio::io::copy_bidirectional(&mut downstream, &mut target).await;
+        });
+    }
+    let (parts, body) = response.into_parts();
+    Ok(Response::from_parts(parts, Body::new(body)))
+}
+
+fn sanitize_tunnel_request_headers(
+    headers: &mut HeaderMap,
+    upgraded: bool,
+    hostname: &str,
+) -> Result<(), ApiFailure> {
+    headers.remove(header::COOKIE);
+    headers.remove(header::AUTHORIZATION);
+    headers.remove(header::PROXY_AUTHORIZATION);
+    if !upgraded {
+        remove_hop_by_hop_headers(headers);
+    }
+    headers.insert(
+        header::HOST,
+        HeaderValue::from_str(hostname)
+            .map_err(|error| ApiFailure::bad_gateway("invalid_virtual_host", &error.to_string()))?,
+    );
+    Ok(())
+}
+
+fn sanitize_tunnel_response_headers(headers: &mut HeaderMap, upgraded: bool) {
+    headers.remove(header::SET_COOKIE);
+    if !upgraded {
+        remove_hop_by_hop_headers(headers);
+    }
+}
+
+fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
+    for name in [
+        header::CONNECTION,
+        header::UPGRADE,
+        header::TRANSFER_ENCODING,
+        header::TE,
+        header::TRAILER,
+    ] {
+        headers.remove(name);
+    }
+    headers.remove("keep-alive");
+    headers.remove("proxy-connection");
 }
 
 async fn agent_list_virtual_network_hosts(
@@ -616,6 +763,7 @@ async fn agent_create_virtual_network_host(
     let host = auth
         .create_virtual_network_host(&workspace_id, &policy_actor_name(&subject), request)
         .await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "host": host })))
 }
 
@@ -650,7 +798,69 @@ async fn agent_delete_virtual_network_host(
         .await?;
     auth.delete_virtual_network_host(&workspace_id, &host.hostname)
         .await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "deleted": true, "hostname": host.hostname })))
+}
+
+async fn publish_virtual_network_hosts(
+    state: &AppState,
+    auth: &AuthStore,
+    workspace_id: &str,
+) -> Result<(), ApiFailure> {
+    let snapshot = virtual_network_hosts_snapshot(auth, workspace_id).await?;
+    state
+        .broadcast_proxy_message(
+            workspace_id,
+            &treer_protocol::ProxyMessage::VirtualNetworkHosts { snapshot },
+        )
+        .await;
+    Ok(())
+}
+
+pub fn spawn_virtual_network_host_refresh(state: AppState, auth: AuthStore) {
+    tokio::spawn(async move {
+        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(30));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        refresh.tick().await;
+        loop {
+            refresh.tick().await;
+            if let Err(error) = auth.refresh_virtual_network_hosts().await {
+                tracing::warn!(%error, "failed to reload virtual hosts");
+                continue;
+            }
+            let Ok(workspaces) = auth.all_workspaces().await else {
+                tracing::warn!("failed to list workspaces for virtual-host refresh");
+                continue;
+            };
+            for workspace in workspaces {
+                match virtual_network_hosts_snapshot(&auth, &workspace.workspace_id).await {
+                    Ok(snapshot) => {
+                        state
+                            .broadcast_proxy_message(
+                                &workspace.workspace_id,
+                                &treer_protocol::ProxyMessage::VirtualNetworkHosts { snapshot },
+                            )
+                            .await;
+                    }
+                    Err(error) => {
+                        let (_, error) = error.into_parts();
+                        tracing::warn!(
+                            workspace = %workspace.workspace_id,
+                            message = %error.message,
+                            "failed to refresh virtual hosts"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+pub(crate) async fn virtual_network_hosts_snapshot(
+    auth: &AuthStore,
+    workspace_id: &str,
+) -> Result<VirtualNetworkHostsSnapshot, auth::AuthFailure> {
+    auth.virtual_network_hosts_snapshot(workspace_id).await
 }
 
 async fn agent_policy_subject(
@@ -798,6 +1008,7 @@ async fn delete_server(
     auth.delete_machine(&workspace_id, &server_id, &agent_ids)
         .await?;
     let (server, deleted_agents) = state.delete_server(&workspace_id, &server_id).await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({
         "server": server,
         "deleted_agents": deleted_agents,
@@ -1308,6 +1519,13 @@ impl ApiFailure {
             error: ProtocolError::new(code, message),
         }
     }
+
+    fn bad_gateway(code: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            error: ProtocolError::new(code, message),
+        }
+    }
 }
 
 impl From<ProtocolError> for ApiFailure {
@@ -1445,6 +1663,7 @@ mod tests {
         let script = render_install_script(&config.public_url);
         assert!(script.starts_with("#!/bin/sh\nset -eu\n"));
         assert!(script.contains("platform=linux-aarch64"));
+        assert!(script.contains("transparent agent networking requires unshare(1)"));
         assert!(script.contains(".local/libexec/treer"));
         assert!(script.contains("treer-agent-host"));
         assert!(script.contains(

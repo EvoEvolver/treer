@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         state.ensure_workspace_info(workspace).await;
     }
     let policy = policy::PolicyEngine::allow_all();
+    api::spawn_virtual_network_host_refresh(state.clone(), auth.clone());
     let app = api::router(state, bootstrap, auth, policy).layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await

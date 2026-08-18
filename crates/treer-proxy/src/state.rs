@@ -4,16 +4,21 @@ use std::time::Duration;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use treer_protocol::{
     AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult,
-    NetworkBinaryFrame, NetworkBinaryKind, ProtocolError, ProxyMessage, ServerInfo, ServerStatus,
-    TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage, TransferBinaryFrame,
-    TransferServerMessage, TransferStats, WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
+    NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest, ProtocolError, ProxyMessage,
+    ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage,
+    TransferBinaryFrame, TransferServerMessage, TransferStats, WorkspaceEvent, WorkspaceInfo,
+    WorkspaceSnapshot,
 };
 use uuid::Uuid;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
+const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+const NETWORK_INITIAL_WINDOW: usize = 256 * 1024;
+const NETWORK_MAX_CHUNK: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketFrame {
@@ -53,6 +58,7 @@ struct Inner {
     terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
     transfer_sessions: Mutex<HashMap<String, TransferSession>>,
     network_streams: Mutex<HashMap<NetworkStreamKey, NetworkStreamLeg>>,
+    browser_network_streams: Mutex<HashMap<NetworkStreamKey, mpsc::Sender<NetworkBinaryFrame>>>,
     events: broadcast::Sender<WorkspaceEvent>,
 }
 
@@ -144,6 +150,7 @@ impl AppState {
                 terminal_sessions: Mutex::new(HashMap::new()),
                 transfer_sessions: Mutex::new(HashMap::new()),
                 network_streams: Mutex::new(HashMap::new()),
+                browser_network_streams: Mutex::new(HashMap::new()),
                 events,
             }),
         }
@@ -151,6 +158,24 @@ impl AppState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkspaceEvent> {
         self.inner.events.subscribe()
+    }
+
+    pub async fn broadcast_proxy_message(&self, workspace_id: &str, message: &ProxyMessage) {
+        let Ok(encoded) = serde_json::to_string(message) else {
+            return;
+        };
+        let outgoing = self
+            .inner
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter(|(key, _)| key.workspace_id == workspace_id)
+            .map(|(_, connection)| connection.outgoing.clone())
+            .collect::<Vec<_>>();
+        for connection in outgoing {
+            let _ = connection.send(SocketFrame::Text(encoded.clone()));
+        }
     }
 
     pub async fn ensure_workspace(&self, workspace_id: &str, name: &str) -> WorkspaceInfo {
@@ -1384,6 +1409,184 @@ impl AppState {
             .await;
     }
 
+    pub async fn open_browser_network_stream(
+        &self,
+        workspace_id: &str,
+        destination_server_id: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<DuplexStream, ProtocolError> {
+        let outgoing = self
+            .server_outgoing(workspace_id, destination_server_id)
+            .await
+            .ok_or_else(|| ProtocolError::new("server_offline", destination_server_id))?;
+        let key = NetworkStreamKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: destination_server_id.to_string(),
+            stream_id: format!("browser_{}", Uuid::new_v4().simple()),
+        };
+        let (incoming_tx, mut incoming_rx) = mpsc::channel(32);
+        self.inner
+            .browser_network_streams
+            .lock()
+            .await
+            .insert(key.clone(), incoming_tx);
+
+        let request = NetworkConnectRequest {
+            source_server_id: "browser".to_string(),
+            source_agent_id: None,
+            host: host.to_string(),
+            port,
+        };
+        let frame = NetworkBinaryFrame {
+            kind: NetworkBinaryKind::Open,
+            stream_id: key.stream_id.clone(),
+            payload: serde_json::to_vec(&request).map_err(|error| {
+                ProtocolError::new(
+                    "encode_error",
+                    format!("failed to encode network request: {error}"),
+                )
+            })?,
+        };
+        if outgoing.send(SocketFrame::Binary(frame.encode()?)).is_err() {
+            self.inner.browser_network_streams.lock().await.remove(&key);
+            return Err(ProtocolError::new("server_offline", destination_server_id));
+        }
+
+        let opened = tokio::time::timeout(NETWORK_OPEN_TIMEOUT, incoming_rx.recv()).await;
+        match opened {
+            Ok(Some(frame)) if frame.kind == NetworkBinaryKind::Opened => {}
+            Ok(Some(frame)) if frame.kind == NetworkBinaryKind::Reset => {
+                self.inner.browser_network_streams.lock().await.remove(&key);
+                return Err(decode_network_reset(&frame));
+            }
+            Ok(Some(frame)) => {
+                self.inner.browser_network_streams.lock().await.remove(&key);
+                return Err(ProtocolError::new(
+                    "invalid_network_frame",
+                    format!("expected opened frame, received {:?}", frame.kind),
+                ));
+            }
+            Ok(None) => {
+                self.inner.browser_network_streams.lock().await.remove(&key);
+                return Err(ProtocolError::new(
+                    "network_stream_closed",
+                    "network stream closed before it opened",
+                ));
+            }
+            Err(_) => {
+                self.reset_browser_network_stream(
+                    &key,
+                    ProtocolError::new("network_open_timeout", "network connection timed out"),
+                )
+                .await;
+                return Err(ProtocolError::new(
+                    "network_open_timeout",
+                    "network connection timed out",
+                ));
+            }
+        }
+
+        let (client, bridge) = tokio::io::duplex(NETWORK_INITIAL_WINDOW);
+        let state = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = state
+                .bridge_browser_network_stream(&key, bridge, incoming_rx)
+                .await
+            {
+                state.reset_browser_network_stream(&key, error).await;
+            } else {
+                state
+                    .inner
+                    .browser_network_streams
+                    .lock()
+                    .await
+                    .remove(&key);
+            }
+        });
+        Ok(client)
+    }
+
+    async fn bridge_browser_network_stream(
+        &self,
+        key: &NetworkStreamKey,
+        stream: DuplexStream,
+        mut incoming: mpsc::Receiver<NetworkBinaryFrame>,
+    ) -> Result<(), ProtocolError> {
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let mut buffer = vec![0_u8; NETWORK_MAX_CHUNK];
+        let mut send_window = NETWORK_INITIAL_WINDOW;
+        let mut local_closed = false;
+        let mut remote_closed = false;
+        while !local_closed || !remote_closed {
+            tokio::select! {
+                read = reader.read(&mut buffer[..send_window.min(NETWORK_MAX_CHUNK)]), if !local_closed && send_window > 0 => {
+                    let read = read.map_err(|error| ProtocolError::new("network_io_error", error.to_string()))?;
+                    if read == 0 {
+                        local_closed = true;
+                        self.send_browser_network_frame(key, NetworkBinaryKind::HalfClose, Vec::new()).await?;
+                    } else {
+                        send_window -= read;
+                        self.send_browser_network_frame(key, NetworkBinaryKind::Data, buffer[..read].to_vec()).await?;
+                    }
+                }
+                frame = incoming.recv() => {
+                    let frame = frame.ok_or_else(|| ProtocolError::new("network_stream_closed", "network stream receiver closed"))?;
+                    match frame.kind {
+                        NetworkBinaryKind::Data => {
+                            writer.write_all(&frame.payload).await.map_err(|error| ProtocolError::new("network_io_error", error.to_string()))?;
+                            let amount = u32::try_from(frame.payload.len()).unwrap_or(u32::MAX).to_be_bytes().to_vec();
+                            self.send_browser_network_frame(key, NetworkBinaryKind::WindowUpdate, amount).await?;
+                        }
+                        NetworkBinaryKind::WindowUpdate => {
+                            let bytes: [u8; 4] = frame.payload.as_slice().try_into().map_err(|_| ProtocolError::new("invalid_network_frame", "invalid network window update"))?;
+                            send_window = send_window.saturating_add(u32::from_be_bytes(bytes) as usize);
+                        }
+                        NetworkBinaryKind::HalfClose => {
+                            if !remote_closed {
+                                writer.shutdown().await.map_err(|error| ProtocolError::new("network_io_error", error.to_string()))?;
+                                remote_closed = true;
+                            }
+                        }
+                        NetworkBinaryKind::Reset => return Err(decode_network_reset(&frame)),
+                        NetworkBinaryKind::Open | NetworkBinaryKind::Opened => {
+                            return Err(ProtocolError::new("invalid_network_frame", format!("unexpected network stream frame {:?}", frame.kind)));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_browser_network_frame(
+        &self,
+        key: &NetworkStreamKey,
+        kind: NetworkBinaryKind,
+        payload: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        let outgoing = self
+            .server_outgoing(&key.workspace_id, &key.server_id)
+            .await
+            .ok_or_else(|| ProtocolError::new("server_offline", &key.server_id))?;
+        let frame = NetworkBinaryFrame {
+            kind,
+            stream_id: key.stream_id.clone(),
+            payload,
+        };
+        outgoing
+            .send(SocketFrame::Binary(frame.encode()?))
+            .map_err(|_| ProtocolError::new("server_offline", &key.server_id))
+    }
+
+    async fn reset_browser_network_stream(&self, key: &NetworkStreamKey, error: ProtocolError) {
+        self.inner.browser_network_streams.lock().await.remove(key);
+        let payload = serde_json::to_vec(&error).unwrap_or_default();
+        let _ = self
+            .send_browser_network_frame(key, NetworkBinaryKind::Reset, payload)
+            .await;
+    }
+
     pub async fn open_network_stream(
         &self,
         workspace_id: &str,
@@ -1469,6 +1672,23 @@ impl AppState {
             server_id: server_id.to_string(),
             stream_id: frame.stream_id.clone(),
         };
+        let browser = self
+            .inner
+            .browser_network_streams
+            .lock()
+            .await
+            .get(&key)
+            .cloned();
+        if let Some(browser) = browser {
+            if browser.send(frame).await.is_err() {
+                self.inner.browser_network_streams.lock().await.remove(&key);
+                return Err(ProtocolError::new(
+                    "network_stream_closed",
+                    "browser network stream closed",
+                ));
+            }
+            return Ok(());
+        }
         let (peer, remove) = {
             let mut streams = self.inner.network_streams.lock().await;
             let stream = streams
@@ -1507,6 +1727,32 @@ impl AppState {
     }
 
     async fn close_server_network_streams(&self, workspace_id: &str, server_id: &str) {
+        let browser_streams = {
+            let mut streams = self.inner.browser_network_streams.lock().await;
+            let keys = streams
+                .keys()
+                .filter(|key| key.workspace_id == workspace_id && key.server_id == server_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| streams.remove(&key).map(|sender| (key, sender)))
+                .collect::<Vec<_>>()
+        };
+        let browser_payload = serde_json::to_vec(&ProtocolError::new(
+            "server_offline",
+            "agent server disconnected",
+        ))
+        .unwrap_or_default();
+        for (key, sender) in browser_streams {
+            let _ = sender
+                .send(NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Reset,
+                    stream_id: key.stream_id,
+                    payload: browser_payload.clone(),
+                })
+                .await;
+        }
+
         let routes = {
             let mut streams = self.inner.network_streams.lock().await;
             let keys = streams
@@ -1688,6 +1934,11 @@ fn remove_network_stream(
     Some(stream)
 }
 
+fn decode_network_reset(frame: &NetworkBinaryFrame) -> ProtocolError {
+    serde_json::from_slice::<ProtocolError>(&frame.payload)
+        .unwrap_or_else(|_| ProtocolError::new("network_stream_reset", "network stream was reset"))
+}
+
 fn send_proxy_message(
     outgoing: &mpsc::UnboundedSender<SocketFrame>,
     message: &ProxyMessage,
@@ -1766,6 +2017,39 @@ mod tests {
             connected_at: now,
             last_seen_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn proxy_messages_broadcast_only_to_their_workspace() {
+        let state = AppState::new();
+        let (alpha_tx, mut alpha_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(test_server(), Uuid::new_v4(), alpha_tx)
+            .await
+            .expect("register alpha controller");
+        let mut beta = test_server();
+        beta.workspace_id = "beta".to_string();
+        let (beta_tx, mut beta_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(beta, Uuid::new_v4(), beta_tx)
+            .await
+            .expect("register beta controller");
+        let message = ProxyMessage::VirtualNetworkHosts {
+            snapshot: treer_protocol::VirtualNetworkHostsSnapshot {
+                workspace_id: "alpha".to_string(),
+                revision: 4,
+                hosts: Vec::new(),
+            },
+        };
+
+        state.broadcast_proxy_message("alpha", &message).await;
+
+        let received: ProxyMessage = serde_json::from_str(&expect_text(
+            alpha_rx.recv().await.expect("alpha virtual-host snapshot"),
+        ))
+        .expect("decode virtual-host snapshot");
+        assert_eq!(received, message);
+        assert!(beta_rx.try_recv().is_err());
     }
 
     fn test_agent(agent_id: &str, name: &str) -> AgentInfo {

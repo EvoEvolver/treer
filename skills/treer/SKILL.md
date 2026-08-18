@@ -18,6 +18,11 @@ test -n "${TREER_AGENT_ID:-}" && test -n "${TREER_AGENT_SERVER_URL:-}"
 treer whoami
 ```
 
+`treer whoami` returns the current workspace plus the complete `agent` and
+`machine` records. Treat those records as the caller identity; do not infer the
+caller from names. `treer discover` also includes the same two records under its
+top-level `self` field alongside all workspace machines and agents.
+
 If the environment check fails, do not guess a proxy or local server address.
 Explain that the process is not running inside a managed Treer agent. A human
 may still use `treer --url <agent-server-url> ...` explicitly outside an agent.
@@ -58,6 +63,7 @@ returns `agent_ambiguous`; use the exact agent ID.
 Discover current topology before choosing a peer or server:
 
 ```bash
+treer whoami
 treer discover
 treer agent list
 treer agent get self
@@ -77,8 +83,9 @@ Names are workspace-visible labels; agent IDs and server IDs do not change.
 ## Manage virtual hosts
 
 Virtual hosts are workspace service-discovery records. They let every process
-using `TREER_NETWORK_PROXY` reach a service by a stable hostname without
-publishing the destination machine's port.
+inside a managed Linux agent reach a service by a stable hostname without
+publishing the destination machine's port. Records are exact; Treer does not
+derive virtual hosts from machine names or reserve a hostname suffix.
 
 Inspect existing records before changing them:
 
@@ -105,7 +112,8 @@ treer virtual-host delete api.internal
 
 These commands operate only in `TREER_WORKSPACE_ID`. The Proxy evaluates them
 as separate `virtual_host.list`, `virtual_host.create`, and
-`virtual_host.delete` policy actions.
+`virtual_host.delete` policy actions. Changes take effect immediately for online
+Controllers; reconnect and periodic full snapshots provide recovery.
 
 ## Access another workspace machine
 
