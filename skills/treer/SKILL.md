@@ -33,6 +33,7 @@ The installed binary is the authority for syntax:
 treer --help
 treer agent --help
 treer machine --help
+treer service --help
 treer virtual-host --help
 treer ssh --help
 treer scp --help
@@ -80,12 +81,37 @@ treer machine rename self build-machine
 
 Names are workspace-visible labels; agent IDs and server IDs do not change.
 
-## Manage virtual hosts
+## Manage machine services and virtual hosts
 
-Virtual hosts are workspace service-discovery records. They let every process
-inside a managed Linux agent reach a service by a stable hostname without
+Machine services are durable records for long-running processes reachable from
+a machine's host network. They outlive the managed Agent that registers or
+maintains them. A server started directly inside a Linux managed Agent remains
+in that Agent's private network namespace; run long-lived services through a
+host facility such as systemd or a Docker published port before registering
+them.
+
+Register a service on the current Agent's machine, or select another workspace
+machine explicitly:
+
+```bash
+treer service register api --port 8080 --protocol http
+treer service register git --machine build-machine --port 9418 --protocol tcp
+treer service list
+treer service probe api
+```
+
+Update a destination without changing its virtual hosts. Deleting a service
+also deletes aliases that reference it, but does not stop the external process:
+
+```bash
+treer service update api --port 8081
+treer service delete git
+```
+
+Virtual hosts are aliases for registered services. They let every process
+inside a managed Linux Agent reach a service by a stable hostname without
 publishing the destination machine's port. Records are exact; Treer does not
-derive virtual hosts from machine names or reserve a hostname suffix.
+derive aliases from machine names or reserve a hostname suffix.
 
 Inspect existing records before changing them:
 
@@ -93,27 +119,22 @@ Inspect existing records before changing them:
 treer virtual-host list
 ```
 
-Add a record using a machine ID or unique machine name. The target host is
-resolved from that machine, and omitting the target port preserves the port
-requested by the client:
+Add a record using a service ID or unique service name:
 
 ```bash
-treer virtual-host add api.internal build-machine --target-port 8080
-treer virtual-host add git.internal build-machine \
-  --target-host 127.0.0.1 --target-port 3000
+treer virtual-host add api.internal api
+treer virtual-host add git.internal git
 ```
 
-Delete only the named discovery record; this does not stop the destination
-service or remove its machine:
+Delete only the named alias; this does not delete or stop its service:
 
 ```bash
 treer virtual-host delete api.internal
 ```
 
-These commands operate only in `TREER_WORKSPACE_ID`. The Proxy evaluates them
-as separate `virtual_host.list`, `virtual_host.create`, and
-`virtual_host.delete` policy actions. Changes take effect immediately for online
-Controllers; reconnect and periodic full snapshots provide recovery.
+These commands operate only in `TREER_WORKSPACE_ID`. Service and virtual-host
+operations have separate policy actions. Changes take effect immediately for
+online Controllers; reconnect and periodic full snapshots provide recovery.
 
 ## Access another workspace machine
 

@@ -17,7 +17,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentServerSnapshot, ApiError,
-    CreateVirtualNetworkHostRequest, ProtocolError, ServerInfo, VirtualNetworkHost, WorkspaceInfo,
+    CreateMachineServiceRequest, CreateVirtualNetworkHostRequest, MachineService,
+    MachineServiceProtocol, ProtocolError, ServerInfo, UpdateMachineServiceRequest,
+    VirtualNetworkHost, WorkspaceInfo,
 };
 use url::Url;
 use uuid::Uuid;
@@ -419,22 +421,46 @@ impl AuthStore {
         .execute(&self.pool)
         .await?;
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS virtual_network_hosts (\
+            "CREATE TABLE IF NOT EXISTS machine_services (\
+             service_id TEXT PRIMARY KEY, \
              workspace_id TEXT NOT NULL, \
-             hostname TEXT NOT NULL COLLATE NOCASE, \
-             destination_server_id TEXT NOT NULL, \
+             name TEXT NOT NULL COLLATE NOCASE, \
+             server_id TEXT NOT NULL, \
              target_host TEXT NOT NULL, \
-             target_port INTEGER, \
+             target_port INTEGER NOT NULL, \
+             protocol TEXT NOT NULL, \
              created_at TEXT NOT NULL, \
              created_by TEXT NOT NULL, \
-             PRIMARY KEY(workspace_id, hostname), \
+             updated_at TEXT NOT NULL, \
+             updated_by TEXT NOT NULL, \
+             UNIQUE(workspace_id, name), \
              FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE)",
         )
         .execute(&self.pool)
         .await?;
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS virtual_network_hosts_destination \
-             ON virtual_network_hosts(workspace_id, destination_server_id)",
+            "CREATE INDEX IF NOT EXISTS machine_services_server \
+             ON machine_services(workspace_id, server_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS virtual_network_hosts (\
+             workspace_id TEXT NOT NULL, \
+             hostname TEXT NOT NULL COLLATE NOCASE, \
+             service_id TEXT NOT NULL, \
+             created_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL, \
+             PRIMARY KEY(workspace_id, hostname), \
+             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE, \
+             FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        self.migrate_virtual_network_hosts_to_services().await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS virtual_network_hosts_service \
+             ON virtual_network_hosts(workspace_id, service_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -524,6 +550,88 @@ impl AuthStore {
             .execute(&self.pool)
             .await?;
         }
+        Ok(())
+    }
+
+    async fn migrate_virtual_network_hosts_to_services(&self) -> anyhow::Result<()> {
+        let columns = sqlx::query("PRAGMA table_info(virtual_network_hosts)")
+            .fetch_all(&self.pool)
+            .await?;
+        if columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "service_id")
+        {
+            return Ok(());
+        }
+
+        let rows = sqlx::query(
+            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
+             created_at, created_by FROM virtual_network_hosts",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DROP TABLE IF EXISTS virtual_network_hosts_v2")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "CREATE TABLE virtual_network_hosts_v2 (\
+             workspace_id TEXT NOT NULL, \
+             hostname TEXT NOT NULL COLLATE NOCASE, \
+             service_id TEXT NOT NULL, \
+             created_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL, \
+             PRIMARY KEY(workspace_id, hostname), \
+             FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE, \
+             FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE)",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        for row in rows {
+            let service_id = format!("svc_{}", Uuid::new_v4().simple());
+            let workspace_id: String = row.get("workspace_id");
+            let hostname: String = row.get("hostname");
+            let created_at: String = row.get("created_at");
+            let created_by: String = row.get("created_by");
+            let target_port = row.get::<Option<i64>, _>("target_port").unwrap_or(80);
+            sqlx::query(
+                "INSERT INTO machine_services(\
+                 service_id, workspace_id, name, server_id, target_host, target_port, protocol, \
+                 created_at, created_by, updated_at, updated_by) \
+                 VALUES(?, ?, ?, ?, ?, ?, 'http', ?, ?, ?, ?)",
+            )
+            .bind(&service_id)
+            .bind(&workspace_id)
+            .bind(&hostname)
+            .bind(row.get::<String, _>("destination_server_id"))
+            .bind(row.get::<String, _>("target_host"))
+            .bind(target_port)
+            .bind(&created_at)
+            .bind(&created_by)
+            .bind(&created_at)
+            .bind(&created_by)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO virtual_network_hosts_v2(\
+                 workspace_id, hostname, service_id, created_at, created_by) \
+                 VALUES(?, ?, ?, ?, ?)",
+            )
+            .bind(workspace_id)
+            .bind(hostname)
+            .bind(service_id)
+            .bind(created_at)
+            .bind(created_by)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query("DROP TABLE virtual_network_hosts")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("ALTER TABLE virtual_network_hosts_v2 RENAME TO virtual_network_hosts")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -789,6 +897,212 @@ impl AuthStore {
         })
     }
 
+    pub async fn list_machine_services(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<MachineService>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
+             protocol, created_at, created_by, updated_at, updated_by \
+             FROM machine_services WHERE workspace_id = ? \
+             ORDER BY name COLLATE NOCASE, service_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(machine_service_from_row).collect()
+    }
+
+    pub async fn resolve_machine_service(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<MachineService, AuthFailure> {
+        let row = sqlx::query(
+            "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
+             protocol, created_at, created_by, updated_at, updated_by \
+             FROM machine_services WHERE workspace_id = ? AND service_id = ?",
+        )
+        .bind(workspace_id)
+        .bind(target)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let row = match row {
+            Some(row) => row,
+            None => sqlx::query(
+                "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
+                 protocol, created_at, created_by, updated_at, updated_by \
+                 FROM machine_services WHERE workspace_id = ? AND name = ? COLLATE NOCASE",
+            )
+            .bind(workspace_id)
+            .bind(target.trim())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?
+            .ok_or_else(|| {
+                AuthFailure::not_found("service_not_found", "machine service does not exist")
+            })?,
+        };
+        machine_service_from_row(row)
+    }
+
+    pub async fn create_machine_service(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        request: CreateMachineServiceRequest,
+    ) -> Result<MachineService, AuthFailure> {
+        let name = validate_resource_name(&request.name, "service")?;
+        let target_host = validate_service_target_host(&request.target_host)?;
+        if request.target_port == 0 {
+            return Err(AuthFailure::bad_request(
+                "invalid_service",
+                "target_port must be between 1 and 65535",
+            ));
+        }
+        let now = Utc::now();
+        let service = MachineService {
+            service_id: format!("svc_{}", Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            name,
+            server_id: request.server_id,
+            target_host,
+            target_port: request.target_port,
+            protocol: request.protocol,
+            created_at: now,
+            created_by: actor.to_string(),
+            updated_at: now,
+            updated_by: actor.to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO machine_services(\
+             service_id, workspace_id, name, server_id, target_host, target_port, protocol, \
+             created_at, created_by, updated_at, updated_by) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&service.service_id)
+        .bind(&service.workspace_id)
+        .bind(&service.name)
+        .bind(&service.server_id)
+        .bind(&service.target_host)
+        .bind(i64::from(service.target_port))
+        .bind(machine_service_protocol_str(service.protocol))
+        .bind(service.created_at.to_rfc3339())
+        .bind(&service.created_by)
+        .bind(service.updated_at.to_rfc3339())
+        .bind(&service.updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict("service_exists", "service name already exists")
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
+        Ok(service)
+    }
+
+    pub async fn update_machine_service(
+        &self,
+        workspace_id: &str,
+        target: &str,
+        actor: &str,
+        request: UpdateMachineServiceRequest,
+    ) -> Result<MachineService, AuthFailure> {
+        let _update = self.virtual_hosts_update.lock().await;
+        let current = self.resolve_machine_service(workspace_id, target).await?;
+        let service = MachineService {
+            name: request
+                .name
+                .as_deref()
+                .map(|name| validate_resource_name(name, "service"))
+                .transpose()?
+                .unwrap_or(current.name),
+            server_id: request.server_id.unwrap_or(current.server_id),
+            target_host: request
+                .target_host
+                .as_deref()
+                .map(validate_service_target_host)
+                .transpose()?
+                .unwrap_or(current.target_host),
+            target_port: request.target_port.unwrap_or(current.target_port),
+            protocol: request.protocol.unwrap_or(current.protocol),
+            updated_at: Utc::now(),
+            updated_by: actor.to_string(),
+            ..current
+        };
+        if service.target_port == 0 {
+            return Err(AuthFailure::bad_request(
+                "invalid_service",
+                "target_port must be between 1 and 65535",
+            ));
+        }
+        sqlx::query(
+            "UPDATE machine_services SET name = ?, server_id = ?, target_host = ?, \
+             target_port = ?, protocol = ?, updated_at = ?, updated_by = ? \
+             WHERE workspace_id = ? AND service_id = ?",
+        )
+        .bind(&service.name)
+        .bind(&service.server_id)
+        .bind(&service.target_host)
+        .bind(i64::from(service.target_port))
+        .bind(machine_service_protocol_str(service.protocol))
+        .bind(service.updated_at.to_rfc3339())
+        .bind(&service.updated_by)
+        .bind(workspace_id)
+        .bind(&service.service_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict("service_exists", "service name already exists")
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
+        if let Some(hosts) = self.virtual_hosts.write().await.get_mut(workspace_id) {
+            for host in hosts
+                .values_mut()
+                .filter(|host| host.service_id == service.service_id)
+            {
+                host.service_protocol = service.protocol;
+                host.destination_server_id.clone_from(&service.server_id);
+                host.target_host.clone_from(&service.target_host);
+                host.target_port = Some(service.target_port);
+            }
+        }
+        self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        Ok(service)
+    }
+
+    pub async fn delete_machine_service(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<MachineService, AuthFailure> {
+        let _update = self.virtual_hosts_update.lock().await;
+        let service = self.resolve_machine_service(workspace_id, target).await?;
+        sqlx::query("DELETE FROM machine_services WHERE workspace_id = ? AND service_id = ?")
+            .bind(workspace_id)
+            .bind(&service.service_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        if let Some(hosts) = self.virtual_hosts.write().await.get_mut(workspace_id) {
+            hosts.retain(|_, host| host.service_id != service.service_id);
+        }
+        self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        Ok(service)
+    }
+
     pub async fn list_virtual_network_hosts(
         &self,
         workspace_id: &str,
@@ -830,38 +1144,27 @@ impl AuthStore {
     ) -> Result<VirtualNetworkHost, AuthFailure> {
         let _update = self.virtual_hosts_update.lock().await;
         let hostname = normalize_virtual_hostname(&request.hostname)?;
-        let target_host = request.target_host.trim();
-        if target_host.is_empty() || target_host.len() > 253 {
-            return Err(AuthFailure::bad_request(
-                "invalid_virtual_host",
-                "target_host must be a non-empty hostname or address",
-            ));
-        }
-        if request.target_port == Some(0) {
-            return Err(AuthFailure::bad_request(
-                "invalid_virtual_host",
-                "target_port must be between 1 and 65535",
-            ));
-        }
+        let service = self
+            .resolve_machine_service(workspace_id, &request.service_id)
+            .await?;
         let record = VirtualNetworkHost {
             workspace_id: workspace_id.to_string(),
             hostname,
-            destination_server_id: request.destination_server_id,
-            target_host: target_host.to_string(),
-            target_port: request.target_port,
+            service_id: service.service_id,
+            service_protocol: service.protocol,
+            destination_server_id: service.server_id,
+            target_host: service.target_host,
+            target_port: Some(service.target_port),
             created_at: Utc::now(),
             created_by: username.to_string(),
         };
         let result = sqlx::query(
             "INSERT INTO virtual_network_hosts(\
-             workspace_id, hostname, destination_server_id, target_host, target_port, \
-             created_at, created_by) VALUES(?, ?, ?, ?, ?, ?, ?)",
+             workspace_id, hostname, service_id, created_at, created_by) VALUES(?, ?, ?, ?, ?)",
         )
         .bind(&record.workspace_id)
         .bind(&record.hostname)
-        .bind(&record.destination_server_id)
-        .bind(&record.target_host)
-        .bind(record.target_port.map(i64::from))
+        .bind(&record.service_id)
         .bind(record.created_at.to_rfc3339())
         .bind(&record.created_by)
         .execute(&self.pool)
@@ -922,8 +1225,9 @@ impl AuthStore {
     pub async fn refresh_virtual_network_hosts(&self) -> anyhow::Result<()> {
         let _update = self.virtual_hosts_update.lock().await;
         let rows = sqlx::query(
-            "SELECT workspace_id, hostname, destination_server_id, target_host, target_port, \
-             created_at, created_by FROM virtual_network_hosts",
+            "SELECT v.workspace_id, v.hostname, v.service_id, s.protocol AS service_protocol, \
+             s.server_id AS destination_server_id, s.target_host, s.target_port, v.created_at, v.created_by \
+             FROM virtual_network_hosts v JOIN machine_services s ON s.service_id = v.service_id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1162,14 +1466,12 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
-        sqlx::query(
-            "DELETE FROM virtual_network_hosts WHERE workspace_id = ? AND destination_server_id = ?",
-        )
-        .bind(workspace_id)
-        .bind(server_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM machine_services WHERE workspace_id = ? AND server_id = ?")
+            .bind(workspace_id)
+            .bind(server_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
         for agent_id in agent_ids {
             sqlx::query("DELETE FROM agent_names WHERE agent_id = ? AND workspace_id = ?")
                 .bind(agent_id)
@@ -2195,6 +2497,80 @@ fn workspace_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceInfo, Aut
     })
 }
 
+fn machine_service_from_row(row: sqlx::sqlite::SqliteRow) -> Result<MachineService, AuthFailure> {
+    let target_port = u16::try_from(row.get::<i64, _>("target_port")).map_err(|error| {
+        AuthFailure::internal(
+            "database_error",
+            format!("machine service has invalid target_port: {error}"),
+        )
+    })?;
+    if target_port == 0 {
+        return Err(AuthFailure::internal(
+            "database_error",
+            "machine service target_port is zero".to_string(),
+        ));
+    }
+    let protocol = match row.get::<String, _>("protocol").as_str() {
+        "tcp" => MachineServiceProtocol::Tcp,
+        "http" => MachineServiceProtocol::Http,
+        value => {
+            return Err(AuthFailure::internal(
+                "database_error",
+                format!("machine service has invalid protocol {value}"),
+            ))
+        }
+    };
+    Ok(MachineService {
+        service_id: row.get("service_id"),
+        workspace_id: row.get("workspace_id"),
+        name: row.get("name"),
+        server_id: row.get("server_id"),
+        target_host: row.get("target_host"),
+        target_port,
+        protocol,
+        created_at: parse_database_timestamp(&row, "created_at", "machine service")?,
+        created_by: row.get("created_by"),
+        updated_at: parse_database_timestamp(&row, "updated_at", "machine service")?,
+        updated_by: row.get("updated_by"),
+    })
+}
+
+fn parse_database_timestamp(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &str,
+    resource: &str,
+) -> Result<chrono::DateTime<Utc>, AuthFailure> {
+    row.get::<String, _>(column).parse().map_err(|error| {
+        AuthFailure::internal(
+            "database_error",
+            format!("{resource} has invalid {column}: {error}"),
+        )
+    })
+}
+
+fn validate_service_target_host(value: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 253
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_service",
+            "target_host must be a non-empty hostname or address",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+const fn machine_service_protocol_str(protocol: MachineServiceProtocol) -> &'static str {
+    match protocol {
+        MachineServiceProtocol::Tcp => "tcp",
+        MachineServiceProtocol::Http => "http",
+    }
+}
+
 pub(crate) fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFailure> {
     let hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
     let labels_valid = !hostname.is_empty()
@@ -2242,6 +2618,17 @@ fn virtual_network_host_from_row(
     Ok(VirtualNetworkHost {
         workspace_id: row.get("workspace_id"),
         hostname: row.get("hostname"),
+        service_id: row.get("service_id"),
+        service_protocol: match row.get::<String, _>("service_protocol").as_str() {
+            "tcp" => MachineServiceProtocol::Tcp,
+            "http" => MachineServiceProtocol::Http,
+            value => {
+                return Err(AuthFailure::internal(
+                    "database_error",
+                    format!("virtual network host has invalid service protocol {value}"),
+                ))
+            }
+        },
         destination_server_id: row.get("destination_server_id"),
         target_host: row.get("target_host"),
         target_port,
@@ -2349,15 +2736,27 @@ mod tests {
             .virtual_network_hosts_snapshot("default")
             .await
             .expect("initial virtual-host snapshot");
+        let service = store
+            .create_machine_service(
+                "default",
+                "admin",
+                CreateMachineServiceRequest {
+                    name: "development API".to_string(),
+                    server_id: "destination".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 8080,
+                    protocol: MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create machine service");
         let record = store
             .create_virtual_network_host(
                 "default",
                 "admin",
                 CreateVirtualNetworkHostRequest {
                     hostname: "API.Dev.Example.".to_string(),
-                    destination_server_id: "destination".to_string(),
-                    target_host: "127.0.0.1".to_string(),
-                    target_port: Some(8080),
+                    service_id: service.service_id.clone(),
                 },
             )
             .await
@@ -2369,6 +2768,9 @@ mod tests {
         assert!(created.revision > initial.revision);
         assert_eq!(created.hosts, std::slice::from_ref(&record));
         assert_eq!(record.hostname, "api.dev.example");
+        assert_eq!(record.service_id, service.service_id);
+        assert_eq!(record.destination_server_id, "destination");
+        assert_eq!(record.target_port, Some(8080));
         assert_eq!(
             store
                 .resolve_virtual_network_host("default", "API.DEV.EXAMPLE")
@@ -2382,9 +2784,7 @@ mod tests {
                 "admin",
                 CreateVirtualNetworkHostRequest {
                     hostname: "api.dev.example".to_string(),
-                    destination_server_id: "destination".to_string(),
-                    target_host: "localhost".to_string(),
-                    target_port: None,
+                    service_id: service.service_id.clone(),
                 },
             )
             .await
@@ -2395,9 +2795,7 @@ mod tests {
                 "admin",
                 CreateVirtualNetworkHostRequest {
                     hostname: "host.via.machine.treer".to_string(),
-                    destination_server_id: "destination".to_string(),
-                    target_host: "localhost".to_string(),
-                    target_port: None,
+                    service_id: service.service_id.clone(),
                 },
             )
             .await
@@ -2408,9 +2806,7 @@ mod tests {
                 "admin",
                 CreateVirtualNetworkHostRequest {
                     hostname: "git.via.example".to_string(),
-                    destination_server_id: "destination".to_string(),
-                    target_host: "localhost".to_string(),
-                    target_port: None,
+                    service_id: service.service_id.clone(),
                 },
             )
             .await
@@ -2426,6 +2822,160 @@ mod tests {
             .expect("deleted virtual-host snapshot");
         assert!(deleted.revision > created.revision);
         assert!(deleted.hosts.is_empty());
+        assert!(store
+            .list_machine_services("default")
+            .await
+            .expect("list machine services")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn machine_service_updates_refresh_aliases_and_delete_cascades() {
+        let store = AuthStore::in_memory("owner-password").await;
+        let service = store
+            .create_machine_service(
+                "default",
+                "admin",
+                CreateMachineServiceRequest {
+                    name: "web".to_string(),
+                    server_id: "machine-a".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 3000,
+                    protocol: MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create service");
+        store
+            .create_virtual_network_host(
+                "default",
+                "admin",
+                CreateVirtualNetworkHostRequest {
+                    hostname: "web.internal".to_string(),
+                    service_id: service.service_id.clone(),
+                },
+            )
+            .await
+            .expect("create alias");
+
+        let updated = store
+            .update_machine_service(
+                "default",
+                "web",
+                "admin",
+                UpdateMachineServiceRequest {
+                    target_port: Some(4000),
+                    ..UpdateMachineServiceRequest::default()
+                },
+            )
+            .await
+            .expect("update service");
+        assert_eq!(updated.target_port, 4000);
+        let alias = store
+            .resolve_virtual_network_host("default", "web.internal")
+            .await
+            .expect("resolve alias")
+            .expect("alias exists");
+        assert_eq!(alias.target_port, Some(4000));
+
+        store
+            .delete_machine_service("default", &service.service_id)
+            .await
+            .expect("delete service");
+        assert!(store
+            .resolve_virtual_network_host("default", "web.internal")
+            .await
+            .expect("resolve deleted alias")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_virtual_hosts_migrate_to_machine_services() {
+        let path = std::env::temp_dir().join(format!(
+            "treer-service-migration-{}.sqlite",
+            Uuid::new_v4().simple()
+        ));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .expect("open legacy database");
+        sqlx::query(
+            "CREATE TABLE organizations(organization_id TEXT PRIMARY KEY, name TEXT NOT NULL, \
+             created_at TEXT NOT NULL, created_by TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create organizations");
+        sqlx::query(
+            "INSERT INTO organizations VALUES('org_default', 'Default organization', \
+             '2026-08-18T00:00:00Z', 'admin')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert organization");
+        sqlx::query(
+            "CREATE TABLE workspaces(workspace_id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, \
+             name TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create workspaces");
+        sqlx::query(
+            "INSERT INTO workspaces VALUES('default', 'org_default', 'Default', \
+             '2026-08-18T00:00:00Z', 'admin')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "CREATE TABLE virtual_network_hosts(\
+             workspace_id TEXT NOT NULL, hostname TEXT NOT NULL, destination_server_id TEXT NOT NULL, \
+             target_host TEXT NOT NULL, target_port INTEGER, created_at TEXT NOT NULL, \
+             created_by TEXT NOT NULL, PRIMARY KEY(workspace_id, hostname))",
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy virtual hosts");
+        sqlx::query(
+            "INSERT INTO virtual_network_hosts VALUES(\
+             'default', 'legacy.internal', 'machine-a', '127.0.0.1', 9000, \
+             '2026-08-18T00:00:00Z', 'admin')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert legacy virtual host");
+        pool.close().await;
+
+        let store = AuthStore::open(
+            &path,
+            "password".to_string(),
+            Url::parse("https://treer.example/").expect("public URL"),
+            true,
+        )
+        .await
+        .expect("migrate legacy database");
+        let services = store
+            .list_machine_services("default")
+            .await
+            .expect("list migrated services");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].server_id, "machine-a");
+        assert_eq!(services[0].target_port, 9000);
+        let alias = store
+            .resolve_virtual_network_host("default", "legacy.internal")
+            .await
+            .expect("resolve migrated alias")
+            .expect("migrated alias");
+        assert_eq!(alias.service_id, services[0].service_id);
+        store.pool.close().await;
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[tokio::test]

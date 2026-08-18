@@ -54,9 +54,22 @@ export interface AdminOrganization {
 
 export interface VirtualNetworkHost {
   hostname: string
+  service_id: string
+  service_protocol: "tcp" | "http"
   destination_server_id: string
   target_host: string
   target_port?: number
+}
+
+export interface MachineService {
+  service_id: string
+  name: string
+  server_id: string
+  target_host: string
+  target_port: number
+  protocol: "tcp" | "http"
+  updated_at: string
+  updated_by: string
 }
 
 export interface ApiErrorBody {

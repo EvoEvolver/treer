@@ -26,9 +26,11 @@ In concrete terms:
    shell agents through the web application or CLI.
 4. Managed agents can discover and coordinate with peers through a stable CLI
    contract rather than knowing machine addresses.
-5. Machines connect outward to the Proxy; local Agent Server, service, and SSH
+5. Agents can register and maintain long-running machine services, then expose
+   stable workspace aliases without making service ports public.
+6. Machines connect outward to the Proxy; local Agent Server, service, and SSH
    ports do not need to be publicly exposed.
-6. The central Proxy is open source and can be privately deployed.
+7. The central Proxy is open source and can be privately deployed.
 
 This is a convenience-first promise with a comprehensible security reason. It
 is not a claim that the current runtime safely hosts mutually untrusted users.

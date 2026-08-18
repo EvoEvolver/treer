@@ -14,8 +14,9 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
-    ApiError, CreateAgentRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
-    PromptAgentRequest, ProtocolError, RenameRequest, TerminalServerMessage, AGENT_ID_HEADER,
+    ApiError, CreateAgentRequest, CreateMachineServiceRequest, CreateVirtualNetworkHostRequest,
+    InputAgentRequest, PromptAgentRequest, ProtocolError, RenameRequest, TerminalServerMessage,
+    UpdateMachineServiceRequest, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -129,6 +130,16 @@ impl LocalApiState {
             .await
     }
 
+    async fn patch_as(
+        &self,
+        suffix: &str,
+        body: &Value,
+        source_agent_id: Option<&str>,
+    ) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::PATCH, suffix, Some(body), source_agent_id)
+            .await
+    }
+
     async fn delete(&self, suffix: &str) -> Result<Value, LocalApiError> {
         self.request(reqwest::Method::DELETE, suffix, None, None)
             .await
@@ -153,6 +164,18 @@ pub fn router(state: LocalApiState) -> Router {
             axum::routing::patch(rename_machine).delete(delete_machine),
         )
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route(
+            "/api/services",
+            get(list_machine_services).post(create_machine_service),
+        )
+        .route(
+            "/api/services/{service_id}",
+            axum::routing::patch(update_machine_service).delete(delete_machine_service),
+        )
+        .route(
+            "/api/services/{service_id}/probe",
+            post(probe_machine_service),
+        )
         .route(
             "/api/virtual-hosts",
             get(list_virtual_network_hosts).post(create_virtual_network_host),
@@ -191,6 +214,83 @@ async fn discovery(State(state): State<LocalApiState>) -> Result<Json<Value>, Lo
 
 async fn list_agents(State(state): State<LocalApiState>) -> Result<Json<Value>, LocalApiError> {
     Ok(Json(state.get("agents").await?))
+}
+
+async fn list_machine_services(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .get_as("services", Some(source_agent_id(&headers)?))
+            .await?,
+    ))
+}
+
+async fn create_machine_service(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateMachineServiceRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .post_as(
+                "services",
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                Some(source_agent_id(&headers)?),
+            )
+            .await?,
+    ))
+}
+
+async fn update_machine_service(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(service_id): Path<String>,
+    Json(request): Json<UpdateMachineServiceRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .patch_as(
+                &format!("services/{service_id}"),
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                Some(source_agent_id(&headers)?),
+            )
+            .await?,
+    ))
+}
+
+async fn delete_machine_service(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(service_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .delete_as(
+                &format!("services/{service_id}"),
+                Some(source_agent_id(&headers)?),
+            )
+            .await?,
+    ))
+}
+
+async fn probe_machine_service(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(service_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .post_as(
+                &format!("services/{service_id}/probe"),
+                &json!({}),
+                Some(source_agent_id(&headers)?),
+            )
+            .await?,
+    ))
 }
 
 async fn list_virtual_network_hosts(

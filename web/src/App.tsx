@@ -21,7 +21,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, websocketUrl, type AdminOrganization, type Agent, type Machine, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, websocketUrl, type AdminOrganization, type Agent, type Machine, type MachineService, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -173,6 +173,8 @@ function WorkspaceApp() {
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
   const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
+  const [createServiceOpen, setCreateServiceOpen] = useState(false)
+  const [editingService, setEditingService] = useState<MachineService | null>(null)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [renameOrganizationOpen, setRenameOrganizationOpen] = useState(false)
@@ -194,10 +196,15 @@ function WorkspaceApp() {
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
   const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
+  const [services, setServices] = useState<MachineService[]>([])
+  const [serviceHealth, setServiceHealth] = useState<Record<string, "healthy" | "unreachable">>({})
   const [virtualHostname, setVirtualHostname] = useState("")
-  const [virtualDestination, setVirtualDestination] = useState("")
-  const [virtualTargetHost, setVirtualTargetHost] = useState("127.0.0.1")
-  const [virtualTargetPort, setVirtualTargetPort] = useState("")
+  const [virtualServiceId, setVirtualServiceId] = useState("")
+  const [serviceName, setServiceName] = useState("")
+  const [serviceServerId, setServiceServerId] = useState("")
+  const [serviceTargetHost, setServiceTargetHost] = useState("127.0.0.1")
+  const [serviceTargetPort, setServiceTargetPort] = useState("")
+  const [serviceProtocol, setServiceProtocol] = useState<"tcp" | "http">("http")
 
   const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : "Something went wrong"), [])
 
@@ -417,27 +424,51 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
-  const loadVirtualHosts = useCallback(async () => {
+  const loadNetwork = useCallback(async () => {
     if (!workspaceId) {
       setVirtualHosts([])
+      setServices([])
       return
     }
-    const data = await api<{ hosts: VirtualNetworkHost[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts`)
-    setVirtualHosts(data.hosts)
+    const [hostData, serviceData] = await Promise.all([
+      api<{ hosts: VirtualNetworkHost[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts`),
+      api<{ services: MachineService[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/services`),
+    ])
+    setVirtualHosts(hostData.hosts)
+    setServices(serviceData.services)
   }, [workspaceId])
 
   useEffect(() => {
-    if (mainView === "network") loadVirtualHosts().catch(showError)
-  }, [mainView, loadVirtualHosts, showError])
+    if (mainView === "network") loadNetwork().catch(showError)
+  }, [mainView, loadNetwork, showError])
 
   function openNetwork() {
     setMainView("network")
   }
 
   function openCreateVirtualHost() {
-    const firstMachine = snapshot?.servers[0]?.server_id ?? ""
-    setVirtualDestination((current) => current || firstMachine)
+    setVirtualServiceId((current) => current || services[0]?.service_id || "")
     setCreateVirtualHostOpen(true)
+  }
+
+  function openCreateService() {
+    setEditingService(null)
+    setServiceName("")
+    setServiceTargetHost("127.0.0.1")
+    setServiceTargetPort("")
+    setServiceProtocol("http")
+    setServiceServerId((current) => current || snapshot?.servers[0]?.server_id || "")
+    setCreateServiceOpen(true)
+  }
+
+  function openEditService(service: MachineService) {
+    setEditingService(service)
+    setServiceName(service.name)
+    setServiceServerId(service.server_id)
+    setServiceTargetHost(service.target_host)
+    setServiceTargetPort(String(service.target_port))
+    setServiceProtocol(service.protocol)
+    setCreateServiceOpen(true)
   }
 
   function openVirtualHost(hostname: string) {
@@ -446,9 +477,50 @@ function WorkspaceApp() {
     window.open(url, "_blank", "noopener,noreferrer")
   }
 
-  async function refreshVirtualHosts() {
+  async function refreshNetwork() {
     try {
-      await loadVirtualHosts()
+      await loadNetwork()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function createService(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId) return
+    try {
+      const servicePath = editingService
+        ? `/api/workspaces/${encodeURIComponent(workspaceId)}/services/${encodeURIComponent(editingService.service_id)}`
+        : `/api/workspaces/${encodeURIComponent(workspaceId)}/services`
+      await api(servicePath, {
+        method: editingService ? "PATCH" : "POST",
+        body: JSON.stringify({
+          name: serviceName,
+          server_id: serviceServerId,
+          target_host: serviceTargetHost,
+          target_port: Number(serviceTargetPort),
+          protocol: serviceProtocol,
+        }),
+      })
+      setServiceName(""); setServiceTargetPort("")
+      await loadNetwork()
+      setCreateServiceOpen(false)
+      setEditingService(null)
+    } catch (reason) { showError(reason) }
+  }
+
+  async function probeService(serviceId: string) {
+    if (!workspaceId) return
+    try {
+      const result = await api<{ health: { healthy: boolean; error?: string } }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/services/${encodeURIComponent(serviceId)}/probe`, { method: "POST", body: "{}" })
+      setServiceHealth((current) => ({ ...current, [serviceId]: result.health.healthy ? "healthy" : "unreachable" }))
+      if (!result.health.healthy) showError(result.health.error || "Service is unreachable")
+    } catch (reason) { showError(reason) }
+  }
+
+  async function deleteService(serviceId: string) {
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/services/${encodeURIComponent(serviceId)}`, { method: "DELETE" })
+      await loadNetwork()
     } catch (reason) { showError(reason) }
   }
 
@@ -460,13 +532,11 @@ function WorkspaceApp() {
         method: "POST",
         body: JSON.stringify({
           hostname: virtualHostname,
-          destination_server_id: virtualDestination,
-          target_host: virtualTargetHost,
-          target_port: virtualTargetPort ? Number(virtualTargetPort) : null,
+          service_id: virtualServiceId,
         }),
       })
-      setVirtualHostname(""); setVirtualTargetPort("")
-      await loadVirtualHosts()
+      setVirtualHostname("")
+      await loadNetwork()
       setCreateVirtualHostOpen(false)
     } catch (reason) { showError(reason) }
   }
@@ -475,7 +545,7 @@ function WorkspaceApp() {
     if (!workspaceId) return
     try {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(hostname)}`, { method: "DELETE" })
-      await loadVirtualHosts()
+      await loadNetwork()
     } catch (reason) { showError(reason) }
   }
 
@@ -551,14 +621,14 @@ function WorkspaceApp() {
             <IconButton label="Reconnect terminal" disabled={!selectedAgent} onClick={() => { setSelectedAgentId(null); requestAnimationFrame(() => setSelectedAgentId(selectedAgent?.agent_id ?? null)) }}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={stopAgent}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
-          </div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshVirtualHosts}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openCreateVirtualHost} disabled={!snapshot?.servers.length}><Plus />Add host</Button></div>}
+          </div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button></div>}
         </header>
         {mainView === "terminal" ? <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className="grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]">
             <div className="flex min-w-0 items-center justify-between gap-4 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><span className="inline-flex shrink-0 items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} /></div>
           </div>
-        </div> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{virtualHosts.length} {virtualHosts.length === 1 ? "host" : "hosts"}</span></div><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="min-w-0 truncate text-left font-mono text-xs font-medium hover:underline" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">{host.target_host}:{host.target_port ?? 80}</span><span className="col-start-1 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="row-span-2 row-start-1 flex items-center justify-end gap-1 sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></div></div>}
+        </div> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
       </section>
     </main>
 
@@ -575,7 +645,9 @@ function WorkspaceApp() {
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createVirtualHostOpen} onOpenChange={setCreateVirtualHostOpen}><DialogContent className="max-w-xl"><form onSubmit={createVirtualHost} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>Add virtual host</DialogTitle><DialogDescription>{workspace?.name ?? "Workspace"}</DialogDescription></DialogHeader><Field label="Virtual hostname"><Input className="font-mono" value={virtualHostname} onChange={(event) => setVirtualHostname(event.target.value)} placeholder="app.internal" required autoFocus /></Field><Field label="Machine"><Select value={virtualDestination} onValueChange={setVirtualDestination} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Target host"><Input className="font-mono" value={virtualTargetHost} onChange={(event) => setVirtualTargetHost(event.target.value)} required /></Field><Field label="HTTP port"><Input type="number" min="1" max="65535" placeholder="80" value={virtualTargetPort} onChange={(event) => setVirtualTargetPort(event.target.value)} /></Field><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setCreateVirtualHostOpen(false)}>Cancel</Button><Button type="submit" disabled={!virtualHostname || !virtualDestination}><Plus />Add host</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createServiceOpen} onOpenChange={(open) => { setCreateServiceOpen(open); if (!open) setEditingService(null) }}><DialogContent className="max-w-xl"><form onSubmit={createService} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>{editingService ? "Edit machine service" : "Register machine service"}</DialogTitle><DialogDescription>{editingService ? "Update the durable service target without changing its virtual hosts." : "Register a long-running service already available from its machine."}</DialogDescription></DialogHeader><Field label="Service name"><Input value={serviceName} onChange={(event) => setServiceName(event.target.value)} placeholder="API server" required autoFocus /></Field><Field label="Machine"><Select value={serviceServerId} onValueChange={setServiceServerId} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Target host"><Input className="font-mono" value={serviceTargetHost} onChange={(event) => setServiceTargetHost(event.target.value)} required /></Field><Field label="Target port"><Input type="number" min="1" max="65535" value={serviceTargetPort} onChange={(event) => setServiceTargetPort(event.target.value)} required /></Field><Field label="Protocol"><Select value={serviceProtocol} onValueChange={(value: "tcp" | "http") => setServiceProtocol(value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="http">HTTP</SelectItem><SelectItem value="tcp">TCP</SelectItem></SelectContent></Select></Field><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setCreateServiceOpen(false)}>Cancel</Button><Button type="submit" disabled={!serviceName || !serviceServerId || !serviceTargetPort}><Server />{editingService ? "Save service" : "Register service"}</Button></DialogFooter></form></DialogContent></Dialog>
+
+    <Dialog open={createVirtualHostOpen} onOpenChange={setCreateVirtualHostOpen}><DialogContent><form onSubmit={createVirtualHost} className="space-y-4"><DialogHeader><DialogTitle>Add virtual host</DialogTitle><DialogDescription>Map a workspace hostname to a registered machine service.</DialogDescription></DialogHeader><Field label="Virtual hostname"><Input className="font-mono" value={virtualHostname} onChange={(event) => setVirtualHostname(event.target.value)} placeholder="app.internal" required autoFocus /></Field><Field label="Service"><Select value={virtualServiceId} onValueChange={setVirtualServiceId} required><SelectTrigger><SelectValue placeholder="Select service" /></SelectTrigger><SelectContent>{services.map((service) => <SelectItem key={service.service_id} value={service.service_id}>{service.name} · {service.target_host}:{service.target_port}</SelectItem>)}</SelectContent></Select></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateVirtualHostOpen(false)}>Cancel</Button><Button type="submit" disabled={!virtualHostname || !virtualServiceId}><Plus />Add host</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 

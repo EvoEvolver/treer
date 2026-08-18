@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -610,6 +611,14 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::ProbeNetwork {
+                host,
+                port,
+                timeout_ms,
+            } => CommandResult::success(
+                command_id.clone(),
+                probe_network(host, port, timeout_ms).await,
+            ),
             AgentCommand::ShutdownMachine => {
                 schedule_machine_shutdown(self.server.workspace_id.clone());
                 CommandResult::success(command_id.clone(), serde_json::json!({ "accepted": true }))
@@ -624,6 +633,25 @@ impl ProxyClient {
             cache.insert(command_id, result.clone());
         }
         result
+    }
+}
+
+async fn probe_network(host: String, port: u16, timeout_ms: u64) -> serde_json::Value {
+    let timeout = Duration::from_millis(timeout_ms.clamp(100, 30_000));
+    match tokio::time::timeout(timeout, TcpStream::connect((host.as_str(), port))).await {
+        Ok(Ok(_)) => serde_json::json!({ "healthy": true, "host": host, "port": port }),
+        Ok(Err(error)) => serde_json::json!({
+            "healthy": false,
+            "host": host,
+            "port": port,
+            "error": error.to_string(),
+        }),
+        Err(_) => serde_json::json!({
+            "healthy": false,
+            "host": host,
+            "port": port,
+            "error": "connection timed out",
+        }),
     }
 }
 
@@ -727,6 +755,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+    use tokio::net::TcpListener;
 
     #[test]
     fn server_advertises_remote_shutdown_support() {
@@ -740,5 +770,18 @@ mod tests {
             server.labels.get("treer.shutdown").map(String::as_str),
             Some("1")
         );
+    }
+
+    #[tokio::test]
+    async fn network_probe_runs_from_the_controller_network() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind service");
+        let port = listener.local_addr().expect("service address").port();
+        let healthy = probe_network(Ipv4Addr::LOCALHOST.to_string(), port, 500).await;
+        assert_eq!(healthy["healthy"], true);
+        drop(listener);
+        let unhealthy = probe_network(Ipv4Addr::LOCALHOST.to_string(), port, 500).await;
+        assert_eq!(unhealthy["healthy"], false);
     }
 }

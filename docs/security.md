@@ -39,6 +39,9 @@ The following statements are grounded in current behavior:
 - Linux Agent DNS resolution uses namespace-private resolver mounts and cannot
   reuse the host `nscd` socket, so virtual-host routing is not bypassed by host
   name-service plugins or cached answers.
+- Registered machine services describe host-network endpoints. Registration,
+  health probing, and routing do not cause Treer to own or sandbox the external
+  service process.
 - The Proxy is open source and can be self-hosted, inspected, and replaced.
 
 These properties support the product phrase: **local custody, scoped

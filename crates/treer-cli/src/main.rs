@@ -13,9 +13,11 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
-    AgentInfo, AgentStatus, CreateAgentRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
-    RenameRequest, ServerInfo, ServerStatus, TerminalClientMessage, TerminalServerMessage,
-    TransferBinaryFrame, TransferServerMessage, TransferStats, WorkspaceSnapshot, AGENT_ID_HEADER,
+    AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
+    CreateVirtualNetworkHostRequest, InputAgentRequest, MachineServiceProtocol, RenameRequest,
+    ServerInfo, ServerStatus, TerminalClientMessage, TerminalServerMessage, TransferBinaryFrame,
+    TransferServerMessage, TransferStats, UpdateMachineServiceRequest, WorkspaceSnapshot,
+    AGENT_ID_HEADER,
 };
 use treer_transfer::TransferReceiver;
 use url::Url;
@@ -62,6 +64,11 @@ enum Command {
     VirtualHost {
         #[command(subcommand)]
         command: VirtualHostCommand,
+    },
+    #[command(about = "Register and maintain long-running machine services")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
     #[command(about = "Show the current managed agent identity")]
     Whoami,
@@ -175,17 +182,61 @@ enum MachineCommand {
 enum VirtualHostCommand {
     #[command(about = "List workspace virtual hosts")]
     List,
-    #[command(about = "Map a virtual hostname to a workspace machine")]
-    Add {
-        hostname: String,
-        machine: String,
+    #[command(about = "Map a virtual hostname to a registered service")]
+    Add { hostname: String, service: String },
+    #[command(about = "Delete a workspace virtual host")]
+    Delete { hostname: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    #[command(about = "List registered machine services")]
+    List,
+    #[command(about = "Register a long-running service")]
+    Register {
+        name: String,
+        #[arg(long)]
+        machine: Option<String>,
         #[arg(long, default_value = "127.0.0.1")]
         target_host: String,
         #[arg(long)]
-        target_port: Option<u16>,
+        port: u16,
+        #[arg(long, value_enum, default_value_t = CliServiceProtocol::Tcp)]
+        protocol: CliServiceProtocol,
     },
-    #[command(about = "Delete a workspace virtual host")]
-    Delete { hostname: String },
+    #[command(about = "Update a registered service")]
+    Update {
+        target: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        machine: Option<String>,
+        #[arg(long)]
+        target_host: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long, value_enum)]
+        protocol: Option<CliServiceProtocol>,
+    },
+    #[command(about = "Probe a service from its machine")]
+    Probe { target: String },
+    #[command(about = "Delete a service and its virtual hosts")]
+    Delete { target: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliServiceProtocol {
+    Tcp,
+    Http,
+}
+
+impl From<CliServiceProtocol> for MachineServiceProtocol {
+    fn from(value: CliServiceProtocol) -> Self {
+        match value {
+            CliServiceProtocol::Tcp => Self::Tcp,
+            CliServiceProtocol::Http => Self::Http,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -364,6 +415,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
+        Command::Service { command } => run_service_command(&client, command).await?,
         Command::Whoami => whoami(&client).await?,
         Command::Discover => discover(&client).await?,
         Command::List => client.value(Method::GET, "api/agents", None).await?,
@@ -520,21 +572,14 @@ async fn run_virtual_host_command(
 ) -> anyhow::Result<Value> {
     match command {
         VirtualHostCommand::List => client.value(Method::GET, "api/virtual-hosts", None).await,
-        VirtualHostCommand::Add {
-            hostname,
-            machine,
-            target_host,
-            target_port,
-        } => {
+        VirtualHostCommand::Add { hostname, service } => {
             client
                 .value(
                     Method::POST,
                     "api/virtual-hosts",
                     Some(serde_json::to_value(CreateVirtualNetworkHostRequest {
                         hostname,
-                        destination_server_id: machine,
-                        target_host,
-                        target_port,
+                        service_id: service,
                     })?),
                 )
                 .await
@@ -548,6 +593,90 @@ async fn run_virtual_host_command(
                 )
                 .await
         }
+    }
+}
+
+async fn run_service_command(client: &ApiClient, command: ServiceCommand) -> anyhow::Result<Value> {
+    match command {
+        ServiceCommand::List => client.value(Method::GET, "api/services", None).await,
+        ServiceCommand::Register {
+            name,
+            machine,
+            target_host,
+            port,
+            protocol,
+        } => {
+            let server_id = resolve_service_machine(client, machine.as_deref()).await?;
+            client
+                .value(
+                    Method::POST,
+                    "api/services",
+                    Some(serde_json::to_value(CreateMachineServiceRequest {
+                        name,
+                        server_id,
+                        target_host,
+                        target_port: port,
+                        protocol: protocol.into(),
+                    })?),
+                )
+                .await
+        }
+        ServiceCommand::Update {
+            target,
+            name,
+            machine,
+            target_host,
+            port,
+            protocol,
+        } => {
+            let server_id = match machine.as_deref() {
+                Some(machine) => Some(resolve_service_machine(client, Some(machine)).await?),
+                None => None,
+            };
+            client
+                .value(
+                    Method::PATCH,
+                    &format!("api/services/{}", path_segment(&target)),
+                    Some(serde_json::to_value(UpdateMachineServiceRequest {
+                        name,
+                        server_id,
+                        target_host,
+                        target_port: port,
+                        protocol: protocol.map(Into::into),
+                    })?),
+                )
+                .await
+        }
+        ServiceCommand::Probe { target } => {
+            client
+                .value(
+                    Method::POST,
+                    &format!("api/services/{}/probe", path_segment(&target)),
+                    Some(json!({})),
+                )
+                .await
+        }
+        ServiceCommand::Delete { target } => {
+            client
+                .value(
+                    Method::DELETE,
+                    &format!("api/services/{}", path_segment(&target)),
+                    None,
+                )
+                .await
+        }
+    }
+}
+
+async fn resolve_service_machine(
+    client: &ApiClient,
+    requested: Option<&str>,
+) -> anyhow::Result<String> {
+    match requested {
+        Some(target) => Ok(resolve_machine(client, target).await?.server_id),
+        None => std::env::var("TREER_SERVER_ID").context(
+            "--machine is required outside a managed agent; managed agents default to their own machine",
+        ),
     }
 }
 
@@ -1412,11 +1541,7 @@ mod tests {
             "virtual-host",
             "add",
             "api.internal",
-            "builder",
-            "--target-host",
-            "127.0.0.1",
-            "--target-port",
-            "8080",
+            "api-service",
         ])
         .expect("virtual host add should parse");
         assert!(matches!(
@@ -1424,13 +1549,10 @@ mod tests {
             Some(Command::VirtualHost {
                 command: VirtualHostCommand::Add {
                     hostname,
-                    machine,
-                    target_host,
-                    target_port: Some(8080),
+                    service,
                 }
             }) if hostname == "api.internal"
-                && machine == "builder"
-                && target_host == "127.0.0.1"
+                && service == "api-service"
         ));
 
         let delete = Args::try_parse_from(["treer", "vhost", "delete", "api.internal"])
@@ -1440,6 +1562,35 @@ mod tests {
             Some(Command::VirtualHost {
                 command: VirtualHostCommand::Delete { hostname }
             }) if hostname == "api.internal"
+        ));
+    }
+
+    #[test]
+    fn service_commands_parse() {
+        let register = Args::try_parse_from([
+            "treer",
+            "service",
+            "register",
+            "api",
+            "--machine",
+            "builder",
+            "--port",
+            "8080",
+            "--protocol",
+            "http",
+        ])
+        .expect("service register should parse");
+        assert!(matches!(
+            register.command,
+            Some(Command::Service {
+                command: ServiceCommand::Register {
+                    name,
+                    machine: Some(machine),
+                    port: 8080,
+                    protocol: CliServiceProtocol::Http,
+                    ..
+                }
+            }) if name == "api" && machine == "builder"
         ));
     }
 

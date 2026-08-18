@@ -16,6 +16,8 @@ matching the question; follow its source links for implementation detail.
 
 ## Historical material
 
+- The completed [machine services execution plan](research/2026-08-18-machine-services-plan.md)
+  records the service-registry migration and verification scope.
 - The [source-level project review](research/2026-08-18-project-review.md) is a
   snapshot of Treer at commit `72921f1`. It includes the technology survey,
   detailed flows, and comparisons with Herdr and AgentENV.

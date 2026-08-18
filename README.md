@@ -241,18 +241,20 @@ target machines need no inbound port. Each relayed stream has an independent
 flow-control window, and terminal, transfer, and relayed network frames share the
 same authenticated connection.
 
-Network access is allowed by default. Workspace virtual hosts are service
-discovery records, independent from authorization: a record maps any valid
-hostname to a machine, target host, and optional target port. They can be
-managed from the Machines tab. For example, mapping `api.internal` to `build-machine`,
-`127.0.0.1`, port `8080` makes this work without exposing port 8080:
+Network access is allowed by default. A machine service is a durable record for
+a long-running host-network process: machine, target host, target port, and TCP
+or HTTP protocol. Virtual hosts are independent aliases that map any valid
+hostname to a service. Both are managed from the Network view. For example,
+registering `build-machine` port `8080` as `api`, then mapping `api.internal` to
+that service, makes this work without exposing port 8080:
 
 ```bash
 curl http://api.internal/
 ```
 
-Deleting a machine also deletes virtual hosts that point to it. Virtual host
-names are exact and case-insensitive; no suffix or naming convention is
+Deleting a machine also deletes its services and their virtual hosts. Deleting
+a service removes its aliases but does not stop the external process. Virtual
+host names are exact and case-insensitive; no suffix or naming convention is
 reserved. Only explicitly configured records are treated as workspace virtual
 hosts. Other hostnames and IP addresses use ordinary outbound access through
 the source machine, subject to the same network policy boundary.
@@ -283,14 +285,19 @@ Managed agents can control workspace discovery records through the local Agent
 Server without receiving Proxy credentials:
 
 ```bash
+treer service register api --port 8080 --protocol http
+treer service probe api
 treer virtual-host list
-treer virtual-host add api.internal build-machine --target-port 8080
+treer virtual-host add api.internal api
 treer virtual-host delete api.internal
 ```
 
 The Agent Server forwards the caller identity under its machine credential, and
-the Proxy evaluates these as `virtual_host.list`, `virtual_host.create`, and
-`virtual_host.delete`. They currently inherit the allow-all default.
+the Proxy evaluates service and virtual-host actions independently. They
+currently inherit the allow-all default. On Linux, a process started directly
+inside a managed Agent remains in its private network namespace. Register
+services started on the machine host network, such as systemd services or
+Docker containers with published ports.
 
 ## Agent collaboration
 

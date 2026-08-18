@@ -80,10 +80,10 @@ flowchart TB
 | Host to child process | PTY raw bytes | Host process ownership |
 
 SQLite persists users, organizations, memberships, sessions, invitations,
-workspaces, enrollment records, machine credentials, display names, and virtual
-hosts. Connected Controllers, pending commands, workspace projections, terminal
-legs, transfers, and network tunnels are held in Proxy memory and do not yet
-support horizontal routing across Proxy replicas.
+workspaces, enrollment records, machine credentials, display names, machine
+services, and virtual hosts. Connected Controllers, pending commands, workspace
+projections, terminal legs, transfers, and network tunnels are held in Proxy
+memory and do not yet support horizontal routing across Proxy replicas.
 
 ## Primary information flow
 
@@ -118,10 +118,14 @@ and TUN interface, then reaches a Controller-owned SOCKS5 boundary. Ordinary
 destinations are authorized by the Proxy and then use source-machine egress;
 only their route request and direct response cross the Controller WebSocket.
 Workspace virtual hosts are relayed through the Proxy to another Controller,
-including their TCP payload. This is network containment and routing, not a VM
-or private filesystem. A private mount namespace supplies the Agent's resolver
-configuration and masks the host `nscd` socket, ensuring DNS lookups reach the
-TUN virtual resolver instead of host NSS plugins or caches. These mounts do not
+including their TCP payload. Each alias resolves through a durable machine
+service record before routing to the target Controller. Services belong to a
+machine and outlive the Agent that registers or maintains them. The Controller
+can probe the target from the machine host network; Treer does not yet start or
+supervise the external service process. This is network containment and routing,
+not a VM or private filesystem. A private mount namespace supplies the Agent's
+resolver configuration and masks the host `nscd` socket, ensuring DNS lookups
+reach the TUN virtual resolver instead of host NSS plugins or caches. These mounts do not
 modify the host resolver files or cache service.
 
 `treer scp` creates an authenticated Proxy transfer session between Controllers.

@@ -621,6 +621,8 @@ mod tests {
         let record = VirtualNetworkHost {
             workspace_id: "default".to_string(),
             hostname: "api".to_string(),
+            service_id: "svc_api".to_string(),
+            service_protocol: treer_protocol::MachineServiceProtocol::Http,
             destination_server_id: "server-b".to_string(),
             target_host: "localhost".to_string(),
             target_port: Some(8080),

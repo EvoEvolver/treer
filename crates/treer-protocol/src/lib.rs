@@ -177,6 +177,11 @@ pub enum AgentCommand {
     Stop {
         agent_id: String,
     },
+    ProbeNetwork {
+        host: String,
+        port: u16,
+        timeout_ms: u64,
+    },
     ShutdownMachine,
 }
 
@@ -579,10 +584,63 @@ pub struct NetworkDirectTarget {
     pub port: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineServiceProtocol {
+    Tcp,
+    Http,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineService {
+    pub service_id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub server_id: String,
+    pub target_host: String,
+    pub target_port: u16,
+    pub protocol: MachineServiceProtocol,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateMachineServiceRequest {
+    pub name: String,
+    pub server_id: String,
+    #[serde(default = "default_network_target_host")]
+    pub target_host: String,
+    pub target_port: u16,
+    #[serde(default = "default_machine_service_protocol")]
+    pub protocol: MachineServiceProtocol,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateMachineServiceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<MachineServiceProtocol>,
+}
+
+const fn default_machine_service_protocol() -> MachineServiceProtocol {
+    MachineServiceProtocol::Tcp
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VirtualNetworkHost {
     pub workspace_id: String,
     pub hostname: String,
+    pub service_id: String,
+    pub service_protocol: MachineServiceProtocol,
     pub destination_server_id: String,
     pub target_host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -601,11 +659,7 @@ pub struct VirtualNetworkHostsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateVirtualNetworkHostRequest {
     pub hostname: String,
-    pub destination_server_id: String,
-    #[serde(default = "default_network_target_host")]
-    pub target_host: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_port: Option<u16>,
+    pub service_id: String,
 }
 
 fn default_network_target_host() -> String {
@@ -979,6 +1033,39 @@ mod tests {
 
         let json = serde_json::to_value(message).expect("serialize command");
         assert_eq!(json["envelope"]["command"]["action"], "shutdown_machine");
+    }
+
+    #[test]
+    fn network_probe_wire_shape_is_stable() {
+        let message = ProxyMessage::Command {
+            envelope: CommandEnvelope {
+                command_id: "cmd_probe".to_string(),
+                workspace_id: "default".to_string(),
+                command: AgentCommand::ProbeNetwork {
+                    host: "127.0.0.1".to_string(),
+                    port: 8080,
+                    timeout_ms: 3_000,
+                },
+            },
+        };
+        let json = serde_json::to_value(message).expect("serialize probe command");
+        assert_eq!(json["envelope"]["command"]["action"], "probe_network");
+        assert_eq!(json["envelope"]["command"]["port"], 8080);
+    }
+
+    #[test]
+    fn machine_service_requests_use_service_ids_for_aliases() {
+        let request = CreateVirtualNetworkHostRequest {
+            hostname: "api.internal".to_string(),
+            service_id: "svc_api".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize virtual host request"),
+            serde_json::json!({
+                "hostname": "api.internal",
+                "service_id": "svc_api"
+            })
+        );
     }
 
     #[test]
