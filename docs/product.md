@@ -1,7 +1,7 @@
 # Product direction
 
 - Status: maintained
-- Last source review: 2026-08-18 at `72921f1`
+- Last source review: 2026-08-18 at `bd3115d`
 
 ## Purpose
 
@@ -78,6 +78,9 @@ inspecting an Agent that runs on that machine.
 | Strong protection from the enrolled machine owner | Not provided by the local Host |
 
 ## Near-term sequence
+
+The maintained [capability roadmap](roadmap.md) classifies the larger backlog
+and owns detailed sequencing. At the product level, the priorities remain:
 
 1. Make enrollment, session sharing, peer coordination, and updates feel
    reliable enough to drive real use.

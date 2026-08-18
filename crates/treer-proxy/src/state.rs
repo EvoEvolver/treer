@@ -6,14 +6,18 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tracing::warn;
 use treer_protocol::{
-    AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult,
-    NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest, NetworkDirectTarget,
-    ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind,
-    TerminalServerMessage, TransferBinaryFrame, TransferServerMessage, TransferStats,
-    WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
+    AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult, DomainEventActor,
+    DomainEventEnvelope, DomainEventResource, NetworkBinaryFrame, NetworkBinaryKind,
+    NetworkConnectRequest, NetworkDirectTarget, ProtocolError, ProxyMessage, ServerInfo,
+    ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage,
+    TransferBinaryFrame, TransferServerMessage, TransferStats, WorkspaceEvent, WorkspaceInfo,
+    WorkspaceSnapshot, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use uuid::Uuid;
+
+use crate::event_bus::EventBus;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
 const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,6 +64,7 @@ struct Inner {
     network_streams: Mutex<HashMap<NetworkStreamKey, NetworkStreamLeg>>,
     browser_network_streams: Mutex<HashMap<NetworkStreamKey, mpsc::Sender<NetworkBinaryFrame>>>,
     events: broadcast::Sender<WorkspaceEvent>,
+    event_bus: EventBus,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -141,6 +146,10 @@ impl WorkspaceState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::with_event_bus(EventBus::in_process())
+    }
+
+    pub fn with_event_bus(event_bus: EventBus) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
             inner: std::sync::Arc::new(Inner {
@@ -152,6 +161,7 @@ impl AppState {
                 network_streams: Mutex::new(HashMap::new()),
                 browser_network_streams: Mutex::new(HashMap::new()),
                 events,
+                event_bus,
             }),
         }
     }
@@ -360,7 +370,7 @@ impl AppState {
                 })?,
             }
         };
-        let _ = self.inner.events.send(event);
+        self.publish_workspace_event(event);
         self.resend_pending(&workspace_id, &server_id).await;
         Ok(())
     }
@@ -421,7 +431,7 @@ impl AppState {
                 })?,
             }
         };
-        let _ = self.inner.events.send(event);
+        self.publish_workspace_event(event);
         Ok(())
     }
 
@@ -467,7 +477,7 @@ impl AppState {
             };
             (agent, event)
         };
-        let _ = self.inner.events.send(event);
+        self.publish_workspace_event(event);
         self.close_agent_terminals(workspace_id, agent_id).await;
         Ok(agent)
     }
@@ -528,7 +538,7 @@ impl AppState {
             };
             (server, event)
         };
-        let _ = self.inner.events.send(event);
+        self.publish_workspace_event(event);
         Ok(server)
     }
 
@@ -570,7 +580,7 @@ impl AppState {
             };
             (server, agents, event)
         };
-        let _ = self.inner.events.send(event);
+        self.publish_workspace_event(event);
 
         let key = ServerKey {
             workspace_id: workspace_id.to_string(),
@@ -663,7 +673,7 @@ impl AppState {
             };
             (agent, event)
         };
-        let _ = self.inner.events.send(event);
+        self.publish_workspace_event(event);
         Ok(agent)
     }
 
@@ -1972,8 +1982,36 @@ impl AppState {
                 })?,
             }
         };
-        let _ = self.inner.events.send(event.clone());
+        self.publish_workspace_event(event.clone());
         Ok(event)
+    }
+
+    fn publish_workspace_event(&self, event: WorkspaceEvent) {
+        let _ = self.inner.events.send(event.clone());
+        let envelope = DomainEventEnvelope {
+            event_id: format!("evt_{}", Uuid::new_v4().simple()),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            organization_id: None,
+            workspace_id: event.workspace_id.clone(),
+            actor: DomainEventActor {
+                kind: "system".to_string(),
+                id: Some("treer-proxy".to_string()),
+            },
+            action: event.event,
+            resource: DomainEventResource {
+                kind: "workspace".to_string(),
+                id: event.workspace_id,
+            },
+            occurred_at: Utc::now(),
+            trace_id: None,
+            causation_id: None,
+            correlation_id: None,
+            workspace_revision: Some(event.revision),
+            payload: event.data,
+        };
+        if let Err(error) = self.inner.event_bus.publish(envelope) {
+            warn!(%error, "domain event could not be queued");
+        }
     }
 }
 
@@ -2135,6 +2173,28 @@ mod tests {
         assert_eq!(beta.workspace.workspace_id, "beta");
         assert!(alpha.servers.is_empty());
         assert!(beta.agents.is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_mutations_publish_versioned_domain_events() {
+        let event_bus = EventBus::in_process();
+        let mut events = event_bus.subscribe();
+        let state = AppState::with_event_bus(event_bus);
+        let (outgoing, _incoming) = mpsc::unbounded_channel();
+
+        state
+            .register_server(test_server(), Uuid::new_v4(), outgoing)
+            .await
+            .expect("register server");
+
+        let event = events.recv().await.expect("domain event");
+        assert_eq!(event.schema_version, DOMAIN_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.workspace_id, "alpha");
+        assert_eq!(event.action, "server.updated");
+        assert_eq!(event.resource.kind, "workspace");
+        assert_eq!(event.resource.id, "alpha");
+        assert_eq!(event.workspace_revision, Some(1));
+        assert_eq!(event.payload["server_id"], "server");
     }
 
     #[tokio::test]

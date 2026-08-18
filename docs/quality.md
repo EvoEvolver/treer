@@ -35,8 +35,8 @@ the full local gate.
 
 - Root [AGENTS.md](../AGENTS.md) is a concise development map, not a manual.
 - [docs/README.md](README.md) indexes maintained and historical knowledge.
-- Stable product, architecture, security, and quality facts live in focused
-  maintained documents.
+- Stable product, roadmap, architecture, security, and quality facts live in
+  focused maintained documents.
 - [PLAN.md](../PLAN.md) and dated research are historical; label snapshots with
   their revision or review date.
 - [`skills/treer/SKILL.md`](../skills/treer/SKILL.md) remains the embedded runtime
@@ -65,6 +65,7 @@ forbids unsafe Rust workspace-wide, and treats Clippy warnings as errors.
 | Architecture | Crate boundaries and shared protocol types | No dependency-boundary lint |
 | Documentation | Indexed maintained docs and mechanical link check | No freshness or source-claim automation |
 | Operations | Structured tracing at core services | No local metrics/traces harness or performance assertions |
+| Event distribution | Event-envelope, subject-safety, adapter, and mutation-wiring tests | No crash-safe outbox or automated NATS failure/replay CI |
 | Security | Explicit trust tier and source-level tests | Allow-all policy and no production isolation backend |
 | Accounting | IDs exist across control paths | No durable per-user attribution, usage, quota, or ledger |
 
@@ -81,6 +82,7 @@ repeated bottleneck or blocks the current product tier.
 | Host mutation or Controller restart | Idempotency and process-survival tests |
 | Runtime path or transfer logic | Escape, symlink, size, and partial-failure tests |
 | Network namespace, DNS, SOCKS, or virtual host | Destination routing and containment tests on Linux |
+| Domain event or NATS adapter | Envelope/subject tests plus a real JetStream publish and persistence check |
 | Browser interaction | Typecheck/build plus manual or automated affected-flow validation |
 | Documentation/index change | `node scripts/check-docs.mjs` |
 

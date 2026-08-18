@@ -20,6 +20,7 @@ second manual.
 | Task | Start here |
 | --- | --- |
 | Understand product scope | [docs/product.md](docs/product.md) |
+| Classify or sequence future capabilities | [docs/roadmap.md](docs/roadmap.md) |
 | Change components or protocols | [docs/architecture.md](docs/architecture.md) |
 | Change auth, isolation, policy, or trust claims | [docs/security.md](docs/security.md) |
 | Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
