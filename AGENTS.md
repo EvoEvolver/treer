@@ -1,0 +1,52 @@
+# Treer repository guide
+
+Treer is a self-hostable control plane and distributed runtime for coordinating
+coding agents across enrolled machines. This file is the short map for agents
+changing the repository; follow links rather than expanding this file into a
+second manual.
+
+## Instruction boundary
+
+- Repository development starts with [the documentation index](docs/README.md).
+- Managed Treer operations use [the embedded Treer skill](skills/treer/SKILL.md).
+  That skill is the runtime CLI contract printed by `treer --skill` and
+  `treer --skills`; do not move, rename, or duplicate it here.
+- The root [README](README.md) owns setup and operator examples.
+- [PLAN.md](PLAN.md) and dated [research](docs/research/) preserve design
+  history. Use source, tests, and maintained docs for current behavior.
+
+## Read by task
+
+| Task | Start here |
+| --- | --- |
+| Understand product scope | [docs/product.md](docs/product.md) |
+| Change components or protocols | [docs/architecture.md](docs/architecture.md) |
+| Change auth, isolation, policy, or trust claims | [docs/security.md](docs/security.md) |
+| Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
+| Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
+
+## Source map
+
+| Path | Responsibility |
+| --- | --- |
+| `crates/treer-proxy` | Public API, auth, durable metadata, workspace routing |
+| `crates/treer-agent-server` | Machine Controller, local API, Proxy link, networking |
+| `crates/treer-agent-host` | Stable local process ownership and idempotent mutations |
+| `crates/treer-agent-runtime` | PTY lifecycle, output replay, working-directory boundary |
+| `crates/treer-cli` | Human and managed-agent command surface |
+| `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
+| `crates/treer-host-protocol` | Controller-to-Host socket contract |
+| `crates/treer-transfer` | Workspace-relative file transfer and validation |
+| `web` | React control plane embedded into the Proxy binary |
+
+## Change discipline
+
+1. Read the closest maintained document and the owning source boundary.
+2. Keep wire models in the shared protocol crates; keep process mechanics below
+   product-aware Controller logic.
+3. Update the closest documentation in the same change when behavior, trust
+   assumptions, commands, or component ownership changes.
+4. Run `just check` before handing off. It checks documentation, frontend
+   type/build health, Rust formatting, tests, and Clippy.
+5. Keep generated artifacts, dependencies, and local research checkouts out of
+   commits. Reference repositories belong under the ignored `.references/`.

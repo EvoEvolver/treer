@@ -1,0 +1,59 @@
+# Treer documentation
+
+This is the maintained map for repository knowledge. Start with the document
+matching the question; follow its source links for implementation detail.
+
+## Maintained documents
+
+| Document | Use it for |
+| --- | --- |
+| [Product direction](product.md) | Purpose, current audience, product promise, and delivery boundaries |
+| [Architecture](architecture.md) | Components, ownership rules, protocols, state, and information flows |
+| [Security model](security.md) | Trust tier, supported claims, credentials, isolation, and known gaps |
+| [Quality and maintenance](quality.md) | Verification, documentation rules, current gaps, and review triggers |
+| [Root README](../README.md) | Installation, deployment, and operator command examples |
+| [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
+
+## Historical material
+
+- The [source-level project review](research/2026-08-18-project-review.md) is a
+  snapshot of Treer at commit `72921f1`. It includes the technology survey,
+  detailed flows, and comparisons with Herdr and AgentENV.
+- The [prototype plan](../PLAN.md) records the original design and delivery
+  rationale. Some shipped behavior has moved beyond its prototype non-goals.
+
+Historical documents explain why decisions were made; they do not override
+maintained documents, source, or tests.
+
+## Authority and scope
+
+Use this order when documents disagree:
+
+1. Executable behavior, shared protocol types, and tests define what ships.
+2. Maintained documents describe current intent and cross-component contracts.
+3. The root README defines supported operator workflows.
+4. Plans and dated research preserve context at a named revision.
+
+The root [AGENTS.md](../AGENTS.md) is a development index. It deliberately links
+to, but does not duplicate, the embedded Treer skill. Keep
+`skills/treer/SKILL.md` at its current path because the CLI embeds it at build
+time and prints it through `treer --skill` and `treer --skills`.
+
+## Update map
+
+| Change | Documentation to review |
+| --- | --- |
+| User-visible setup or commands | `README.md`, embedded Treer skill |
+| Product scope or sequencing | Product direction |
+| Component ownership, route, protocol, or state | Architecture |
+| Auth, credentials, policy, isolation, or security wording | Security model |
+| Verification command, CI, known gap, or doc convention | Quality and maintenance |
+
+Run `node scripts/check-docs.mjs` after documentation changes. The check verifies
+required entry points, the embedded-skill contract, and repository-relative
+Markdown links. Create an execution plan only when substantial work needs a
+durable decision log; do not create empty document trees in anticipation of it.
+
+This layout follows the progressive-disclosure model described in OpenAI's
+[Harness engineering](https://openai.com/index/harness-engineering/): keep the
+root map small and move durable detail into indexed, versioned repository files.

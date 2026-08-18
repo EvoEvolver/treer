@@ -10,6 +10,7 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
 check:
+    node scripts/check-docs.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
     cargo fmt --all -- --check
