@@ -210,9 +210,11 @@ that permits unprivileged user namespaces.
 The namespace bind-mounts private resolver configuration with `hosts: files
 dns` and a non-loopback nameserver. This bypasses host NSS plugins such as mDNS
 that may reject workspace virtual-host suffixes before a DNS packet reaches the
-TUN adapter. `tun2proxy` answers those DNS requests from its virtual pool and
-restores the original hostname for Treer routing. The host's `/etc` files are
-not modified, and virtual-host changes remain dynamic.
+TUN adapter. It also masks the host's `nscd` socket so cached host lookups cannot
+bypass the private resolver. `tun2proxy` answers those DNS requests from its
+virtual pool and restores the original hostname for Treer routing. The host's
+resolver files and cache service are not modified, and virtual-host changes
+remain dynamic.
 
 In transparent mode the Controller clears the standard HTTP(S) and all-protocol
 proxy environment variables, because its loopback SOCKS listener is outside the

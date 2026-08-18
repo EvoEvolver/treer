@@ -35,6 +35,8 @@ pub struct ChildArgs {
     nsswitch: PathBuf,
     #[arg(long)]
     resolv_conf: PathBuf,
+    #[arg(long)]
+    nscd_mask: PathBuf,
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
@@ -59,7 +61,10 @@ pub async fn run(args: ExecArgs) -> Result<()> {
     let notify = sandbox_dir.path().join("agent.sock");
     let nsswitch = sandbox_dir.path().join("nsswitch.conf");
     let resolv_conf = sandbox_dir.path().join("resolv.conf");
+    let nscd_mask = sandbox_dir.path().join("nscd-mask");
     write_namespace_resolver_files(&nsswitch, &resolv_conf)?;
+    std::fs::create_dir(&nscd_mask)
+        .with_context(|| format!("failed to create {}", nscd_mask.display()))?;
     let listener = UnixListener::bind(&notify)
         .with_context(|| format!("failed to create sandbox notifier {}", notify.display()))?;
     let (transfer_socket, remote_fd) = tun2proxy::socket_transfer::create_transfer_socket_pair()
@@ -89,6 +94,8 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         .arg(&nsswitch)
         .arg("--resolv-conf")
         .arg(&resolv_conf)
+        .arg("--nscd-mask")
+        .arg(&nscd_mask)
         .arg("--")
         .args(&args.command)
         .kill_on_drop(true);
@@ -143,7 +150,7 @@ pub async fn run(args: ExecArgs) -> Result<()> {
 
 pub async fn run_child(args: ChildArgs) -> Result<()> {
     require_command(&args.command)?;
-    mount_namespace_resolver_files(&args.nsswitch, &args.resolv_conf).await?;
+    mount_namespace_resolver_files(&args.nsswitch, &args.resolv_conf, &args.nscd_mask).await?;
     let mut proxy = args.network_proxy;
     if let Some(rest) = proxy.strip_prefix("socks5h://") {
         proxy = format!("socks5://{rest}");
@@ -209,7 +216,11 @@ fn sandbox_nsswitch(installed: &str) -> String {
     output
 }
 
-async fn mount_namespace_resolver_files(nsswitch: &Path, resolv_conf: &Path) -> Result<()> {
+async fn mount_namespace_resolver_files(
+    nsswitch: &Path,
+    resolv_conf: &Path,
+    nscd_mask: &Path,
+) -> Result<()> {
     run_mount(["--make-rprivate".as_ref(), Path::new("/")]).await?;
     run_mount(["--bind".as_ref(), nsswitch, Path::new("/etc/nsswitch.conf")]).await?;
     run_mount([
@@ -218,6 +229,25 @@ async fn mount_namespace_resolver_files(nsswitch: &Path, resolv_conf: &Path) -> 
         Path::new("/etc/resolv.conf"),
     ])
     .await?;
+    mask_host_nscd(nscd_mask).await?;
+    Ok(())
+}
+
+async fn mask_host_nscd(mask: &Path) -> Result<()> {
+    let mut targets = Vec::new();
+    for target in [Path::new("/run/nscd"), Path::new("/var/run/nscd")] {
+        if !target.is_dir() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(target)
+            .with_context(|| format!("failed to resolve {}", target.display()))?;
+        if !targets.contains(&canonical) {
+            targets.push(canonical);
+        }
+    }
+    for target in targets {
+        run_mount(["--bind".as_ref(), mask, target.as_path()]).await?;
+    }
     Ok(())
 }
 
@@ -351,6 +381,7 @@ impl SandboxDirectory {
         let _ = std::fs::remove_file(self.path.join("agent.sock"));
         let _ = std::fs::remove_file(self.path.join("nsswitch.conf"));
         let _ = std::fs::remove_file(self.path.join("resolv.conf"));
+        let _ = std::fs::remove_dir(self.path.join("nscd-mask"));
         let _ = std::fs::remove_dir(&self.path);
         self.cleaned = true;
     }

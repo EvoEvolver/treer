@@ -117,7 +117,10 @@ On Linux, managed Agent TCP and DNS traffic enters a per-Agent network namespace
 and TUN interface, then reaches a Controller-owned SOCKS5 boundary. Ordinary
 destinations use source-machine egress; workspace virtual hosts are relayed
 through the Proxy to another Controller. This is network containment and
-routing, not a VM or private filesystem.
+routing, not a VM or private filesystem. A private mount namespace supplies the
+Agent's resolver configuration and masks the host `nscd` socket, ensuring DNS
+lookups reach the TUN virtual resolver instead of host NSS plugins or caches.
+These mounts do not modify the host resolver files or cache service.
 
 `treer scp` creates an authenticated Proxy transfer session between Controllers.
 Remote operands are workspace-relative; the transfer engine rejects symlinks

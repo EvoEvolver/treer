@@ -36,6 +36,9 @@ The following statements are grounded in current behavior:
   workspace root.
 - Linux Agent network traffic crosses a namespace and Controller policy
   boundary, which can support stronger egress rules later.
+- Linux Agent DNS resolution uses namespace-private resolver mounts and cannot
+  reuse the host `nscd` socket, so virtual-host routing is not bypassed by host
+  name-service plugins or cached answers.
 - The Proxy is open source and can be self-hosted, inspected, and replaced.
 
 These properties support the product phrase: **local custody, scoped
