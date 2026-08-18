@@ -232,10 +232,14 @@ directly to the Controller's loopback listener; it is not a workspace virtual
 host and never traverses the Proxy. This keeps `treer`, `treer ssh`, and
 `treer scp` usable inside transparent network namespaces.
 
-TCP streams are multiplexed as binary frames over the Controller's existing
-`/agent/connect` WebSocket; no machine needs an inbound port. Each stream has an
-independent flow-control window, and terminal, transfer, and network frames
-share the same authenticated connection.
+Every TCP connection asks the Proxy to resolve the destination and apply network
+policy. For an ordinary hostname or IP address, the Proxy returns a direct route
+and the source Controller opens the outbound socket locally; application payload
+bytes do not traverse the Proxy. Workspace virtual-host streams are multiplexed
+as binary frames over the Controllers' existing `/agent/connect` WebSockets, so
+target machines need no inbound port. Each relayed stream has an independent
+flow-control window, and terminal, transfer, and relayed network frames share the
+same authenticated connection.
 
 Network access is allowed by default. Workspace virtual hosts are service
 discovery records, independent from authorization: a record maps any valid

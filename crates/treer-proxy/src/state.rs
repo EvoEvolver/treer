@@ -8,10 +8,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use treer_protocol::{
     AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult,
-    NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest, ProtocolError, ProxyMessage,
-    ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage,
-    TransferBinaryFrame, TransferServerMessage, TransferStats, WorkspaceEvent, WorkspaceInfo,
-    WorkspaceSnapshot,
+    NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest, NetworkDirectTarget,
+    ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind,
+    TerminalServerMessage, TransferBinaryFrame, TransferServerMessage, TransferStats,
+    WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
 };
 use uuid::Uuid;
 
@@ -1549,7 +1549,9 @@ impl AppState {
                             }
                         }
                         NetworkBinaryKind::Reset => return Err(decode_network_reset(&frame)),
-                        NetworkBinaryKind::Open | NetworkBinaryKind::Opened => {
+                        NetworkBinaryKind::Open
+                        | NetworkBinaryKind::Opened
+                        | NetworkBinaryKind::Direct => {
                             return Err(ProtocolError::new("invalid_network_frame", format!("unexpected network stream frame {:?}", frame.kind)));
                         }
                     }
@@ -1652,6 +1654,47 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn send_direct_network_route(
+        &self,
+        workspace_id: &str,
+        source_server_id: &str,
+        connection_id: Uuid,
+        stream_id: String,
+        target: NetworkDirectTarget,
+    ) -> Result<(), ProtocolError> {
+        let key = ServerKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: source_server_id.to_string(),
+        };
+        let outgoing = {
+            let connections = self.inner.connections.read().await;
+            match connections.get(&key) {
+                Some(connection) if connection.connection_id == connection_id => {
+                    connection.outgoing.clone()
+                }
+                _ => {
+                    return Err(ProtocolError::new(
+                        "stale_connection",
+                        format!("connection for {source_server_id} is no longer current"),
+                    ));
+                }
+            }
+        };
+        let frame = NetworkBinaryFrame {
+            kind: NetworkBinaryKind::Direct,
+            stream_id,
+            payload: serde_json::to_vec(&target).map_err(|error| {
+                ProtocolError::new(
+                    "encode_error",
+                    format!("failed to encode direct route: {error}"),
+                )
+            })?,
+        };
+        outgoing
+            .send(SocketFrame::Binary(frame.encode()?))
+            .map_err(|_| ProtocolError::new("server_offline", source_server_id))
+    }
+
     pub async fn relay_network_frame(
         &self,
         workspace_id: &str,
@@ -1661,10 +1704,13 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        if frame.kind == NetworkBinaryKind::Open {
+        if matches!(
+            frame.kind,
+            NetworkBinaryKind::Open | NetworkBinaryKind::Direct
+        ) {
             return Err(ProtocolError::new(
                 "invalid_network_frame",
-                "open frame cannot be relayed as an existing stream",
+                "route frame cannot be relayed as an existing stream",
             ));
         }
         let key = NetworkStreamKey {
@@ -2740,6 +2786,42 @@ mod tests {
             assert_eq!(close.kind, NetworkBinaryKind::HalfClose);
             assert_eq!(close.stream_id, expected_peer_id);
         }
+        assert!(state.inner.network_streams.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_network_routes_do_not_create_proxy_stream_legs() {
+        let state = AppState::new();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(test_server(), connection_id, server_tx)
+            .await
+            .expect("register controller");
+
+        let target = NetworkDirectTarget {
+            host: "example.com".to_string(),
+            port: 443,
+        };
+        state
+            .send_direct_network_route(
+                "alpha",
+                "server",
+                connection_id,
+                "net_source".to_string(),
+                target.clone(),
+            )
+            .await
+            .expect("send direct route");
+
+        let route = expect_network(server_rx.recv().await.expect("direct route frame"));
+        assert_eq!(route.kind, NetworkBinaryKind::Direct);
+        assert_eq!(route.stream_id, "net_source");
+        assert_eq!(
+            serde_json::from_slice::<NetworkDirectTarget>(&route.payload)
+                .expect("decode direct target"),
+            target
+        );
         assert!(state.inner.network_streams.lock().await.is_empty());
     }
 

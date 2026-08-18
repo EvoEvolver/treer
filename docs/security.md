@@ -81,10 +81,13 @@ scoping alone does not isolate those credentials.
 
 ## Data and control-plane exposure
 
-The Proxy can observe control messages and relayed terminal, transfer, and
-network data. Browser-to-service tunneling strips cookies, authorization
-headers, proxy authorization, and response `Set-Cookie` before forwarding, but
-this is not end-to-end confidentiality from the Proxy.
+The Proxy can observe control messages, every requested network destination,
+and relayed terminal, transfer, and workspace virtual-host data. Ordinary
+outbound TCP payload stays between the source Controller and destination; the
+Proxy authorizes its route but cannot observe its payload through Treer.
+Browser-to-service tunneling strips cookies, authorization headers, proxy
+authorization, and response `Set-Cookie` before forwarding, but this is not
+end-to-end confidentiality from the Proxy.
 
 Durable identity data is stored in SQLite. Live connections, pending commands,
 terminal streams, transfers, and tunnels are held in process memory. Current

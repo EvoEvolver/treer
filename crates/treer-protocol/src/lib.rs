@@ -430,6 +430,7 @@ pub enum NetworkBinaryKind {
     WindowUpdate = 4,
     HalfClose = 5,
     Reset = 6,
+    Direct = 7,
 }
 
 impl TryFrom<u8> for NetworkBinaryKind {
@@ -443,6 +444,7 @@ impl TryFrom<u8> for NetworkBinaryKind {
             4 => Ok(Self::WindowUpdate),
             5 => Ok(Self::HalfClose),
             6 => Ok(Self::Reset),
+            7 => Ok(Self::Direct),
             _ => Err(ProtocolError::new(
                 "invalid_network_frame",
                 format!("unknown network binary frame kind {value}"),
@@ -567,6 +569,12 @@ pub struct NetworkConnectRequest {
     pub source_server_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_agent_id: Option<String>,
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkDirectTarget {
     pub host: String,
     pub port: u16,
 }
@@ -1071,6 +1079,28 @@ mod tests {
             frame
         );
         assert!(!TransferBinaryFrame::is_transfer_frame(&encoded));
+    }
+
+    #[test]
+    fn network_direct_target_round_trips() {
+        let target = NetworkDirectTarget {
+            host: "example.com".to_string(),
+            port: 443,
+        };
+        let frame = NetworkBinaryFrame {
+            kind: NetworkBinaryKind::Direct,
+            stream_id: "net_direct".to_string(),
+            payload: serde_json::to_vec(&target).expect("encode direct target"),
+        };
+
+        let decoded = NetworkBinaryFrame::decode(&frame.encode().expect("encode direct frame"))
+            .expect("decode direct frame");
+        assert_eq!(decoded.kind, NetworkBinaryKind::Direct);
+        assert_eq!(
+            serde_json::from_slice::<NetworkDirectTarget>(&decoded.payload)
+                .expect("decode direct target"),
+            target
+        );
     }
 
     #[test]

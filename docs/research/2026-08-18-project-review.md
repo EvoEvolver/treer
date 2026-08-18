@@ -272,7 +272,11 @@ flowchart LR
 Virtual hosts are explicit workspace discovery records. They are not DNS zones
 and do not by themselves authorize access. Source Agent identity is carried in
 SOCKS authentication so the policy API can evaluate it, but the production
-Proxy currently installs an allow-all policy engine.
+Proxy currently installs an allow-all policy engine. Every connection sends its
+destination metadata to the Proxy for that decision. When no virtual host
+matches, the Proxy returns a direct route and the source Controller carries the
+TCP payload over its own outbound socket; only virtual-host payload is relayed
+through the Proxy.
 
 Browser HTTP/WebSocket tunneling to a virtual host follows the same Controller
 path. Before forwarding, the Proxy removes browser cookies, `Authorization`,

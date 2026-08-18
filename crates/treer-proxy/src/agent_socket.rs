@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use treer_protocol::{
     AgentServerMessage, NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest,
-    NetworkOpenRequest, ProtocolError, ProxyMessage, TerminalBinaryFrame, TerminalBinaryKind,
-    TransferBinaryFrame, VirtualNetworkHost, PROTOCOL_VERSION,
+    NetworkDirectTarget, NetworkOpenRequest, ProtocolError, ProxyMessage, TerminalBinaryFrame,
+    TerminalBinaryKind, TransferBinaryFrame, VirtualNetworkHost, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
 
@@ -443,10 +443,10 @@ async fn route_network_open(
             .await
             .map_err(|error| (stream_id.clone(), error.into_parts().1))?
     };
-    let (destination_target, target_host, target_port) =
-        resolve_network_target(&request, virtual_host, source_server_id);
+    let route = resolve_network_route(&request, virtual_host);
+    let destination_target = route.destination_server_id(source_server_id);
     let destination = state
-        .resolve_server(workspace_id, &destination_target)
+        .resolve_server(workspace_id, destination_target)
         .await
         .map_err(|error| (stream_id.clone(), error))?;
     if let Some(agent_id) = request.source_agent_id.as_deref() {
@@ -469,56 +469,105 @@ async fn route_network_open(
         source_server_id,
         request.source_agent_id.as_deref(),
         &destination.server_id,
-        &target_host,
-        target_port,
+        route.host(),
+        route.port(),
     );
     policy
         .authorize(&policy_request)
         .await
         .map_err(|error| (stream_id.clone(), error))?;
-    frame.payload = serde_json::to_vec(&NetworkConnectRequest {
-        source_server_id: source_server_id.to_string(),
-        source_agent_id: request.source_agent_id,
-        host: target_host,
-        port: target_port,
-    })
-    .map_err(|error| {
-        (
-            frame.stream_id.clone(),
-            ProtocolError::new("encode_error", error.to_string()),
-        )
-    })?;
-    state
-        .open_network_stream(
-            workspace_id,
-            source_server_id,
-            connection_id,
-            &destination.server_id,
-            frame,
-        )
-        .await
-        .map_err(|error| (stream_id, error))
+    match route {
+        ResolvedNetworkRoute::Direct { host, port } => state
+            .send_direct_network_route(
+                workspace_id,
+                source_server_id,
+                connection_id,
+                stream_id.clone(),
+                NetworkDirectTarget { host, port },
+            )
+            .await
+            .map_err(|error| (stream_id, error)),
+        ResolvedNetworkRoute::Relay {
+            destination_server_id,
+            host,
+            port,
+        } => {
+            frame.payload = serde_json::to_vec(&NetworkConnectRequest {
+                source_server_id: source_server_id.to_string(),
+                source_agent_id: request.source_agent_id,
+                host,
+                port,
+            })
+            .map_err(|error| {
+                (
+                    frame.stream_id.clone(),
+                    ProtocolError::new("encode_error", error.to_string()),
+                )
+            })?;
+            state
+                .open_network_stream(
+                    workspace_id,
+                    source_server_id,
+                    connection_id,
+                    &destination_server_id,
+                    frame,
+                )
+                .await
+                .map_err(|error| (stream_id, error))
+        }
+    }
 }
 
-fn resolve_network_target(
+#[derive(Debug, PartialEq, Eq)]
+enum ResolvedNetworkRoute {
+    Direct {
+        host: String,
+        port: u16,
+    },
+    Relay {
+        destination_server_id: String,
+        host: String,
+        port: u16,
+    },
+}
+
+impl ResolvedNetworkRoute {
+    fn destination_server_id<'a>(&'a self, source_server_id: &'a str) -> &'a str {
+        match self {
+            Self::Direct { .. } => source_server_id,
+            Self::Relay {
+                destination_server_id,
+                ..
+            } => destination_server_id,
+        }
+    }
+
+    fn host(&self) -> &str {
+        match self {
+            Self::Direct { host, .. } | Self::Relay { host, .. } => host,
+        }
+    }
+
+    fn port(&self) -> u16 {
+        match self {
+            Self::Direct { port, .. } | Self::Relay { port, .. } => *port,
+        }
+    }
+}
+
+fn resolve_network_route(
     request: &NetworkOpenRequest,
     virtual_host: Option<VirtualNetworkHost>,
-    source_server_id: &str,
-) -> (String, String, u16) {
+) -> ResolvedNetworkRoute {
     virtual_host.map_or_else(
-        || {
-            (
-                source_server_id.to_string(),
-                request.host.clone(),
-                request.port,
-            )
+        || ResolvedNetworkRoute::Direct {
+            host: request.host.clone(),
+            port: request.port,
         },
-        |record| {
-            (
-                record.destination_server_id,
-                record.target_host,
-                record.target_port.unwrap_or(request.port),
-            )
+        |record| ResolvedNetworkRoute::Relay {
+            destination_server_id: record.destination_server_id,
+            host: record.target_host,
+            port: record.target_port.unwrap_or(request.port),
         },
     )
 }
@@ -579,12 +628,19 @@ mod tests {
             created_by: "admin".to_string(),
         };
         assert_eq!(
-            resolve_network_target(&request, Some(record), "server-a"),
-            ("server-b".to_string(), "localhost".to_string(), 8080)
+            resolve_network_route(&request, Some(record)),
+            ResolvedNetworkRoute::Relay {
+                destination_server_id: "server-b".to_string(),
+                host: "localhost".to_string(),
+                port: 8080,
+            }
         );
         assert_eq!(
-            resolve_network_target(&request, None, "server-a"),
-            ("server-a".to_string(), "127.0.0.1".to_string(), 80)
+            resolve_network_route(&request, None),
+            ResolvedNetworkRoute::Direct {
+                host: "127.0.0.1".to_string(),
+                port: 80,
+            }
         );
     }
 }

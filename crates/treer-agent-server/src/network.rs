@@ -9,7 +9,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 use treer_protocol::{
-    NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest, NetworkOpenRequest, ProtocolError,
+    NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest, NetworkDirectTarget,
+    NetworkOpenRequest, ProtocolError,
 };
 use uuid::Uuid;
 
@@ -169,13 +170,6 @@ impl NetworkRuntime {
             runtime.inner.streams.lock().await.remove(&stream_id);
             if let Err(error) = result {
                 debug!(stream_id, %error, "source network stream closed");
-                let _ = runtime
-                    .send(NetworkBinaryFrame {
-                        kind: NetworkBinaryKind::Reset,
-                        stream_id,
-                        payload: encode_error("stream_error", &error.to_string()),
-                    })
-                    .await;
             }
         });
     }
@@ -367,16 +361,76 @@ async fn source_stream(
     runtime: &NetworkRuntime,
     stream_id: &str,
 ) -> anyhow::Result<()> {
-    let opened = incoming
+    let route = incoming
         .recv()
         .await
         .ok_or_else(|| anyhow!("network stream closed before open"))?;
-    if opened.kind != NetworkBinaryKind::Opened {
-        write_socks_reply(&mut socket, 0x05).await?;
-        return Err(decode_reset(&opened));
+    match route.kind {
+        NetworkBinaryKind::Direct => {
+            let target: NetworkDirectTarget = match serde_json::from_slice(&route.payload) {
+                Ok(target) => target,
+                Err(error) => {
+                    write_socks_reply(&mut socket, 0x05).await?;
+                    return Err(error).context("invalid direct network target");
+                }
+            };
+            if target.host.is_empty() || target.port == 0 {
+                write_socks_reply(&mut socket, 0x05).await?;
+                return Err(anyhow!("direct network target is invalid"));
+            }
+            let mut destination =
+                match TcpStream::connect((target.host.as_str(), target.port)).await {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        write_socks_reply(&mut socket, 0x05).await?;
+                        return Err(error).with_context(|| {
+                            format!(
+                                "failed to connect directly to {}:{}",
+                                target.host, target.port
+                            )
+                        });
+                    }
+                };
+            write_socks_reply(&mut socket, 0).await?;
+            tokio::io::copy_bidirectional(&mut socket, &mut destination)
+                .await
+                .context("direct network stream failed")?;
+            Ok(())
+        }
+        NetworkBinaryKind::Opened => {
+            let result = async {
+                write_socks_reply(&mut socket, 0).await?;
+                bridge_stream(socket, incoming, runtime, stream_id, INITIAL_WINDOW).await
+            }
+            .await;
+            if let Err(error) = &result {
+                let _ = runtime
+                    .send(NetworkBinaryFrame {
+                        kind: NetworkBinaryKind::Reset,
+                        stream_id: stream_id.to_string(),
+                        payload: encode_error("stream_error", &error.to_string()),
+                    })
+                    .await;
+            }
+            result
+        }
+        NetworkBinaryKind::Reset => {
+            write_socks_reply(&mut socket, 0x05).await?;
+            Err(decode_reset(&route))
+        }
+        _ => {
+            write_socks_reply(&mut socket, 0x05).await?;
+            let error = anyhow!("unexpected network route frame {:?}", route.kind);
+            let _ = runtime
+                .send(NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Reset,
+                    stream_id: stream_id.to_string(),
+                    payload: encode_error("invalid_network_route", &error.to_string()),
+                })
+                .await;
+            Err(error)
+        }
     }
-    write_socks_reply(&mut socket, 0).await?;
-    bridge_stream(socket, incoming, runtime, stream_id, INITIAL_WINDOW).await
 }
 
 async fn write_socks_reply(socket: &mut TcpStream, status: u8) -> io::Result<()> {
@@ -437,7 +491,7 @@ async fn bridge_stream(
                         }
                     }
                     NetworkBinaryKind::Reset => return Err(decode_reset(&frame)),
-                    NetworkBinaryKind::Open | NetworkBinaryKind::Opened => {
+                    NetworkBinaryKind::Open | NetworkBinaryKind::Opened | NetworkBinaryKind::Direct => {
                         return Err(anyhow!("unexpected network stream frame {:?}", frame.kind));
                     }
                 }
@@ -591,6 +645,94 @@ mod tests {
                 .is_err()
         );
         local_api_task.await.expect("local API task");
+    }
+
+    #[tokio::test]
+    async fn direct_route_bridges_locally_without_proxy_data_frames() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind target server");
+        let target_port = target.local_addr().expect("target address").port();
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.expect("accept target connection");
+            let mut request = [0_u8; 18];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read target request");
+            assert_eq!(&request, b"GET / HTTP/1.0\r\n\r\n");
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("write target response");
+        });
+
+        let api_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reserve API port");
+        let api_address = api_reservation.local_addr().expect("API address");
+        drop(api_reservation);
+        let runtime = NetworkRuntime::bind_near(api_address)
+            .await
+            .expect("bind network runtime");
+        let mut client = TcpStream::connect(runtime.listen_address())
+            .await
+            .expect("connect SOCKS client");
+        client.write_all(&[5, 1, 0]).await.expect("SOCKS greeting");
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).await.expect("SOCKS method");
+        assert_eq!(method, [5, 0]);
+        client
+            .write_all(&[
+                5, 1, 0, 3, 11, b'd', b'i', b'r', b'e', b'c', b't', b'.', b't', b'e', b's', b't',
+                0, 80,
+            ])
+            .await
+            .expect("SOCKS connect request");
+
+        let source_open = next_frame(&runtime).await;
+        assert_eq!(source_open.kind, NetworkBinaryKind::Open);
+        assert_eq!(
+            serde_json::from_slice::<NetworkOpenRequest>(&source_open.payload)
+                .expect("decode network open")
+                .destination,
+            "direct.test"
+        );
+        runtime
+            .handle_incoming(NetworkBinaryFrame {
+                kind: NetworkBinaryKind::Direct,
+                stream_id: source_open.stream_id,
+                payload: serde_json::to_vec(&NetworkDirectTarget {
+                    host: Ipv4Addr::LOCALHOST.to_string(),
+                    port: target_port,
+                })
+                .expect("encode direct target"),
+            })
+            .await
+            .expect("apply direct route");
+
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).await.expect("SOCKS reply");
+        assert_eq!(reply[1], 0);
+        client
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .await
+            .expect("write HTTP request");
+        client.shutdown().await.expect("half-close HTTP request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .expect("HTTP response timeout")
+            .expect("read HTTP response");
+        assert!(response.ends_with(b"\r\n\r\nok"));
+
+        target_task.await.expect("target task");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), runtime.next_outgoing())
+                .await
+                .is_err(),
+            "direct traffic must not produce Proxy data frames"
+        );
     }
 
     #[tokio::test]
