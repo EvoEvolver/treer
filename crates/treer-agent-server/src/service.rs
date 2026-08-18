@@ -89,6 +89,7 @@ fn address_is_available(address: SocketAddr) -> bool {
 async fn local_api_matches(address: &SocketAddr, workspace: &str, server_id: &str) -> bool {
     let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
+        .no_proxy()
         .build()
     else {
         return false;
@@ -202,6 +203,9 @@ pub async fn update(workspace: &str) -> Result<()> {
     let treer_url = artifact_url(&proxy, platform, "treer")?;
     let client = reqwest::Client::builder()
         .timeout(UPDATE_DOWNLOAD_TIMEOUT)
+        // Agent terminals inherit Treer's socks5h proxy. Updating the
+        // Controller must not depend on the data plane it is replacing.
+        .no_proxy()
         .build()
         .context("failed to create update client")?;
 
@@ -471,6 +475,7 @@ async fn controller_epoch(config: &ServiceConfig) -> Option<String> {
     let address = config.listen.parse::<SocketAddr>().ok()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
+        .no_proxy()
         .build()
         .ok()?;
     let value = client
