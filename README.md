@@ -87,6 +87,24 @@ and linger enabled; macOS uses a per-user LaunchAgent with `KeepAlive`. Override
 needed. The first available loopback port starting at `8790` is saved per
 workspace.
 
+Setup is interactive by default. Before enrollment it explains that the Agent
+Server is a persistent proxy and agent host running with the current user's
+system permissions, and recommends a dedicated account, VM, container, or
+other sandbox. On the first setup it asks for a machine name. Treer stores a
+random installation identity and that name in the machine-level state directory;
+later setup runs reuse both, so claiming another enrollment link does not create
+a duplicate machine. The identity is random and does not contain or derive from
+a MAC address.
+
+Automation must opt in explicitly and provide a name on first setup:
+
+```bash
+TREER_ENROLLMENT_KEY='enr_v1_...' \
+  treer-agent-server connect \
+  --proxy 'https://PROXY_HOST/' \
+  --non-interactive --accept-risk --name 'build-machine'
+```
+
 Pull and hot-activate the latest Controller and agent-facing CLI with one command:
 
 ```bash

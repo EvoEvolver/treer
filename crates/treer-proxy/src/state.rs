@@ -160,6 +160,12 @@ impl AppState {
         self.inner.events.subscribe()
     }
 
+    pub async fn allow_server_reenrollment(&self, workspace_id: &str, server_id: &str) {
+        if let Some(workspace) = self.inner.workspaces.write().await.get_mut(workspace_id) {
+            workspace.deleted_servers.remove(server_id);
+        }
+    }
+
     pub async fn broadcast_proxy_message(&self, workspace_id: &str, message: &ProxyMessage) {
         let Ok(encoded) = serde_json::to_string(message) else {
             return;
@@ -2552,6 +2558,39 @@ mod tests {
                 .code,
             "server_deleted"
         );
+    }
+
+    #[tokio::test]
+    async fn reenrollment_clears_a_deleted_machine_tombstone() {
+        let state = AppState::new();
+        let server = test_server();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, _server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), connection_id, server_tx)
+            .await
+            .expect("register machine");
+        state
+            .delete_server("alpha", "server")
+            .await
+            .expect("delete machine");
+
+        let (blocked_tx, _blocked_rx) = mpsc::unbounded_channel();
+        assert_eq!(
+            state
+                .register_server(server.clone(), Uuid::new_v4(), blocked_tx)
+                .await
+                .expect_err("deleted machine remains blocked")
+                .code,
+            "server_deleted"
+        );
+
+        state.allow_server_reenrollment("alpha", "server").await;
+        let (reenrolled_tx, _reenrolled_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server, Uuid::new_v4(), reenrolled_tx)
+            .await
+            .expect("reenrolled machine reconnects");
     }
 
     #[tokio::test]

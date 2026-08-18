@@ -876,6 +876,12 @@ pub struct MachineEnrollmentKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineEnrollmentRequest {
+    pub installation_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineEnrollmentResponse {
     pub workspace_id: String,
     pub server_id: String,

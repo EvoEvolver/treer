@@ -16,10 +16,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use treer_protocol::{
     AgentCommand, ApiError, CreateAgentRequest, CreateMachineServiceRequest,
-    CreateVirtualNetworkHostRequest, InputAgentRequest, MachineEnrollmentResponse, MachineService,
-    PromptAgentRequest, ProtocolError, RenameRequest, TerminalClientMessage, TerminalServerMessage,
-    TransferServerMessage, UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    CreateVirtualNetworkHostRequest, InputAgentRequest, MachineEnrollmentRequest,
+    MachineEnrollmentResponse, MachineService, PromptAgentRequest, ProtocolError, RenameRequest,
+    TerminalClientMessage, TerminalServerMessage, TransferServerMessage,
+    UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -75,6 +75,7 @@ pub fn router(
     policy: PolicyEngine,
 ) -> Router {
     let agent_control = Router::new()
+        .route("/agent/machine/identity", post(bind_machine_identity))
         .route(
             "/agent/workspaces/{workspace_id}/snapshot",
             get(workspace_snapshot),
@@ -366,16 +367,60 @@ async fn install_script(Extension(config): Extension<BootstrapConfig>) -> Respon
 }
 
 async fn enroll_machine(
+    State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     headers: HeaderMap,
+    request: Option<Json<MachineEnrollmentRequest>>,
 ) -> Result<Response, ApiFailure> {
-    let enrollment = auth.claim_machine_enrollment_from_headers(&headers).await?;
+    let request = request.as_ref().map(|request| &request.0);
+    let enrollment = auth
+        .claim_machine_enrollment_from_headers(
+            &headers,
+            request.map(|request| request.installation_id.as_str()),
+            request.map(|request| request.name.as_str()),
+        )
+        .await?;
+    state
+        .allow_server_reenrollment(&enrollment.workspace_id, &enrollment.server_id)
+        .await;
     let response = MachineEnrollmentResponse {
         workspace_id: enrollment.workspace_id,
         server_id: enrollment.server_id,
         machine_token: enrollment.machine_token,
     };
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response())
+}
+
+async fn bind_machine_identity(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(machine): Extension<MachineSession>,
+    Json(request): Json<MachineEnrollmentRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let workspace_id = machine.workspace_id.as_deref().ok_or_else(|| {
+        ProtocolError::new(
+            "machine_identity_required",
+            "machine workspace identity is required",
+        )
+    })?;
+    let server_id = machine.server_id.as_deref().ok_or_else(|| {
+        ProtocolError::new(
+            "machine_identity_required",
+            "machine server identity is required",
+        )
+    })?;
+    auth.bind_machine_identity(
+        workspace_id,
+        server_id,
+        &request.installation_id,
+        &request.name,
+    )
+    .await?;
+    if state.resolve_server(workspace_id, server_id).await.is_ok() {
+        let name = normalize_display_name(request.name)?;
+        state.rename_server(workspace_id, server_id, name).await?;
+    }
+    Ok(Json(json!({ "bound": true, "server_id": server_id })))
 }
 
 async fn download_artifact(
@@ -467,6 +512,11 @@ set -eu
 artifact_base={artifact_base}
 install_dir=${{TREER_INSTALL_DIR:-"${{HOME:?HOME is required}}/.local/bin"}}
 server_dir=${{TREER_AGENT_SERVER_INSTALL_DIR:-"${{HOME}}/.local/libexec/treer"}}
+
+echo "treer: security notice" >&2
+echo "treer: the Agent Server is a persistent proxy and agent host that runs with your user account's system permissions" >&2
+echo "treer: workspace agents can execute commands and make network requests on this machine" >&2
+echo "treer: use a dedicated account, VM, container, or other sandbox when possible" >&2
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64|Linux-amd64) platform=linux-x86_64 ;;
@@ -1966,6 +2016,25 @@ mod tests {
         assert!(url.query().is_none());
     }
 
+    #[tokio::test]
+    async fn legacy_enrollment_requests_without_identity_remain_supported() {
+        let auth = AuthStore::in_memory("admin-password").await;
+        let enrollment = auth
+            .create_machine_enrollment("default", "admin")
+            .await
+            .expect("create enrollment");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {enrollment}"))
+                .expect("enrollment authorization"),
+        );
+        let response = enroll_machine(State(AppState::new()), Extension(auth), headers, None)
+            .await
+            .unwrap_or_else(|error| panic!("legacy enrollment: {}", error.error.message));
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[test]
     fn bootstrap_separates_public_installation_from_workspace_connection() {
         let config = test_config();
@@ -1989,6 +2058,8 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\nset -eu\n"));
         assert!(script.contains("platform=linux-aarch64"));
         assert!(script.contains("transparent agent networking requires unshare(1)"));
+        assert!(script.contains("persistent proxy and agent host"));
+        assert!(script.contains("container, or other sandbox"));
         assert!(script.contains(".local/libexec/treer"));
         assert!(script.contains("treer-agent-host"));
         assert!(script.contains(

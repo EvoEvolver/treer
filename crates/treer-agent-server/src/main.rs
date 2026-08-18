@@ -7,13 +7,16 @@ mod proxy;
 mod sandbox;
 mod service;
 
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use tracing::info;
-use treer_protocol::{parse_machine_enrollment_key, ApiError, MachineEnrollmentResponse};
+use treer_protocol::{
+    parse_machine_enrollment_key, ApiError, MachineEnrollmentRequest, MachineEnrollmentResponse,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -100,6 +103,15 @@ struct ConnectArgs {
     root: PathBuf,
     #[arg(long, env = "TREER_AGENT_SERVER_LISTEN")]
     listen: Option<SocketAddr>,
+    /// Set or replace the persistent machine name.
+    #[arg(long, env = "TREER_MACHINE_NAME")]
+    name: Option<String>,
+    /// Disable prompts. Requires --accept-risk and, on first setup, --name.
+    #[arg(long)]
+    non_interactive: bool,
+    /// Confirm that the persistent proxy and agent host may use this account's permissions.
+    #[arg(long)]
+    accept_risk: bool,
 }
 
 #[derive(Debug, Clone, ClapArgs)]
@@ -294,17 +306,52 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     }
     let enrollment = parse_machine_enrollment_key(&args.enrollment_key)
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    if service::is_registered(&enrollment.workspace_id)? {
-        anyhow::bail!(
-            "workspace {} is already connected on this machine; uninstall it before enrolling again",
-            enrollment.workspace_id
+    let existing_identity = service::load_machine_identity()?;
+    let mut input = io::BufReader::new(io::stdin());
+    let mut output = io::stderr();
+    let identity = prepare_machine_identity(
+        &args,
+        existing_identity,
+        io::stdin().is_terminal(),
+        &mut input,
+        &mut output,
+    )?;
+    service::save_machine_identity(&identity)?;
+    let proxy = normalize_http_url(args.proxy.clone())?;
+    if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
+        let installed_proxy = normalize_http_url(
+            Url::parse(&config.proxy).context("invalid proxy URL in installed service config")?,
+        )?;
+        if installed_proxy != proxy {
+            anyhow::bail!(
+                "workspace {} is already connected to {}; uninstall it before connecting the same workspace ID to {}",
+                enrollment.workspace_id,
+                installed_proxy,
+                proxy
+            );
+        }
+        bind_machine_identity(&proxy, &config, &identity).await?;
+        let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity).await?;
+        if response.server_id != config.server_id {
+            anyhow::bail!(
+                "Proxy returned machine {} instead of the installed machine {}",
+                response.server_id,
+                config.server_id
+            );
+        }
+        config.machine_token = response.machine_token;
+        config.proxy = proxy.to_string();
+        service::refresh_registration(config)?;
+        println!(
+            "treer: reusing machine {} for workspace {}",
+            identity.name, enrollment.workspace_id
         );
+        return Ok(());
     }
     service::preflight_registration(&enrollment.workspace_id)?;
     let root = std::fs::canonicalize(&args.root)
         .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
-    let proxy = normalize_http_url(args.proxy)?;
-    let response = claim_machine_enrollment(&proxy, &args.enrollment_key).await?;
+    let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity).await?;
     if response.workspace_id != enrollment.workspace_id {
         anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
     }
@@ -330,6 +377,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
 async fn claim_machine_enrollment(
     proxy: &Url,
     enrollment_key: &str,
+    identity: &service::MachineIdentity,
 ) -> Result<MachineEnrollmentResponse> {
     let endpoint = proxy
         .join("api/machines/enroll")
@@ -337,6 +385,10 @@ async fn claim_machine_enrollment(
     let response = reqwest::Client::new()
         .post(endpoint.clone())
         .bearer_auth(enrollment_key)
+        .json(&MachineEnrollmentRequest {
+            installation_id: identity.installation_id.clone(),
+            name: identity.name.clone(),
+        })
         .send()
         .await
         .with_context(|| format!("failed to connect to {endpoint}"))?;
@@ -352,6 +404,108 @@ async fn claim_machine_enrollment(
         .json()
         .await
         .context("Proxy returned an invalid enrollment response")
+}
+
+async fn bind_machine_identity(
+    proxy: &Url,
+    config: &service::ServiceConfig,
+    identity: &service::MachineIdentity,
+) -> Result<()> {
+    let endpoint = proxy
+        .join("agent/machine/identity")
+        .context("failed to build machine identity URL")?;
+    let response = reqwest::Client::new()
+        .post(endpoint.clone())
+        .bearer_auth(&config.machine_token)
+        .json(&MachineEnrollmentRequest {
+            installation_id: identity.installation_id.clone(),
+            name: identity.name.clone(),
+        })
+        .send()
+        .await
+        .with_context(|| format!("failed to connect to {endpoint}"))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let error = response.json::<ApiError>().await.ok();
+    anyhow::bail!(
+        "{}",
+        error
+            .map(|error| error.error.message)
+            .unwrap_or_else(|| format!("Proxy identity binding failed with HTTP {status}"))
+    )
+}
+
+fn prepare_machine_identity(
+    args: &ConnectArgs,
+    existing: Option<service::MachineIdentity>,
+    terminal: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<service::MachineIdentity> {
+    writeln!(output, "Treer setup security notice")?;
+    writeln!(
+        output,
+        "Treer installs a persistent proxy and agent host that run with your user account's system permissions."
+    )?;
+    writeln!(
+        output,
+        "Workspace agents can execute commands and make network requests on this machine."
+    )?;
+    writeln!(
+        output,
+        "Run Treer in a dedicated account, VM, container, or other sandbox when possible."
+    )?;
+
+    if args.non_interactive {
+        if !args.accept_risk {
+            anyhow::bail!("--non-interactive requires --accept-risk");
+        }
+    } else {
+        if !terminal {
+            anyhow::bail!(
+                "interactive setup requires a terminal; use --non-interactive --accept-risk for automation"
+            );
+        }
+        if !args.accept_risk {
+            write!(output, "Continue setup? [y/N] ")?;
+            output.flush()?;
+            let mut answer = String::new();
+            input.read_line(&mut answer)?;
+            if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                anyhow::bail!("setup cancelled");
+            }
+        }
+    }
+
+    let requested_name = args
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let name = if let Some(name) = requested_name {
+        name.to_string()
+    } else if let Some(identity) = existing.as_ref() {
+        writeln!(output, "Reusing machine name: {}", identity.name)?;
+        identity.name.clone()
+    } else if args.non_interactive {
+        anyhow::bail!("first-time non-interactive setup requires --name <machine-name>");
+    } else {
+        write!(output, "Machine name: ")?;
+        output.flush()?;
+        let mut name = String::new();
+        input.read_line(&mut name)?;
+        name.trim().to_string()
+    };
+    service::validate_machine_name(&name)?;
+    Ok(match existing {
+        Some(mut identity) => {
+            identity.name = name;
+            identity
+        }
+        None => service::MachineIdentity::new(name),
+    })
 }
 
 fn require_loopback_listen(listen: SocketAddr) -> Result<()> {
@@ -423,6 +577,7 @@ mod tests {
     use axum::http::HeaderMap;
     use axum::routing::post;
     use axum::{Json, Router};
+    use std::io::Cursor;
     use treer_protocol::format_machine_enrollment_key;
 
     #[test]
@@ -470,6 +625,105 @@ mod tests {
         );
     }
 
+    fn setup_args(name: Option<&str>, non_interactive: bool, accept_risk: bool) -> ConnectArgs {
+        ConnectArgs {
+            proxy: Url::parse("https://treer.example/").expect("proxy URL"),
+            enrollment_key: "test-key".to_string(),
+            root: PathBuf::from("."),
+            listen: None,
+            name: name.map(str::to_string),
+            non_interactive,
+            accept_risk,
+        }
+    }
+
+    #[test]
+    fn first_interactive_setup_confirms_risk_and_asks_for_a_name() {
+        let args = setup_args(None, false, false);
+        let mut input = Cursor::new(b"yes\nBuild machine\n");
+        let mut output = Vec::new();
+        let identity = prepare_machine_identity(&args, None, true, &mut input, &mut output)
+            .expect("interactive setup");
+        assert_eq!(identity.name, "Build machine");
+        assert!(identity.installation_id.starts_with("mid_"));
+        let output = String::from_utf8(output).expect("setup output");
+        assert!(output.contains("persistent proxy and agent host"));
+        assert!(output.contains("system permissions"));
+        assert!(output.contains("sandbox"));
+        assert!(output.contains("Continue setup?"));
+        assert!(output.contains("Machine name:"));
+    }
+
+    #[test]
+    fn later_setup_reuses_the_saved_machine_name() {
+        let args = setup_args(None, false, false);
+        let existing = service::MachineIdentity {
+            installation_id: "mid_0123456789abcdef0123456789abcdef".to_string(),
+            name: "Existing builder".to_string(),
+        };
+        let mut input = Cursor::new(b"y\n");
+        let mut output = Vec::new();
+        let identity =
+            prepare_machine_identity(&args, Some(existing.clone()), true, &mut input, &mut output)
+                .expect("repeat setup");
+        assert_eq!(identity, existing);
+        assert!(String::from_utf8(output)
+            .expect("setup output")
+            .contains("Reusing machine name: Existing builder"));
+    }
+
+    #[test]
+    fn automated_setup_requires_explicit_risk_acceptance_and_first_name() {
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let missing_acceptance = prepare_machine_identity(
+            &setup_args(Some("builder"), true, false),
+            None,
+            false,
+            &mut input,
+            &mut output,
+        )
+        .expect_err("risk acceptance is required");
+        assert!(missing_acceptance.to_string().contains("--accept-risk"));
+
+        let missing_name = prepare_machine_identity(
+            &setup_args(None, true, true),
+            None,
+            false,
+            &mut input,
+            &mut output,
+        )
+        .expect_err("first setup name is required");
+        assert!(missing_name.to_string().contains("--name"));
+
+        let identity = prepare_machine_identity(
+            &setup_args(Some("builder"), true, true),
+            None,
+            false,
+            &mut input,
+            &mut output,
+        )
+        .expect("explicit automated setup");
+        assert_eq!(identity.name, "builder");
+    }
+
+    #[test]
+    fn interactive_setup_refuses_to_guess_without_a_terminal() {
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let error = prepare_machine_identity(
+            &setup_args(Some("builder"), false, false),
+            None,
+            false,
+            &mut input,
+            &mut output,
+        )
+        .expect_err("terminal is required");
+        assert!(error
+            .to_string()
+            .contains("--non-interactive --accept-risk"));
+    }
+
     #[test]
     fn update_command_accepts_a_workspace() {
         let args =
@@ -486,20 +740,27 @@ mod tests {
         const KEY: &str = "enr_v1_776f726b73706163652d61_abc123.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let app = Router::new().route(
             "/api/machines/enroll",
-            post(|headers: HeaderMap| async move {
-                let expected = format!("Bearer {KEY}");
-                assert_eq!(
-                    headers
-                        .get("authorization")
-                        .and_then(|value| value.to_str().ok()),
-                    Some(expected.as_str())
-                );
-                Json(MachineEnrollmentResponse {
-                    workspace_id: "workspace-a".to_string(),
-                    server_id: "srv_test".to_string(),
-                    machine_token: "srv_test.secret".to_string(),
-                })
-            }),
+            post(
+                |headers: HeaderMap, Json(request): Json<MachineEnrollmentRequest>| async move {
+                    let expected = format!("Bearer {KEY}");
+                    assert_eq!(
+                        headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok()),
+                        Some(expected.as_str())
+                    );
+                    assert_eq!(
+                        request.installation_id,
+                        "mid_0123456789abcdef0123456789abcdef"
+                    );
+                    assert_eq!(request.name, "builder");
+                    Json(MachineEnrollmentResponse {
+                        workspace_id: "workspace-a".to_string(),
+                        server_id: "srv_test".to_string(),
+                        machine_token: "srv_test.secret".to_string(),
+                    })
+                },
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -509,6 +770,10 @@ mod tests {
         let response = claim_machine_enrollment(
             &Url::parse(&format!("http://{address}/")).expect("Proxy URL"),
             KEY,
+            &service::MachineIdentity {
+                installation_id: "mid_0123456789abcdef0123456789abcdef".to_string(),
+                name: "builder".to_string(),
+            },
         )
         .await
         .expect("claim enrollment");

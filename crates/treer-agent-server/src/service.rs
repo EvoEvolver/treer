@@ -29,6 +29,72 @@ pub struct ServiceConfig {
     pub host_socket: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineIdentity {
+    pub installation_id: String,
+    pub name: String,
+}
+
+impl MachineIdentity {
+    pub fn new(name: String) -> Self {
+        Self {
+            installation_id: format!("mid_{}", Uuid::new_v4().simple()),
+            name,
+        }
+    }
+
+    fn load(path: &Path) -> Result<Self> {
+        let bytes = fs::read(path)
+            .with_context(|| format!("failed to read machine identity {}", path.display()))?;
+        let identity: Self = serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid machine identity {}", path.display()))?;
+        validate_machine_identity(&identity)?;
+        Ok(identity)
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        validate_machine_identity(self)?;
+        save_json(self, path)
+    }
+}
+
+pub fn load_machine_identity() -> Result<Option<MachineIdentity>> {
+    let path = machine_identity_path()?;
+    match fs::metadata(&path) {
+        Ok(_) => MachineIdentity::load(&path).map(Some),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+pub fn save_machine_identity(identity: &MachineIdentity) -> Result<()> {
+    identity.save(&machine_identity_path()?)
+}
+
+fn machine_identity_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("machine-identity.json"))
+}
+
+fn validate_machine_identity(identity: &MachineIdentity) -> Result<()> {
+    if !identity.installation_id.starts_with("mid_")
+        || identity.installation_id.len() != 36
+        || !identity.installation_id[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("machine installation identity is invalid");
+    }
+    validate_machine_name(&identity.name)
+}
+
+pub fn validate_machine_name(name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        bail!("machine name must contain 1 to 80 printable characters");
+    }
+    Ok(())
+}
+
 impl ServiceConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)
@@ -132,9 +198,26 @@ pub fn register(config: ServiceConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn is_registered(workspace: &str) -> Result<bool> {
+pub fn refresh_registration(config: ServiceConfig) -> Result<()> {
+    let workspace = config.workspace.clone();
+    register(config)?;
+    if let Err(error) = restart_controller(&workspace) {
+        eprintln!(
+            "treer: warning: hot Controller restart failed ({error:#}); restarting the Host service"
+        );
+        restart(&workspace)?;
+    }
+    Ok(())
+}
+
+pub fn registered_config(workspace: &str) -> Result<Option<ServiceConfig>> {
     validate_workspace(workspace)?;
-    Ok(ServicePaths::new(workspace)?.config.is_file())
+    let path = ServicePaths::new(workspace)?.config;
+    if path.is_file() {
+        ServiceConfig::load(&path).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn preflight_registration(workspace: &str) -> Result<()> {
@@ -550,10 +633,7 @@ impl ServicePaths {
         let config_home = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
-        let state_dir = env::var_os("TREER_STATE_DIR")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("XDG_STATE_HOME").map(|path| PathBuf::from(path).join("treer")))
-            .unwrap_or_else(|| home.join(".local/state/treer"));
+        let state_dir = state_dir()?;
         let key = workspace_key(workspace);
         let executable = env::current_exe()
             .context("failed to find the treer-agent-server executable")?
@@ -570,6 +650,14 @@ impl ServicePaths {
             state_dir,
         })
     }
+}
+
+fn state_dir() -> Result<PathBuf> {
+    let home = home_dir()?;
+    Ok(env::var_os("TREER_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("XDG_STATE_HOME").map(|path| PathBuf::from(path).join("treer")))
+        .unwrap_or_else(|| home.join(".local/state/treer")))
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -1202,5 +1290,22 @@ mod tests {
             & 0o777;
         std::fs::remove_file(&path).expect("remove test configuration");
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn machine_identity_round_trips_without_hardware_identifiers() {
+        let directory = std::env::temp_dir().join(format!(
+            "treer-machine-identity-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = directory.join("machine-identity.json");
+        let identity = MachineIdentity::new("Build machine".to_string());
+        identity.save(&path).expect("save machine identity");
+        let loaded = MachineIdentity::load(&path).expect("load machine identity");
+        assert_eq!(loaded, identity);
+        let encoded = fs::read_to_string(&path).expect("read machine identity");
+        assert!(!encoded.contains("mac_address"));
+        assert!(!encoded.contains("hardware_address"));
+        fs::remove_dir_all(directory).expect("remove identity directory");
     }
 }
