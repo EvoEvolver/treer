@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-treer}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB:-treer}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.14.4-alpine3.22
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    restart: unless-stopped
+    volumes:
+      - nats-data:/data
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+
+  proxy:
+    build: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD}"
+      DATABASE_URL: "${DATABASE_URL:?set DATABASE_URL}"
+      PORT: "8787"
+      TREER_PROXY_PUBLIC_URL: "${TREER_PROXY_PUBLIC_URL:-http://127.0.0.1:8787/}"
+      TREER_NATS_URL: "nats://nats:4222"
+      TREER_NATS_STREAM: "TREER_EVENTS"
+      TREER_NATS_SUBJECT_PREFIX: "treer.v1.events"
+    ports:
+      - "8787:8787"
+
+volumes:
+  postgres-data:
+  nats-data:

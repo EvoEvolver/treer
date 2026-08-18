@@ -176,6 +176,51 @@ and workload signing keys are stored in PostgreSQL. The Proxy requires
 test suite. Changing `ADMIN_PASSWORD` changes the administrator's next login
 password without rewriting user accounts.
 
+## NATS event bus
+
+The Proxy can publish revisioned workspace changes as versioned domain events
+to NATS JetStream. NATS is optional: without `TREER_NATS_URL`, the same event
+contract runs in process and the browser event stream continues to work.
+
+For a single-host deployment with separate PostgreSQL, Proxy, and NATS
+processes, use the checked-in Compose stack:
+
+```bash
+ADMIN_PASSWORD='replace-this' \
+POSTGRES_PASSWORD='replace-this-too' \
+DATABASE_URL='postgres://treer:replace-this-too@postgres:5432/treer' \
+docker compose up --build -d
+curl -fsS http://127.0.0.1:8222/jsz
+```
+
+This persists PostgreSQL and JetStream data in separate volumes. NATS client
+and monitoring ports bind only to host loopback; the Proxy remains available
+on port 8787. Set `TREER_PROXY_PUBLIC_URL` in the command environment when
+other machines must reach the Proxy. If credentials contain URL-reserved
+characters, percent-encode them in `DATABASE_URL`.
+
+For a Proxy started outside Compose, configure:
+
+```bash
+export TREER_NATS_URL='nats://127.0.0.1:4222'
+export TREER_NATS_STREAM='TREER_EVENTS'
+export TREER_NATS_SUBJECT_PREFIX='treer.v1.events'
+```
+
+Subjects use
+`treer.v1.events.workspace_<encoded-workspace-id>.<action>`. Payloads use the
+shared `DomainEventEnvelope` with a stable event ID, schema version, actor,
+action, resource, timestamp, revision, correlation fields, and JSON payload.
+JetStream retains up to 1 GiB or 30 days and deduplicates retried publishes by
+event ID within a 10-minute window. A configured Proxy fails startup when it
+cannot initialize the expected stream or when an existing stream does not
+capture its configured subject prefix.
+
+Runtime disconnects are retried from a bounded in-memory queue and do not fail
+the originating workspace mutation. This is not yet a transactional outbox: a
+Proxy crash or a full queue can lose unpublished events. Durable database state
+therefore remains authoritative until the outbox is implemented.
+
 ## Railway
 
 The root `Dockerfile` and `railway.json` make the repository directly

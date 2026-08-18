@@ -8,6 +8,7 @@ matching the question; follow its source links for implementation detail.
 | Document | Use it for |
 | --- | --- |
 | [Product direction](product.md) | Purpose, current audience, product promise, and delivery boundaries |
+| [Capability roadmap](roadmap.md) | Real scenarios, capability planes, dependencies, and sequencing |
 | [Architecture](architecture.md) | Components, ownership rules, protocols, state, and information flows |
 | [Security model](security.md) | Trust tier, supported claims, credentials, isolation, and known gaps |
 | [Quality and maintenance](quality.md) | Verification, documentation rules, current gaps, and review triggers |
@@ -46,7 +47,8 @@ time and prints it through `treer --skill` and `treer --skills`.
 | Change | Documentation to review |
 | --- | --- |
 | User-visible setup or commands | `README.md`, embedded Treer skill |
-| Product scope or sequencing | Product direction |
+| Product scope or promise | Product direction |
+| Capability classification or sequencing | Capability roadmap |
 | Component ownership, route, protocol, or state | Architecture |
 | Auth, credentials, policy, isolation, or security wording | Security model |
 | Verification command, CI, known gap, or doc convention | Quality and maintenance |

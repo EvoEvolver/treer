@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
 pub const WORKLOAD_CREDENTIAL_HEADER: &str = "x-treer-workload-credential";
@@ -904,6 +905,41 @@ pub struct WorkspaceEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainEventActor {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainEventResource {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainEventEnvelope {
+    pub event_id: String,
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    pub workspace_id: String,
+    pub actor: DomainEventActor,
+    pub action: String,
+    pub resource: DomainEventResource,
+    pub occurred_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_revision: Option<u64>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: ProtocolError,
 }
@@ -1131,6 +1167,50 @@ mod tests {
         assert_eq!(
             serde_json::to_value(inactive).expect("serialize verification"),
             serde_json::json!({ "active": false })
+        );
+    }
+
+    #[test]
+    fn domain_event_envelope_has_a_stable_wire_shape() {
+        let event = DomainEventEnvelope {
+            event_id: "evt_123".to_string(),
+            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
+            organization_id: Some("org_1".to_string()),
+            workspace_id: "ws_1".to_string(),
+            actor: DomainEventActor {
+                kind: "agent".to_string(),
+                id: Some("agent_1".to_string()),
+            },
+            action: "service.updated".to_string(),
+            resource: DomainEventResource {
+                kind: "service".to_string(),
+                id: "svc_1".to_string(),
+            },
+            occurred_at: "2026-08-18T21:00:00Z".parse().expect("timestamp"),
+            trace_id: Some("trace_1".to_string()),
+            causation_id: Some("evt_122".to_string()),
+            correlation_id: Some("task_1".to_string()),
+            workspace_revision: Some(9),
+            payload: serde_json::json!({"hostname": "api.internal"}),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).expect("serialize domain event"),
+            serde_json::json!({
+                "event_id": "evt_123",
+                "schema_version": 1,
+                "organization_id": "org_1",
+                "workspace_id": "ws_1",
+                "actor": {"kind": "agent", "id": "agent_1"},
+                "action": "service.updated",
+                "resource": {"kind": "service", "id": "svc_1"},
+                "occurred_at": "2026-08-18T21:00:00Z",
+                "trace_id": "trace_1",
+                "causation_id": "evt_122",
+                "correlation_id": "task_1",
+                "workspace_revision": 9,
+                "payload": {"hostname": "api.internal"}
+            })
         );
     }
 

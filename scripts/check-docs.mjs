@@ -8,6 +8,7 @@ const requiredFiles = [
   "README.md",
   "docs/README.md",
   "docs/product.md",
+  "docs/roadmap.md",
   "docs/architecture.md",
   "docs/security.md",
   "docs/quality.md",

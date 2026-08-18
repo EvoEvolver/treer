@@ -1,6 +1,7 @@
 mod agent_socket;
 mod api;
 mod auth;
+mod event_bus;
 mod identity;
 pub mod policy;
 mod state;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use event_bus::{EventBus, EventBusConfig};
 use state::AppState;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -53,6 +55,20 @@ struct Args {
     disable_auth: bool,
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     database_url: String,
+    #[arg(
+        long,
+        env = "TREER_NATS_URL",
+        help = "NATS server URL; when absent, domain events stay in process"
+    )]
+    nats_url: Option<String>,
+    #[arg(long, env = "TREER_NATS_STREAM", default_value = "TREER_EVENTS")]
+    nats_stream: String,
+    #[arg(
+        long,
+        env = "TREER_NATS_SUBJECT_PREFIX",
+        default_value = "treer.v1.events"
+    )]
+    nats_subject_prefix: String,
     #[arg(long, env = "RAILWAY_PUBLIC_DOMAIN", hide = true)]
     railway_public_domain: Option<String>,
 }
@@ -89,7 +105,20 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("failed to connect to PostgreSQL")?;
-    let state = AppState::new();
+    let event_bus = match args.nats_url {
+        Some(nats_url) => EventBus::connect_nats(EventBusConfig::new(
+            nats_url,
+            args.nats_stream,
+            args.nats_subject_prefix,
+        ))
+        .await
+        .context("failed to initialize NATS event bus")?,
+        None => {
+            info!("NATS is not configured; domain events will stay in process");
+            EventBus::in_process()
+        }
+    };
+    let state = AppState::with_event_bus(event_bus);
     for workspace in auth
         .all_workspaces()
         .await

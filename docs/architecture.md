@@ -18,8 +18,10 @@ flowchart TB
     subgraph Central[Central control plane]
         Proxy["treer-proxy<br/>auth, metadata, routing"]
         DB[(PostgreSQL)]
+        NATS[(NATS JetStream<br/>optional event distribution)]
         Web[Embedded React application]
         Proxy <--> DB
+        Proxy --> NATS
         Proxy --> Web
     end
 
@@ -40,7 +42,7 @@ flowchart TB
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
-| [`treer-proxy`](../crates/treer-proxy/src/main.rs) | Public API, user auth, workload token signing, PostgreSQL metadata, workspace projection, command and stream routing | Local process lifetime |
+| [`treer-proxy`](../crates/treer-proxy/src/main.rs) | Public API, user auth, workload token signing, PostgreSQL metadata, workspace projection, command and stream routing, domain-event publication | Local process lifetime |
 | [`treer-agent-server`](../crates/treer-agent-server/src/main.rs) | Machine Controller, local API, Agent definitions, state detection, Proxy link, network bridge | Durable PTY ownership |
 | [`treer-agent-host`](../crates/treer-agent-host/src/main.rs) | Stable child processes, Controller supervision, idempotent mutation cache | Users, workspaces, Agent brands, product policy |
 | [`treer-agent-runtime`](../crates/treer-agent-runtime/src/lib.rs) | PTY lifecycle, raw input/output, bounded replay, root-relative working directories | Distributed routing or identity |
@@ -64,6 +66,11 @@ flowchart TB
   configured workspace root. This path rule is not filesystem sandboxing.
 - Durable identity metadata lives in PostgreSQL; live routing and streams are
   currently single-Proxy in-memory state.
+- Workspace mutations emit a shared, versioned domain-event envelope. The
+  broker-neutral event bus stays in process by default and can publish the same
+  envelope to an optional NATS JetStream.
+- JetStream carries durable domain events, not PTY output, terminal input, file
+  transfer payloads, or virtual-network TCP bytes.
 - The web build is embedded into `treer-proxy`; frontend API changes and Proxy
   routes must be changed and verified together.
 - `skills/treer/SKILL.md` is embedded into the CLI at build time and is the
@@ -84,6 +91,14 @@ workspaces, enrollment records, machine credentials, the workload signing key,
 display names, machine services, and virtual hosts. Connected Controllers, pending commands, workspace
 projections, terminal legs, transfers, and network tunnels are held in Proxy
 memory and do not yet support horizontal routing across Proxy replicas.
+
+Workspace state changes also produce `DomainEventEnvelope` values containing a
+unique event ID, schema version, actor, action, resource, occurrence time,
+workspace revision, optional trace/correlation lineage, and JSON payload. When
+`TREER_NATS_URL` is configured, the Proxy provisions a file-backed JetStream
+stream and publishes these envelopes under a workspace-scoped subject. Publish
+retries use the event ID as `Nats-Msg-Id`; the database remains authoritative
+because the publisher queue is not yet a transactional outbox.
 
 ## Primary information flow
 
