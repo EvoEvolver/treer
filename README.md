@@ -204,12 +204,12 @@ transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
 `all_proxy` instead. Native macOS currently uses this compatibility mode; use a
 Linux container when transparent capture is required.
 
-Managed agents reach the Controller's local API through the internal
-`treer-agent-server.invalid` address. The local SOCKS endpoint recognizes this
-address and bridges HTTP and WebSocket traffic directly to the Controller's
-loopback listener; it is not a workspace virtual host and never traverses the
-Proxy. This keeps `treer`, `treer ssh`, and `treer scp` usable inside transparent
-network namespaces.
+Managed agents reach the Controller's local API through the reserved TEST-NET-1
+address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
+SOCKS endpoint recognizes this address and bridges HTTP and WebSocket traffic
+directly to the Controller's loopback listener; it is not a workspace virtual
+host and never traverses the Proxy. This keeps `treer`, `treer ssh`, and
+`treer scp` usable inside transparent network namespaces.
 
 TCP streams are multiplexed as binary frames over the Controller's existing
 `/agent/connect` WebSocket; no machine needs an inbound port. Each stream has an

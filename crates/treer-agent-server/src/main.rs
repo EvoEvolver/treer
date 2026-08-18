@@ -249,7 +249,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
 
 fn agent_server_url(listen_address: SocketAddr, transparent: bool) -> String {
     let host = if transparent {
-        network::SANDBOX_LOCAL_API_HOST
+        network::SANDBOX_LOCAL_API_IP
     } else {
         "127.0.0.1"
     };
@@ -438,10 +438,7 @@ mod tests {
     #[test]
     fn transparent_agents_use_the_sandbox_local_api_route() {
         let address = "127.0.0.1:8790".parse().expect("local API address");
-        assert_eq!(
-            agent_server_url(address, true),
-            "http://treer-agent-server.invalid:8790"
-        );
+        assert_eq!(agent_server_url(address, true), "http://192.0.2.1:8790");
         assert_eq!(agent_server_url(address, false), "http://127.0.0.1:8790");
     }
 

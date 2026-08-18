@@ -17,7 +17,7 @@ const STREAM_CHANNEL_CAPACITY: usize = 32;
 const OUTGOING_CHANNEL_CAPACITY: usize = 128;
 const INITIAL_WINDOW: usize = 256 * 1024;
 const MAX_CHUNK: usize = 16 * 1024;
-pub const SANDBOX_LOCAL_API_HOST: &str = "treer-agent-server.invalid";
+pub const SANDBOX_LOCAL_API_IP: &str = "192.0.2.1";
 
 #[derive(Clone)]
 pub struct NetworkRuntime {
@@ -129,7 +129,7 @@ impl NetworkRuntime {
                 return;
             }
         };
-        if route.destination == SANDBOX_LOCAL_API_HOST
+        if route.destination == SANDBOX_LOCAL_API_IP
             && route.port == self.inner.local_api_address.port()
         {
             let local_api_address = self.inner.local_api_address;
@@ -470,26 +470,19 @@ mod tests {
             .expect("network runtime stopped")
     }
 
-    async fn request_domain(client: &mut TcpStream, domain: &str, port: u16) {
+    async fn request_ipv4(client: &mut TcpStream, address: Ipv4Addr, port: u16) {
         client.write_all(&[5, 1, 0]).await.expect("SOCKS greeting");
         let mut method = [0_u8; 2];
         client.read_exact(&mut method).await.expect("SOCKS method");
         assert_eq!(method, [5, 0]);
-        let domain = domain.as_bytes();
         client
-            .write_all(&[
-                5,
-                1,
-                0,
-                3,
-                u8::try_from(domain.len()).expect("domain length"),
-            ])
+            .write_all(&[5, 1, 0, 1])
             .await
             .expect("SOCKS connect header");
         client
-            .write_all(domain)
+            .write_all(&address.octets())
             .await
-            .expect("SOCKS connect domain");
+            .expect("SOCKS connect address");
         client
             .write_all(&port.to_be_bytes())
             .await
@@ -571,9 +564,9 @@ mod tests {
         let mut client = TcpStream::connect(runtime.listen_address())
             .await
             .expect("connect SOCKS client");
-        request_domain(
+        request_ipv4(
             &mut client,
-            SANDBOX_LOCAL_API_HOST,
+            SANDBOX_LOCAL_API_IP.parse().expect("sandbox local API IP"),
             local_api_address.port(),
         )
         .await;
