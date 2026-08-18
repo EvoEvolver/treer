@@ -428,10 +428,11 @@ impl ControllerRuntime {
                 "TREER_AGENT_SERVER_URL".to_string(),
                 self.inner.agent_server_url.clone(),
             ),
-            ("ALL_PROXY".to_string(), network_proxy_url.clone()),
-            ("all_proxy".to_string(), network_proxy_url.clone()),
-            ("TREER_NETWORK_PROXY".to_string(), network_proxy_url),
         ]);
+        env.extend(network_environment(
+            network_proxy_url,
+            self.inner.sandbox_executable.is_some(),
+        ));
         if let Some(agent_id) = agent_id {
             env.insert("TREER_AGENT_ID".to_string(), agent_id.to_string());
         }
@@ -1047,6 +1048,20 @@ fn agent_network_proxy_url(base: &str, agent_id: &str) -> String {
     url.to_string()
 }
 
+fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::from([("TREER_NETWORK_PROXY".to_string(), network_proxy_url.clone())]);
+    if transparent {
+        // The Controller's loopback is outside the agent network namespace.
+        // Proxy-aware applications must use the TUN path instead of dialing it directly.
+        env.insert("ALL_PROXY".to_string(), String::new());
+        env.insert("all_proxy".to_string(), String::new());
+    } else {
+        env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
+        env.insert("all_proxy".to_string(), network_proxy_url);
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1146,6 +1161,31 @@ mod tests {
         let url = url::Url::parse(&url).expect("agent proxy URL");
         assert_eq!(url.username(), "agent-a");
         assert_eq!(url.password(), Some("treer"));
+    }
+
+    #[test]
+    fn transparent_networking_does_not_expose_the_host_loopback_proxy() {
+        let env = network_environment("socks5h://agent-a:treer@127.0.0.1:8791".to_string(), true);
+
+        assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(""));
+        assert_eq!(env.get("all_proxy").map(String::as_str), Some(""));
+        assert_eq!(
+            env.get("TREER_NETWORK_PROXY").map(String::as_str),
+            Some("socks5h://agent-a:treer@127.0.0.1:8791")
+        );
+    }
+
+    #[test]
+    fn compatibility_networking_exposes_the_socks_proxy() {
+        let proxy = "socks5h://agent-a:treer@127.0.0.1:8791";
+        let env = network_environment(proxy.to_string(), false);
+
+        assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(proxy));
+        assert_eq!(env.get("all_proxy").map(String::as_str), Some(proxy));
+        assert_eq!(
+            env.get("TREER_NETWORK_PROXY").map(String::as_str),
+            Some(proxy)
+        );
     }
 
     #[test]

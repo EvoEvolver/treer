@@ -195,11 +195,14 @@ passed into the namespace; this keeps the Proxy WebSocket and machine egress
 outside the sandbox. Linux requires `unshare(1)` from `util-linux` and a kernel
 that permits unprivileged user namespaces.
 
-The Controller still injects `ALL_PROXY`, `all_proxy`, and
-`TREER_NETWORK_PROXY` for diagnostics and compatibility. Set
-`TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
-transparent namespace wrapper. Native macOS currently uses this compatibility
-mode; use a Linux container when transparent capture is required.
+In transparent mode the Controller clears `ALL_PROXY` and `all_proxy`, because
+its loopback SOCKS listener is outside the agent network namespace and normal
+application traffic must enter the TUN adapter. `TREER_NETWORK_PROXY` remains
+available for diagnostics. Set `TREER_NETWORK_MODE=proxy-env` before starting
+the Controller to disable the transparent namespace wrapper and inject the
+SOCKS URL through `ALL_PROXY` and `all_proxy` instead. Native macOS currently
+uses this compatibility mode; use a Linux container when transparent capture is
+required.
 
 TCP streams are multiplexed as binary frames over the Controller's existing
 `/agent/connect` WebSocket; no machine needs an inbound port. Each stream has an
