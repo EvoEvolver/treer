@@ -6,6 +6,7 @@ mod event_bus;
 mod identity;
 pub mod policy;
 mod state;
+mod traffic;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ use event_bus::{EventBus, EventBusConfig};
 use state::AppState;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+use traffic::TrafficRecorder;
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -188,7 +190,9 @@ async fn main() -> anyhow::Result<()> {
             EventBus::in_process()
         }
     };
-    let state = AppState::with_backplanes(event_bus, cluster.clone());
+    let traffic = TrafficRecorder::new(auth.database_pool());
+    traffic.spawn_flush_task();
+    let state = AppState::with_backplanes_and_traffic(event_bus, cluster.clone(), traffic);
     for workspace in auth
         .all_workspaces()
         .await

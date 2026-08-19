@@ -417,6 +417,10 @@ pub fn router(
             axum::routing::patch(update_service_ingress).delete(delete_service_ingress),
         )
         .route(
+            "/api/workspaces/{workspace_id}/traffic",
+            get(list_machine_traffic),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy",
             any(proxy_virtual_network_host_root),
         )
@@ -1092,6 +1096,37 @@ async fn list_servers(
 ) -> Result<Json<Value>, ApiFailure> {
     let snapshot = state.snapshot(&workspace_id).await?;
     Ok(Json(json!({ "servers": snapshot.servers })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MachineTrafficQuery {
+    #[serde(default = "default_traffic_hours")]
+    hours: u16,
+}
+
+const fn default_traffic_hours() -> u16 {
+    24
+}
+
+async fn list_machine_traffic(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<MachineTrafficQuery>,
+) -> Result<Json<Value>, ApiFailure> {
+    if !(1..=24 * 30).contains(&query.hours) {
+        return Err(ApiFailure::bad_request(
+            "invalid_traffic_window",
+            "traffic window must be between 1 and 720 hours",
+        ));
+    }
+    let traffic = state
+        .recent_machine_traffic(&workspace_id, query.hours)
+        .await
+        .map_err(|error| ApiFailure::internal("traffic_query_failed", &format!("{error:#}")))?;
+    Ok(Json(json!({
+        "hours": query.hours,
+        "traffic": traffic,
+    })))
 }
 
 async fn list_machine_services(

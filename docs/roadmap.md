@@ -137,7 +137,9 @@ in file-backed JetStream KV, and uses Core NATS request/reply for commands and
 stream delivery. Machine heartbeats revalidate PostgreSQL revocation before
 renewing a lease. It supports multiple stateless Proxy replicas against one
 PostgreSQL/NATS pair; multi-region broker topology, transactional domain-event
-outboxes, traffic accounting, and load testing remain later work.
+outboxes, exact billing-grade traffic accounting, telemetry export, and load
+testing remain later work. The current Proxy records approximate hourly payload
+totals for machine-to-machine relay directions using buffered atomic counters.
 
 ### Identity, policy, and delegation
 

@@ -106,6 +106,14 @@ export interface ServiceIngress {
   updated_by: string
 }
 
+export interface MachineTrafficRecord {
+  window_start: string
+  source_server_id: string
+  destination_server_id: string
+  payload_bytes: number
+  payload_frames: number
+}
+
 export interface ApiErrorBody {
   error?: { message?: string }
 }

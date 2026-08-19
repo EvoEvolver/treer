@@ -217,6 +217,23 @@ host-only ingress cookie. The application continues to own its normal
 `Authorization`, cookies, and `Set-Cookie` semantics. The Proxy removes only
 Treer-private credentials, hop-by-hop headers, and spoofable identity headers.
 
+Machine-to-machine relay traffic is accounted at the coordinating Proxy's
+`NetworkBinaryFrame::Data` routing boundary. Stream creation resolves two
+directional counters keyed by workspace, source machine, and destination
+machine. The per-frame hot path performs only relaxed atomic additions; it does
+not lock a map or write PostgreSQL. Each Proxy drains its counters every ten
+seconds and batch-upserts hourly rows into `machine_traffic_hourly`, so replicas
+converge through additive PostgreSQL updates without routing telemetry through
+JetStream. Cross-Proxy frames are counted only after they reach the Proxy that
+owns the stream legs, avoiding double accounting at the NATS hop. Hourly rows
+are retained for 90 days and pruned once per hour.
+
+These records count relayed application payload bytes and data frames, not
+WebSocket, TLS, NATS, or TCP framing. PTY traffic, public-ingress traffic, and
+direct egress are excluded because they do not describe a machine-to-machine
+direction. A Proxy crash can lose at most its unflushed interval; traffic
+accounting is operational telemetry rather than an exact billing ledger.
+
 For route-level details and additional diagrams, use the dated
 [project review](research/2026-08-18-project-review.md). Review this document
 whenever a crate boundary, transport, persistence rule, or ownership invariant

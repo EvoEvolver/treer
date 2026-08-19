@@ -9,10 +9,10 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tracing::warn;
 use treer_protocol::{
     AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult, DomainEventActor,
-    DomainEventEnvelope, DomainEventResource, NetworkBinaryFrame, NetworkBinaryKind,
-    NetworkConnectRequest, NetworkDirectTarget, ProtocolError, ProxyMessage, ServerInfo,
-    ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage, WorkspaceEvent,
-    WorkspaceInfo, WorkspaceSnapshot, DOMAIN_EVENT_SCHEMA_VERSION,
+    DomainEventEnvelope, DomainEventResource, MachineTrafficRecord, NetworkBinaryFrame,
+    NetworkBinaryKind, NetworkConnectRequest, NetworkDirectTarget, ProtocolError, ProxyMessage,
+    ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage,
+    WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use uuid::Uuid;
 
@@ -21,6 +21,7 @@ use crate::cluster::{
     ClusterSessionKind,
 };
 use crate::event_bus::EventBus;
+use crate::traffic::{TrafficCounter, TrafficRecorder};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
 const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,6 +52,7 @@ struct Inner {
     events: broadcast::Sender<WorkspaceEvent>,
     event_bus: EventBus,
     cluster: ClusterBus,
+    traffic: TrafficRecorder,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -96,6 +98,7 @@ struct NetworkStreamLeg {
     peer: NetworkStreamKey,
     role: NetworkStreamRole,
     closed: bool,
+    outgoing_traffic: std::sync::Arc<TrafficCounter>,
 }
 
 struct WorkspaceState {
@@ -137,6 +140,14 @@ impl AppState {
     }
 
     pub fn with_backplanes(event_bus: EventBus, cluster: ClusterBus) -> Self {
+        Self::with_backplanes_and_traffic(event_bus, cluster, TrafficRecorder::default())
+    }
+
+    pub fn with_backplanes_and_traffic(
+        event_bus: EventBus,
+        cluster: ClusterBus,
+        traffic: TrafficRecorder,
+    ) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
             inner: std::sync::Arc::new(Inner {
@@ -151,8 +162,17 @@ impl AppState {
                 events,
                 event_bus,
                 cluster,
+                traffic,
             }),
         }
+    }
+
+    pub async fn recent_machine_traffic(
+        &self,
+        workspace_id: &str,
+        hours: u16,
+    ) -> anyhow::Result<Vec<MachineTrafficRecord>> {
+        self.inner.traffic.recent(workspace_id, hours).await
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkspaceEvent> {
@@ -1467,6 +1487,11 @@ impl AppState {
             server_id: destination_server_id.to_string(),
             stream_id: self.inner.cluster.routed_id("net"),
         };
+        let traffic = self.inner.traffic.register_stream(
+            workspace_id,
+            source_server_id,
+            destination_server_id,
+        );
         {
             let mut streams = self.inner.network_streams.lock().await;
             if streams.contains_key(&source) || streams.contains_key(&destination) {
@@ -1481,6 +1506,7 @@ impl AppState {
                     peer: destination.clone(),
                     role: NetworkStreamRole::Source,
                     closed: false,
+                    outgoing_traffic: traffic.source_to_destination,
                 },
             );
             streams.insert(
@@ -1489,6 +1515,7 @@ impl AppState {
                     peer: source.clone(),
                     role: NetworkStreamRole::Destination,
                     closed: false,
+                    outgoing_traffic: traffic.destination_to_source,
                 },
             );
         }
@@ -1632,14 +1659,17 @@ impl AppState {
                 stream.closed = true;
             }
             let peer = stream.peer.clone();
+            let traffic =
+                (frame.kind == NetworkBinaryKind::Data).then(|| stream.outgoing_traffic.clone());
             let remove = frame.kind == NetworkBinaryKind::Reset
                 || (stream.closed && streams.get(&peer).is_some_and(|peer| peer.closed));
             if remove {
                 remove_network_stream(&mut streams, &key);
             }
-            (peer, remove)
+            (peer, remove, traffic)
         };
-        let (peer, remove) = route;
+        let (peer, remove, traffic) = route;
+        let payload_bytes = frame.payload.len();
         frame.stream_id.clone_from(&peer.stream_id);
         if self
             .send_server_frame(
@@ -1654,6 +1684,9 @@ impl AppState {
             let mut streams = self.inner.network_streams.lock().await;
             remove_network_stream(&mut streams, &key);
             return Err(ProtocolError::new("server_offline", peer.server_id));
+        }
+        if let Some(traffic) = traffic {
+            traffic.record(payload_bytes);
         }
         Ok(())
     }
@@ -3092,6 +3125,89 @@ mod tests {
             assert_eq!(close.stream_id, expected_peer_id);
         }
         assert!(state.inner.network_streams.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn relayed_payload_is_counted_once_in_machine_direction() {
+        let traffic = TrafficRecorder::default();
+        let state = AppState::with_backplanes_and_traffic(
+            EventBus::in_process(),
+            ClusterBus::standalone("traffic-test".to_string()),
+            traffic.clone(),
+        );
+        let source_connection = Uuid::new_v4();
+        let destination_connection = Uuid::new_v4();
+        let (source_tx, mut source_rx) = mpsc::unbounded_channel();
+        let (destination_tx, mut destination_rx) = mpsc::unbounded_channel();
+        let mut source = test_server();
+        source.server_id = "source".to_string();
+        source.name = "source".to_string();
+        let mut destination = test_server();
+        destination.server_id = "destination".to_string();
+        destination.name = "destination".to_string();
+        state
+            .register_server(source, source_connection, source_tx)
+            .await
+            .expect("register source");
+        state
+            .register_server(destination, destination_connection, destination_tx)
+            .await
+            .expect("register destination");
+
+        state
+            .open_network_stream(
+                "alpha",
+                "source",
+                source_connection,
+                "destination",
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Open,
+                    stream_id: "source-stream".to_string(),
+                    payload: b"connect".to_vec(),
+                },
+            )
+            .await
+            .expect("open stream");
+        let destination_open =
+            expect_network(destination_rx.recv().await.expect("destination open"));
+
+        state
+            .relay_network_frame(
+                "alpha",
+                "source",
+                source_connection,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Data,
+                    stream_id: "source-stream".to_string(),
+                    payload: b"request".to_vec(),
+                },
+            )
+            .await
+            .expect("relay request");
+        let _ = destination_rx.recv().await.expect("destination data");
+        state
+            .relay_network_frame(
+                "alpha",
+                "destination",
+                destination_connection,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Data,
+                    stream_id: destination_open.stream_id,
+                    payload: b"response".to_vec(),
+                },
+            )
+            .await
+            .expect("relay response");
+        let _ = source_rx.recv().await.expect("source data");
+
+        assert_eq!(
+            traffic.pending_for("alpha", "source", "destination"),
+            (7, 1)
+        );
+        assert_eq!(
+            traffic.pending_for("alpha", "destination", "source"),
+            (8, 1)
+        );
     }
 
     #[tokio::test]

@@ -124,6 +124,11 @@ applications therefore remain responsible for their own authorization, input
 validation, abuse controls, and data isolation. Treer reserves `/.treer/` on
 published hosts for its authorization callback.
 
+The Proxy retains hourly machine-to-machine traffic metadata: workspace, source
+machine, destination machine, payload byte count, and data-frame count. It does
+not retain network payloads. The traffic query uses the same workspace
+membership middleware as other workspace APIs.
+
 The workload signing private key is stored in the Proxy PostgreSQL database. Its
 Ed25519 public key is intentionally exposed through `/.well-known/jwks.json`;
 the online verify endpoint exposes only claims already contained in a supplied

@@ -282,6 +282,10 @@ struct CloudflareEmailError {
 }
 
 impl AuthStore {
+    pub(crate) fn database_pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     pub async fn open(
         database_url: &str,
         admin_password: String,

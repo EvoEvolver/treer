@@ -274,5 +274,19 @@ CREATE TABLE IF NOT EXISTS ingress_sessions (
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ingress_sessions_expiry ON ingress_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS machine_traffic_hourly (
+    workspace_id TEXT NOT NULL,
+    window_start BIGINT NOT NULL,
+    source_server_id TEXT NOT NULL,
+    destination_server_id TEXT NOT NULL,
+    payload_bytes BIGINT NOT NULL DEFAULT 0 CHECK(payload_bytes >= 0),
+    payload_frames BIGINT NOT NULL DEFAULT 0 CHECK(payload_frames >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, window_start, source_server_id, destination_server_id),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS machine_traffic_hourly_workspace_window
+    ON machine_traffic_hourly(workspace_id, window_start DESC);
 CREATE INDEX IF NOT EXISTS virtual_network_hosts_service
     ON virtual_network_hosts(workspace_id, service_id);

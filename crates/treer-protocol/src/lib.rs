@@ -698,6 +698,15 @@ pub struct UpdateServiceIngressRequest {
     pub enabled: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineTrafficRecord {
+    pub window_start: DateTime<Utc>,
+    pub source_server_id: String,
+    pub destination_server_id: String,
+    pub payload_bytes: u64,
+    pub payload_frames: u64,
+}
+
 fn default_network_target_host() -> String {
     "127.0.0.1".to_string()
 }

@@ -406,6 +406,19 @@ Treer consumes its own ingress cookie/header and strips client-supplied
 `X-Treer-*` identity headers before forwarding. Only HTTP services can be
 published. Disabling or deleting an ingress does not stop the machine service.
 
+The Proxy also records hourly payload totals for each relayed machine direction.
+Workspace members can query the last 1 to 720 hours without scanning individual
+connections:
+
+```text
+GET /api/workspaces/<workspace_id>/traffic?hours=24
+```
+
+The response reports `source_server_id`, `destination_server_id`,
+`payload_bytes`, and `payload_frames`. Counters flush to PostgreSQL every ten
+seconds; protocol overhead, PTY bytes, public ingress, and direct internet
+egress are intentionally excluded. Hourly rows are retained for 90 days.
+
 Deleting an online machine sends a confirmed shutdown command over its existing
 Controller WebSocket before revoking the machine credential. A capable
 Controller then stops the local systemd user service or macOS LaunchAgent, which
