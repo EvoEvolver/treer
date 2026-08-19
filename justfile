@@ -37,3 +37,9 @@ agent-server *args:
 
 stage-artifacts:
     sh scripts/stage-local-artifacts.sh
+
+deploy-canary:
+    sh scripts/deploy-canary.sh
+
+test-canary:
+    sh scripts/test-canary.sh

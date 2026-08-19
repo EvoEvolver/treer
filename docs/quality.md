@@ -35,6 +35,19 @@ handoff. The docs-only GitHub Actions workflow checks documentation structure
 and links on relevant pull requests and pushes to `main`; it does not replace
 the full local gate.
 
+Before a Railway Production promotion, deploy the exact candidate revision and
+run the black-box Canary gate:
+
+```bash
+just deploy-canary
+just test-canary
+```
+
+The Canary workflow creates two temporary Railway machine services and verifies
+cross-machine virtual networking, wildcard public ingress, and directional
+traffic accounting. See [Canary environment](canary.md) for its resource and
+cleanup contract.
+
 ## Documentation contract
 
 - Root [AGENTS.md](../AGENTS.md) is a concise development map, not a manual.
@@ -85,7 +98,7 @@ repeated bottleneck or blocks the current product tier.
 | Proxy auth, membership, or routing | Authorization and cross-workspace isolation tests |
 | Host mutation or Controller restart | Idempotency and process-survival tests |
 | Runtime path logic | Working-directory containment and escape tests |
-| Network namespace, DNS, SOCKS, virtual host, or public ingress | Destination routing, authentication/header semantics, HTTP streaming, WebSocket, and containment tests on Linux |
+| Network namespace, DNS, SOCKS, virtual host, or public ingress | Unit/integration coverage plus the disposable two-machine Railway Canary workflow; add focused checks for changed authentication/header, streaming, WebSocket, or containment behavior |
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |
 | Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, and affected-flow validation |
 | Documentation/index change | `node scripts/check-docs.mjs` |

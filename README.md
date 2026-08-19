@@ -324,6 +324,21 @@ automatically by the Proxy.
 The Proxy image builds and serves Linux agent binaries for its own CPU
 architecture. The App image contains no Proxy or machine binaries.
 
+Changes intended for the managed Railway deployment go to Canary before
+Production. From an authenticated operator checkout, run:
+
+```bash
+just deploy-canary
+just test-canary
+```
+
+The first command uploads the current worktree to the separate Canary Proxy and
+App. The second creates two disposable Railway machine services and verifies
+cross-machine virtual networking, public wildcard ingress, and traffic
+accounting before cleaning them up. Production promotion must use the same
+committed revision that passed both this gate and `just check`. See
+[the Canary runbook](docs/canary.md) for DNS and override variables.
+
 Open the App URL to discover servers, create agents, and attach to
 their live terminals. The browser terminal supports ANSI colors, alternate
 screens, cursor movement, per-keystroke input, paste, and dynamic resize. PTY

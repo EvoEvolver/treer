@@ -820,6 +820,7 @@ async fn bootstrap_info(
     Ok(Json(json!({
         "install_command": install_command,
         "connect_command": connect_command,
+        "enrollment_key": enrollment,
         "script_url": script_url.as_str(),
         "workspace_id": workspace_id,
     })))
