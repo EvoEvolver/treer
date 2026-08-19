@@ -191,11 +191,12 @@ services, and workload signing keys are stored in PostgreSQL. The Proxy requires
 test suite. Changing `ADMIN_PASSWORD` changes the administrator's next login
 password without rewriting user accounts.
 
-Password recovery uses Cloudflare Email Sending. Set `CLOUDFLARE_API_TOKEN` on
+Registration welcome messages and password recovery use Cloudflare Email Sending.
+Set `CLOUDFLARE_API_TOKEN` on
 the Proxy service; the token must be allowed to send email for the configured
 account. The default account ID is `84188a5eaca91f5c9914fa67494c84c1` and the
 default sender is `service@treer.ai`; override them with
-`CLOUDFLARE_ACCOUNT_ID` and `TREER_PASSWORD_RESET_FROM`. Reset links expire
+`CLOUDFLARE_ACCOUNT_ID` and `TREER_EMAIL_FROM`. Reset links expire
 after 30 minutes, can be used once, and revoke every existing user session when
 the password changes. Requests return the same response for known and unknown
 email addresses.

@@ -46,20 +46,20 @@ pub struct AuthStore {
     app_public_url: Url,
     secure_cookies: bool,
     disabled: bool,
-    password_reset_email: Option<PasswordResetEmailSender>,
+    email_sender: Option<CloudflareEmailSender>,
     virtual_hosts: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, VirtualNetworkHost>>>>,
     virtual_hosts_update: Arc<tokio::sync::Mutex<()>>,
     virtual_hosts_revision: Arc<AtomicU64>,
 }
 
-pub struct PasswordResetEmailConfig {
+pub struct CloudflareEmailConfig {
     pub account_id: String,
     pub api_token: String,
     pub from: String,
 }
 
 #[derive(Clone)]
-struct PasswordResetEmailSender {
+struct CloudflareEmailSender {
     client: reqwest::Client,
     endpoint: Url,
     api_token: Arc<str>,
@@ -182,8 +182,8 @@ pub struct UpdateMemberRoleRequest {
     role: String,
 }
 
-impl PasswordResetEmailSender {
-    fn new(config: PasswordResetEmailConfig) -> anyhow::Result<Self> {
+impl CloudflareEmailSender {
+    fn new(config: CloudflareEmailConfig) -> anyhow::Result<Self> {
         if config.account_id.trim().is_empty() {
             anyhow::bail!("Cloudflare account ID must not be empty");
         }
@@ -216,15 +216,13 @@ impl PasswordResetEmailSender {
         })
     }
 
-    async fn send(&self, recipient: &str, reset_url: &Url) -> anyhow::Result<()> {
-        let text = format!(
-            "Reset your Treer password\n\nOpen this link within 30 minutes:\n\n{}\n\nIf you did not request this, you can ignore this email.",
-            reset_url.as_str()
-        );
-        let html_url = escape_html(reset_url.as_str());
-        let html = format!(
-            "<h1>Reset your Treer password</h1><p>Open the link below within 30 minutes.</p><p><a href=\"{html_url}\">Reset password</a></p><p>If you did not request this, you can ignore this email.</p>"
-        );
+    async fn send(
+        &self,
+        recipient: &str,
+        subject: &str,
+        html: String,
+        text: String,
+    ) -> anyhow::Result<()> {
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -232,7 +230,7 @@ impl PasswordResetEmailSender {
             .json(&json!({
                 "to": recipient,
                 "from": self.from.as_ref(),
-                "subject": "Reset your Treer password",
+                "subject": subject,
                 "html": html,
                 "text": text,
             }))
@@ -249,6 +247,37 @@ impl PasswordResetEmailSender {
             anyhow::bail!("Cloudflare email API returned {status}: {message}");
         }
         Ok(())
+    }
+
+    async fn send_password_reset(&self, recipient: &str, reset_url: &Url) -> anyhow::Result<()> {
+        let text = format!(
+            "Reset your Treer password\n\nOpen this link within 30 minutes:\n\n{}\n\nIf you did not request this, you can ignore this email.",
+            reset_url.as_str()
+        );
+        let html_url = escape_html(reset_url.as_str());
+        let html = format!(
+            "<h1>Reset your Treer password</h1><p>Open the link below within 30 minutes.</p><p><a href=\"{html_url}\">Reset password</a></p><p>If you did not request this, you can ignore this email.</p>"
+        );
+        self.send(recipient, "Reset your Treer password", html, text)
+            .await
+    }
+
+    async fn send_welcome(
+        &self,
+        recipient: &str,
+        preferred_name: &str,
+        app_url: &Url,
+    ) -> anyhow::Result<()> {
+        let text = format!(
+            "Hi {preferred_name},\n\nYour Treer account is ready.\n\nOpen Treer: {}",
+            app_url.as_str()
+        );
+        let preferred_name = escape_html(preferred_name);
+        let app_url = escape_html(app_url.as_str());
+        let html = format!(
+            "<h1>Welcome to Treer</h1><p>Hi {preferred_name}, your account is ready.</p><p><a href=\"{app_url}\">Open Treer</a></p>"
+        );
+        self.send(recipient, "Welcome to Treer", html, text).await
     }
 }
 
@@ -271,7 +300,7 @@ impl AuthStore {
         app_public_url: Url,
         secure_cookies: bool,
         disabled: bool,
-        password_reset_email: Option<PasswordResetEmailConfig>,
+        email_config: Option<CloudflareEmailConfig>,
     ) -> anyhow::Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
@@ -283,9 +312,7 @@ impl AuthStore {
             app_public_url,
             secure_cookies,
             disabled,
-            password_reset_email: password_reset_email
-                .map(PasswordResetEmailSender::new)
-                .transpose()?,
+            email_sender: email_config.map(CloudflareEmailSender::new).transpose()?,
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
@@ -330,7 +357,7 @@ impl AuthStore {
             app_public_url: Url::parse("https://app.treer.example/").expect("valid URL"),
             secure_cookies: true,
             disabled: false,
-            password_reset_email: None,
+            email_sender: None,
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
@@ -1977,7 +2004,7 @@ impl AuthStore {
 
     async fn request_password_reset(&self, email: &str) -> Result<(), AuthFailure> {
         normalize_email(email)?;
-        let Some(sender) = &self.password_reset_email else {
+        let Some(sender) = &self.email_sender else {
             tracing::warn!("password reset requested but CLOUDFLARE_API_TOKEN is not configured");
             return Ok(());
         };
@@ -1987,7 +2014,10 @@ impl AuthStore {
         let sender = sender.clone();
         let auth = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = sender.send(&pending.recipient, &pending.url).await {
+            if let Err(error) = sender
+                .send_password_reset(&pending.recipient, &pending.url)
+                .await
+            {
                 tracing::error!(%error, "failed to send password reset email");
                 if let Err(error) = auth.revoke_password_reset(&pending.token_id).await {
                     tracing::error!(?error, "failed to revoke undelivered password reset token");
@@ -2526,7 +2556,21 @@ impl AuthStore {
             }
         }
         transaction.commit().await.map_err(AuthFailure::database)?;
-        self.create_session(user_id, email, preferred_name).await
+        let session = self.create_session(user_id, email, preferred_name).await?;
+        if let Some(sender) = self.email_sender.clone() {
+            let recipient = session.email.clone();
+            let preferred_name = session.preferred_name.clone();
+            let app_url = self.app_public_url.clone();
+            tokio::spawn(async move {
+                if let Err(error) = sender
+                    .send_welcome(&recipient, &preferred_name, &app_url)
+                    .await
+                {
+                    tracing::error!(%error, "failed to send registration welcome email");
+                }
+            });
+        }
+        Ok(session)
     }
 }
 
@@ -3684,6 +3728,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_registration_sends_a_welcome_email() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind email API");
+        let address = listener.local_addr().expect("email API address");
+        let (capture_tx, capture_rx) = oneshot::channel();
+        let capture = Arc::new(Mutex::new(Some(capture_tx)));
+        let app = Router::new()
+            .route("/send", post(capture_email))
+            .with_state(capture);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let mut store = AuthStore::for_test("owner-password").await;
+        store.email_sender = Some(CloudflareEmailSender {
+            client: reqwest::Client::new(),
+            endpoint: Url::parse(&format!("http://{address}/send")).expect("email endpoint"),
+            api_token: "cloudflare-test-token".into(),
+            from: "service@treer.ai".into(),
+        });
+        let (invite, _) = store
+            .create_personal_invitation()
+            .await
+            .expect("invitation");
+        store
+            .register(&invite, "Alice@Example.com", "Alice", "password123")
+            .await
+            .expect("registration");
+
+        let (headers, body) = tokio::time::timeout(StdDuration::from_secs(2), capture_rx)
+            .await
+            .expect("welcome email timeout")
+            .expect("captured welcome email");
+        assert_eq!(
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer cloudflare-test-token")
+        );
+        assert_eq!(body["to"], "alice@example.com");
+        assert_eq!(body["from"], "service@treer.ai");
+        assert_eq!(body["subject"], "Welcome to Treer");
+        assert!(body["text"].as_str().expect("text body").contains("Alice"));
+        assert!(body["html"].as_str().expect("HTML body").contains("Alice"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn password_reset_is_single_use_rate_limited_and_revokes_sessions() {
         let store = AuthStore::for_test("owner-password").await;
         let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
@@ -3775,7 +3866,7 @@ mod tests {
             .route("/send", post(capture_email))
             .with_state(capture);
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
-        let sender = PasswordResetEmailSender {
+        let sender = CloudflareEmailSender {
             client: reqwest::Client::new(),
             endpoint: Url::parse(&format!("http://{address}/send")).expect("email endpoint"),
             api_token: "cloudflare-test-token".into(),
@@ -3786,7 +3877,7 @@ mod tests {
         )
         .expect("reset URL");
         sender
-            .send("owner@example.com", &reset_url)
+            .send_password_reset("owner@example.com", &reset_url)
             .await
             .expect("send reset email");
         let (headers, body) = capture_rx.await.expect("captured email");
