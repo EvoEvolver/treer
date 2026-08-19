@@ -152,6 +152,18 @@ pub struct AgentInboxResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailDelivery {
+    pub message: AgentMailMessage,
+    pub unread: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxResponse {
+    pub deliveries: Vec<MailDelivery>,
+    pub remaining_unread: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadIdentityTokenRequest {
     pub audience: String,
 }
@@ -1057,6 +1069,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(AgentInboxRequest { limit: 50 }).expect("serialize inbox request"),
             serde_json::json!({ "limit": 50 })
+        );
+        assert_eq!(
+            serde_json::to_value(MailboxResponse {
+                deliveries: vec![],
+                remaining_unread: 3,
+            })
+            .expect("serialize mailbox response"),
+            serde_json::json!({ "deliveries": [], "remaining_unread": 3 })
         );
     }
 

@@ -465,8 +465,10 @@ treer mail --to reviewer --to Owner "Please coordinate on this result."
 Agent names, and unique preferred names in one shared address space. Stable IDs
 take precedence; an ambiguous display name is rejected with a request to use an
 ID. Human recipients open **Inbox** in the web sidebar for the selected
-workspace. Like Agent inboxes, the web inbox marks only the returned unread
-batch read and does not receive a push notification.
+workspace. The central mailbox keeps recent received messages available after
+they are read and reconstructs visible context chains for tracing. Opening it
+marks unread deliveries in the returned batch read and does not receive a push
+notification.
 
 ## Workload identity
 

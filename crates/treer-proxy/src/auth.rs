@@ -18,8 +18,8 @@ use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentInboxResponse,
     AgentMailMessage, AgentServerSnapshot, ApiError, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, MachineService, MachineServiceProtocol, MailAddress,
-    MailAddressKind, ProtocolError, ServerInfo, UpdateMachineServiceRequest, VirtualNetworkHost,
-    WorkspaceHuman, WorkspaceInfo,
+    MailAddressKind, MailDelivery, MailboxResponse, ProtocolError, ServerInfo,
+    UpdateMachineServiceRequest, VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
 };
 use url::Url;
 use uuid::Uuid;
@@ -1268,12 +1268,12 @@ impl AuthStore {
         })
     }
 
-    pub async fn read_human_inbox(
+    pub async fn read_human_mailbox(
         &self,
         workspace_id: &str,
         recipient_user_id: &str,
         limit: u16,
-    ) -> Result<AgentInboxResponse, AuthFailure> {
+    ) -> Result<MailboxResponse, AuthFailure> {
         if limit == 0 || limit > MAX_INBOX_LIMIT {
             return Err(AuthFailure::bad_request(
                 "invalid_inbox_limit",
@@ -1285,13 +1285,13 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let rows = sqlx::query(
             "SELECT m.message_id, m.workspace_id, m.sender_kind, m.sender_id, m.sender_name, \
-                    m.body, m.created_at \
+                    m.body, m.created_at, r.read_at \
              FROM mail_recipients r \
              JOIN mail_messages m ON m.message_id = r.message_id \
              WHERE r.workspace_id = $1 AND r.recipient_kind = 'human' \
-               AND r.recipient_id = $2 AND r.read_at IS NULL \
-             ORDER BY r.created_at, r.message_id LIMIT $3 \
-             FOR UPDATE OF r SKIP LOCKED",
+               AND r.recipient_id = $2 \
+             ORDER BY r.created_at DESC, r.message_id DESC LIMIT $3 \
+             FOR UPDATE OF r",
         )
         .bind(workspace_id)
         .bind(recipient_user_id)
@@ -1342,27 +1342,31 @@ impl AuthStore {
             }
         }
 
-        let mut messages = Vec::with_capacity(rows.len());
+        let mut deliveries = Vec::with_capacity(rows.len());
         for row in rows {
             let message_id: String = row.get("message_id");
-            messages.push(AgentMailMessage {
-                message_id: message_id.clone(),
-                workspace_id: row.get("workspace_id"),
-                sender: MailAddress {
-                    kind: if row.get::<String, _>("sender_kind") == "agent" {
-                        MailAddressKind::Agent
-                    } else {
-                        MailAddressKind::Human
+            let unread = row.get::<Option<String>, _>("read_at").is_none();
+            deliveries.push(MailDelivery {
+                unread,
+                message: AgentMailMessage {
+                    message_id: message_id.clone(),
+                    workspace_id: row.get("workspace_id"),
+                    sender: MailAddress {
+                        kind: if row.get::<String, _>("sender_kind") == "agent" {
+                            MailAddressKind::Agent
+                        } else {
+                            MailAddressKind::Human
+                        },
+                        id: row.get("sender_id"),
+                        name: row.get("sender_name"),
                     },
-                    id: row.get("sender_id"),
-                    name: row.get("sender_name"),
+                    recipients: recipients_by_message
+                        .remove(&message_id)
+                        .unwrap_or_default(),
+                    context_ids: contexts_by_message.remove(&message_id).unwrap_or_default(),
+                    body: row.get("body"),
+                    created_at: parse_database_timestamp(&row, "created_at", "agent message")?,
                 },
-                recipients: recipients_by_message
-                    .remove(&message_id)
-                    .unwrap_or_default(),
-                context_ids: contexts_by_message.remove(&message_id).unwrap_or_default(),
-                body: row.get("body"),
-                created_at: parse_database_timestamp(&row, "created_at", "agent message")?,
             });
         }
         if !message_ids.is_empty() {
@@ -1390,8 +1394,8 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
-        Ok(AgentInboxResponse {
-            messages,
+        Ok(MailboxResponse {
+            deliveries,
             remaining_unread: u64::try_from(remaining).unwrap_or(0),
         })
     }
@@ -2988,26 +2992,28 @@ mod tests {
             .expect("send human mail");
         assert_eq!(sent.recipients, [agent.clone(), human]);
 
-        let inbox = store
-            .read_human_inbox("human-mail", &owner.user_id, 50)
+        let mailbox = store
+            .read_human_mailbox("human-mail", &owner.user_id, 50)
             .await
-            .expect("read human inbox");
-        assert_eq!(inbox.messages, [sent]);
+            .expect("read human mailbox");
+        assert_eq!(mailbox.deliveries.len(), 1);
+        assert!(mailbox.deliveries[0].unread);
+        assert_eq!(mailbox.deliveries[0].message, sent);
         let agent_inbox = store
             .read_agent_inbox("human-mail", &agent.id, 50)
             .await
             .expect("read agent inbox independently");
-        assert_eq!(agent_inbox.messages, inbox.messages);
-        assert!(store
-            .read_human_inbox("human-mail", &owner.user_id, 50)
+        assert_eq!(agent_inbox.messages, [sent]);
+        let reread = store
+            .read_human_mailbox("human-mail", &owner.user_id, 50)
             .await
-            .expect("reread human inbox")
-            .messages
-            .is_empty());
+            .expect("reread human mailbox");
+        assert_eq!(reread.deliveries.len(), 1);
+        assert!(!reread.deliveries[0].unread);
 
         let outsider = bootstrap_owner(&store, "outsider@example.com", "Outsider").await;
         let error = store
-            .read_human_inbox("human-mail", &outsider.user_id, 50)
+            .read_human_mailbox("human-mail", &outsider.user_id, 50)
             .await
             .expect_err("non-member cannot read human inbox");
         assert_eq!(error.into_parts().1.code, "organization_access_denied");
