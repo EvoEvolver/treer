@@ -21,8 +21,8 @@ use treer_protocol::{
     AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentInfo, ApiError, CreateAgentRequest,
     CreateMachineServiceRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
     MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService, MailAddress,
-    MailAddressKind, PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest,
-    SendAgentMailResponse, TerminalClientMessage, TerminalServerMessage,
+    MailAddressKind, MailboxResponse, PromptAgentRequest, ProtocolError, RenameRequest,
+    SendAgentMailRequest, SendAgentMailResponse, TerminalClientMessage, TerminalServerMessage,
     UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
     WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceHuman, AGENT_ID_HEADER,
 };
@@ -637,9 +637,9 @@ async fn human_read_inbox(
     Extension(session): Extension<CurrentSession>,
     Path(workspace_id): Path<String>,
     Json(request): Json<AgentInboxRequest>,
-) -> Result<Json<AgentInboxResponse>, ApiFailure> {
+) -> Result<Json<MailboxResponse>, ApiFailure> {
     Ok(Json(
-        auth.read_human_inbox(&workspace_id, &session.user_id, request.limit)
+        auth.read_human_mailbox(&workspace_id, &session.user_id, request.limit)
             .await?,
     ))
 }

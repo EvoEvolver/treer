@@ -60,6 +60,16 @@ export interface MailMessage {
   created_at: string
 }
 
+export interface MailDelivery {
+  message: MailMessage
+  unread: boolean
+}
+
+export interface MailboxResponse {
+  deliveries: MailDelivery[]
+  remaining_unread: number
+}
+
 export interface AdminDashboard {
   machine_count: number
   agent_count: number

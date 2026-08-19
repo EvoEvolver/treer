@@ -214,8 +214,10 @@ treer mail --to reviewer --to Owner "Please coordinate on this result."
 
 Preferred names are valid only when unique across the combined Agent and human
 directory; IDs remain stable when names change. Humans read their workspace
-inbox from the web application; opening it marks only the returned batch read.
-Sending still does not notify or interrupt the human or any Agent.
+inbox from the web application. The central Inbox retains recent read messages
+and traces context messages visible in that mailbox; opening it marks unread
+deliveries in the returned batch read. Sending still does not notify or
+interrupt the human or any Agent.
 
 ## Create and coordinate a peer
 

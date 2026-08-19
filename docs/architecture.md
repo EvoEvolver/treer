@@ -114,10 +114,13 @@ Controller first validates the private workload credential, and the Proxy
 verifies that the Agent belongs to that machine and workspace. Each `--to`
 target resolves across Agent IDs, user IDs, Agent names, and preferred names;
 ambiguous names are rejected. One message and its typed recipient deliveries
-are committed together. Agent `inbox` and the web workspace Inbox
-each lock an oldest-first unread batch and mark only that recipient's rows read.
-This path is shared PostgreSQL state and neither requires NATS nor interrupts a
-live Agent or human.
+are committed together. Agent `inbox` locks an oldest-first unread batch. The
+web workspace Inbox returns the human's recent delivery history newest-first,
+captures each row's prior unread state, and marks unread rows in that returned
+batch read. Its trace view links context messages already present in that
+delivery history; an inaccessible context remains an unresolved ID. This path
+is shared PostgreSQL state and neither requires NATS nor interrupts a live
+Agent or human.
 
 Each Controller connection,
 pending command, browser session, terminal leg, and network route is

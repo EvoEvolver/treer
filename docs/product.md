@@ -25,8 +25,9 @@ In concrete terms:
 3. Workspace members can create, observe, prompt, and stop Codex, Claude, or
    shell agents through the web application or CLI.
 4. Managed agents can discover peers and organization members, exchange
-   pull-only durable mail with Agents or humans, and coordinate through a
-   stable CLI contract rather than knowing machine addresses.
+   pull-only durable mail with Agents or humans, while browser users can read
+   message history and trace visible context chains without knowing machine
+   addresses.
 5. Agents can register and maintain long-running machine services, then expose
    stable workspace aliases without making service ports public.
 6. Machines connect outward to the Proxy; local Agent Server and service ports

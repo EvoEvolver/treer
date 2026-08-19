@@ -6,6 +6,7 @@ import {
   Copy,
   ExternalLink,
   FolderKanban,
+  GitBranch,
   KeyRound,
   LogOut,
   Mail,
@@ -14,6 +15,7 @@ import {
   Pencil,
   Plus,
   RotateCw,
+  Search,
   Server,
   Square,
   ShieldCheck,
@@ -22,7 +24,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type MailMessage, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type MailDelivery, type MailMessage, type MailboxResponse, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -37,7 +39,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
-type MainView = "terminal" | "network"
+type MainView = "terminal" | "inbox" | "network"
 type AuthMode = "login" | "register" | "forgot" | "reset"
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 type DeleteTarget = { kind: "machine" | "agent"; id: string; name: string } | null
@@ -191,6 +193,83 @@ function AdminPanel() {
   return <main className="min-h-dvh bg-[#f7f7f5]"><header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div><Button size="sm" onClick={loadDashboard}><RotateCw />Refresh</Button></div>{error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="grid grid-cols-2 border-y"><div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div><div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div></div><section className="mt-12"><h2 className="text-sm font-semibold">User invitations</h2><div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div><Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button></div></section></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
 }
 
+type MailTraceEntry = { id: string; message?: MailMessage; current: boolean }
+
+function mailSubject(message: MailMessage) {
+  return message.body.split("\n", 1)[0]?.trim() || "Untitled message"
+}
+
+function formatMailTime(value: string, compact = false) {
+  const date = new Date(value)
+  if (!compact) return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
+  const today = new Date()
+  if (date.toDateString() === today.toDateString()) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+  return date.toLocaleDateString([], { month: "short", day: "numeric" })
+}
+
+function buildMailTrace(messages: MailMessage[], selected: MailMessage | undefined): MailTraceEntry[] {
+  if (!selected) return []
+  const byId = new Map(messages.map((message) => [message.message_id, message]))
+  const visited = new Set<string>()
+  const entries: MailTraceEntry[] = []
+  const visit = (id: string) => {
+    if (visited.has(id)) return
+    visited.add(id)
+    const message = byId.get(id)
+    if (message) message.context_ids.forEach(visit)
+    entries.push({ id, message, current: id === selected.message_id })
+  }
+  selected.context_ids.forEach(visit)
+  visit(selected.message_id)
+  return entries
+}
+
+function InboxView({ deliveries, selectedMessageId, query, loading, remainingUnread, onQueryChange, onSelect, onCopy }: {
+  deliveries: MailDelivery[]
+  selectedMessageId: string | null
+  query: string
+  loading: boolean
+  remainingUnread: number
+  onQueryChange: (value: string) => void
+  onSelect: (messageId: string) => void
+  onCopy: (value: string) => void
+}) {
+  const messages = deliveries.map((delivery) => delivery.message)
+  const normalizedQuery = query.trim().toLowerCase()
+  const visibleDeliveries = deliveries.filter(({ message }) => !normalizedQuery || [message.message_id, message.sender.name, message.sender.id, message.body, ...message.recipients.flatMap((recipient) => [recipient.name, recipient.id])].some((value) => value.toLowerCase().includes(normalizedQuery)))
+  const selected = messages.find((message) => message.message_id === selectedMessageId)
+  const trace = buildMailTrace(messages, selected)
+
+  return <div className="grid min-h-0 grid-rows-[minmax(230px,42%)_minmax(360px,1fr)] bg-background lg:grid-cols-[340px_minmax(0,1fr)] lg:grid-rows-1">
+    <section className="flex min-h-0 flex-col border-b bg-[#fbfbfa] lg:border-b-0 lg:border-r" aria-label="Message list">
+      <div className="shrink-0 border-b px-3 py-3">
+        <div className="relative"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search messages" className="h-8 bg-background pl-8 text-xs" /></div>
+        <div className="mt-2 flex items-center justify-between px-0.5 text-[10px] text-muted-foreground"><span>{visibleDeliveries.length} messages</span>{remainingUnread > 0 && <span>{remainingUnread} older unread</span>}</div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {visibleDeliveries.map(({ message, unread }) => <button key={message.message_id} onClick={() => onSelect(message.message_id)} className={cn("grid w-full grid-cols-[8px_minmax(0,1fr)_auto] gap-x-2 border-b px-3 py-3 text-left hover:bg-black/[.035]", selectedMessageId === message.message_id && "bg-[#eef4f8] hover:bg-[#eef4f8]")}>
+          <span className={cn("mt-1.5 size-1.5 rounded-full", unread ? "bg-sky-500" : "bg-transparent")} />
+          <span className="min-w-0"><span className="flex min-w-0 items-center gap-2"><span className={cn("truncate text-xs", unread ? "font-semibold" : "font-medium")}>{message.sender.name}</span><span className="shrink-0 text-[9px] uppercase text-muted-foreground">{message.sender.kind}</span></span><span className="mt-1 block truncate text-[11px] font-medium text-foreground/90">{mailSubject(message)}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground">{message.body.replace(/\s+/g, " ")}</span></span>
+          <span className="pt-0.5 text-[9px] text-muted-foreground">{formatMailTime(message.created_at, true)}</span>
+        </button>)}
+        {!loading && !visibleDeliveries.length && <EmptyState icon={<Mail />} label={query ? "No messages match this search" : "No messages in this workspace"} />}
+        {loading && <div className="px-4 py-8 text-center text-xs text-muted-foreground">Loading messages...</div>}
+      </div>
+    </section>
+
+    <section className="min-h-0 overflow-auto" aria-label="Message reader">
+      {selected ? <article className="mx-auto w-full max-w-[900px] px-5 py-7 sm:px-8 sm:py-10 lg:px-12">
+        <header className="border-b pb-6">
+          <div className="flex items-start justify-between gap-4"><div className="min-w-0"><h1 className="break-words text-xl font-semibold sm:text-2xl">{mailSubject(selected)}</h1><div className="mt-4 flex items-center gap-3"><span className={cn("grid size-8 shrink-0 place-items-center rounded-[5px] text-[10px] font-bold", selected.sender.kind === "agent" ? "bg-[#dcecf8] text-[#315f7d]" : "bg-[#f7dfea] text-[#824e67]")}>{initials(selected.sender.name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{selected.sender.name}</span><span className="block truncate font-mono text-[9px] text-muted-foreground">{selected.sender.id}</span></span></div></div><time className="shrink-0 pt-1 text-[10px] text-muted-foreground">{formatMailTime(selected.created_at)}</time></div>
+          <div className="mt-4 grid grid-cols-[34px_minmax(0,1fr)] gap-2 text-[10px] text-muted-foreground"><span>To</span><span className="min-w-0 break-words">{selected.recipients.map((recipient) => `${recipient.name} (${recipient.kind})`).join(", ")}</span><span>ID</span><button className="min-w-0 truncate text-left font-mono hover:text-foreground" onClick={() => onCopy(selected.message_id)} title="Copy message ID">{selected.message_id}</button></div>
+        </header>
+        <div className="whitespace-pre-wrap break-words py-8 text-sm leading-7 text-foreground">{selected.body}</div>
+        <section className="border-t pt-6"><div className="mb-4 flex items-center gap-2 text-xs font-semibold"><GitBranch className="size-3.5 text-muted-foreground" />Message trace</div><div className="ml-1.5 border-l pl-5">{trace.map((entry) => <button key={entry.id} disabled={!entry.message} onClick={() => entry.message && onSelect(entry.id)} className={cn("relative block w-full py-2.5 text-left", entry.message && !entry.current && "hover:text-primary")}><span className={cn("absolute -left-[24px] top-4 size-1.5 rounded-full ring-4 ring-background", entry.current ? "bg-sky-500" : entry.message ? "bg-zinc-400" : "bg-amber-400")} />{entry.message ? <><span className="flex min-w-0 items-center gap-2"><span className="truncate text-[11px] font-medium">{entry.message.sender.name}</span><span className="shrink-0 text-[9px] text-muted-foreground">{formatMailTime(entry.message.created_at, true)}</span>{entry.current && <span className="text-[9px] font-medium text-sky-700">Current</span>}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground">{mailSubject(entry.message)}</span></> : <><span className="block text-[11px] font-medium text-amber-700">Referenced message unavailable</span><span className="mt-1 block truncate font-mono text-[9px] text-muted-foreground">{entry.id}</span></>}</button>)}</div></section>
+      </article> : <div className="grid h-full min-h-[300px] place-items-center"><EmptyState icon={<Mail />} label={deliveries.length ? "Select a message to read" : "Your inbox is empty"} /></div>}
+    </section>
+  </div>
+}
+
 function WorkspaceApp() {
   const [user, setUser] = useState<User | null | undefined>(undefined)
   const [organizations, setOrganizations] = useState<Organization[]>([])
@@ -208,7 +287,6 @@ function WorkspaceApp() {
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
-  const [inboxOpen, setInboxOpen] = useState(false)
   const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
   const [createServiceOpen, setCreateServiceOpen] = useState(false)
   const [editingService, setEditingService] = useState<MachineService | null>(null)
@@ -232,7 +310,10 @@ function WorkspaceApp() {
   const [connectCommand, setConnectCommand] = useState("")
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
-  const [inboxMessages, setInboxMessages] = useState<MailMessage[]>([])
+  const [mailDeliveries, setMailDeliveries] = useState<MailDelivery[]>([])
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
+  const [inboxLoading, setInboxLoading] = useState(false)
+  const [inboxQuery, setInboxQuery] = useState("")
   const [remainingUnread, setRemainingUnread] = useState(0)
   const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
   const [services, setServices] = useState<MachineService[]>([])
@@ -291,6 +372,10 @@ function WorkspaceApp() {
   }, [workspaceId])
 
   useEffect(() => {
+    setMailDeliveries([])
+    setSelectedMessageId(null)
+    setInboxQuery("")
+    setRemainingUnread(0)
     if (!workspaceId) {
       setSnapshot(null)
       setSelectedAgentId(null)
@@ -439,14 +524,21 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
-  async function loadInbox(append = false) {
+  async function loadInbox() {
     if (!workspaceId) return
+    setInboxLoading(true)
     try {
-      const data = await api<{ messages: MailMessage[]; remaining_unread: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/inbox`, { method: "POST", body: JSON.stringify({ limit: 50 }) })
-      setInboxMessages((current) => append ? [...current, ...data.messages] : data.messages)
+      const data = await api<MailboxResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/inbox`, { method: "POST", body: JSON.stringify({ limit: 100 }) })
+      setMailDeliveries(data.deliveries)
       setRemainingUnread(data.remaining_unread)
-      setInboxOpen(true)
+      setSelectedMessageId((current) => current && data.deliveries.some((delivery) => delivery.message.message_id === current) ? current : data.deliveries[0]?.message.message_id ?? null)
     } catch (reason) { showError(reason) }
+    finally { setInboxLoading(false) }
+  }
+
+  function openInbox() {
+    setMainView("inbox")
+    void loadInbox()
   }
 
   async function updateMemberRole(userId: string, role: Member["role"]) {
@@ -625,6 +717,7 @@ function WorkspaceApp() {
           <IconButton label="Create workspace" disabled={!organizationId} onClick={() => setCreateWorkspaceOpen(true)}><Plus /></IconButton>
         </div>
         <div className="px-2 pb-2">
+          <Button variant={mainView === "inbox" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openInbox} disabled={!workspaceId}><Mail className="size-3.5" />Inbox</Button>
           <Button variant={mainView === "network" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openNetwork} disabled={!workspaceId}><Network className="size-3.5" />Network</Button>
         </div>
 
@@ -654,7 +747,6 @@ function WorkspaceApp() {
         </Tabs>
 
         <div className="shrink-0 border-t p-2">
-          <Button variant="ghost" className="h-8 w-full justify-start px-2 text-xs font-normal text-muted-foreground" onClick={() => loadInbox(false)} disabled={!workspaceId}><Mail className="size-3.5" />Inbox</Button>
           <Button variant="ghost" className="h-8 w-full justify-start px-2 text-xs font-normal text-muted-foreground" onClick={openMembers} disabled={!organizationId}><Users className="size-3.5" />Members</Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild><button className="mt-1 grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-black/[.05]"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
@@ -665,20 +757,20 @@ function WorkspaceApp() {
 
       <section className="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]">
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
-          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "network" ? "Network" : selectedAgent?.name ?? "Terminal"}</strong></div>
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "inbox" ? "Inbox" : mainView === "network" ? "Network" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
             <IconButton label="Reconnect terminal" disabled={!selectedAgent} onClick={() => { setSelectedAgentId(null); requestAnimationFrame(() => setSelectedAgentId(selectedAgent?.agent_id ?? null)) }}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={stopAgent}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
-          </div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button></div>}
+          </div> : mainView === "inbox" ? <div className="flex shrink-0 items-center gap-2"><span className="hidden text-[10px] text-muted-foreground sm:inline">{mailDeliveries.length} messages</span><IconButton label="Refresh inbox" onClick={loadInbox} disabled={inboxLoading}><RotateCw /></IconButton></div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button></div>}
         </header>
         {mainView === "terminal" ? <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className="grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]">
             <div className="flex min-w-0 items-center justify-between gap-4 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><span className="inline-flex shrink-0 items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} /></div>
           </div>
-        </div> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
+        </div> : mainView === "inbox" ? <InboxView deliveries={mailDeliveries} selectedMessageId={selectedMessageId} query={inboxQuery} loading={inboxLoading} remainingUnread={remainingUnread} onQueryChange={setInboxQuery} onSelect={setSelectedMessageId} onCopy={copy} /> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
       </section>
     </main>
 
@@ -704,8 +796,6 @@ function WorkspaceApp() {
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget?.name} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="min-w-0"><span className="block truncate text-sm font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive" onClick={() => removeMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
-
-    <Dialog open={inboxOpen} onOpenChange={setInboxOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Inbox</DialogTitle><DialogDescription>Messages sent by Agents in {workspace?.name ?? "this workspace"}. Opening the inbox marks the returned batch read.</DialogDescription></DialogHeader><div className="max-h-[60vh] divide-y overflow-auto border-y">{inboxMessages.map((message) => <article key={message.message_id} className="py-4"><div className="flex items-start justify-between gap-4"><div className="min-w-0"><div className="truncate text-sm font-medium">{message.sender.name}</div><div className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground">{message.sender.id} · {message.message_id}</div></div><time className="shrink-0 text-[10px] text-muted-foreground">{new Date(message.created_at).toLocaleString()}</time></div><p className="mt-3 whitespace-pre-wrap text-sm leading-6">{message.body}</p>{message.context_ids.length > 0 && <div className="mt-3 truncate font-mono text-[9px] text-muted-foreground">Context: {message.context_ids.join(", ")}</div>}</article>)}{!inboxMessages.length && <EmptyState icon={<Mail />} label="No unread messages" />}</div><DialogFooter><span className="mr-auto self-center text-xs text-muted-foreground">{remainingUnread > 0 ? `${remainingUnread} unread remaining` : "Inbox is up to date"}</span>{remainingUnread > 0 && <Button variant="outline" onClick={() => loadInbox(true)}>Load next</Button>}<Button onClick={() => setInboxOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
   </TooltipProvider>

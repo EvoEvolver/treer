@@ -102,7 +102,9 @@ and organization role of humans in their workspace organization, but the Agent
 directory does not expose member email addresses. Mail resolves Agent and human
 IDs or unique display names through one workspace-scoped recipient namespace.
 Human inbox reads require a current user session and current membership in the
-workspace organization. Ordinary
+workspace organization. Mailbox history contains only deliveries addressed to
+that user; the browser does not dereference context IDs that are absent from
+that history. Ordinary
 outbound TCP payload stays between the source Controller and destination; the
 Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy
