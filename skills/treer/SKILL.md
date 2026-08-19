@@ -133,6 +133,39 @@ These commands operate only in `TREER_WORKSPACE_ID`. Service and virtual-host
 operations have separate policy actions. Changes take effect immediately for
 online Controllers; reconnect and periodic full snapshots provide recovery.
 
+## Publish an HTTP service
+
+Publish a registered HTTP service through the Proxy's wildcard HTTPS domain.
+The returned URL remains stable until the ingress is deleted:
+
+```bash
+treer publish create api --slug issue-tracker --access public
+treer publish list
+```
+
+`public` means Treer does not require an identity at the edge; the application
+can still use its own cookies, API keys, or `Authorization` header. Use
+`workspace` to admit organization members and managed Agents only:
+
+```bash
+treer publish access issue-tracker-a81f.apps.example workspace
+TOKEN=$(treer identity token api)
+curl -H "Treer-Authorization: Bearer $TOKEN" \
+  https://issue-tracker-a81f.apps.example/
+```
+
+Pause or remove an endpoint without stopping its machine service:
+
+```bash
+treer publish disable issue-tracker-a81f.apps.example
+treer publish enable issue-tracker-a81f.apps.example
+treer publish delete issue-tracker-a81f.apps.example
+```
+
+An Agent may publish only services on its own machine. Publishing supports HTTP
+and WebSocket traffic; arbitrary TCP remains available only through workspace
+virtual hosts. Treer reserves `/.treer/` on every published hostname.
+
 ## Authenticate to an identity-aware service
 
 When a registered service explicitly accepts Treer workload identity, request

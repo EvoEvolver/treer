@@ -20,9 +20,10 @@ use subtle::ConstantTimeEq;
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentInboxResponse,
     AgentMailMessage, AgentServerSnapshot, ApiError, CreateMachineServiceRequest,
-    CreateVirtualNetworkHostRequest, MachineService, MachineServiceProtocol, MailAddress,
-    MailAddressKind, MailDelivery, MailboxResponse, ProtocolError, ServerInfo,
-    UpdateMachineServiceRequest, VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, MachineService,
+    MachineServiceProtocol, MailAddress, MailAddressKind, MailDelivery, MailboxResponse,
+    ProtocolError, ServerInfo, ServiceIngress, ServiceIngressAccess, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
     AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
@@ -43,6 +44,8 @@ const MAX_MAIL_BODY_BYTES: usize = 32 * 1024;
 const MAX_MAIL_RECIPIENTS: usize = 32;
 const MAX_MAIL_CONTEXTS: usize = 32;
 const MAX_INBOX_LIMIT: u16 = 100;
+const INGRESS_AUTH_CODE_TTL_MINUTES: i64 = 5;
+const INGRESS_SESSION_TTL_HOURS: i64 = 12;
 
 #[derive(Clone)]
 pub struct AuthStore {
@@ -59,6 +62,20 @@ pub struct AuthStore {
     virtual_hosts_update: Arc<tokio::sync::Mutex<()>>,
     virtual_hosts_revision: Arc<AtomicU64>,
     agent_credentials: Arc<tokio::sync::RwLock<HashMap<String, AgentCredentialRecord>>>,
+    service_ingresses: Arc<tokio::sync::RwLock<HashMap<String, ResolvedServiceIngress>>>,
+    service_ingresses_update: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedServiceIngress {
+    pub ingress: ServiceIngress,
+    pub service: MachineService,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConsumedIngressAuthorization {
+    pub session_token: String,
+    pub return_path: String,
 }
 
 pub struct CloudflareEmailConfig {
@@ -497,9 +514,12 @@ impl AuthStore {
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
             agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            service_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            service_ingresses_update: Arc::new(tokio::sync::Mutex::new(())),
         };
         store.initialize_schema().await?;
         store.refresh_virtual_network_hosts().await?;
+        store.refresh_service_ingresses().await?;
         Ok(store)
     }
 
@@ -546,6 +566,8 @@ impl AuthStore {
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
             agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            service_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            service_ingresses_update: Arc::new(tokio::sync::Mutex::new(())),
         };
         store
             .initialize_schema()
@@ -555,6 +577,10 @@ impl AuthStore {
             .refresh_virtual_network_hosts()
             .await
             .expect("load virtual hosts");
+        store
+            .refresh_service_ingresses()
+            .await
+            .expect("load service ingresses");
         store
     }
 
@@ -1255,6 +1281,357 @@ impl AuthStore {
             revision: self.virtual_hosts_revision.load(Ordering::SeqCst),
             hosts,
         })
+    }
+
+    pub async fn list_service_ingresses(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<ServiceIngress>, AuthFailure> {
+        let mut ingresses = self
+            .service_ingresses
+            .read()
+            .await
+            .values()
+            .filter(|resolved| resolved.ingress.workspace_id == workspace_id)
+            .map(|resolved| resolved.ingress.clone())
+            .collect::<Vec<_>>();
+        ingresses.sort_by(|left, right| left.hostname.cmp(&right.hostname));
+        Ok(ingresses)
+    }
+
+    pub async fn resolve_service_ingress(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<ResolvedServiceIngress, AuthFailure> {
+        self.service_ingresses
+            .read()
+            .await
+            .values()
+            .find(|resolved| {
+                resolved.ingress.workspace_id == workspace_id
+                    && (resolved.ingress.ingress_id == target
+                        || resolved.ingress.hostname.eq_ignore_ascii_case(target))
+            })
+            .cloned()
+            .ok_or_else(|| {
+                AuthFailure::not_found("ingress_not_found", "service ingress does not exist")
+            })
+    }
+
+    pub async fn resolve_service_ingress_hostname(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<ResolvedServiceIngress>, AuthFailure> {
+        if let Some(resolved) = self
+            .service_ingresses
+            .read()
+            .await
+            .get(&hostname.to_ascii_lowercase())
+            .cloned()
+        {
+            return Ok(Some(resolved));
+        }
+        let row = sqlx::query(
+            "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
+             i.created_at, i.created_by, i.updated_at, i.updated_by, \
+             s.name AS service_name, s.server_id, s.target_host, s.target_port, \
+             s.protocol AS service_protocol, s.created_at AS service_created_at, \
+             s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
+             s.updated_by AS service_updated_by \
+             FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id \
+             WHERE lower(i.hostname) = lower($1)",
+        )
+        .bind(hostname)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let Some(row) = row else { return Ok(None) };
+        let resolved = resolved_service_ingress_from_row(row)?;
+        self.service_ingresses.write().await.insert(
+            resolved.ingress.hostname.to_ascii_lowercase(),
+            resolved.clone(),
+        );
+        Ok(Some(resolved))
+    }
+
+    pub async fn create_service_ingress(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        base_domain: &str,
+        request: CreateServiceIngressRequest,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let _update = self.service_ingresses_update.lock().await;
+        let service = self
+            .resolve_machine_service(workspace_id, &request.service_id)
+            .await?;
+        if service.protocol != MachineServiceProtocol::Http {
+            return Err(AuthFailure::bad_request(
+                "service_protocol_mismatch",
+                "public ingress requires an HTTP service",
+            ));
+        }
+        let slug = normalize_ingress_slug(request.slug.as_deref().unwrap_or(&service.name))?;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let hostname = format!("{slug}-{}.{}", &suffix[..8], base_domain);
+        if hostname.len() > 253 {
+            return Err(AuthFailure::bad_request(
+                "invalid_ingress_slug",
+                "generated ingress hostname is too long",
+            ));
+        }
+        let now = Utc::now();
+        let ingress = ServiceIngress {
+            ingress_id: format!("ing_{}", Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            service_id: service.service_id.clone(),
+            hostname: hostname.clone(),
+            access: request.access,
+            enabled: true,
+            created_at: now,
+            created_by: actor.to_string(),
+            updated_at: now,
+            updated_by: actor.to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO service_ingresses(\
+             ingress_id, workspace_id, service_id, hostname, access, enabled, created_at, \
+             created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(&ingress.ingress_id)
+        .bind(&ingress.workspace_id)
+        .bind(&ingress.service_id)
+        .bind(&ingress.hostname)
+        .bind(service_ingress_access_str(ingress.access))
+        .bind(ingress.enabled)
+        .bind(ingress.created_at.to_rfc3339())
+        .bind(&ingress.created_by)
+        .bind(ingress.updated_at.to_rfc3339())
+        .bind(&ingress.updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict("ingress_exists", "service ingress hostname already exists")
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
+        self.service_ingresses.write().await.insert(
+            hostname.to_ascii_lowercase(),
+            ResolvedServiceIngress {
+                ingress: ingress.clone(),
+                service,
+            },
+        );
+        Ok(ingress)
+    }
+
+    pub async fn update_service_ingress(
+        &self,
+        workspace_id: &str,
+        target: &str,
+        actor: &str,
+        request: UpdateServiceIngressRequest,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let _update = self.service_ingresses_update.lock().await;
+        let current = self.resolve_service_ingress(workspace_id, target).await?;
+        let mut ingress = current.ingress;
+        ingress.access = request.access.unwrap_or(ingress.access);
+        ingress.enabled = request.enabled.unwrap_or(ingress.enabled);
+        ingress.updated_at = Utc::now();
+        ingress.updated_by = actor.to_string();
+        sqlx::query(
+            "UPDATE service_ingresses SET access = $1, enabled = $2, updated_at = $3, \
+             updated_by = $4 WHERE workspace_id = $5 AND ingress_id = $6",
+        )
+        .bind(service_ingress_access_str(ingress.access))
+        .bind(ingress.enabled)
+        .bind(ingress.updated_at.to_rfc3339())
+        .bind(&ingress.updated_by)
+        .bind(workspace_id)
+        .bind(&ingress.ingress_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.service_ingresses.write().await.insert(
+            ingress.hostname.to_ascii_lowercase(),
+            ResolvedServiceIngress {
+                ingress: ingress.clone(),
+                service: current.service,
+            },
+        );
+        Ok(ingress)
+    }
+
+    pub async fn delete_service_ingress(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let _update = self.service_ingresses_update.lock().await;
+        let resolved = self.resolve_service_ingress(workspace_id, target).await?;
+        sqlx::query("DELETE FROM service_ingresses WHERE workspace_id = $1 AND ingress_id = $2")
+            .bind(workspace_id)
+            .bind(&resolved.ingress.ingress_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        self.service_ingresses
+            .write()
+            .await
+            .remove(&resolved.ingress.hostname.to_ascii_lowercase());
+        Ok(resolved.ingress)
+    }
+
+    pub async fn refresh_service_ingresses(&self) -> anyhow::Result<()> {
+        let _update = self.service_ingresses_update.lock().await;
+        let rows = sqlx::query(
+            "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
+             i.created_at, i.created_by, i.updated_at, i.updated_by, \
+             s.name AS service_name, s.server_id, s.target_host, s.target_port, \
+             s.protocol AS service_protocol, s.created_at AS service_created_at, \
+             s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
+             s.updated_by AS service_updated_by \
+             FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut refreshed = HashMap::new();
+        for row in rows {
+            let resolved = resolved_service_ingress_from_row(row)
+                .map_err(|error| anyhow::anyhow!(error.into_parts().1.message))?;
+            refreshed.insert(resolved.ingress.hostname.to_ascii_lowercase(), resolved);
+        }
+        *self.service_ingresses.write().await = refreshed;
+        Ok(())
+    }
+
+    pub async fn create_ingress_auth_code(
+        &self,
+        ingress: &ServiceIngress,
+        user_id: &str,
+        return_path: &str,
+    ) -> Result<String, AuthFailure> {
+        self.require_workspace_member(&ingress.workspace_id, user_id)
+            .await?;
+        let return_path = validate_ingress_return_path(return_path)?;
+        let code = format!("iac_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let now = Utc::now();
+        sqlx::query("DELETE FROM ingress_auth_codes WHERE expires_at <= $1 OR used_at IS NOT NULL")
+            .bind(now.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO ingress_auth_codes(code, ingress_id, user_id, return_path, expires_at) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&code)
+        .bind(&ingress.ingress_id)
+        .bind(user_id)
+        .bind(return_path)
+        .bind((now + Duration::minutes(INGRESS_AUTH_CODE_TTL_MINUTES)).to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(code)
+    }
+
+    pub async fn consume_ingress_auth_code(
+        &self,
+        hostname: &str,
+        code: &str,
+    ) -> Result<ConsumedIngressAuthorization, AuthFailure> {
+        let now = Utc::now();
+        let row = sqlx::query(
+            "SELECT c.ingress_id, c.user_id, c.return_path, i.workspace_id \
+             FROM ingress_auth_codes c JOIN service_ingresses i ON i.ingress_id = c.ingress_id \
+             WHERE c.code = $1 AND lower(i.hostname) = lower($2) AND i.enabled = TRUE \
+             AND c.used_at IS NULL AND c.expires_at > $3",
+        )
+        .bind(code)
+        .bind(hostname)
+        .bind(now.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(invalid_ingress_authorization)?;
+        let workspace_id: String = row.get("workspace_id");
+        let user_id: String = row.get("user_id");
+        self.require_workspace_member(&workspace_id, &user_id)
+            .await?;
+        let result = sqlx::query(
+            "UPDATE ingress_auth_codes SET used_at = $1 WHERE code = $2 AND used_at IS NULL",
+        )
+        .bind(now.to_rfc3339())
+        .bind(code)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if result.rows_affected() != 1 {
+            return Err(invalid_ingress_authorization());
+        }
+        let session_token = format!("ias_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        sqlx::query("DELETE FROM ingress_sessions WHERE expires_at <= $1")
+            .bind(now.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO ingress_sessions(token, ingress_id, user_id, created_at, expires_at) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&session_token)
+        .bind(row.get::<String, _>("ingress_id"))
+        .bind(&user_id)
+        .bind(now.to_rfc3339())
+        .bind((now + Duration::hours(INGRESS_SESSION_TTL_HOURS)).to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(ConsumedIngressAuthorization {
+            session_token,
+            return_path: row.get("return_path"),
+        })
+    }
+
+    pub async fn authenticate_ingress_session(
+        &self,
+        hostname: &str,
+        token: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        let row = sqlx::query(
+            "SELECT s.user_id, i.workspace_id FROM ingress_sessions s \
+             JOIN service_ingresses i ON i.ingress_id = s.ingress_id \
+             WHERE s.token = $1 AND lower(i.hostname) = lower($2) AND i.enabled = TRUE \
+             AND s.expires_at > $3",
+        )
+        .bind(token)
+        .bind(hostname)
+        .bind(Utc::now().to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let Some(row) = row else { return Ok(None) };
+        let user_id: String = row.get("user_id");
+        let workspace_id: String = row.get("workspace_id");
+        if self
+            .require_workspace_member(&workspace_id, &user_id)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        Ok(Some(user_id))
+    }
+
+    pub(crate) fn authentication_disabled(&self) -> bool {
+        self.disabled
     }
 
     async fn membership_role(
@@ -3427,7 +3804,7 @@ pub async fn require_machine(
     }
 }
 
-async fn authenticate_request(
+pub(crate) async fn authenticate_request(
     auth: &AuthStore,
     headers: &HeaderMap,
 ) -> Result<CurrentSession, AuthFailure> {
@@ -3908,6 +4285,13 @@ fn provider_preferred_name(
     validate_preferred_name(email.split('@').next().unwrap_or("Treer user"))
 }
 
+fn invalid_ingress_authorization() -> AuthFailure {
+    AuthFailure::unauthorized(
+        "invalid_ingress_authorization",
+        "ingress authorization is invalid or expired",
+    )
+}
+
 fn parse_password_reset_token(token: &str) -> Result<(&str, &str), AuthFailure> {
     let (token_id, secret) = token.split_once('.').ok_or_else(invalid_password_reset)?;
     if token_id.len() != 36
@@ -4093,6 +4477,110 @@ const fn machine_service_protocol_str(protocol: MachineServiceProtocol) -> &'sta
         MachineServiceProtocol::Tcp => "tcp",
         MachineServiceProtocol::Http => "http",
     }
+}
+
+const fn service_ingress_access_str(access: ServiceIngressAccess) -> &'static str {
+    match access {
+        ServiceIngressAccess::Public => "public",
+        ServiceIngressAccess::Workspace => "workspace",
+    }
+}
+
+fn normalize_ingress_slug(value: &str) -> Result<String, AuthFailure> {
+    let mut slug = String::new();
+    let mut separator = false;
+    for byte in value.trim().bytes() {
+        if byte.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() && slug.len() < 40 {
+                slug.push('-');
+            }
+            if slug.len() < 40 {
+                slug.push(byte.to_ascii_lowercase() as char);
+            }
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        return Err(AuthFailure::bad_request(
+            "invalid_ingress_slug",
+            "ingress slug must contain an ASCII letter or number",
+        ));
+    }
+    Ok(slug)
+}
+
+fn validate_ingress_return_path(value: &str) -> Result<String, AuthFailure> {
+    if !value.starts_with('/')
+        || value.starts_with("//")
+        || value.len() > 4096
+        || value.chars().any(char::is_control)
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_ingress_return_path",
+            "ingress return path must be a local absolute path",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn resolved_service_ingress_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<ResolvedServiceIngress, AuthFailure> {
+    let ingress = ServiceIngress {
+        ingress_id: row.get("ingress_id"),
+        workspace_id: row.get("workspace_id"),
+        service_id: row.get("service_id"),
+        hostname: row.get("hostname"),
+        access: match row.get::<String, _>("access").as_str() {
+            "public" => ServiceIngressAccess::Public,
+            "workspace" => ServiceIngressAccess::Workspace,
+            value => {
+                return Err(AuthFailure::internal(
+                    "database_error",
+                    format!("service ingress has invalid access mode {value}"),
+                ))
+            }
+        },
+        enabled: row.get("enabled"),
+        created_at: parse_database_timestamp(&row, "created_at", "service ingress")?,
+        created_by: row.get("created_by"),
+        updated_at: parse_database_timestamp(&row, "updated_at", "service ingress")?,
+        updated_by: row.get("updated_by"),
+    };
+    let target_port = u16::try_from(row.get::<i64, _>("target_port")).map_err(|error| {
+        AuthFailure::internal(
+            "database_error",
+            format!("service ingress target has invalid port: {error}"),
+        )
+    })?;
+    let service = MachineService {
+        service_id: ingress.service_id.clone(),
+        workspace_id: ingress.workspace_id.clone(),
+        name: row.get("service_name"),
+        server_id: row.get("server_id"),
+        target_host: row.get("target_host"),
+        target_port,
+        protocol: match row.get::<String, _>("service_protocol").as_str() {
+            "tcp" => MachineServiceProtocol::Tcp,
+            "http" => MachineServiceProtocol::Http,
+            value => {
+                return Err(AuthFailure::internal(
+                    "database_error",
+                    format!("service ingress target has invalid protocol {value}"),
+                ))
+            }
+        },
+        created_at: parse_database_timestamp(&row, "service_created_at", "service ingress target")?,
+        created_by: row.get("service_created_by"),
+        updated_at: parse_database_timestamp(&row, "service_updated_at", "service ingress target")?,
+        updated_by: row.get("service_updated_by"),
+    };
+    Ok(ResolvedServiceIngress { ingress, service })
 }
 
 pub(crate) fn normalize_virtual_hostname(value: &str) -> Result<String, AuthFailure> {
@@ -5188,6 +5676,108 @@ mod tests {
             .await
             .expect_err("cross-organization access must fail");
         assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn service_ingress_and_human_authorization_are_durable_and_scoped() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let organization = store
+            .list_organizations(&owner.user_id)
+            .await
+            .expect("list organizations")
+            .into_iter()
+            .next()
+            .expect("personal organization");
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "published",
+                "Published",
+                &owner.user_id,
+            )
+            .await
+            .expect("create workspace");
+        let service = store
+            .create_machine_service(
+                "published",
+                &owner.user_id,
+                CreateMachineServiceRequest {
+                    name: "Issue Tracker".to_string(),
+                    server_id: "machine-a".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 3000,
+                    protocol: MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create service");
+        let ingress = store
+            .create_service_ingress(
+                "published",
+                &owner.user_id,
+                "apps.treer.ai",
+                CreateServiceIngressRequest {
+                    service_id: service.service_id.clone(),
+                    slug: None,
+                    access: ServiceIngressAccess::Workspace,
+                },
+            )
+            .await
+            .expect("create ingress");
+        assert!(ingress.hostname.starts_with("issue-tracker-"));
+        assert!(ingress.hostname.ends_with(".apps.treer.ai"));
+        assert_eq!(
+            store
+                .resolve_service_ingress_hostname(&ingress.hostname)
+                .await
+                .expect("resolve ingress")
+                .expect("stored ingress")
+                .service
+                .service_id,
+            service.service_id
+        );
+
+        let code = store
+            .create_ingress_auth_code(&ingress, &owner.user_id, "/issues?mine=1")
+            .await
+            .expect("create authorization code");
+        let authorization = store
+            .consume_ingress_auth_code(&ingress.hostname, &code)
+            .await
+            .expect("consume authorization code");
+        assert_eq!(authorization.return_path, "/issues?mine=1");
+        assert_eq!(
+            store
+                .authenticate_ingress_session(&ingress.hostname, &authorization.session_token)
+                .await
+                .expect("authenticate ingress session")
+                .as_deref(),
+            Some(owner.user_id.as_str())
+        );
+        assert!(store
+            .consume_ingress_auth_code(&ingress.hostname, &code)
+            .await
+            .is_err());
+
+        let disabled = store
+            .update_service_ingress(
+                "published",
+                &ingress.ingress_id,
+                &owner.user_id,
+                UpdateServiceIngressRequest {
+                    access: None,
+                    enabled: Some(false),
+                },
+            )
+            .await
+            .expect("disable ingress");
+        assert!(!disabled.enabled);
+        assert!(store
+            .authenticate_ingress_session(&ingress.hostname, &authorization.session_token)
+            .await
+            .expect("disabled session lookup")
+            .is_none());
     }
 
     #[tokio::test]

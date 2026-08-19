@@ -19,12 +19,14 @@ use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
     AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentInfo, ApiError, CreateAgentRequest,
-    CreateMachineServiceRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
-    MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService, MailAddress,
-    MailAddressKind, MailboxResponse, PromptAgentRequest, ProtocolError, RenameRequest,
-    SendAgentMailRequest, SendAgentMailResponse, TerminalClientMessage, TerminalServerMessage,
-    UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
-    WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceHuman, AGENT_ID_HEADER,
+    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
+    InputAgentRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
+    MailAddress, MailAddressKind, MailboxResponse, PromptAgentRequest, ProtocolError,
+    RenameRequest, SendAgentMailRequest, SendAgentMailResponse, ServiceIngress,
+    ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, VirtualNetworkHostsSnapshot,
+    WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceHuman,
+    AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -36,12 +38,13 @@ use crate::policy::{
     PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_CREATE,
     ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT, ACTION_AGENT_METADATA_READ,
     ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP, ACTION_AGENT_UPDATE,
-    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE,
+    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_CREATE, ACTION_INGRESS_DELETE,
+    ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE, ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE,
     ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE,
     ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
     ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT, RESOURCE_AGENT_MAILBOX,
     RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX, RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE,
-    RESOURCE_VIRTUAL_HOST,
+    RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
 
@@ -63,6 +66,122 @@ struct WorkloadIdentityApi {
     auth: AuthStore,
     policy: PolicyEngine,
     issuer: IdentityIssuer,
+}
+
+#[derive(Clone)]
+struct ServiceIngressApi {
+    auth: AuthStore,
+    policy: PolicyEngine,
+    config: IngressConfig,
+}
+
+const INGRESS_SESSION_COOKIE: &str = "__Host-treer_ingress";
+const TREER_AUTHORIZATION_HEADER: &str = "treer-authorization";
+const TREER_IDENTITY_TOKEN_HEADER: &str = "x-treer-identity-token";
+
+#[derive(Clone)]
+pub struct IngressConfig {
+    public_url: Option<Url>,
+    base_domain: Option<Arc<str>>,
+    proxy_public_url: Url,
+    app_public_url: Url,
+}
+
+impl IngressConfig {
+    pub fn new(
+        mut public_url: Option<Url>,
+        proxy_public_url: &Url,
+        app_public_url: &Url,
+    ) -> anyhow::Result<Self> {
+        let base_domain = if let Some(url) = public_url.as_mut() {
+            if !matches!(url.scheme(), "http" | "https")
+                || url.username() != ""
+                || url.password().is_some()
+            {
+                anyhow::bail!("ingress public URL must be an HTTP(S) URL without credentials");
+            }
+            let hostname = url
+                .host_str()
+                .context("ingress public URL must contain a base domain")?
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            let valid = hostname.len() <= 253
+                && hostname.split('.').count() >= 2
+                && hostname.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        })
+                });
+            if !valid {
+                anyhow::bail!("ingress public URL must use a valid DNS base domain");
+            }
+            url.set_path("/");
+            url.set_query(None);
+            url.set_fragment(None);
+            Some(hostname.into())
+        } else {
+            None
+        };
+        Ok(Self {
+            public_url,
+            base_domain,
+            proxy_public_url: proxy_public_url.clone(),
+            app_public_url: app_public_url.clone(),
+        })
+    }
+
+    pub fn public_url(&self) -> Option<&Url> {
+        self.public_url.as_ref()
+    }
+
+    fn base_domain(&self) -> Result<&str, ApiFailure> {
+        self.base_domain.as_deref().ok_or_else(|| {
+            ApiFailure::service_unavailable(
+                "ingress_not_configured",
+                "TREER_INGRESS_PUBLIC_URL is not configured",
+            )
+        })
+    }
+
+    fn matches_hostname(&self, hostname: &str) -> bool {
+        self.base_domain.as_deref().is_some_and(|base| {
+            hostname
+                .strip_suffix(&format!(".{base}"))
+                .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+        })
+    }
+
+    fn url_for_hostname(&self, hostname: &str) -> Result<Url, ApiFailure> {
+        let mut url = self.public_url.clone().ok_or_else(|| {
+            ApiFailure::service_unavailable(
+                "ingress_not_configured",
+                "TREER_INGRESS_PUBLIC_URL is not configured",
+            )
+        })?;
+        url.set_host(Some(hostname)).map_err(|_| {
+            ApiFailure::internal(
+                "invalid_ingress_hostname",
+                "stored ingress hostname is invalid",
+            )
+        })?;
+        Ok(url)
+    }
+
+    fn ingress_cookie_name(&self) -> &'static str {
+        if self
+            .public_url
+            .as_ref()
+            .is_some_and(|url| url.scheme() == "https")
+        {
+            INGRESS_SESSION_COOKIE
+        } else {
+            "treer_ingress"
+        }
+    }
 }
 
 impl BootstrapConfig {
@@ -134,12 +253,18 @@ pub fn router(
     policy: PolicyEngine,
     identity: IdentityIssuer,
     browser: BrowserAccess,
+    ingress: IngressConfig,
 ) -> Router {
     let cors = browser.cors_layer();
     let workload_identity = WorkloadIdentityApi {
         auth: auth_store.clone(),
         policy: policy.clone(),
         issuer: identity.clone(),
+    };
+    let service_ingress = ServiceIngressApi {
+        auth: auth_store.clone(),
+        policy: policy.clone(),
+        config: ingress.clone(),
     };
     let agent_control = Router::new()
         .route("/agent/machine/identity", post(bind_machine_identity))
@@ -194,6 +319,14 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/virtual-hosts/{hostname}",
             axum::routing::delete(agent_delete_virtual_network_host),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/ingresses",
+            get(agent_list_service_ingresses).post(agent_create_service_ingress),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/ingresses/{ingress_id}",
+            axum::routing::patch(agent_update_service_ingress).delete(agent_delete_service_ingress),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -279,6 +412,18 @@ pub fn router(
             axum::routing::delete(delete_virtual_network_host),
         )
         .route(
+            "/api/workspaces/{workspace_id}/ingresses",
+            get(list_service_ingresses).post(create_service_ingress),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/ingresses/{ingress_id}",
+            axum::routing::patch(update_service_ingress).delete(delete_service_ingress),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/traffic",
+            get(list_machine_traffic),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy",
             any(proxy_virtual_network_host_root),
         )
@@ -352,7 +497,7 @@ pub fn router(
             auth_store.clone(),
             auth::require_admin,
         ));
-    Router::new()
+    let control = Router::new()
         .route("/install.sh", get(install_script))
         .route("/api/machines/enroll", post(enroll_machine))
         .route("/artifacts/{platform}/{binary}", get(download_artifact))
@@ -377,14 +522,20 @@ pub fn router(
         .merge(agent_control)
         .merge(authenticated)
         .merge(admin)
+        .layer(cors);
+    Router::new()
+        .merge(control)
+        .route("/.treer/ingress/authorize", get(authorize_service_ingress))
+        .fallback(any(proxy_service_ingress))
         .layer(Extension(bootstrap))
         .layer(Extension(policy))
         .layer(Extension(identity))
         .layer(Extension(workload_identity))
+        .layer(Extension(service_ingress))
         .layer(Extension(auth_store))
         .layer(Extension(browser))
+        .layer(Extension(ingress))
         .with_state(state)
-        .layer(cors)
 }
 
 async fn health() -> Json<Value> {
@@ -991,6 +1142,37 @@ async fn list_servers(
     Ok(Json(json!({ "servers": snapshot.servers })))
 }
 
+#[derive(Debug, Deserialize)]
+struct MachineTrafficQuery {
+    #[serde(default = "default_traffic_hours")]
+    hours: u16,
+}
+
+const fn default_traffic_hours() -> u16 {
+    24
+}
+
+async fn list_machine_traffic(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<MachineTrafficQuery>,
+) -> Result<Json<Value>, ApiFailure> {
+    if !(1..=24 * 30).contains(&query.hours) {
+        return Err(ApiFailure::bad_request(
+            "invalid_traffic_window",
+            "traffic window must be between 1 and 720 hours",
+        ));
+    }
+    let traffic = state
+        .recent_machine_traffic(&workspace_id, query.hours)
+        .await
+        .map_err(|error| ApiFailure::internal("traffic_query_failed", &format!("{error:#}")))?;
+    Ok(Json(json!({
+        "hours": query.hours,
+        "traffic": traffic,
+    })))
+}
+
 async fn list_machine_services(
     Extension(auth): Extension<AuthStore>,
     Path(workspace_id): Path<String>,
@@ -1035,6 +1217,7 @@ async fn update_machine_service(
     let service = auth
         .update_machine_service(&workspace_id, &service_id, &session.user_id, request)
         .await?;
+    refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "service": service })))
 }
@@ -1047,6 +1230,7 @@ async fn delete_machine_service(
     let service = auth
         .delete_machine_service(&workspace_id, &service_id)
         .await?;
+    refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({
         "deleted": true,
@@ -1111,6 +1295,333 @@ async fn delete_virtual_network_host(
     Ok(Json(json!({ "deleted": true })))
 }
 
+async fn list_service_ingresses(
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let ingresses = auth
+        .list_service_ingresses(&workspace_id)
+        .await?
+        .into_iter()
+        .map(|ingress| service_ingress_json(&config, ingress))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(json!({ "ingresses": ingresses })))
+}
+
+async fn create_service_ingress(
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(session): Extension<CurrentSession>,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<CreateServiceIngressRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let ingress = auth
+        .create_service_ingress(
+            &workspace_id,
+            &session.user_id,
+            config.base_domain()?,
+            request,
+        )
+        .await?;
+    Ok(Json(json!({
+        "ingress": service_ingress_json(&config, ingress)?
+    })))
+}
+
+async fn update_service_ingress(
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(session): Extension<CurrentSession>,
+    Path((workspace_id, ingress_id)): Path<(String, String)>,
+    Json(request): Json<UpdateServiceIngressRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let ingress = auth
+        .update_service_ingress(&workspace_id, &ingress_id, &session.user_id, request)
+        .await?;
+    Ok(Json(json!({
+        "ingress": service_ingress_json(&config, ingress)?
+    })))
+}
+
+async fn delete_service_ingress(
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, ingress_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let ingress = auth
+        .delete_service_ingress(&workspace_id, &ingress_id)
+        .await?;
+    Ok(Json(json!({
+        "deleted": true,
+        "ingress_id": ingress.ingress_id,
+        "hostname": ingress.hostname,
+    })))
+}
+
+fn service_ingress_json(
+    config: &IngressConfig,
+    ingress: ServiceIngress,
+) -> Result<Value, ApiFailure> {
+    let public_url = config.url_for_hostname(&ingress.hostname)?.to_string();
+    let mut value = serde_json::to_value(ingress)
+        .map_err(|error| ApiFailure::internal("serialization_error", &error.to_string()))?;
+    value
+        .as_object_mut()
+        .expect("service ingress serializes as an object")
+        .insert("url".to_string(), Value::String(public_url));
+    Ok(value)
+}
+
+#[derive(Debug, Deserialize)]
+struct IngressAuthorizeQuery {
+    hostname: String,
+    #[serde(default = "default_ingress_return_path")]
+    return_path: String,
+}
+
+fn default_ingress_return_path() -> String {
+    "/".to_string()
+}
+
+async fn authorize_service_ingress(
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    headers: HeaderMap,
+    Query(query): Query<IngressAuthorizeQuery>,
+) -> Result<Response, ApiFailure> {
+    let request_host = request_hostname(&headers)?;
+    let proxy_host = config
+        .proxy_public_url
+        .host_str()
+        .ok_or_else(|| ApiFailure::internal("proxy_url_error", "proxy public URL has no host"))?;
+    if !request_host.eq_ignore_ascii_case(proxy_host) {
+        return Err(ApiFailure::not_found("route_not_found", "route not found"));
+    }
+    let resolved = auth
+        .resolve_service_ingress_hostname(&query.hostname)
+        .await?
+        .filter(|resolved| resolved.ingress.enabled)
+        .ok_or_else(|| ApiFailure::not_found("ingress_not_found", "service ingress not found"))?;
+    if resolved.ingress.access != ServiceIngressAccess::Workspace {
+        return Ok(Redirect::to(
+            config
+                .url_for_hostname(&resolved.ingress.hostname)?
+                .as_str(),
+        )
+        .into_response());
+    }
+    let session = match auth::authenticate_request(&auth, &headers).await {
+        Ok(session) => session,
+        Err(error) => {
+            let (status, error) = error.into_parts();
+            if status != StatusCode::UNAUTHORIZED {
+                return Err(ApiFailure { status, error });
+            }
+            let mut authorize_url = config.proxy_public_url.clone();
+            authorize_url.set_path("/.treer/ingress/authorize");
+            authorize_url.set_query(None);
+            authorize_url
+                .query_pairs_mut()
+                .append_pair("hostname", &resolved.ingress.hostname)
+                .append_pair("return_path", &query.return_path);
+            let mut login_url = config.app_public_url.clone();
+            login_url.set_query(None);
+            login_url
+                .query_pairs_mut()
+                .append_pair("return_to", authorize_url.as_str());
+            return Ok(Redirect::to(login_url.as_str()).into_response());
+        }
+    };
+    let code = auth
+        .create_ingress_auth_code(&resolved.ingress, &session.user_id, &query.return_path)
+        .await?;
+    let mut callback = config.url_for_hostname(&resolved.ingress.hostname)?;
+    callback.set_path("/.treer/callback");
+    callback.set_query(None);
+    callback.query_pairs_mut().append_pair("code", &code);
+    Ok(Redirect::to(callback.as_str()).into_response())
+}
+
+async fn proxy_service_ingress(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(identity): Extension<IdentityIssuer>,
+    mut request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    let hostname = request_hostname(request.headers())?;
+    if !config.matches_hostname(&hostname) {
+        return Err(ApiFailure::not_found("route_not_found", "route not found"));
+    }
+    let resolved = auth
+        .resolve_service_ingress_hostname(&hostname)
+        .await?
+        .filter(|resolved| resolved.ingress.enabled)
+        .ok_or_else(|| ApiFailure::not_found("ingress_not_found", "service ingress not found"))?;
+    if request.uri().path() == "/.treer/callback" {
+        return complete_ingress_authorization(&auth, &config, &hostname, request.uri()).await;
+    }
+    if request.uri().path().starts_with("/.treer/") {
+        return Err(ApiFailure::not_found("route_not_found", "route not found"));
+    }
+
+    let mut identity_token = None;
+    if resolved.ingress.access == ServiceIngressAccess::Workspace && !auth.authentication_disabled()
+    {
+        if let Some(token) = ingress_bearer_token(request.headers())? {
+            let verified = identity.verify(token, &resolved.service.service_id);
+            let valid = verified.claims.as_ref().is_some_and(|claims| {
+                claims.workspace_id == resolved.ingress.workspace_id
+                    && claims.service_id == resolved.service.service_id
+            });
+            if !verified.active || !valid {
+                return Err(ApiFailure::unauthorized(
+                    "ingress_authentication_required",
+                    "valid workspace Agent credentials are required",
+                ));
+            }
+            identity_token = Some(token.to_string());
+        } else {
+            let session = cookie_value(request.headers(), config.ingress_cookie_name());
+            let authenticated = match session {
+                Some(token) => auth
+                    .authenticate_ingress_session(&hostname, &token)
+                    .await?
+                    .is_some(),
+                None => false,
+            };
+            if !authenticated {
+                return redirect_to_ingress_authorization(&config, &hostname, request.uri());
+            }
+        }
+    }
+
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    sanitize_ingress_request_headers(
+        request.headers_mut(),
+        upgraded,
+        &hostname,
+        config.public_url.as_ref().map_or("http", url::Url::scheme),
+        config.ingress_cookie_name(),
+        identity_token.as_deref(),
+    )?;
+    tunnel_http_request(
+        state,
+        &resolved.ingress.workspace_id,
+        &resolved.service.server_id,
+        &resolved.service.target_host,
+        resolved.service.target_port,
+        request,
+        false,
+        "service ingress",
+    )
+    .await
+}
+
+async fn complete_ingress_authorization(
+    auth: &AuthStore,
+    config: &IngressConfig,
+    hostname: &str,
+    uri: &Uri,
+) -> Result<Response, ApiFailure> {
+    let code = uri
+        .query()
+        .and_then(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
+        })
+        .ok_or_else(|| {
+            ApiFailure::bad_request(
+                "invalid_ingress_authorization",
+                "authorization code missing",
+            )
+        })?;
+    let authorization = auth.consume_ingress_auth_code(hostname, &code).await?;
+    let secure = if config
+        .public_url
+        .as_ref()
+        .is_some_and(|url| url.scheme() == "https")
+    {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
+        config.ingress_cookie_name(),
+        authorization.session_token,
+        12 * 60 * 60,
+        secure,
+    );
+    let mut response = Redirect::to(&authorization.return_path).into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie)
+            .map_err(|error| ApiFailure::internal("cookie_error", &error.to_string()))?,
+    );
+    Ok(response)
+}
+
+fn redirect_to_ingress_authorization(
+    config: &IngressConfig,
+    hostname: &str,
+    uri: &Uri,
+) -> Result<Response, ApiFailure> {
+    let mut url = config.proxy_public_url.clone();
+    url.set_path("/.treer/ingress/authorize");
+    url.set_query(None);
+    url.query_pairs_mut()
+        .append_pair("hostname", hostname)
+        .append_pair("return_path", &uri.to_string());
+    Ok(Redirect::to(url.as_str()).into_response())
+}
+
+fn request_hostname(headers: &HeaderMap) -> Result<String, ApiFailure> {
+    let authority = headers
+        .get(header::HOST)
+        .ok_or_else(|| ApiFailure::bad_request("host_required", "Host header is required"))?
+        .to_str()
+        .map_err(|_| ApiFailure::bad_request("invalid_host", "Host header is invalid"))?
+        .parse::<axum::http::uri::Authority>()
+        .map_err(|_| ApiFailure::bad_request("invalid_host", "Host header is invalid"))?;
+    Ok(authority.host().trim_end_matches('.').to_ascii_lowercase())
+}
+
+fn ingress_bearer_token(headers: &HeaderMap) -> Result<Option<&str>, ApiFailure> {
+    let Some(value) = headers.get(TREER_AUTHORIZATION_HEADER) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| {
+        ApiFailure::unauthorized(
+            "ingress_authentication_required",
+            "Treer-Authorization header is invalid",
+        )
+    })?;
+    let (scheme, token) = value.split_once(' ').ok_or_else(|| {
+        ApiFailure::unauthorized(
+            "ingress_authentication_required",
+            "Treer-Authorization must contain a Bearer token",
+        )
+    })?;
+    if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
+        return Err(ApiFailure::unauthorized(
+            "ingress_authentication_required",
+            "Treer-Authorization must contain a Bearer token",
+        ));
+    }
+    Ok(Some(token.trim()))
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|item| item.trim().split_once('='))
+        .find_map(|(key, value)| (key == name).then(|| value.to_string()))
+}
+
 async fn proxy_virtual_network_host_root(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -1151,15 +1662,6 @@ async fn proxy_virtual_network_host(
             "browser access requires an HTTP service",
         ));
     }
-    let stream = state
-        .open_browser_network_stream(
-            &workspace_id,
-            &host.destination_server_id,
-            &host.target_host,
-            host.target_port.unwrap_or(80),
-        )
-        .await?;
-
     let query = request.uri().query();
     let target = if path.is_empty() {
         query.map_or_else(|| "/".to_string(), |query| format!("/?{query}"))
@@ -1172,26 +1674,56 @@ async fn proxy_virtual_network_host(
     *request.version_mut() = Version::HTTP_11;
 
     let upgraded = request.headers().contains_key(header::UPGRADE);
-    let downstream_upgrade = upgraded.then(|| hyper::upgrade::on(&mut request));
     sanitize_tunnel_request_headers(request.headers_mut(), upgraded, &host.hostname)?;
+    tunnel_http_request(
+        state,
+        &workspace_id,
+        &host.destination_server_id,
+        &host.target_host,
+        host.target_port.unwrap_or(80),
+        request,
+        true,
+        "virtual host",
+    )
+    .await
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn tunnel_http_request(
+    state: AppState,
+    workspace_id: &str,
+    server_id: &str,
+    target_host: &str,
+    target_port: u16,
+    mut request: Request<Body>,
+    strip_response_cookies: bool,
+    route_kind: &'static str,
+) -> Result<Response, ApiFailure> {
+    let stream = state
+        .open_browser_network_stream(workspace_id, server_id, target_host, target_port)
+        .await?;
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    let downstream_upgrade = upgraded.then(|| hyper::upgrade::on(&mut request));
     let io = TokioIo::new(stream);
     let (mut sender, connection) = hyper::client::conn::http1::handshake::<_, Body>(io)
         .await
         .map_err(|error| ApiFailure::bad_gateway("tunnel_handshake_failed", &error.to_string()))?;
     tokio::spawn(async move {
         if let Err(error) = connection.with_upgrades().await {
-            tracing::debug!(%error, "virtual host tunnel connection closed");
+            tracing::debug!(%error, route_kind, "HTTP tunnel connection closed");
         }
     });
     let mut response = sender
         .send_request(request)
         .await
         .map_err(|error| ApiFailure::bad_gateway("tunnel_request_failed", &error.to_string()))?;
-
     let target_upgrade = (response.status() == StatusCode::SWITCHING_PROTOCOLS)
         .then(|| hyper::upgrade::on(&mut response));
-    sanitize_tunnel_response_headers(response.headers_mut(), target_upgrade.is_some());
+    if strip_response_cookies {
+        sanitize_tunnel_response_headers(response.headers_mut(), target_upgrade.is_some());
+    } else if target_upgrade.is_none() {
+        remove_hop_by_hop_headers(response.headers_mut());
+    }
     if let (Some(downstream), Some(target)) = (downstream_upgrade, target_upgrade) {
         tokio::spawn(async move {
             let Ok(downstream) = downstream.await else {
@@ -1223,6 +1755,85 @@ fn sanitize_tunnel_request_headers(
         HeaderValue::from_str(hostname)
             .map_err(|error| ApiFailure::bad_gateway("invalid_virtual_host", &error.to_string()))?,
     );
+    Ok(())
+}
+
+fn sanitize_ingress_request_headers(
+    headers: &mut HeaderMap,
+    upgraded: bool,
+    hostname: &str,
+    public_scheme: &str,
+    ingress_cookie_name: &str,
+    identity_token: Option<&str>,
+) -> Result<(), ApiFailure> {
+    headers.remove(header::PROXY_AUTHORIZATION);
+    headers.remove(TREER_AUTHORIZATION_HEADER);
+    for name in headers
+        .keys()
+        .filter(|name| name.as_str().starts_with("x-treer-"))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        headers.remove(name);
+    }
+    if let Some(cookie) = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let forwarded = cookie
+            .split(';')
+            .map(str::trim)
+            .filter(|item| {
+                item.split_once('=')
+                    .is_none_or(|(name, _)| name != ingress_cookie_name)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if forwarded.is_empty() {
+            headers.remove(header::COOKIE);
+        } else {
+            headers.insert(
+                header::COOKIE,
+                HeaderValue::from_str(&forwarded).map_err(|error| {
+                    ApiFailure::bad_request("invalid_cookie", &error.to_string())
+                })?,
+            );
+        }
+    }
+    for name in [
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+    ] {
+        headers.remove(name);
+    }
+    if !upgraded {
+        remove_hop_by_hop_headers(headers);
+    }
+    headers.insert(
+        header::HOST,
+        HeaderValue::from_str(hostname)
+            .map_err(|error| ApiFailure::bad_gateway("invalid_ingress_host", &error.to_string()))?,
+    );
+    headers.insert(
+        "x-forwarded-host",
+        HeaderValue::from_str(hostname)
+            .map_err(|error| ApiFailure::bad_request("invalid_host", &error.to_string()))?,
+    );
+    headers.insert(
+        "x-forwarded-proto",
+        HeaderValue::from_str(public_scheme)
+            .map_err(|error| ApiFailure::internal("invalid_ingress_scheme", &error.to_string()))?,
+    );
+    if let Some(token) = identity_token {
+        headers.insert(
+            TREER_IDENTITY_TOKEN_HEADER,
+            HeaderValue::from_str(token).map_err(|error| {
+                ApiFailure::bad_request("invalid_identity_token", &error.to_string())
+            })?,
+        );
+    }
     Ok(())
 }
 
@@ -1345,6 +1956,7 @@ async fn agent_update_machine_service(
             request,
         )
         .await?;
+    refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "service": service })))
 }
@@ -1378,6 +1990,7 @@ async fn agent_delete_machine_service(
     let service = auth
         .delete_machine_service(&workspace_id, &service.service_id)
         .await?;
+    refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({
         "deleted": true,
@@ -1510,6 +2123,143 @@ async fn agent_delete_virtual_network_host(
     Ok(Json(json!({ "deleted": true, "hostname": host.hostname })))
 }
 
+async fn agent_list_service_ingresses(
+    State(state): State<AppState>,
+    Extension(api): Extension<ServiceIngressApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    api.policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            ACTION_INGRESS_LIST,
+            PolicyResource::new(RESOURCE_SERVICE_INGRESS, "*"),
+        ))
+        .await?;
+    list_service_ingresses(
+        Extension(api.auth),
+        Extension(api.config),
+        Path(workspace_id),
+    )
+    .await
+}
+
+async fn agent_create_service_ingress(
+    State(state): State<AppState>,
+    Extension(api): Extension<ServiceIngressApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(mut request): Json<CreateServiceIngressRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let service = api
+        .auth
+        .resolve_machine_service(&workspace_id, &request.service_id)
+        .await?;
+    require_agent_owns_service(&subject, &service)?;
+    request.service_id.clone_from(&service.service_id);
+    api.policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_INGRESS_CREATE,
+            service_ingress_policy_resource("new", request.access, &service),
+        ))
+        .await?;
+    let ingress = api
+        .auth
+        .create_service_ingress(
+            &workspace_id,
+            &policy_actor_name(&subject),
+            api.config.base_domain()?,
+            request,
+        )
+        .await?;
+    Ok(Json(json!({
+        "ingress": service_ingress_json(&api.config, ingress)?
+    })))
+}
+
+async fn agent_update_service_ingress(
+    State(state): State<AppState>,
+    Extension(api): Extension<ServiceIngressApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, ingress_id)): Path<(String, String)>,
+    Json(request): Json<UpdateServiceIngressRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let current = api
+        .auth
+        .resolve_service_ingress(&workspace_id, &ingress_id)
+        .await?;
+    require_agent_owns_service(&subject, &current.service)?;
+    api.policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_INGRESS_UPDATE,
+            service_ingress_policy_resource(
+                &current.ingress.ingress_id,
+                request.access.unwrap_or(current.ingress.access),
+                &current.service,
+            ),
+        ))
+        .await?;
+    let ingress = api
+        .auth
+        .update_service_ingress(
+            &workspace_id,
+            &current.ingress.ingress_id,
+            &policy_actor_name(&subject),
+            request,
+        )
+        .await?;
+    Ok(Json(json!({
+        "ingress": service_ingress_json(&api.config, ingress)?
+    })))
+}
+
+async fn agent_delete_service_ingress(
+    State(state): State<AppState>,
+    Extension(api): Extension<ServiceIngressApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, ingress_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let current = api
+        .auth
+        .resolve_service_ingress(&workspace_id, &ingress_id)
+        .await?;
+    require_agent_owns_service(&subject, &current.service)?;
+    api.policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            ACTION_INGRESS_DELETE,
+            service_ingress_policy_resource(
+                &current.ingress.ingress_id,
+                current.ingress.access,
+                &current.service,
+            ),
+        ))
+        .await?;
+    let ingress = api
+        .auth
+        .delete_service_ingress(&workspace_id, &current.ingress.ingress_id)
+        .await?;
+    Ok(Json(json!({
+        "deleted": true,
+        "ingress_id": ingress.ingress_id,
+        "hostname": ingress.hostname,
+    })))
+}
+
 async fn publish_virtual_network_hosts(
     state: &AppState,
     auth: &AuthStore,
@@ -1525,9 +2275,15 @@ async fn publish_virtual_network_hosts(
     Ok(())
 }
 
-pub fn spawn_virtual_network_host_refresh(state: AppState, auth: AuthStore) {
+async fn refresh_service_ingress_routes(auth: &AuthStore) -> Result<(), ApiFailure> {
+    auth.refresh_service_ingresses()
+        .await
+        .map_err(|error| ApiFailure::internal("ingress_refresh_failed", &format!("{error:#}")))
+}
+
+pub fn spawn_network_metadata_refresh(state: AppState, auth: AuthStore) {
     tokio::spawn(async move {
-        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(5));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         refresh.tick().await;
         loop {
@@ -1535,6 +2291,9 @@ pub fn spawn_virtual_network_host_refresh(state: AppState, auth: AuthStore) {
             if let Err(error) = auth.refresh_virtual_network_hosts().await {
                 tracing::warn!(%error, "failed to reload virtual hosts");
                 continue;
+            }
+            if let Err(error) = auth.refresh_service_ingresses().await {
+                tracing::warn!(%error, "failed to reload service ingresses");
             }
             let Ok(workspaces) = auth.all_workspaces().await else {
                 tracing::warn!("failed to list workspaces for virtual-host refresh");
@@ -1688,6 +2447,41 @@ fn virtual_host_policy_resource(hostname: &str, service: &MachineService) -> Pol
         .with_attribute("destination_server_id", &service.server_id)
         .with_attribute("target_host", &service.target_host)
         .with_attribute("target_port", service.target_port.to_string())
+}
+
+fn service_ingress_policy_resource(
+    ingress_id: &str,
+    access: ServiceIngressAccess,
+    service: &MachineService,
+) -> PolicyResource {
+    PolicyResource::new(RESOURCE_SERVICE_INGRESS, ingress_id)
+        .with_attribute("service_id", &service.service_id)
+        .with_attribute("destination_server_id", &service.server_id)
+        .with_attribute("access", service_ingress_access_name(access))
+}
+
+fn require_agent_owns_service(
+    subject: &PolicySubject,
+    service: &MachineService,
+) -> Result<(), ApiFailure> {
+    match subject {
+        PolicySubject::Agent { server_id, .. } if server_id == &service.server_id => Ok(()),
+        PolicySubject::Agent { .. } => Err(ApiFailure::forbidden(
+            "ingress_service_not_owned",
+            "agents may publish only services registered on their own machine",
+        )),
+        PolicySubject::Machine { .. } => Err(ApiFailure::forbidden(
+            "ingress_agent_required",
+            "a managed agent identity is required to publish a service",
+        )),
+    }
+}
+
+const fn service_ingress_access_name(access: ServiceIngressAccess) -> &'static str {
+    match access {
+        ServiceIngressAccess::Public => "public",
+        ServiceIngressAccess::Workspace => "workspace",
+    }
 }
 
 fn machine_service_policy_resource(
@@ -2354,12 +3148,20 @@ async fn send_event(
     outgoing.send(Message::Text(encoded.into())).await
 }
 
+#[derive(Debug)]
 pub struct ApiFailure {
     status: StatusCode,
     error: ProtocolError,
 }
 
 impl ApiFailure {
+    fn unauthorized(code: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            error: ProtocolError::new(code, message),
+        }
+    }
+
     fn forbidden(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -2384,6 +3186,13 @@ impl ApiFailure {
     fn bad_gateway(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
+            error: ProtocolError::new(code, message),
+        }
+    }
+
+    fn service_unavailable(code: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             error: ProtocolError::new(code, message),
         }
     }
@@ -2515,6 +3324,30 @@ mod tests {
             .expect("browser access")
     }
 
+    fn test_ingress_config() -> IngressConfig {
+        IngressConfig::new(
+            Some(Url::parse("https://apps.treer.ai/").expect("ingress URL")),
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+            &Url::parse("https://app.treer.ai/").expect("app URL"),
+        )
+        .expect("ingress config")
+    }
+
+    #[test]
+    fn ingress_config_matches_one_wildcard_label_and_builds_urls() {
+        let config = test_ingress_config();
+        assert!(config.matches_hostname("demo.apps.treer.ai"));
+        assert!(!config.matches_hostname("apps.treer.ai"));
+        assert!(!config.matches_hostname("nested.demo.apps.treer.ai"));
+        assert_eq!(
+            config
+                .url_for_hostname("demo.apps.treer.ai")
+                .expect("ingress URL")
+                .as_str(),
+            "https://demo.apps.treer.ai/"
+        );
+    }
+
     #[tokio::test]
     async fn trailing_slash_browser_tunnel_route_is_registered() {
         let auth = AuthStore::for_test("admin-password").await;
@@ -2531,6 +3364,7 @@ mod tests {
             PolicyEngine::allow_all(),
             identity,
             test_browser_access(),
+            test_ingress_config(),
         );
         let response = app
             .oneshot(
@@ -2542,6 +3376,69 @@ mod tests {
             .await
             .expect("route response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn workspace_ingress_redirects_humans_to_proxy_authorization() {
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let service = auth
+            .create_machine_service(
+                "default",
+                "test-user",
+                CreateMachineServiceRequest {
+                    name: "private app".to_string(),
+                    server_id: "machine-a".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 8080,
+                    protocol: treer_protocol::MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create service");
+        let ingress = auth
+            .create_service_ingress(
+                "default",
+                "test-user",
+                "apps.treer.ai",
+                CreateServiceIngressRequest {
+                    service_id: service.service_id,
+                    slug: Some("private".to_string()),
+                    access: ServiceIngressAccess::Workspace,
+                },
+            )
+            .await
+            .expect("create ingress");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let request = Request::builder()
+            .uri("/dashboard?tab=active")
+            .header(header::HOST, &ingress.hostname)
+            .body(Body::empty())
+            .expect("ingress request");
+        let response = proxy_service_ingress(
+            State(AppState::new()),
+            Extension(auth),
+            Extension(test_ingress_config()),
+            Extension(identity),
+            request,
+        )
+        .await
+        .expect("authorization redirect");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .expect("redirect location")
+            .to_str()
+            .expect("location text");
+        assert!(location.starts_with("https://proxy.treer.ai/.treer/ingress/authorize?"));
+        assert!(location.contains("hostname=private-"));
+        assert!(location.contains("return_path=%2Fdashboard%3Ftab%3Dactive"));
     }
 
     #[test]
@@ -2584,6 +3481,7 @@ mod tests {
             PolicyEngine::allow_all(),
             identity,
             test_browser_access(),
+            test_ingress_config(),
         );
         let response = app
             .oneshot(
@@ -2627,6 +3525,7 @@ mod tests {
             PolicyEngine::allow_all(),
             identity,
             test_browser_access(),
+            test_ingress_config(),
         );
         let response = app
             .oneshot(
@@ -3272,6 +4171,159 @@ mod tests {
             .await
             .expect("read tunnel response");
         assert_eq!(&body[..], b"hello");
+        controller.await.expect("join controller");
+    }
+
+    #[tokio::test]
+    async fn public_ingress_preserves_application_auth_and_strips_treer_headers() {
+        let state = AppState::new();
+        let now = chrono::Utc::now();
+        let server = treer_protocol::ServerInfo {
+            server_id: "machine-a".to_string(),
+            workspace_id: "default".to_string(),
+            name: "machine-a".to_string(),
+            hostname: "machine-a".to_string(),
+            root: "/tmp".to_string(),
+            labels: Default::default(),
+            status: treer_protocol::ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server(server, connection_id, server_tx)
+            .await
+            .expect("register controller");
+
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let service = auth
+            .create_machine_service(
+                "default",
+                "test-user",
+                CreateMachineServiceRequest {
+                    name: "public app".to_string(),
+                    server_id: "machine-a".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 8080,
+                    protocol: treer_protocol::MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create machine service");
+        let ingress = auth
+            .create_service_ingress(
+                "default",
+                "test-user",
+                "apps.treer.ai",
+                CreateServiceIngressRequest {
+                    service_id: service.service_id,
+                    slug: Some("demo".to_string()),
+                    access: ServiceIngressAccess::Public,
+                },
+            )
+            .await
+            .expect("create ingress");
+
+        let controller_state = state.clone();
+        let controller = tokio::spawn(async move {
+            let open = match server_rx.recv().await.expect("network open") {
+                SocketFrame::Binary(encoded) => {
+                    treer_protocol::NetworkBinaryFrame::decode(&encoded).expect("decode open")
+                }
+                _ => panic!("expected network open"),
+            };
+            controller_state
+                .relay_network_frame(
+                    "default",
+                    "machine-a",
+                    connection_id,
+                    treer_protocol::NetworkBinaryFrame {
+                        kind: treer_protocol::NetworkBinaryKind::Opened,
+                        stream_id: open.stream_id.clone(),
+                        payload: Vec::new(),
+                    },
+                )
+                .await
+                .expect("open stream");
+            let request = loop {
+                let frame = match server_rx.recv().await.expect("HTTP request frame") {
+                    SocketFrame::Binary(encoded) => {
+                        treer_protocol::NetworkBinaryFrame::decode(&encoded).expect("decode data")
+                    }
+                    _ => continue,
+                };
+                if frame.kind == treer_protocol::NetworkBinaryKind::Data {
+                    break String::from_utf8(frame.payload).expect("HTTP request text");
+                }
+            };
+            let lower = request.to_ascii_lowercase();
+            assert!(request.starts_with("GET /api/items?limit=2 HTTP/1.1\r\n"));
+            assert!(lower.contains("authorization: bearer application-token\r\n"));
+            assert!(lower.contains("cookie: app_session=visible\r\n"));
+            assert!(!lower.contains("treer_ingress"));
+            assert!(!lower.contains("x-treer-spoofed"));
+            assert!(lower.contains("host: demo-"));
+            assert!(lower.contains(".apps.treer.ai\r\n"));
+            controller_state
+                .relay_network_frame(
+                    "default",
+                    "machine-a",
+                    connection_id,
+                    treer_protocol::NetworkBinaryFrame {
+                        kind: treer_protocol::NetworkBinaryKind::Data,
+                        stream_id: open.stream_id.clone(),
+                        payload: b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nSet-Cookie: app_session=updated; Path=/\r\n\r\nok".to_vec(),
+                    },
+                )
+                .await
+                .expect("send HTTP response");
+            controller_state
+                .relay_network_frame(
+                    "default",
+                    "machine-a",
+                    connection_id,
+                    treer_protocol::NetworkBinaryFrame {
+                        kind: treer_protocol::NetworkBinaryKind::HalfClose,
+                        stream_id: open.stream_id,
+                        payload: Vec::new(),
+                    },
+                )
+                .await
+                .expect("close response");
+        });
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let request = Request::builder()
+            .uri("/api/items?limit=2")
+            .header(header::HOST, &ingress.hostname)
+            .header(header::AUTHORIZATION, "Bearer application-token")
+            .header(
+                header::COOKIE,
+                "__Host-treer_ingress=private; app_session=visible",
+            )
+            .header("x-treer-spoofed", "false")
+            .body(Body::empty())
+            .expect("ingress request");
+        let response = proxy_service_ingress(
+            State(state),
+            Extension(auth),
+            Extension(test_ingress_config()),
+            Extension(identity),
+            request,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("ingress request: {}", error.error.message));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::SET_COOKIE),
+            Some(&HeaderValue::from_static("app_session=updated; Path=/"))
+        );
         controller.await.expect("join controller");
     }
 }

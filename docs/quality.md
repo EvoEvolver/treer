@@ -68,7 +68,7 @@ forbids unsafe Rust workspace-wide, and treats Clippy warnings as errors.
 | Frontend | TypeScript typecheck, production build, and standalone container health/config routes | No checked-in browser workflow or visual regression test |
 | Architecture | Crate boundaries and shared protocol types | No dependency-boundary lint |
 | Documentation | Indexed maintained docs and mechanical link check | No freshness or source-claim automation |
-| Operations | Structured tracing at core services | No local metrics/traces harness or performance assertions |
+| Operations | Structured tracing plus buffered directional machine traffic counters | No local metrics/traces harness or end-to-end performance assertions |
 | Event and cluster distribution | Event-envelope, lease/snapshot separation, durable projection replay, and two-Proxy command/terminal/network integration tests | No crash-safe domain-event outbox or automated NATS failure CI |
 | Security | Explicit trust tier and source-level tests | Allow-all policy and no production isolation backend |
 | Accounting | IDs exist across control paths | No durable per-user attribution, usage, quota, or ledger |
@@ -85,7 +85,7 @@ repeated bottleneck or blocks the current product tier.
 | Proxy auth, membership, or routing | Authorization and cross-workspace isolation tests |
 | Host mutation or Controller restart | Idempotency and process-survival tests |
 | Runtime path logic | Working-directory containment and escape tests |
-| Network namespace, DNS, SOCKS, or virtual host | Destination routing and containment tests on Linux |
+| Network namespace, DNS, SOCKS, virtual host, or public ingress | Destination routing, authentication/header semantics, HTTP streaming, WebSocket, and containment tests on Linux |
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |
 | Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, and affected-flow validation |
 | Documentation/index change | `node scripts/check-docs.mjs` |

@@ -103,7 +103,8 @@ PostgreSQL persists users, OAuth identities and short-lived OAuth states,
 organizations, memberships, sessions, password reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, Agent messages, per-Agent and per-human read state, message
-context edges, machine services, and virtual hosts. Administrator invitations
+context edges, machine services, virtual hosts, service ingresses, and ingress
+authorization sessions. Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
@@ -225,6 +226,39 @@ not a VM or private filesystem. A private mount namespace supplies the Agent's
 resolver configuration and masks the host `nscd` socket, ensuring DNS lookups
 reach the TUN virtual resolver instead of host NSS plugins or caches. These mounts do not
 modify the host resolver files or cache service.
+
+Public service ingress is a separate resource from workspace virtual hosts. A
+`ServiceIngress` points directly to one HTTP machine service and owns a generated
+single-label hostname under `TREER_INGRESS_PUBLIC_URL`. Any Proxy replica can
+resolve the request `Host` from its in-memory cache, falling back to PostgreSQL
+on a cache miss, then reuse the existing browser network stream to reach the
+target Controller. A five-second metadata refresh converges out-of-band and
+cross-replica changes. HTTP bodies remain streaming and WebSocket upgrades pin
+one route for the connection lifetime.
+
+`public` ingress performs no Treer edge authentication. `workspace` ingress
+accepts an audience-bound Agent token in `Treer-Authorization` or redirects a
+human through the Proxy session and a single-use authorization code to a
+host-only ingress cookie. The application continues to own its normal
+`Authorization`, cookies, and `Set-Cookie` semantics. The Proxy removes only
+Treer-private credentials, hop-by-hop headers, and spoofable identity headers.
+
+Machine-to-machine relay traffic is accounted at the coordinating Proxy's
+`NetworkBinaryFrame::Data` routing boundary. Stream creation resolves two
+directional counters keyed by workspace, source machine, and destination
+machine. The per-frame hot path performs only relaxed atomic additions; it does
+not lock a map or write PostgreSQL. Each Proxy drains its counters every ten
+seconds and batch-upserts hourly rows into `machine_traffic_hourly`, so replicas
+converge through additive PostgreSQL updates without routing telemetry through
+JetStream. Cross-Proxy frames are counted only after they reach the Proxy that
+owns the stream legs, avoiding double accounting at the NATS hop. Hourly rows
+are retained for 90 days and pruned once per hour.
+
+These records count relayed application payload bytes and data frames, not
+WebSocket, TLS, NATS, or TCP framing. PTY traffic, public-ingress traffic, and
+direct egress are excluded because they do not describe a machine-to-machine
+direction. A Proxy crash can lose at most its unflushed interval; traffic
+accounting is operational telemetry rather than an exact billing ledger.
 
 For route-level details and additional diagrams, use the dated
 [project review](research/2026-08-18-project-review.md). Review this document

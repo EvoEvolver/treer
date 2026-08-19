@@ -6,6 +6,7 @@ mod event_bus;
 mod identity;
 pub mod policy;
 mod state;
+mod traffic;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ use event_bus::{EventBus, EventBusConfig};
 use state::AppState;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+use traffic::TrafficRecorder;
 use treer_proxy::policy_store::WorkspacePolicyStore;
 use url::Url;
 
@@ -39,6 +41,12 @@ struct Args {
         help = "Externally reachable browser application URL used for invitations and CORS"
     )]
     app_public_url: Option<Url>,
+    #[arg(
+        long,
+        env = "TREER_INGRESS_PUBLIC_URL",
+        help = "Base URL for wildcard service ingress, for example https://apps.treer.ai/"
+    )]
+    ingress_public_url: Option<Url>,
     #[arg(
         long,
         env = "TREER_ARTIFACTS_DIR",
@@ -134,6 +142,8 @@ async fn main() -> anyhow::Result<()> {
         listen,
     )?;
     let app_public_url = app_public_url(args.app_public_url, &proxy_public_url)?;
+    let ingress =
+        api::IngressConfig::new(args.ingress_public_url, &proxy_public_url, &app_public_url)?;
     if !args.disable_auth && proxy_public_url.scheme() != "https" {
         warn!(%proxy_public_url, "authenticated proxy is using an insecure HTTP public URL");
     }
@@ -215,7 +225,9 @@ async fn main() -> anyhow::Result<()> {
             EventBus::in_process()
         }
     };
-    let state = AppState::with_backplanes(event_bus, cluster.clone());
+    let traffic = TrafficRecorder::new(auth.pool());
+    traffic.spawn_flush_task();
+    let state = AppState::with_backplanes_and_traffic(event_bus, cluster.clone(), traffic);
     for workspace in auth
         .all_workspaces()
         .await
@@ -231,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
     let identity = identity::IdentityIssuer::load(&auth, &proxy_public_url)
         .await
         .context("failed to initialize workload identity issuer")?;
-    api::spawn_virtual_network_host_refresh(state.clone(), auth.clone());
+    api::spawn_network_metadata_refresh(state.clone(), auth.clone());
     let app = api::router(
         state,
         bootstrap,
@@ -239,12 +251,13 @@ async fn main() -> anyhow::Result<()> {
         policy,
         identity,
         api::BrowserAccess::new(&app_public_url)?,
+        ingress.clone(),
     )
     .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
-    info!(address = %listen, %proxy_public_url, %app_public_url, %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
+    info!(address = %listen, %proxy_public_url, %app_public_url, ingress = ?ingress.public_url(), %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
     axum::serve(listener, app)
         .await
         .context("proxy server failed")

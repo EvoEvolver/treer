@@ -778,6 +778,54 @@ pub struct CreateVirtualNetworkHostRequest {
     pub service_id: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceIngressAccess {
+    #[default]
+    Public,
+    Workspace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceIngress {
+    pub ingress_id: String,
+    pub workspace_id: String,
+    pub service_id: String,
+    pub hostname: String,
+    pub access: ServiceIngressAccess,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateServiceIngressRequest {
+    pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub access: ServiceIngressAccess,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateServiceIngressRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ServiceIngressAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineTrafficRecord {
+    pub window_start: DateTime<Utc>,
+    pub source_server_id: String,
+    pub destination_server_id: String,
+    pub payload_bytes: u64,
+    pub payload_frames: u64,
+}
+
 fn default_network_target_host() -> String {
     "127.0.0.1".to_string()
 }

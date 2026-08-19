@@ -16,10 +16,10 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
     AgentInboxRequest, ApiError, CreateAgentRequest, CreateMachineServiceRequest,
-    CreateVirtualNetworkHostRequest, InputAgentRequest, PromptAgentRequest, ProtocolError,
-    RenameRequest, SendAgentMailRequest, TerminalServerMessage, UpdateMachineServiceRequest,
-    WorkloadIdentityTokenRequest, AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER,
-    WORKLOAD_CREDENTIAL_HEADER,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
+    PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest, TerminalServerMessage,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, WorkloadIdentityTokenRequest,
+    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -181,6 +181,14 @@ pub fn router(state: LocalApiState) -> Router {
         .route(
             "/api/virtual-hosts/{hostname}",
             axum::routing::delete(delete_virtual_network_host),
+        )
+        .route(
+            "/api/publish",
+            get(list_service_ingresses).post(create_service_ingress),
+        )
+        .route(
+            "/api/publish/{ingress_id}",
+            axum::routing::patch(update_service_ingress).delete(delete_service_ingress),
         )
         .route(
             "/api/agents/{agent_id}",
@@ -375,6 +383,64 @@ async fn delete_virtual_network_host(
     Ok(Json(
         state
             .delete_as(&format!("virtual-hosts/{hostname}"), Some(&agent_id))
+            .await?,
+    ))
+}
+
+async fn list_service_ingresses(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("ingresses", Some(&agent)).await?))
+}
+
+async fn create_service_ingress(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateServiceIngressRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                "ingresses",
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                Some(&agent),
+            )
+            .await?,
+    ))
+}
+
+async fn update_service_ingress(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(ingress_id): Path<String>,
+    Json(request): Json<UpdateServiceIngressRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .patch_as(
+                &format!("ingresses/{ingress_id}"),
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                Some(&agent),
+            )
+            .await?,
+    ))
+}
+
+async fn delete_service_ingress(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(ingress_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(&format!("ingresses/{ingress_id}"), Some(&agent))
             .await?,
     ))
 }

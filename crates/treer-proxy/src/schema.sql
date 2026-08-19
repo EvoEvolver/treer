@@ -278,5 +278,62 @@ CREATE TABLE IF NOT EXISTS virtual_network_hosts (
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
     FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS service_ingresses (
+    ingress_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    hostname TEXT NOT NULL,
+    access TEXT NOT NULL CHECK(access IN ('public', 'workspace')),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS service_ingresses_hostname_lower
+    ON service_ingresses(lower(hostname));
+CREATE INDEX IF NOT EXISTS service_ingresses_workspace
+    ON service_ingresses(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS service_ingresses_service
+    ON service_ingresses(service_id);
+
+CREATE TABLE IF NOT EXISTS ingress_auth_codes (
+    code TEXT PRIMARY KEY,
+    ingress_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    return_path TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    FOREIGN KEY(ingress_id) REFERENCES service_ingresses(ingress_id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ingress_sessions (
+    token TEXT PRIMARY KEY,
+    ingress_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY(ingress_id) REFERENCES service_ingresses(ingress_id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ingress_sessions_expiry ON ingress_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS machine_traffic_hourly (
+    workspace_id TEXT NOT NULL,
+    window_start BIGINT NOT NULL,
+    source_server_id TEXT NOT NULL,
+    destination_server_id TEXT NOT NULL,
+    payload_bytes BIGINT NOT NULL DEFAULT 0 CHECK(payload_bytes >= 0),
+    payload_frames BIGINT NOT NULL DEFAULT 0 CHECK(payload_frames >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, window_start, source_server_id, destination_server_id),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS machine_traffic_hourly_workspace_window
+    ON machine_traffic_hourly(workspace_id, window_start DESC);
 CREATE INDEX IF NOT EXISTS virtual_network_hosts_service
     ON virtual_network_hosts(workspace_id, service_id);

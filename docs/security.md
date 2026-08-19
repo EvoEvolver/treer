@@ -59,6 +59,10 @@ The following statements are grounded in current behavior:
   it to the Agent, machine, and workspace. Managed Agents can exchange it for a
   60-second, Ed25519-signed token bound to one registered service. The Proxy
   resolves the stable Agent, machine, workspace, and service IDs before signing.
+- An HTTP machine service can be published under a generated wildcard hostname.
+  Public endpoints deliberately admit anonymous internet traffic; workspace
+  endpoints require a current organization member session or a workload token
+  whose audience is the target service.
 
 These properties support the product phrase: **local custody, scoped
 coordination, open control plane**.
@@ -129,6 +133,20 @@ Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy
 authorization, and response `Set-Cookie` before forwarding, but this is not
 end-to-end confidentiality from the Proxy.
+
+Wildcard service ingress has different semantics from the authenticated
+browser-to-virtual-host tunnel. It preserves application cookies,
+`Authorization`, and response `Set-Cookie`. The Proxy consumes its host-only
+ingress cookie and `Treer-Authorization`, removes client-supplied `X-Treer-*`
+and forwarding headers, and then forwards the application request. Published
+applications therefore remain responsible for their own authorization, input
+validation, abuse controls, and data isolation. Treer reserves `/.treer/` on
+published hosts for its authorization callback.
+
+The Proxy retains hourly machine-to-machine traffic metadata: workspace, source
+machine, destination machine, payload byte count, and data-frame count. It does
+not retain network payloads. The traffic query uses the same workspace
+membership middleware as other workspace APIs.
 
 The workload signing private key is stored in the Proxy PostgreSQL database. Its
 Ed25519 public key is intentionally exposed through `/.well-known/jwks.json`;
