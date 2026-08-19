@@ -94,7 +94,7 @@ flowchart TB
 | Browser to App | HTTPS static files and runtime JSON configuration | None |
 | Browser to Proxy | Cross-origin HTTP/JSON and WebSocket frames | Host-only user or admin session cookie; exact App origin allowlist |
 | Controller to Proxy | Persistent WebSocket, JSON and binary frames | Workspace-bound machine Bearer credential |
-| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; mail, inbox, and workload-token requests require the Agent credential |
+| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Managed-Agent requests require the matching Agent workload credential; local CLI requests require a private operator credential stored in the owner-only Controller config |
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
 | Host to child process | PTY raw bytes | Host process ownership |
 | Proxy replica to Proxy replica | Core NATS MessagePack request/reply and broadcast; JetStream KV for leases, snapshots, and durable projections | Private NATS boundary |
@@ -128,6 +128,25 @@ batch read. Its trace view links context messages already present in that
 delivery history; an inaccessible context remains an unresolved ID. This path
 is shared PostgreSQL state and neither requires NATS nor interrupts a live
 Agent or human.
+
+The managed-Agent CLI carries its Agent ID and workload credential on discovery,
+Agent control, and terminal WebSocket requests. The Controller validates and
+forwards both values under its machine credential. The Proxy independently
+checks the workload credential's SHA-256 hash and machine/workspace binding
+before constructing the Agent principal. A request carrying only a machine
+credential may discover or control resources on that same machine; cross-machine
+Agent and machine control requires the authenticated Agent principal. Local CLI
+requests without an Agent identity require the Controller's private operator
+credential and remain machine-scoped at the Proxy.
+
+Workspace policy documents have a versioned shared wire model and one JSONB row
+per workspace in PostgreSQL. The typed store validates bounded documents, uses
+optimistic revision updates, and emits a transactional PostgreSQL notification.
+The Proxy compiles documents into action-indexed immutable rules and applies them
+to Agent discovery, inspection, creation, prompt, input, output, terminal,
+lifecycle, machine mutation, mail, service, virtual-host, network, and workload
+identity checks. A per-workspace five-second cache keeps JSONB reads off the hot
+path while bounding cross-replica update and revocation staleness.
 
 Each Controller connection,
 pending command, browser session, terminal leg, and network route is

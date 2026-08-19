@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -13,14 +13,17 @@ use axum::Json;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
+use subtle::ConstantTimeEq;
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentInboxResponse,
     AgentMailMessage, AgentServerSnapshot, ApiError, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, MachineService, MachineServiceProtocol, MailAddress,
     MailAddressKind, MailDelivery, MailboxResponse, ProtocolError, ServerInfo,
     UpdateMachineServiceRequest, VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
+    AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -35,6 +38,7 @@ const PASSWORD_RESET_TTL_MINUTES: i64 = 30;
 const PASSWORD_RESET_RATE_LIMIT_SECONDS: i64 = 60;
 const OAUTH_STATE_TTL_MINUTES: i64 = 10;
 const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
+const AGENT_CREDENTIAL_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
 const MAX_MAIL_BODY_BYTES: usize = 32 * 1024;
 const MAX_MAIL_RECIPIENTS: usize = 32;
 const MAX_MAIL_CONTEXTS: usize = 32;
@@ -54,6 +58,7 @@ pub struct AuthStore {
     virtual_hosts: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, VirtualNetworkHost>>>>,
     virtual_hosts_update: Arc<tokio::sync::Mutex<()>>,
     virtual_hosts_revision: Arc<AtomicU64>,
+    agent_credentials: Arc<tokio::sync::RwLock<HashMap<String, AgentCredentialRecord>>>,
 }
 
 pub struct CloudflareEmailConfig {
@@ -203,6 +208,21 @@ pub struct OrganizationMember {
 pub struct MachineSession {
     pub server_id: Option<String>,
     pub workspace_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentSession {
+    pub agent_id: String,
+    pub server_id: String,
+    pub workspace_id: String,
+}
+
+#[derive(Clone)]
+struct AgentCredentialRecord {
+    workspace_id: String,
+    server_id: String,
+    secret_hash: String,
+    cached_at: Instant,
 }
 
 impl MachineSession {
@@ -447,6 +467,10 @@ struct CloudflareEmailError {
 }
 
 impl AuthStore {
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     pub async fn open(
         database_url: &str,
         admin_password: String,
@@ -472,6 +496,7 @@ impl AuthStore {
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
+            agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
         store.initialize_schema().await?;
         store.refresh_virtual_network_hosts().await?;
@@ -520,6 +545,7 @@ impl AuthStore {
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
+            agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
         store
             .initialize_schema()
@@ -1783,7 +1809,18 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE agent_credentials SET revoked_at = $1 \
+             WHERE agent_id = $2 AND workspace_id = $3 AND revoked_at IS NULL",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(agent_id)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
+        self.agent_credentials.write().await.remove(agent_id);
         Ok(())
     }
 
@@ -1838,8 +1875,23 @@ impl AuthStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(AuthFailure::database)?;
+            sqlx::query(
+                "UPDATE agent_credentials SET revoked_at = $1 \
+                 WHERE agent_id = $2 AND workspace_id = $3 AND revoked_at IS NULL",
+            )
+            .bind(Utc::now().to_rfc3339())
+            .bind(agent_id)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
         }
         transaction.commit().await.map_err(AuthFailure::database)?;
+        let mut credentials = self.agent_credentials.write().await;
+        for agent_id in agent_ids {
+            credentials.remove(agent_id);
+        }
+        drop(credentials);
         if let Some(hosts) = self.virtual_hosts.write().await.get_mut(workspace_id) {
             hosts.retain(|_, host| host.destination_server_id != server_id);
         }
@@ -2101,6 +2153,107 @@ impl AuthStore {
             server_id: Some(server_id.to_string()),
             workspace_id: Some(row.get("workspace_id")),
         })
+    }
+
+    pub async fn create_agent_credential(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        agent_id: &str,
+    ) -> Result<String, AuthFailure> {
+        let credential = format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let record = AgentCredentialRecord {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            secret_hash: fast_secret_hash(&credential),
+            cached_at: Instant::now(),
+        };
+        sqlx::query(
+            "INSERT INTO agent_credentials(agent_id, workspace_id, server_id, secret_hash, created_at) \
+             VALUES($1, $2, $3, $4, $5) ON CONFLICT(agent_id) DO NOTHING",
+        )
+        .bind(agent_id)
+        .bind(workspace_id)
+        .bind(server_id)
+        .bind(&record.secret_hash)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)
+        .and_then(|result| {
+            if result.rows_affected() == 1 {
+                Ok(())
+            } else {
+                Err(AuthFailure::conflict(
+                    "agent_credential_exists",
+                    "Agent credential already exists",
+                ))
+            }
+        })?;
+        self.agent_credentials
+            .write()
+            .await
+            .insert(agent_id.to_string(), record);
+        Ok(credential)
+    }
+
+    pub async fn authenticate_agent(
+        &self,
+        machine: &MachineSession,
+        headers: &HeaderMap,
+    ) -> Result<Option<AgentSession>, AuthFailure> {
+        let agent_id = optional_header(headers, AGENT_ID_HEADER)?;
+        let credential = optional_header(headers, WORKLOAD_CREDENTIAL_HEADER)?;
+        let (agent_id, credential) = match (agent_id, credential) {
+            (None, None) => return Ok(None),
+            (Some(agent_id), Some(credential)) => (agent_id, credential),
+            _ => {
+                return Err(AuthFailure::unauthorized(
+                    "agent_authentication_required",
+                    "Agent ID and workload credential are both required",
+                ))
+            }
+        };
+        let cached = self.agent_credentials.read().await.get(agent_id).cloned();
+        let record = if let Some(record) =
+            cached.filter(|record| record.cached_at.elapsed() < AGENT_CREDENTIAL_CACHE_TTL)
+        {
+            record
+        } else {
+            let row = sqlx::query(
+                "SELECT workspace_id, server_id, secret_hash FROM agent_credentials \
+                 WHERE agent_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(agent_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            let Some(row) = row else {
+                self.agent_credentials.write().await.remove(agent_id);
+                return Err(agent_auth_required());
+            };
+            let record = AgentCredentialRecord {
+                workspace_id: row.get("workspace_id"),
+                server_id: row.get("server_id"),
+                secret_hash: row.get("secret_hash"),
+                cached_at: Instant::now(),
+            };
+            self.agent_credentials
+                .write()
+                .await
+                .insert(agent_id.to_string(), record.clone());
+            record
+        };
+        if !machine.allows_server(&record.workspace_id, &record.server_id)
+            || !fast_secret_matches(credential, &record.secret_hash)
+        {
+            return Err(agent_auth_required());
+        }
+        Ok(Some(AgentSession {
+            agent_id: agent_id.to_string(),
+            server_id: record.server_id,
+            workspace_id: record.workspace_id,
+        }))
     }
 
     pub async fn machine_is_active(
@@ -3254,8 +3407,16 @@ pub async fn require_machine(
 ) -> Response {
     match auth.authenticate_machine(request.headers()).await {
         Ok(session) if machine_workspace_matches(&session, request.uri().path()) => {
-            request.extensions_mut().insert(session);
-            next.run(request).await
+            match auth.authenticate_agent(&session, request.headers()).await {
+                Ok(agent) => {
+                    request.extensions_mut().insert(session);
+                    if let Some(agent) = agent {
+                        request.extensions_mut().insert(agent);
+                    }
+                    next.run(request).await
+                }
+                Err(error) => error.into_response(),
+            }
         }
         Ok(_) => AuthFailure::forbidden(
             "machine_workspace_mismatch",
@@ -3600,7 +3761,45 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
+fn optional_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, AuthFailure> {
+    headers
+        .get(name)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(agent_auth_required)
+        })
+        .transpose()
+}
+
+fn agent_auth_required() -> AuthFailure {
+    AuthFailure::unauthorized(
+        "agent_authentication_required",
+        "valid Agent workload credentials are required",
+    )
+}
+
+fn fast_secret_hash(secret: &str) -> String {
+    format!("{:x}", Sha256::digest(secret.as_bytes()))
+}
+
+fn fast_secret_matches(secret: &str, expected_hash: &str) -> bool {
+    let actual = fast_secret_hash(secret);
+    actual.len() == expected_hash.len()
+        && actual
+            .as_bytes()
+            .ct_eq(expected_hash.as_bytes())
+            .unwrap_u8()
+            == 1
+}
+
 fn machine_workspace_matches(session: &MachineSession, path: &str) -> bool {
+    if path == "/agent/machine/identity" {
+        return session.server_id.is_some() && session.workspace_id.is_some();
+    }
     let Some(encoded_workspace) = path
         .strip_prefix("/agent/workspaces/")
         .and_then(|rest| rest.split('/').next())
@@ -5066,6 +5265,37 @@ mod tests {
         assert!(machine.allows_server("workspace-a", &claim.server_id));
         assert!(!machine.allows_server("workspace-b", &claim.server_id));
         assert!(!machine.allows_server("workspace-a", "srv_other"));
+
+        let workload_credential = store
+            .create_agent_credential("workspace-a", &claim.server_id, "agent-a")
+            .await
+            .expect("create Agent credential");
+        headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+        headers.insert(
+            WORKLOAD_CREDENTIAL_HEADER,
+            HeaderValue::from_str(&workload_credential).expect("workload header"),
+        );
+        let agent = store
+            .authenticate_agent(&machine, &headers)
+            .await
+            .expect("authenticate Agent")
+            .expect("Agent session");
+        assert_eq!(agent.server_id, claim.server_id);
+
+        let other_machine = MachineSession {
+            server_id: Some("srv_other".to_string()),
+            workspace_id: Some("workspace-a".to_string()),
+        };
+        assert!(store
+            .authenticate_agent(&other_machine, &headers)
+            .await
+            .is_err());
+
+        headers.insert(
+            WORKLOAD_CREDENTIAL_HEADER,
+            HeaderValue::from_static("wlc_invalid"),
+        );
+        assert!(store.authenticate_agent(&machine, &headers).await.is_err());
     }
 
     #[tokio::test]
@@ -5329,6 +5559,10 @@ mod tests {
         assert!(!machine_workspace_matches(
             &machine,
             "/agent/workspaces/other/agents"
+        ));
+        assert!(machine_workspace_matches(
+            &machine,
+            "/agent/machine/identity"
         ));
     }
 }

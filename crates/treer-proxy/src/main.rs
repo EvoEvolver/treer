@@ -17,6 +17,7 @@ use event_bus::{EventBus, EventBusConfig};
 use state::AppState;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+use treer_proxy::policy_store::WorkspacePolicyStore;
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -226,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
         .start(state.clone())
         .await
         .context("failed to start NATS cluster consumers")?;
-    let policy = policy::PolicyEngine::allow_all();
+    let policy = policy::PolicyEngine::durable(WorkspacePolicyStore::new(auth.pool()));
     let identity = identity::IdentityIssuer::load(&auth, &proxy_public_url)
         .await
         .context("failed to initialize workload identity issuer")?;

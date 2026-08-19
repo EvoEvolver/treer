@@ -128,6 +128,8 @@ struct ServerArgs {
     server_id: Option<String>,
     #[arg(long, env = "TREER_MACHINE_TOKEN")]
     machine_token: Option<String>,
+    #[arg(long, env = "TREER_OPERATOR_CREDENTIAL", hide_env_values = true)]
+    operator_credential: Option<String>,
     #[arg(long, env = "TREER_WORKSPACE_ROOT", default_value = ".")]
     root: PathBuf,
     #[arg(
@@ -166,6 +168,7 @@ async fn main() -> Result<()> {
                 workspace: config.workspace,
                 server_id: Some(config.server_id),
                 machine_token: Some(config.machine_token),
+                operator_credential: Some(config.operator_credential),
                 root: config.root,
                 listen: config
                     .listen
@@ -247,6 +250,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         args.workspace.clone(),
         server_id.clone(),
         args.machine_token,
+        args.operator_credential,
         runtime,
     );
     let app = local_api::router(local_state);
@@ -350,6 +354,9 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
             );
         }
         config.machine_token = response.machine_token;
+        if config.operator_credential.is_empty() {
+            config.operator_credential = new_operator_credential();
+        }
         config.proxy = proxy.to_string();
         service::refresh_registration(config)?;
         println!(
@@ -372,6 +379,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         workspace: response.workspace_id.clone(),
         server_id: response.server_id,
         machine_token: response.machine_token,
+        operator_credential: new_operator_credential(),
         root,
         listen: listen.to_string(),
         host_socket,
@@ -382,6 +390,10 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         response.workspace_id, proxy
     );
     Ok(())
+}
+
+fn new_operator_credential() -> String {
+    format!("opc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 async fn claim_machine_enrollment(

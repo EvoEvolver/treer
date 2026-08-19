@@ -6,9 +6,11 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
 pub const WORKLOAD_CREDENTIAL_HEADER: &str = "x-treer-workload-credential";
+pub const OPERATOR_CREDENTIAL_HEADER: &str = "x-treer-operator-credential";
 pub const TERMINAL_BINARY_VERSION: u8 = 1;
 const TERMINAL_BINARY_HEADER_LEN: usize = 12;
 pub const NETWORK_BINARY_VERSION: u8 = 1;
@@ -91,6 +93,122 @@ pub struct WorkspaceSnapshot {
     pub workspace: WorkspaceInfo,
     pub servers: Vec<ServerInfo>,
     pub agents: Vec<AgentInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyMode {
+    Monitor,
+    Enforce,
+}
+
+impl PolicyMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Monitor => "monitor",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyEffect {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyPrincipalKind {
+    Human,
+    Agent,
+    Machine,
+    Service,
+}
+
+impl PolicyPrincipalKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+            Self::Machine => "machine",
+            Self::Service => "service",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyPrincipalRef {
+    pub kind: PolicyPrincipalKind,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyPrincipalGroup {
+    #[serde(default)]
+    pub principals: Vec<PolicyPrincipalRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicySubjectSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PolicyPrincipalKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, rename = "self", skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyResourceSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_group: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspacePolicyRule {
+    pub id: String,
+    pub priority: i32,
+    pub effect: PolicyEffect,
+    pub subjects: Vec<PolicySubjectSelector>,
+    pub actions: Vec<String>,
+    pub resources: Vec<PolicyResourceSelector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspacePolicyDocument {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub defaults: BTreeMap<String, PolicyEffect>,
+    #[serde(default)]
+    pub groups: BTreeMap<String, PolicyPrincipalGroup>,
+    #[serde(default)]
+    pub rules: Vec<WorkspacePolicyRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePolicy {
+    pub workspace_id: String,
+    pub revision: u64,
+    pub mode: PolicyMode,
+    pub document: WorkspacePolicyDocument,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: PolicyPrincipalRef,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -268,6 +386,7 @@ pub struct AgentServerSnapshot {
 pub enum AgentCommand {
     Create {
         agent_id: String,
+        workload_credential: String,
         request: CreateAgentRequest,
     },
     Prompt {
@@ -1220,5 +1339,61 @@ mod tests {
     fn malformed_machine_enrollment_keys_are_rejected() {
         assert!(parse_machine_enrollment_key("enr_old.secret").is_err());
         assert!(parse_machine_enrollment_key("enr_v1_zz_id.0123").is_err());
+    }
+
+    #[test]
+    fn workspace_policy_document_has_a_stable_json_shape() {
+        let document = WorkspacePolicyDocument {
+            schema_version: POLICY_SCHEMA_VERSION,
+            defaults: BTreeMap::from([("mail.send".to_string(), PolicyEffect::Deny)]),
+            groups: BTreeMap::new(),
+            rules: vec![WorkspacePolicyRule {
+                id: "self-inbox".to_string(),
+                priority: 100,
+                effect: PolicyEffect::Allow,
+                subjects: vec![PolicySubjectSelector {
+                    kind: Some(PolicyPrincipalKind::Agent),
+                    id: None,
+                    machine_id: None,
+                    group: None,
+                    is_self: true,
+                }],
+                actions: vec!["mail.read".to_string()],
+                resources: vec![PolicyResourceSelector {
+                    kind: Some("agent.mailbox".to_string()),
+                    id: None,
+                    principal_group: None,
+                }],
+            }],
+        };
+        let value = serde_json::to_value(&document).expect("serialize policy document");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "defaults": {"mail.send": "deny"},
+                "groups": {},
+                "rules": [{
+                    "id": "self-inbox",
+                    "priority": 100,
+                    "effect": "allow",
+                    "subjects": [{"kind": "agent", "self": true}],
+                    "actions": ["mail.read"],
+                    "resources": [{"kind": "agent.mailbox"}]
+                }]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<WorkspacePolicyDocument>(value)
+                .expect("deserialize policy document"),
+            document
+        );
+        assert!(
+            serde_json::from_value::<WorkspacePolicyDocument>(serde_json::json!({
+                "schema_version": 1,
+                "unexpected": true
+            }))
+            .is_err()
+        );
     }
 }
