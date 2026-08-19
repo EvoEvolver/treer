@@ -141,59 +141,44 @@ CREATE TABLE IF NOT EXISTS agent_names (
 );
 CREATE INDEX IF NOT EXISTS agent_names_workspace_id ON agent_names(workspace_id);
 
-CREATE TABLE IF NOT EXISTS agent_messages (
+CREATE TABLE IF NOT EXISTS mail_messages (
     message_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
-    sender_agent_id TEXT NOT NULL,
+    sender_kind TEXT NOT NULL CHECK(sender_kind IN ('agent', 'human')),
+    sender_id TEXT NOT NULL,
     sender_name TEXT NOT NULL,
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS agent_messages_workspace_created
-    ON agent_messages(workspace_id, created_at, message_id);
+CREATE INDEX IF NOT EXISTS mail_messages_workspace_created
+    ON mail_messages(workspace_id, created_at, message_id);
 
-CREATE TABLE IF NOT EXISTS agent_message_recipients (
+CREATE TABLE IF NOT EXISTS mail_recipients (
     message_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
-    recipient_agent_id TEXT NOT NULL,
+    recipient_kind TEXT NOT NULL CHECK(recipient_kind IN ('agent', 'human')),
+    recipient_id TEXT NOT NULL,
     recipient_name TEXT NOT NULL,
     position BIGINT NOT NULL,
     created_at TEXT NOT NULL,
     read_at TEXT,
-    PRIMARY KEY(message_id, recipient_agent_id),
-    FOREIGN KEY(message_id) REFERENCES agent_messages(message_id) ON DELETE CASCADE,
+    PRIMARY KEY(message_id, recipient_kind, recipient_id),
+    FOREIGN KEY(message_id) REFERENCES mail_messages(message_id) ON DELETE CASCADE,
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS agent_message_recipients_unread
-    ON agent_message_recipients(workspace_id, recipient_agent_id, created_at, message_id)
-    WHERE read_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS agent_message_human_recipients (
-    message_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    recipient_user_id TEXT NOT NULL,
-    recipient_name TEXT NOT NULL,
-    position BIGINT NOT NULL,
-    created_at TEXT NOT NULL,
-    read_at TEXT,
-    PRIMARY KEY(message_id, recipient_user_id),
-    FOREIGN KEY(message_id) REFERENCES agent_messages(message_id) ON DELETE CASCADE,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY(recipient_user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS agent_message_human_recipients_unread
-    ON agent_message_human_recipients(
-        workspace_id, recipient_user_id, created_at, message_id
+CREATE INDEX IF NOT EXISTS mail_recipients_unread
+    ON mail_recipients(
+        workspace_id, recipient_kind, recipient_id, created_at, message_id
     ) WHERE read_at IS NULL;
 
-CREATE TABLE IF NOT EXISTS agent_message_contexts (
+CREATE TABLE IF NOT EXISTS mail_contexts (
     message_id TEXT NOT NULL,
     context_message_id TEXT NOT NULL,
     position BIGINT NOT NULL,
     PRIMARY KEY(message_id, context_message_id),
-    FOREIGN KEY(message_id) REFERENCES agent_messages(message_id) ON DELETE CASCADE,
-    FOREIGN KEY(context_message_id) REFERENCES agent_messages(message_id) ON DELETE CASCADE
+    FOREIGN KEY(message_id) REFERENCES mail_messages(message_id) ON DELETE CASCADE,
+    FOREIGN KEY(context_message_id) REFERENCES mail_messages(message_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS deleted_agents (

@@ -45,13 +45,9 @@ export interface Member {
 }
 
 export interface MailAddress {
-  agent_id: string
+  kind: "agent" | "human"
+  id: string
   name: string
-}
-
-export interface HumanMailAddress {
-  user_id: string
-  preferred_name: string
 }
 
 export interface MailMessage {
@@ -59,7 +55,6 @@ export interface MailMessage {
   workspace_id: string
   sender: MailAddress
   recipients: MailAddress[]
-  human_recipients: HumanMailAddress[]
   context_ids: string[]
   body: string
   created_at: string

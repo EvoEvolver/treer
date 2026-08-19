@@ -450,15 +450,16 @@ names, and roles without exposing email addresses:
 
 ```bash
 treer human list
-treer mail --to-human usr_123 "The deployment is ready."
-treer mail --to reviewer --to-human usr_123 "Please coordinate on this result."
+treer mail --to usr_123 "The deployment is ready."
+treer mail --to reviewer --to Owner "Please coordinate on this result."
 ```
 
-`--to-human` is repeatable and accepts only a listed `user_id`; preferred names
-are display-only because they can collide or change. Human recipients open
-**Inbox** in the web sidebar for the selected workspace. Like Agent inboxes,
-the web inbox marks only the returned unread batch read and does not receive a
-push notification.
+`--to` is the only recipient option. It accepts Agent IDs, user IDs, unique
+Agent names, and unique preferred names in one shared address space. Stable IDs
+take precedence; an ambiguous display name is rejected with a request to use an
+ID. Human recipients open **Inbox** in the web sidebar for the selected
+workspace. Like Agent inboxes, the web inbox marks only the returned unread
+batch read and does not receive a push notification.
 
 ## Workload identity
 

@@ -189,10 +189,14 @@ treer inbox --limit 100
 read. Check `remaining_unread` and call it again when it is nonzero. Preserve
 message IDs from the response when a later message should reference them.
 
-Recipient targets accept an Agent ID, a unique name, or `self`/`.`. Context
-messages must belong to the same workspace and must have been sent or received
-by the caller. Use `mail` for deferred collaboration; use `agent prompt` only
-when intentionally starting work in another Agent's terminal session.
+Recipient targets use one shared address space for Agents and humans. `--to`
+accepts an Agent ID, user ID, unique Agent name, unique preferred name, or
+`self`/`.` for the calling Agent. Stable IDs take precedence over display-name
+matches. If a name matches more than one Agent or human, Treer returns
+`recipient_ambiguous`; use a stable ID. Context messages must belong to the same
+workspace and must have been sent or received by the caller. Use `mail` for
+deferred collaboration; use `agent prompt` only when intentionally starting
+work in another Agent's terminal session.
 
 The human directory for a workspace is its parent organization's member list.
 Discover stable human addresses without exposing member email addresses:
@@ -201,18 +205,17 @@ Discover stable human addresses without exposing member email addresses:
 treer human list
 ```
 
-Send to the returned `user_id` with `--to-human`. Human and Agent recipients
-may share one message, and each option may be repeated:
+Use the same repeatable `--to` option for humans and Agents:
 
 ```bash
-treer mail --to-human usr_123 "The deployment is ready for review."
-treer mail --to reviewer --to-human usr_123 "Please coordinate on this result."
+treer mail --to usr_123 "The deployment is ready for review."
+treer mail --to reviewer --to Owner "Please coordinate on this result."
 ```
 
-Do not address a human by preferred name: names are display-only, may collide,
-and may change. Humans read their workspace inbox from the web application;
-opening it marks only the returned batch read. Sending still does not notify or
-interrupt the human or any Agent.
+Preferred names are valid only when unique across the combined Agent and human
+directory; IDs remain stable when names change. Humans read their workspace
+inbox from the web application; opening it marks only the returned batch read.
+Sending still does not notify or interrupt the human or any Agent.
 
 ## Create and coordinate a peer
 

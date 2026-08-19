@@ -96,8 +96,10 @@ virtual-host data. Agent mail is stored as plaintext in PostgreSQL;
 context IDs may reference only same-workspace messages the sender previously
 sent or received. Managed Agents may list the stable user ID, preferred name,
 and organization role of humans in their workspace organization, but the Agent
-directory does not expose member email addresses. Human inbox reads require a
-current user session and current membership in the workspace organization. Ordinary
+directory does not expose member email addresses. Mail resolves Agent and human
+IDs or unique display names through one workspace-scoped recipient namespace.
+Human inbox reads require a current user session and current membership in the
+workspace organization. Ordinary
 outbound TCP payload stays between the source Controller and destination; the
 Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy

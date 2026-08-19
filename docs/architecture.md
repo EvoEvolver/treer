@@ -64,8 +64,9 @@ flowchart TB
   input or a runtime event, and reading an inbox marks only that recipient's
   returned deliveries read.
 - A workspace's human directory is derived from its parent organization
-  membership. Human mail addresses use stable user IDs; preferred names are
-  display snapshots and member emails are not exposed to managed Agents.
+  membership. Mail uses one address model for Agents and humans: stable IDs or
+  unique display names resolve within the combined workspace directory. Member
+  emails are not exposed to managed Agents.
 - Enrolled machines establish outbound connections to the Proxy.
 - Durable identity metadata lives in PostgreSQL. With NATS configured, live
   Controller ownership and machine snapshots are shared across Proxy replicas;
@@ -109,10 +110,10 @@ consume the invitation and write identity state in one transaction.
 Agent mail and human-directory requests travel from the caller's loopback API
 to the Proxy under the Controller's machine credential and caller Agent ID. The
 Controller first validates the private workload credential, and the Proxy
-verifies that the Agent belongs to that machine and workspace. Agent recipient
-names resolve to stable Agent IDs; human recipients must use stable user IDs
-from the workspace organization directory. One message and its typed recipient
-deliveries are committed together. Agent `inbox` and the web workspace Inbox
+verifies that the Agent belongs to that machine and workspace. Each `--to`
+target resolves across Agent IDs, user IDs, Agent names, and preferred names;
+ambiguous names are rejected. One message and its typed recipient deliveries
+are committed together. Agent `inbox` and the web workspace Inbox
 each lock an oldest-first unread batch and mark only that recipient's rows read.
 This path is shared PostgreSQL state and neither requires NATS nor interrupts a
 live Agent or human.

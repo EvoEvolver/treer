@@ -86,8 +86,6 @@ enum Command {
     Mail {
         #[arg(short = 't', long = "to")]
         recipients: Vec<String>,
-        #[arg(long = "to-human")]
-        human_recipients: Vec<String>,
         #[arg(short = 'c', long = "context")]
         context_ids: Vec<String>,
         body: String,
@@ -452,11 +450,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Discover => discover(&client).await?,
         Command::Mail {
             recipients,
-            human_recipients,
             context_ids,
             body,
         } => {
-            validate_mail_recipients(&recipients, &human_recipients)?;
+            validate_mail_recipients(&recipients)?;
             let recipients = recipients
                 .into_iter()
                 .map(|target| normalize_target(&target))
@@ -467,7 +464,6 @@ async fn main() -> anyhow::Result<()> {
                     "api/mail",
                     Some(serde_json::to_value(SendAgentMailRequest {
                         recipients,
-                        human_recipients,
                         context_ids,
                         body,
                     })?),
@@ -1049,9 +1045,9 @@ fn normalize_target(target: &str) -> anyhow::Result<String> {
     Ok(target.to_string())
 }
 
-fn validate_mail_recipients(agents: &[String], humans: &[String]) -> anyhow::Result<()> {
-    if agents.is_empty() && humans.is_empty() {
-        bail!("mail requires at least one --to or --to-human recipient");
+fn validate_mail_recipients(recipients: &[String]) -> anyhow::Result<()> {
+    if recipients.is_empty() {
+        bail!("mail requires at least one --to recipient");
     }
     Ok(())
 }
@@ -1372,32 +1368,25 @@ mod tests {
             mail.command,
             Some(Command::Mail {
                 recipients,
-                human_recipients,
                 context_ids,
                 body,
             }) if recipients == ["reviewer", "tester"]
-                && human_recipients.is_empty()
                 && context_ids == ["msg_one", "msg_two"]
                 && body == "Review complete."
         ));
         let no_recipient = Args::try_parse_from(["treer", "mail", "no recipient"])
             .expect("recipient validation happens after parsing");
-        let Some(Command::Mail {
-            recipients,
-            human_recipients,
-            ..
-        }) = no_recipient.command
-        else {
+        let Some(Command::Mail { recipients, .. }) = no_recipient.command else {
             panic!("expected mail command");
         };
-        assert!(validate_mail_recipients(&recipients, &human_recipients).is_err());
+        assert!(validate_mail_recipients(&recipients).is_err());
 
         let human_mail =
-            Args::try_parse_from(["treer", "mail", "--to-human", "usr_123", "Human update."])
-                .expect("human mail should parse");
+            Args::try_parse_from(["treer", "mail", "--to", "usr_123", "Human update."])
+                .expect("human mail should parse through the common recipient option");
         assert!(matches!(
             human_mail.command,
-            Some(Command::Mail { human_recipients, .. }) if human_recipients == ["usr_123"]
+            Some(Command::Mail { recipients, .. }) if recipients == ["usr_123"]
         ));
 
         let humans =

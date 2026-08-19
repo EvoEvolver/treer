@@ -93,9 +93,17 @@ pub struct WorkspaceSnapshot {
     pub agents: Vec<AgentInfo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailAddressKind {
+    Agent,
+    Human,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentMailAddress {
-    pub agent_id: String,
+pub struct MailAddress {
+    pub kind: MailAddressKind,
+    pub id: String,
     pub name: String,
 }
 
@@ -107,19 +115,11 @@ pub struct WorkspaceHuman {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HumanMailAddress {
-    pub user_id: String,
-    pub preferred_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentMailMessage {
     pub message_id: String,
     pub workspace_id: String,
-    pub sender: AgentMailAddress,
-    pub recipients: Vec<AgentMailAddress>,
-    #[serde(default)]
-    pub human_recipients: Vec<HumanMailAddress>,
+    pub sender: MailAddress,
+    pub recipients: Vec<MailAddress>,
     #[serde(default)]
     pub context_ids: Vec<String>,
     pub body: String,
@@ -130,8 +130,6 @@ pub struct AgentMailMessage {
 pub struct SendAgentMailRequest {
     #[serde(default)]
     pub recipients: Vec<String>,
-    #[serde(default)]
-    pub human_recipients: Vec<String>,
     #[serde(default)]
     pub context_ids: Vec<String>,
     pub body: String,
@@ -1040,16 +1038,18 @@ mod tests {
     #[test]
     fn agent_mail_requests_have_stable_wire_shapes() {
         let request = SendAgentMailRequest {
-            recipients: vec!["reviewer".to_string(), "agent_2".to_string()],
-            human_recipients: vec!["usr_1".to_string()],
+            recipients: vec![
+                "reviewer".to_string(),
+                "agent_2".to_string(),
+                "usr_1".to_string(),
+            ],
             context_ids: vec!["msg_parent".to_string()],
             body: "Review complete.".to_string(),
         };
         assert_eq!(
             serde_json::to_value(request).expect("serialize mail request"),
             serde_json::json!({
-                "recipients": ["reviewer", "agent_2"],
-                "human_recipients": ["usr_1"],
+                "recipients": ["reviewer", "agent_2", "usr_1"],
                 "context_ids": ["msg_parent"],
                 "body": "Review complete."
             })

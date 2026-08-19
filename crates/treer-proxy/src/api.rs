@@ -18,13 +18,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
-    AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentMailAddress, ApiError,
-    CreateAgentRequest, CreateMachineServiceRequest, CreateVirtualNetworkHostRequest,
-    InputAgentRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
-    PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest, SendAgentMailResponse,
-    TerminalClientMessage, TerminalServerMessage, UpdateMachineServiceRequest,
-    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentInfo, ApiError, CreateAgentRequest,
+    CreateMachineServiceRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
+    MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService, MailAddress,
+    MailAddressKind, PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest,
+    SendAgentMailResponse, TerminalClientMessage, TerminalServerMessage,
+    UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
+    WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceHuman, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -460,73 +460,119 @@ async fn agent_send_mail(
             "mail sender was not an agent",
         ));
     };
-    let recipient_count = request.recipients.len() + request.human_recipients.len();
-    if recipient_count == 0 || recipient_count > 32 {
+    if request.recipients.is_empty() || request.recipients.len() > 32 {
         return Err(ApiFailure::bad_request(
             "invalid_mail_recipients",
             "mail must have 1-32 recipients",
         ));
     }
-    let sender = state.resolve_agent(&workspace_id, agent_id).await?;
+    let snapshot = state.snapshot(&workspace_id).await?;
+    let humans = auth.list_workspace_humans(&workspace_id).await?;
+    let sender = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.agent_id == *agent_id)
+        .ok_or_else(|| ProtocolError::new("agent_not_found", agent_id))?;
     let mut seen = HashSet::new();
     let mut recipients = Vec::new();
-    for target in &request.recipients {
-        let target = target.trim();
+    for raw_target in &request.recipients {
+        let target = raw_target.trim();
         let target = if matches!(target, "self" | ".") {
             agent_id.as_str()
         } else {
             target
         };
-        let recipient = state.resolve_agent(&workspace_id, target).await?;
-        if !seen.insert(recipient.agent_id.clone()) {
+        let recipient = resolve_mail_recipient(&snapshot.agents, &humans, target)?;
+        if !seen.insert((recipient.kind, recipient.id.clone())) {
             continue;
         }
+        let resource_type = match recipient.kind {
+            MailAddressKind::Agent => RESOURCE_AGENT_MAILBOX,
+            MailAddressKind::Human => RESOURCE_HUMAN_MAILBOX,
+        };
         policy
             .authorize(&PolicyRequest::new(
                 &workspace_id,
                 subject.clone(),
                 ACTION_MAIL_SEND,
-                PolicyResource::new(RESOURCE_AGENT_MAILBOX, &recipient.agent_id),
+                PolicyResource::new(resource_type, &recipient.id),
             ))
             .await?;
-        recipients.push(AgentMailAddress {
-            agent_id: recipient.agent_id,
-            name: recipient.name,
-        });
-    }
-    let mut seen_humans = HashSet::new();
-    let mut human_recipients = Vec::new();
-    for user_id in &request.human_recipients {
-        let human = auth
-            .resolve_workspace_human(&workspace_id, user_id.trim())
-            .await?;
-        if !seen_humans.insert(human.user_id.clone()) {
-            continue;
-        }
-        policy
-            .authorize(&PolicyRequest::new(
-                &workspace_id,
-                subject.clone(),
-                ACTION_MAIL_SEND,
-                PolicyResource::new(RESOURCE_HUMAN_MAILBOX, &human.user_id),
-            ))
-            .await?;
-        human_recipients.push(human);
+        recipients.push(recipient);
     }
     let message = auth
         .send_agent_mail(
             &workspace_id,
-            AgentMailAddress {
-                agent_id: sender.agent_id,
-                name: sender.name,
+            MailAddress {
+                kind: MailAddressKind::Agent,
+                id: sender.agent_id.clone(),
+                name: sender.name.clone(),
             },
             recipients,
-            human_recipients,
             request.context_ids,
             &request.body,
         )
         .await?;
     Ok(Json(SendAgentMailResponse { message }))
+}
+
+fn resolve_mail_recipient(
+    agents: &[AgentInfo],
+    humans: &[WorkspaceHuman],
+    target: &str,
+) -> Result<MailAddress, ProtocolError> {
+    let mut matches = agents
+        .iter()
+        .filter(|agent| agent.agent_id == target)
+        .map(|agent| MailAddress {
+            kind: MailAddressKind::Agent,
+            id: agent.agent_id.clone(),
+            name: agent.name.clone(),
+        })
+        .chain(
+            humans
+                .iter()
+                .filter(|human| human.user_id == target)
+                .map(|human| MailAddress {
+                    kind: MailAddressKind::Human,
+                    id: human.user_id.clone(),
+                    name: human.preferred_name.clone(),
+                }),
+        )
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        matches.extend(
+            agents
+                .iter()
+                .filter(|agent| agent.name == target)
+                .map(|agent| MailAddress {
+                    kind: MailAddressKind::Agent,
+                    id: agent.agent_id.clone(),
+                    name: agent.name.clone(),
+                }),
+        );
+        matches.extend(
+            humans
+                .iter()
+                .filter(|human| human.preferred_name == target)
+                .map(|human| MailAddress {
+                    kind: MailAddressKind::Human,
+                    id: human.user_id.clone(),
+                    name: human.preferred_name.clone(),
+                }),
+        );
+    }
+    match matches.as_slice() {
+        [] => Err(ProtocolError::new(
+            "recipient_not_found",
+            format!("no Agent or human recipient matches {target}"),
+        )),
+        [recipient] => Ok(recipient.clone()),
+        _ => Err(ProtocolError::new(
+            "recipient_ambiguous",
+            format!("more than one Agent or human is named {target}; use a stable id"),
+        )),
+    }
 }
 
 async fn agent_list_humans(
@@ -1994,8 +2040,13 @@ impl ApiFailure {
 impl From<ProtocolError> for ApiFailure {
     fn from(error: ProtocolError) -> Self {
         let status = match error.code.as_str() {
-            "workspace_not_found" | "server_not_found" | "agent_not_found" => StatusCode::NOT_FOUND,
-            "workspace_exists" | "agent_ambiguous" | "server_ambiguous" => StatusCode::CONFLICT,
+            "workspace_not_found"
+            | "server_not_found"
+            | "agent_not_found"
+            | "recipient_not_found" => StatusCode::NOT_FOUND,
+            "workspace_exists" | "agent_ambiguous" | "server_ambiguous" | "recipient_ambiguous" => {
+                StatusCode::CONFLICT
+            }
             "policy_denied" | "policy_subject_mismatch" => StatusCode::FORBIDDEN,
             "server_offline" | "no_online_server" | "ssh_unsupported" | "scp_unsupported" => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -2490,6 +2541,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mail_recipients_share_one_agent_and_human_namespace() {
+        let snapshot = state_with_managed_agent()
+            .await
+            .snapshot("default")
+            .await
+            .expect("workspace snapshot");
+        let humans = vec![
+            WorkspaceHuman {
+                user_id: "usr_owner".to_string(),
+                preferred_name: "Owner".to_string(),
+                role: "owner".to_string(),
+            },
+            WorkspaceHuman {
+                user_id: "usr_reviewer".to_string(),
+                preferred_name: "reviewer".to_string(),
+                role: "member".to_string(),
+            },
+        ];
+
+        let human = resolve_mail_recipient(&snapshot.agents, &humans, "Owner")
+            .expect("unique preferred name");
+        assert_eq!(human.kind, MailAddressKind::Human);
+        assert_eq!(human.id, "usr_owner");
+
+        let stable_id = resolve_mail_recipient(&snapshot.agents, &humans, "usr_reviewer")
+            .expect("stable human id");
+        assert_eq!(stable_id.kind, MailAddressKind::Human);
+
+        let ambiguous = resolve_mail_recipient(&snapshot.agents, &humans, "reviewer")
+            .expect_err("Agent and human display names share one namespace");
+        assert_eq!(ambiguous.code, "recipient_ambiguous");
+    }
+
+    #[tokio::test]
     async fn managed_agent_mail_resolves_recipients_without_interrupting_runtime() {
         let state = state_with_managed_agent().await;
         let auth = AuthStore::for_test("admin-password").await;
@@ -2511,15 +2596,14 @@ mod tests {
             Path("default".to_string()),
             Json(SendAgentMailRequest {
                 recipients: vec!["reviewer".to_string()],
-                human_recipients: vec![],
                 context_ids: vec![],
                 body: "Check this when convenient.".to_string(),
             }),
         )
         .await
         .unwrap_or_else(|error| panic!("send mail: {}", error.error.message));
-        assert_eq!(sent.0.message.sender.agent_id, "agent-a");
-        assert_eq!(sent.0.message.recipients[0].agent_id, "agent-b");
+        assert_eq!(sent.0.message.sender.id, "agent-a");
+        assert_eq!(sent.0.message.recipients[0].id, "agent-b");
         assert_eq!(
             state
                 .resolve_agent("default", "agent-b")
