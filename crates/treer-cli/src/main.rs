@@ -14,9 +14,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
-    CreateVirtualNetworkHostRequest, InputAgentRequest, MachineServiceProtocol, RenameRequest,
-    SendAgentMailRequest, ServerInfo, TerminalClientMessage, TerminalServerMessage,
-    UpdateMachineServiceRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
+    MachineServiceProtocol, RenameRequest, SendAgentMailRequest, ServerInfo, ServiceIngressAccess,
+    TerminalClientMessage, TerminalServerMessage, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
     WorkspaceSnapshot, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
@@ -72,6 +73,11 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    #[command(about = "Publish machine services through wildcard HTTPS ingress")]
+    Publish {
+        #[command(subcommand)]
+        command: PublishCommand,
     },
     #[command(about = "Obtain a short-lived identity token for a workspace service")]
     Identity {
@@ -245,6 +251,46 @@ enum IdentityCommand {
         #[arg(long, help = "Print the complete JSON token response")]
         json: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum PublishCommand {
+    #[command(about = "List published service endpoints")]
+    List,
+    #[command(about = "Publish an HTTP service")]
+    Create {
+        service: String,
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long, value_enum, default_value_t = CliIngressAccess::Public)]
+        access: CliIngressAccess,
+    },
+    #[command(about = "Change a published endpoint's access mode")]
+    Access {
+        target: String,
+        access: CliIngressAccess,
+    },
+    #[command(about = "Enable a published endpoint")]
+    Enable { target: String },
+    #[command(about = "Disable a published endpoint without deleting it")]
+    Disable { target: String },
+    #[command(about = "Delete a published endpoint")]
+    Delete { target: String },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliIngressAccess {
+    Public,
+    Workspace,
+}
+
+impl From<CliIngressAccess> for ServiceIngressAccess {
+    fn from(value: CliIngressAccess) -> Self {
+        match value {
+            CliIngressAccess::Public => Self::Public,
+            CliIngressAccess::Workspace => Self::Workspace,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -428,6 +474,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
         Command::Service { command } => run_service_command(&client, command).await?,
+        Command::Publish { command } => run_publish_command(&client, command).await?,
         Command::Identity { command } => {
             let IdentityCommand::Token { audience, json } = command;
             let response: WorkloadIdentityTokenResponse = client
@@ -727,6 +774,65 @@ async fn run_service_command(client: &ApiClient, command: ServiceCommand) -> any
                 .await
         }
     }
+}
+
+async fn run_publish_command(client: &ApiClient, command: PublishCommand) -> anyhow::Result<Value> {
+    match command {
+        PublishCommand::List => client.value(Method::GET, "api/publish", None).await,
+        PublishCommand::Create {
+            service,
+            slug,
+            access,
+        } => {
+            client
+                .value(
+                    Method::POST,
+                    "api/publish",
+                    Some(serde_json::to_value(CreateServiceIngressRequest {
+                        service_id: service,
+                        slug,
+                        access: access.into(),
+                    })?),
+                )
+                .await
+        }
+        PublishCommand::Access { target, access } => {
+            update_published_endpoint(client, &target, Some(access.into()), None).await
+        }
+        PublishCommand::Enable { target } => {
+            update_published_endpoint(client, &target, None, Some(true)).await
+        }
+        PublishCommand::Disable { target } => {
+            update_published_endpoint(client, &target, None, Some(false)).await
+        }
+        PublishCommand::Delete { target } => {
+            client
+                .value(
+                    Method::DELETE,
+                    &format!("api/publish/{}", path_segment(&target)),
+                    None,
+                )
+                .await
+        }
+    }
+}
+
+async fn update_published_endpoint(
+    client: &ApiClient,
+    target: &str,
+    access: Option<ServiceIngressAccess>,
+    enabled: Option<bool>,
+) -> anyhow::Result<Value> {
+    client
+        .value(
+            Method::PATCH,
+            &format!("api/publish/{}", path_segment(target)),
+            Some(serde_json::to_value(UpdateServiceIngressRequest {
+                access,
+                enabled,
+            })?),
+        )
+        .await
 }
 
 async fn resolve_service_machine(
@@ -1301,6 +1407,40 @@ mod tests {
             Some(Command::VirtualHost {
                 command: VirtualHostCommand::Delete { hostname }
             }) if hostname == "api.internal"
+        ));
+    }
+
+    #[test]
+    fn publish_commands_parse() {
+        let args = Args::try_parse_from([
+            "treer",
+            "publish",
+            "create",
+            "api",
+            "--slug",
+            "issue-tracker",
+            "--access",
+            "workspace",
+        ])
+        .expect("publish create should parse");
+        assert!(matches!(
+            args.command,
+            Some(Command::Publish {
+                command: PublishCommand::Create {
+                    service,
+                    slug: Some(slug),
+                    access: CliIngressAccess::Workspace,
+                }
+            }) if service == "api" && slug == "issue-tracker"
+        ));
+
+        let args = Args::try_parse_from(["treer", "publish", "disable", "demo.apps.test"])
+            .expect("publish disable should parse");
+        assert!(matches!(
+            args.command,
+            Some(Command::Publish {
+                command: PublishCommand::Disable { target }
+            }) if target == "demo.apps.test"
         ));
     }
 

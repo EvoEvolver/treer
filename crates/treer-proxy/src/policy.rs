@@ -18,12 +18,17 @@ pub const ACTION_SERVICE_PROBE: &str = "service.probe";
 pub const ACTION_VIRTUAL_HOST_LIST: &str = "virtual_host.list";
 pub const ACTION_VIRTUAL_HOST_CREATE: &str = "virtual_host.create";
 pub const ACTION_VIRTUAL_HOST_DELETE: &str = "virtual_host.delete";
+pub const ACTION_INGRESS_LIST: &str = "ingress.list";
+pub const ACTION_INGRESS_CREATE: &str = "ingress.create";
+pub const ACTION_INGRESS_UPDATE: &str = "ingress.update";
+pub const ACTION_INGRESS_DELETE: &str = "ingress.delete";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT_MAILBOX: &str = "agent.mailbox";
 pub const RESOURCE_HUMAN_DIRECTORY: &str = "human.directory";
 pub const RESOURCE_HUMAN_MAILBOX: &str = "human.mailbox";
 pub const RESOURCE_MACHINE_SERVICE: &str = "machine.service";
 pub const RESOURCE_VIRTUAL_HOST: &str = "virtual_host";
+pub const RESOURCE_SERVICE_INGRESS: &str = "service.ingress";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySubject {

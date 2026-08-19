@@ -238,7 +238,8 @@ mode with health, restart, deployment revision, and ownership.
 The service catalog can grow from a target address into an operational object:
 
 - owner, maintainers, protocol, health, deployment revision, and dependencies;
-- virtual hosts, TLS, private and public ingress, and cross-workspace export;
+- virtual hosts, wildcard TLS ingress with optional workspace authentication,
+  custom domains, and cross-workspace export;
 - workload-identity audience, accepted issuers, and credential helpers;
 - connection counts, byte usage, latency, failures, and circuit state;
 - network and egress policy independent from service application policy.

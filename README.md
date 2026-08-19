@@ -282,7 +282,9 @@ automatically by the Proxy.
 3. For more than one Treer replica, add a NATS service with JetStream enabled
    and expose its private URL as `TREER_NATS_URL`.
 4. Set `ADMIN_PASSWORD`, `CLOUDFLARE_API_TOKEN`, `TREER_PROXY_PUBLIC_URL`, and
-   `TREER_APP_PUBLIC_URL` on the Proxy service.
+   `TREER_APP_PUBLIC_URL` on the Proxy service. To publish Agent-maintained HTTP
+   services, also set `TREER_INGRESS_PUBLIC_URL=https://apps.example.com/` and
+   attach `*.apps.example.com` to the same Proxy service.
 5. Create an App service from the `web` directory and set its
    `TREER_PROXY_PUBLIC_URL` variable.
 6. Add the Proxy and App public domains, then increase the Proxy replica count.
@@ -384,7 +386,25 @@ Proxy updates its in-memory routing table and immediately broadcasts a full,
 revisioned snapshot to every online Controller in that workspace. A Controller
 receives a fresh snapshot after every WebSocket registration and ignores stale
 revisions on the same connection. The Proxy also reloads PostgreSQL and broadcasts
-snapshots every 30 seconds, which repairs missed or out-of-band changes.
+snapshots every five seconds, which repairs missed or out-of-band changes.
+
+HTTP services can also be published through wildcard HTTPS ingress. Configure
+one wildcard domain on the Proxy; creating an endpoint changes only PostgreSQL
+routing metadata and does not create another DNS record or TLS certificate:
+
+```bash
+export TREER_INGRESS_PUBLIC_URL='https://apps.treer.ai/'
+treer publish create api --slug issue-tracker --access public
+treer publish list
+```
+
+`public` leaves authentication to the application. `workspace` redirects human
+visitors through their Treer login and accepts a managed Agent's audience-bound
+token in `Treer-Authorization`. Application `Authorization`, cookies,
+`Set-Cookie`, streaming responses, and WebSocket upgrades pass through unchanged.
+Treer consumes its own ingress cookie/header and strips client-supplied
+`X-Treer-*` identity headers before forwarding. Only HTTP services can be
+published. Disabling or deleting an ingress does not stop the machine service.
 
 Deleting an online machine sends a confirmed shutdown command over its existing
 Controller WebSocket before revoking the machine credential. A capable

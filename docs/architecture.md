@@ -103,7 +103,8 @@ PostgreSQL persists users, organizations, memberships, sessions, password
 reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, Agent messages, per-Agent and per-human read state, message
-context edges, machine services, and virtual hosts. Administrator invitations
+context edges, machine services, virtual hosts, service ingresses, and ingress
+authorization sessions. Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
@@ -199,6 +200,22 @@ not a VM or private filesystem. A private mount namespace supplies the Agent's
 resolver configuration and masks the host `nscd` socket, ensuring DNS lookups
 reach the TUN virtual resolver instead of host NSS plugins or caches. These mounts do not
 modify the host resolver files or cache service.
+
+Public service ingress is a separate resource from workspace virtual hosts. A
+`ServiceIngress` points directly to one HTTP machine service and owns a generated
+single-label hostname under `TREER_INGRESS_PUBLIC_URL`. Any Proxy replica can
+resolve the request `Host` from its in-memory cache, falling back to PostgreSQL
+on a cache miss, then reuse the existing browser network stream to reach the
+target Controller. A five-second metadata refresh converges out-of-band and
+cross-replica changes. HTTP bodies remain streaming and WebSocket upgrades pin
+one route for the connection lifetime.
+
+`public` ingress performs no Treer edge authentication. `workspace` ingress
+accepts an audience-bound Agent token in `Treer-Authorization` or redirects a
+human through the Proxy session and a single-use authorization code to a
+host-only ingress cookie. The application continues to own its normal
+`Authorization`, cookies, and `Set-Cookie` semantics. The Proxy removes only
+Treer-private credentials, hop-by-hop headers, and spoofable identity headers.
 
 For route-level details and additional diagrams, use the dated
 [project review](research/2026-08-18-project-review.md). Review this document

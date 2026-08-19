@@ -24,7 +24,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type MailDelivery, type MailMessage, type MailboxResponse, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type MailDelivery, type MailMessage, type MailboxResponse, type Member, type Organization, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -56,6 +56,18 @@ function defaultAgentName(kind: string) {
   const day = String(now.getDate()).padStart(2, "0")
   const prefix = kind === "command" ? "cmd" : kind === "codex" || kind === "claude" ? kind : "agent"
   return `${prefix}-${now.getFullYear()}-${month}-${day}`
+}
+
+function ingressReturnUrl() {
+  const value = new URLSearchParams(window.location.search).get("return_to")
+  if (!value) return null
+  try {
+    const candidate = new URL(value)
+    const authorize = new URL(proxyUrl("/.treer/ingress/authorize"))
+    return candidate.origin === authorize.origin && candidate.pathname === authorize.pathname ? candidate.toString() : null
+  } catch {
+    return null
+  }
 }
 
 function Status({ value }: { value: string }) {
@@ -112,6 +124,11 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
       const path = registering ? "/api/auth/register" : "/api/auth/login"
       const body = registering ? { invite, email, preferred_name: preferredName, password } : { email, password }
       const user = await api<User>(path, { method: "POST", body: JSON.stringify(body) })
+      const returnTo = ingressReturnUrl()
+      if (returnTo) {
+        window.location.assign(returnTo)
+        return
+      }
       window.history.replaceState(null, "", window.location.pathname)
       onAuthenticated(user)
     } catch (reason) {
@@ -288,6 +305,7 @@ function WorkspaceApp() {
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
   const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
+  const [publishOpen, setPublishOpen] = useState(false)
   const [createServiceOpen, setCreateServiceOpen] = useState(false)
   const [editingService, setEditingService] = useState<MachineService | null>(null)
   const [inviteOpen, setInviteOpen] = useState(false)
@@ -317,9 +335,13 @@ function WorkspaceApp() {
   const [remainingUnread, setRemainingUnread] = useState(0)
   const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
   const [services, setServices] = useState<MachineService[]>([])
+  const [ingresses, setIngresses] = useState<ServiceIngress[]>([])
   const [serviceHealth, setServiceHealth] = useState<Record<string, "healthy" | "unreachable">>({})
   const [virtualHostname, setVirtualHostname] = useState("")
   const [virtualServiceId, setVirtualServiceId] = useState("")
+  const [publishServiceId, setPublishServiceId] = useState("")
+  const [publishSlug, setPublishSlug] = useState("")
+  const [publishAccess, setPublishAccess] = useState<"public" | "workspace">("public")
   const [serviceName, setServiceName] = useState("")
   const [serviceServerId, setServiceServerId] = useState("")
   const [serviceTargetHost, setServiceTargetHost] = useState("127.0.0.1")
@@ -334,6 +356,12 @@ function WorkspaceApp() {
       else showError(reason)
     })
   }, [showError])
+
+  useEffect(() => {
+    if (!user) return
+    const returnTo = ingressReturnUrl()
+    if (returnTo) window.location.assign(returnTo)
+  }, [user])
 
   const loadOrganizations = useCallback(async (preferred?: string) => {
     const data = await api<{ organizations: Organization[] }>("/api/organizations")
@@ -569,14 +597,17 @@ function WorkspaceApp() {
     if (!workspaceId) {
       setVirtualHosts([])
       setServices([])
+      setIngresses([])
       return
     }
-    const [hostData, serviceData] = await Promise.all([
+    const [hostData, serviceData, ingressData] = await Promise.all([
       api<{ hosts: VirtualNetworkHost[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts`),
       api<{ services: MachineService[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/services`),
+      api<{ ingresses: ServiceIngress[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/ingresses`),
     ])
     setVirtualHosts(hostData.hosts)
     setServices(serviceData.services)
+    setIngresses(ingressData.ingresses)
   }, [workspaceId])
 
   useEffect(() => {
@@ -590,6 +621,11 @@ function WorkspaceApp() {
   function openCreateVirtualHost() {
     setVirtualServiceId((current) => current || services[0]?.service_id || "")
     setCreateVirtualHostOpen(true)
+  }
+
+  function openPublish() {
+    setPublishServiceId((current) => current || services.find((service) => service.protocol === "http")?.service_id || "")
+    setPublishOpen(true)
   }
 
   function openCreateService() {
@@ -690,6 +726,35 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
+  async function createIngress(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/ingresses`, {
+        method: "POST",
+        body: JSON.stringify({ service_id: publishServiceId, slug: publishSlug || undefined, access: publishAccess }),
+      })
+      setPublishSlug("")
+      await loadNetwork()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function updateIngress(ingressId: string, update: { access?: ServiceIngress["access"]; enabled?: boolean }) {
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/ingresses/${encodeURIComponent(ingressId)}`, { method: "PATCH", body: JSON.stringify(update) })
+      await loadNetwork()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function deleteIngress(ingressId: string) {
+    if (!workspaceId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/ingresses/${encodeURIComponent(ingressId)}`, { method: "DELETE" })
+      await loadNetwork()
+    } catch (reason) { showError(reason) }
+  }
+
   async function copy(value: string) {
     try { await navigator.clipboard.writeText(value) }
     catch { showError("Unable to copy to the clipboard") }
@@ -763,7 +828,7 @@ function WorkspaceApp() {
             <IconButton label="Reconnect terminal" disabled={!selectedAgent} onClick={() => { setSelectedAgentId(null); requestAnimationFrame(() => setSelectedAgentId(selectedAgent?.agent_id ?? null)) }}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={stopAgent}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
-          </div> : mainView === "inbox" ? <div className="flex shrink-0 items-center gap-2"><span className="hidden text-[10px] text-muted-foreground sm:inline">{mailDeliveries.length} messages</span><IconButton label="Refresh inbox" onClick={loadInbox} disabled={inboxLoading}><RotateCw /></IconButton></div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button></div>}
+          </div> : mainView === "inbox" ? <div className="flex shrink-0 items-center gap-2"><span className="hidden text-[10px] text-muted-foreground sm:inline">{mailDeliveries.length} messages</span><IconButton label="Refresh inbox" onClick={loadInbox} disabled={inboxLoading}><RotateCw /></IconButton></div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div>}
         </header>
         {mainView === "terminal" ? <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className="grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]">
@@ -798,6 +863,29 @@ function WorkspaceApp() {
     <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="min-w-0"><span className="block truncate text-sm font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive" onClick={() => removeMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
 
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={publishOpen} onOpenChange={setPublishOpen}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader><DialogTitle>Published endpoints</DialogTitle><DialogDescription>Expose an HTTP machine service through the configured wildcard HTTPS domain.</DialogDescription></DialogHeader>
+        <form onSubmit={createIngress} className="grid gap-3 border-y py-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px_auto]">
+          <Field label="Service"><Select value={publishServiceId} onValueChange={setPublishServiceId} required><SelectTrigger><SelectValue placeholder="Select service" /></SelectTrigger><SelectContent>{services.filter((service) => service.protocol === "http").map((service) => <SelectItem key={service.service_id} value={service.service_id}>{service.name}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="URL slug"><Input value={publishSlug} onChange={(event) => setPublishSlug(event.target.value)} placeholder="service name" /></Field>
+          <Field label="Access"><Select value={publishAccess} onValueChange={(value: ServiceIngress["access"]) => setPublishAccess(value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="public">Public</SelectItem><SelectItem value="workspace">Workspace</SelectItem></SelectContent></Select></Field>
+          <Button type="submit" className="self-end" disabled={!publishServiceId}><ExternalLink />Publish</Button>
+        </form>
+        <div className="max-h-[45vh] divide-y overflow-auto">
+          {ingresses.map((ingress) => {
+            const service = services.find((item) => item.service_id === ingress.service_id)
+            return <div key={ingress.ingress_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2 sm:grid-cols-[minmax(0,1fr)_120px_auto]">
+              <span className="min-w-0"><button title={ingress.hostname} className="block max-w-full truncate text-left font-mono text-xs font-medium hover:underline" onClick={() => window.open(ingress.url, "_blank", "noopener,noreferrer")}>{ingress.hostname}</button><span className="mt-1 block truncate text-[10px] text-muted-foreground">{service?.name ?? ingress.service_id}</span></span>
+              <Select value={ingress.access} onValueChange={(access: ServiceIngress["access"]) => updateIngress(ingress.ingress_id, { access })}><SelectTrigger className="col-start-1 row-start-2 h-8 w-[120px] text-xs sm:col-start-2 sm:row-start-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="public">Public</SelectItem><SelectItem value="workspace">Workspace</SelectItem></SelectContent></Select>
+              <span className="col-start-2 row-span-2 row-start-1 flex items-center gap-1 sm:col-start-3 sm:row-span-1"><label className="flex size-8 cursor-pointer items-center justify-center" title={ingress.enabled ? "Disable endpoint" : "Enable endpoint"}><input type="checkbox" className="size-4 accent-foreground" checked={ingress.enabled} onChange={(event) => updateIngress(ingress.ingress_id, { enabled: event.target.checked })} aria-label={`${ingress.enabled ? "Disable" : "Enable"} ${ingress.hostname}`} /></label><IconButton label={`Copy ${ingress.hostname}`} onClick={() => copy(ingress.url)}><Copy /></IconButton><IconButton label={`Open ${ingress.hostname}`} onClick={() => window.open(ingress.url, "_blank", "noopener,noreferrer")} disabled={!ingress.enabled}><ExternalLink /></IconButton><IconButton label={`Delete ${ingress.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteIngress(ingress.ingress_id)}><Trash2 /></IconButton></span>
+            </div>
+          })}
+          {!ingresses.length && <EmptyState icon={<ExternalLink />} label="No published endpoints" />}
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => setPublishOpen(false)}>Close</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
   </TooltipProvider>
 }
 

@@ -40,6 +40,12 @@ struct Args {
     app_public_url: Option<Url>,
     #[arg(
         long,
+        env = "TREER_INGRESS_PUBLIC_URL",
+        help = "Base URL for wildcard service ingress, for example https://apps.treer.ai/"
+    )]
+    ingress_public_url: Option<Url>,
+    #[arg(
+        long,
         env = "TREER_ARTIFACTS_DIR",
         default_value = "dist",
         help = "Directory containing <platform>/treer[-agent-server] binaries"
@@ -122,6 +128,8 @@ async fn main() -> anyhow::Result<()> {
         listen,
     )?;
     let app_public_url = app_public_url(args.app_public_url, &proxy_public_url)?;
+    let ingress =
+        api::IngressConfig::new(args.ingress_public_url, &proxy_public_url, &app_public_url)?;
     if !args.disable_auth && proxy_public_url.scheme() != "https" {
         warn!(%proxy_public_url, "authenticated proxy is using an insecure HTTP public URL");
     }
@@ -196,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
     let identity = identity::IdentityIssuer::load(&auth, &proxy_public_url)
         .await
         .context("failed to initialize workload identity issuer")?;
-    api::spawn_virtual_network_host_refresh(state.clone(), auth.clone());
+    api::spawn_network_metadata_refresh(state.clone(), auth.clone());
     let app = api::router(
         state,
         bootstrap,
@@ -204,12 +212,13 @@ async fn main() -> anyhow::Result<()> {
         policy,
         identity,
         api::BrowserAccess::new(&app_public_url)?,
+        ingress.clone(),
     )
     .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
-    info!(address = %listen, %proxy_public_url, %app_public_url, %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
+    info!(address = %listen, %proxy_public_url, %app_public_url, ingress = ?ingress.public_url(), %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
     axum::serve(listener, app)
         .await
         .context("proxy server failed")

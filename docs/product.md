@@ -28,8 +28,9 @@ In concrete terms:
    pull-only durable mail with Agents or humans, while browser users can read
    message history and trace visible context chains without knowing machine
    addresses.
-5. Agents can register and maintain long-running machine services, then expose
-   stable workspace aliases without making service ports public.
+5. Agents can register and maintain long-running machine services, expose
+   stable workspace aliases, and publish HTTP services through an optional
+   wildcard HTTPS ingress for humans and other Agents.
 6. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed.
 7. The central Proxy is open source and can be privately deployed.

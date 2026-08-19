@@ -95,6 +95,17 @@ export interface MachineService {
   updated_by: string
 }
 
+export interface ServiceIngress {
+  ingress_id: string
+  service_id: string
+  hostname: string
+  url: string
+  access: "public" | "workspace"
+  enabled: boolean
+  updated_at: string
+  updated_by: string
+}
+
 export interface ApiErrorBody {
   error?: { message?: string }
 }

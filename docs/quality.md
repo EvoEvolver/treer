@@ -85,7 +85,7 @@ repeated bottleneck or blocks the current product tier.
 | Proxy auth, membership, or routing | Authorization and cross-workspace isolation tests |
 | Host mutation or Controller restart | Idempotency and process-survival tests |
 | Runtime path logic | Working-directory containment and escape tests |
-| Network namespace, DNS, SOCKS, or virtual host | Destination routing and containment tests on Linux |
+| Network namespace, DNS, SOCKS, virtual host, or public ingress | Destination routing, authentication/header semantics, HTTP streaming, WebSocket, and containment tests on Linux |
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |
 | Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, and affected-flow validation |
 | Documentation/index change | `node scripts/check-docs.mjs` |
