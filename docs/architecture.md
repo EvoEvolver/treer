@@ -88,9 +88,14 @@ flowchart TB
 
 PostgreSQL persists users, organizations, memberships, sessions, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
-display names, machine services, and virtual hosts. Connected Controllers, pending commands, workspace
-projections, terminal legs, transfers, and network tunnels are held in Proxy
-memory and do not yet support horizontal routing across Proxy replicas.
+display names, machine services, and virtual hosts. Administrator invitations
+create a user-owned personal organization during registration; organization
+invitations only create membership in their target organization. Both flows
+consume the invitation and write identity state in one transaction.
+
+Connected Controllers, pending commands, workspace projections, terminal legs,
+transfers, and network tunnels are held in Proxy memory and do not yet support
+horizontal routing across Proxy replicas.
 
 Workspace state changes also produce `DomainEventEnvelope` values containing a
 unique event ID, schema version, actor, action, resource, occurrence time,

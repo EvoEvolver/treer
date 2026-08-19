@@ -44,12 +44,9 @@ export interface Member {
   role: "owner" | "admin" | "member"
 }
 
-export interface AdminOrganization {
-  organization_id: string
-  name: string
-  member_count: number
-  owner_count: number
-  initial_invitation_pending: boolean
+export interface AdminDashboard {
+  machine_count: number
+  agent_count: number
 }
 
 export interface VirtualNetworkHost {

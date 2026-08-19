@@ -23,13 +23,13 @@ use treer_protocol::{
 use url::Url;
 use uuid::Uuid;
 
+use crate::state::AppState;
+
 const SESSION_COOKIE: &str = "treer_session";
 const ADMIN_SESSION_COOKIE: &str = "treer_admin_session";
 const SESSION_TTL_DAYS: i64 = 30;
 const ADMIN_SESSION_TTL_HOURS: i64 = 8;
 const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
-const DEFAULT_ORGANIZATION_ID: &str = "org_default";
-const DEFAULT_ORGANIZATION_NAME: &str = "Default organization";
 
 #[derive(Clone)]
 pub struct AuthStore {
@@ -70,15 +70,6 @@ pub struct OrganizationMember {
     pub preferred_name: String,
     pub role: String,
     pub joined_at: String,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct AdminOrganizationInfo {
-    pub organization_id: String,
-    pub name: String,
-    pub member_count: i64,
-    pub owner_count: i64,
-    pub initial_invitation_pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,6 +215,33 @@ impl AuthStore {
         store
     }
 
+    #[cfg(test)]
+    pub(crate) async fn seed_test_workspace(&self, workspace_id: &str) {
+        let organization_id = format!("org_{workspace_id}");
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO organizations(organization_id, name, created_at, created_by) \
+             VALUES($1, $2, $3, 'test')",
+        )
+        .bind(&organization_id)
+        .bind(format!("{workspace_id} organization"))
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .expect("seed organization");
+        sqlx::query(
+            "INSERT INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
+             VALUES($1, $2, $3, $4, 'test')",
+        )
+        .bind(workspace_id)
+        .bind(organization_id)
+        .bind(workspace_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .expect("seed workspace");
+    }
+
     async fn initialize_schema(&self) -> anyhow::Result<()> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('treer_schema'))")
@@ -232,24 +250,6 @@ impl AuthStore {
         sqlx::raw_sql(include_str!("schema.sql"))
             .execute(&mut *transaction)
             .await?;
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO organizations(organization_id, name, created_at, created_by) \
-             VALUES($1, $2, $3, 'admin') ON CONFLICT DO NOTHING",
-        )
-        .bind(DEFAULT_ORGANIZATION_ID)
-        .bind(DEFAULT_ORGANIZATION_NAME)
-        .bind(&now)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "INSERT INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
-             VALUES('default', $1, 'Default', $2, 'admin') ON CONFLICT DO NOTHING",
-        )
-        .bind(DEFAULT_ORGANIZATION_ID)
-        .bind(&now)
-        .execute(&mut *transaction)
-        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -392,29 +392,11 @@ impl AuthStore {
         })
     }
 
-    pub async fn admin_organizations(&self) -> Result<Vec<AdminOrganizationInfo>, AuthFailure> {
-        let rows = sqlx::query(
-            "SELECT o.organization_id, o.name, COUNT(m.user_id) AS member_count, \
-             COALESCE(SUM(CASE WHEN m.role = 'owner' THEN 1 ELSE 0 END), 0) AS owner_count, \
-             EXISTS(SELECT 1 FROM invitations i WHERE i.organization_id = o.organization_id \
-             AND i.role = 'owner' AND i.used_at IS NULL) AS initial_invitation_pending \
-             FROM organizations o LEFT JOIN organization_members m \
-             ON m.organization_id = o.organization_id \
-             GROUP BY o.organization_id, o.name ORDER BY lower(o.name)",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| AdminOrganizationInfo {
-                organization_id: row.get("organization_id"),
-                name: row.get("name"),
-                member_count: row.get("member_count"),
-                owner_count: row.get("owner_count"),
-                initial_invitation_pending: row.get("initial_invitation_pending"),
-            })
-            .collect())
+    pub async fn active_machine_count(&self) -> Result<i64, AuthFailure> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM machines WHERE revoked_at IS NULL")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AuthFailure::database)
     }
 
     pub async fn require_organization_member(
@@ -1578,8 +1560,8 @@ impl AuthStore {
         let token = format!("inv_{}", Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO invitations(\
-             token, created_at, created_by, organization_id, role) \
-             VALUES($1, $2, $3, $4, 'member')",
+             token, created_at, created_by, kind, organization_id, role) \
+             VALUES($1, $2, $3, 'organization', $4, 'member')",
         )
         .bind(&token)
         .bind(Utc::now().to_rfc3339())
@@ -1594,48 +1576,14 @@ impl AuthStore {
         Ok((token, url))
     }
 
-    async fn create_initial_invitation(
-        &self,
-        organization_id: &str,
-    ) -> Result<(String, Url), AuthFailure> {
-        let owner_count = sqlx::query_scalar::<_, i64>(
-            "SELECT (SELECT COUNT(*) FROM organization_members \
-             WHERE organization_id = $1 AND role = 'owner') + \
-             (SELECT COUNT(*) FROM invitations WHERE organization_id = $2 \
-             AND role = 'owner' AND used_at IS NULL)",
-        )
-        .bind(organization_id)
-        .bind(organization_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        if owner_count != 0 {
-            return Err(AuthFailure::conflict(
-                "organization_already_initialized",
-                "this organization already has an owner",
-            ));
-        }
-        let exists = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM organizations WHERE organization_id = $1",
-        )
-        .bind(organization_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        if exists == 0 {
-            return Err(AuthFailure::not_found(
-                "organization_not_found",
-                "organization does not exist",
-            ));
-        }
+    async fn create_personal_invitation(&self) -> Result<(String, Url), AuthFailure> {
         let token = format!("inv_{}", Uuid::new_v4().simple());
         sqlx::query(
-            "INSERT INTO invitations(token, created_at, created_by, organization_id, role) \
-             VALUES($1, $2, 'platform-admin', $3, 'owner')",
+            "INSERT INTO invitations(token, created_at, created_by, kind) \
+             VALUES($1, $2, 'platform-admin', 'personal')",
         )
         .bind(&token)
         .bind(Utc::now().to_rfc3339())
-        .bind(organization_id)
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
@@ -1730,11 +1678,14 @@ impl AuthStore {
                 "password must contain at least 8 characters",
             ));
         }
+        let password_hash = hash_password(password)?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let invitation = sqlx::query(
-            "SELECT organization_id, role FROM invitations WHERE token = $1 AND used_at IS NULL",
+            "SELECT kind, organization_id, role FROM invitations \
+             WHERE token = $1 AND used_at IS NULL FOR UPDATE",
         )
         .bind(invite)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?
         .ok_or_else(|| {
@@ -1743,10 +1694,9 @@ impl AuthStore {
                 "invitation is invalid or already used",
             )
         })?;
-        let organization_id: String = invitation.get("organization_id");
-        let role: String = invitation.get("role");
-        let password_hash = hash_password(password)?;
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let kind: String = invitation.get("kind");
+        let organization_id: Option<String> = invitation.get("organization_id");
+        let role: Option<String> = invitation.get("role");
         let user_id = format!("usr_{}", Uuid::new_v4().simple());
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -1785,17 +1735,64 @@ impl AuthStore {
                 "invitation is invalid or already used",
             ));
         }
-        sqlx::query(
-            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
-             VALUES($1, $2, $3, $4)",
-        )
-        .bind(organization_id)
-        .bind(&user_id)
-        .bind(role)
-        .bind(&now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
+        match kind.as_str() {
+            "personal" => {
+                let organization_id = format!("org_{}", Uuid::new_v4().simple());
+                let organization_name = format!("{preferred_name} Personal");
+                sqlx::query(
+                    "INSERT INTO organizations(organization_id, name, created_at, created_by) \
+                     VALUES($1, $2, $3, $4)",
+                )
+                .bind(&organization_id)
+                .bind(organization_name)
+                .bind(&now)
+                .bind(&user_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+                sqlx::query(
+                    "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+                     VALUES($1, $2, 'owner', $3)",
+                )
+                .bind(organization_id)
+                .bind(&user_id)
+                .bind(&now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+            }
+            "organization" => {
+                let organization_id = organization_id.ok_or_else(|| {
+                    AuthFailure::internal(
+                        "invalid_invitation_state",
+                        "organization invitation has no organization".to_string(),
+                    )
+                })?;
+                let role = role.ok_or_else(|| {
+                    AuthFailure::internal(
+                        "invalid_invitation_state",
+                        "organization invitation has no role".to_string(),
+                    )
+                })?;
+                sqlx::query(
+                    "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+                     VALUES($1, $2, $3, $4)",
+                )
+                .bind(organization_id)
+                .bind(&user_id)
+                .bind(role)
+                .bind(&now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+            }
+            _ => {
+                return Err(AuthFailure::internal(
+                    "invalid_invitation_state",
+                    "invitation has an unsupported kind".to_string(),
+                ));
+            }
+        }
         transaction.commit().await.map_err(AuthFailure::database)?;
         self.create_session(user_id, email, preferred_name).await
     }
@@ -2077,19 +2074,20 @@ pub async fn admin_logout(
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response())
 }
 
-pub async fn admin_organizations(
+pub async fn admin_dashboard(
     Extension(auth): Extension<AuthStore>,
+    State(state): State<AppState>,
 ) -> Result<Json<Value>, AuthFailure> {
     Ok(Json(json!({
-        "organizations": auth.admin_organizations().await?
+        "machine_count": auth.active_machine_count().await?,
+        "agent_count": state.platform_agent_count().await,
     })))
 }
 
-pub async fn admin_create_initial_invitation(
+pub async fn admin_create_invitation(
     Extension(auth): Extension<AuthStore>,
-    AxumPath(organization_id): AxumPath<String>,
 ) -> Result<Json<Value>, AuthFailure> {
-    let (token, url) = auth.create_initial_invitation(&organization_id).await?;
+    let (token, url) = auth.create_personal_invitation().await?;
     Ok(Json(json!({ "token": token, "url": url.as_str() })))
 }
 
@@ -2486,9 +2484,9 @@ mod tests {
 
     async fn bootstrap_owner(store: &AuthStore, email: &str, name: &str) -> CurrentSession {
         let (invite, _) = store
-            .create_initial_invitation(DEFAULT_ORGANIZATION_ID)
+            .create_personal_invitation()
             .await
-            .expect("initial owner invitation");
+            .expect("personal invitation");
         store
             .register(&invite, email, name, "password123")
             .await
@@ -2498,6 +2496,7 @@ mod tests {
     #[tokio::test]
     async fn virtual_network_hosts_are_normalized_resolved_and_cleaned_up() {
         let mut store = AuthStore::for_test("owner-password").await;
+        store.seed_test_workspace("default").await;
         let initial = store
             .virtual_network_hosts_snapshot("default")
             .await
@@ -2598,6 +2597,7 @@ mod tests {
     #[tokio::test]
     async fn machine_service_updates_refresh_aliases_and_delete_cascades() {
         let store = AuthStore::for_test("owner-password").await;
+        store.seed_test_workspace("default").await;
         let service = store
             .create_machine_service(
                 "default",
@@ -2663,12 +2663,8 @@ mod tests {
             .await
             .expect("repeat schema initialization");
         assert_eq!(
-            store
-                .all_workspaces()
-                .await
-                .expect("load seeded workspace")
-                .len(),
-            1
+            store.all_workspaces().await.expect("load workspaces").len(),
+            0
         );
     }
 
@@ -2681,7 +2677,7 @@ mod tests {
             .expect("admin login");
         assert!(store.admin_session(&admin.token).await.unwrap().is_some());
         let (invite, url) = store
-            .create_initial_invitation(DEFAULT_ORGANIZATION_ID)
+            .create_personal_invitation()
             .await
             .expect("invitation");
         assert!(url.as_str().contains(&invite));
@@ -2692,6 +2688,13 @@ mod tests {
             .expect("registration");
         assert_eq!(registered.email, "alice@example.com");
         assert_eq!(registered.preferred_name, "Alice");
+        let organizations = store
+            .list_organizations(&registered.user_id)
+            .await
+            .expect("personal organization");
+        assert_eq!(organizations.len(), 1);
+        assert_eq!(organizations[0].name, "Alice Personal");
+        assert_eq!(organizations[0].role, "owner");
         assert!(store
             .register(&invite, "bob@example.com", "Bob", "password123")
             .await
@@ -2747,6 +2750,16 @@ mod tests {
             .register(&alice_invite, "alice@example.com", "Alice", "password123")
             .await
             .expect("register alice");
+        let alice_organizations = store
+            .list_organizations(&alice.user_id)
+            .await
+            .expect("alice organizations");
+        assert_eq!(alice_organizations.len(), 1);
+        assert_eq!(
+            alice_organizations[0].organization_id,
+            organization.organization_id
+        );
+        assert_ne!(alice_organizations[0].name, "Alice Personal");
 
         let workspaces = store
             .list_workspaces(&organization.organization_id, &alice.user_id)
@@ -2802,10 +2815,17 @@ mod tests {
     async fn workspace_access_is_limited_to_organization_members() {
         let store = AuthStore::for_test("owner-password").await;
         let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
-        let (invite, _) = store
-            .create_invitation(DEFAULT_ORGANIZATION_ID, &owner.user_id)
+        let personal = store
+            .list_organizations(&owner.user_id)
             .await
-            .expect("default organization invite");
+            .expect("owner organizations")
+            .into_iter()
+            .next()
+            .expect("personal organization");
+        let (invite, _) = store
+            .create_invitation(&personal.organization_id, &owner.user_id)
+            .await
+            .expect("personal organization invite");
         let alice = store
             .register(&invite, "alice@example.com", "Alice", "password123")
             .await
@@ -3051,6 +3071,10 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {}", claim.machine_token))
                 .expect("authorization header"),
         );
+        assert_eq!(
+            store.active_machine_count().await.expect("machine count"),
+            1
+        );
 
         store
             .delete_machine("workspace-a", &claim.server_id, &["agent-a".to_string()])
@@ -3058,6 +3082,10 @@ mod tests {
             .expect("delete machine");
 
         assert!(store.authenticate_machine(&headers).await.is_err());
+        assert_eq!(
+            store.active_machine_count().await.expect("machine count"),
+            0
+        );
         let machine_name =
             sqlx::query_scalar::<_, String>("SELECT name FROM machine_names WHERE server_id = $1")
                 .bind(&claim.server_id)

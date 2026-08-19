@@ -72,7 +72,7 @@ members share a broad operational surface.
 | Credential or identity | Scope | Important limitation |
 | --- | --- | --- |
 | User session cookie | User plus organization memberships | Browser identity is not propagated to Host operations end to end |
-| Admin session cookie | Platform administration | Separate high-impact trust boundary |
+| Admin session cookie | User invitation creation and aggregate platform resource counts | Separate high-impact trust boundary |
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
 | Machine Bearer credential | One machine record and workspace | Controller operations are attributed primarily to the machine |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |

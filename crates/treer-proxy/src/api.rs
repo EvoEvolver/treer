@@ -283,10 +283,10 @@ pub fn router(
     let admin = Router::new()
         .route("/api/admin/me", get(auth::admin_me))
         .route("/api/admin/logout", post(auth::admin_logout))
-        .route("/api/admin/organizations", get(auth::admin_organizations))
+        .route("/api/admin/dashboard", get(auth::admin_dashboard))
         .route(
-            "/api/admin/organizations/{organization_id}/initial-invitation",
-            post(auth::admin_create_initial_invitation),
+            "/api/admin/invitations",
+            post(auth::admin_create_invitation),
         )
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
@@ -2296,6 +2296,7 @@ mod tests {
     async fn agent_identity_tokens_use_the_canonical_service_audience() {
         let state = state_with_managed_agent().await;
         let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
         let service = auth
             .create_machine_service(
                 "default",
@@ -2364,6 +2365,7 @@ mod tests {
     async fn managed_agent_can_manage_services_and_virtual_hosts() {
         let state = state_with_managed_agent().await;
         let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
         let policy = PolicyEngine::allow_all();
         let machine = MachineSession {
             server_id: Some("machine-a".to_string()),
@@ -2453,6 +2455,7 @@ mod tests {
     #[tokio::test]
     async fn browser_tunnel_rejects_tcp_services_before_opening_a_stream() {
         let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
         let service = auth
             .create_machine_service(
                 "default",
@@ -2515,6 +2518,7 @@ mod tests {
             .expect("register controller");
 
         let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
         let service = auth
             .create_machine_service(
                 "default",

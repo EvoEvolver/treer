@@ -257,6 +257,16 @@ impl AppState {
             })
     }
 
+    pub async fn platform_agent_count(&self) -> usize {
+        self.inner
+            .workspaces
+            .read()
+            .await
+            .values()
+            .map(|workspace| workspace.agents.len())
+            .sum()
+    }
+
     pub async fn register_server(
         &self,
         mut server: ServerInfo,
@@ -2159,6 +2169,33 @@ mod tests {
             exit_code: None,
             output_revision: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn platform_agent_count_sums_current_workspace_agents() {
+        let state = AppState::new();
+        state.ensure_workspace("alpha", "Alpha").await;
+        state.ensure_workspace("beta", "Beta").await;
+        let mut beta_agent = test_agent("agent-beta", "Beta agent");
+        beta_agent.workspace_id = "beta".to_string();
+        {
+            let mut workspaces = state.inner.workspaces.write().await;
+            workspaces
+                .get_mut("alpha")
+                .expect("alpha workspace")
+                .agents
+                .insert(
+                    "agent-alpha".to_string(),
+                    test_agent("agent-alpha", "Alpha agent"),
+                );
+            workspaces
+                .get_mut("beta")
+                .expect("beta workspace")
+                .agents
+                .insert("agent-beta".to_string(), beta_agent);
+        }
+
+        assert_eq!(state.platform_agent_count().await, 2);
     }
 
     #[tokio::test]

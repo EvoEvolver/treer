@@ -46,12 +46,47 @@ CREATE TABLE IF NOT EXISTS invitations (
     created_by TEXT NOT NULL,
     used_at TEXT,
     used_by TEXT,
-    organization_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')),
+    kind TEXT NOT NULL CONSTRAINT invitations_kind_check
+        CHECK(kind IN ('personal', 'organization')),
+    organization_id TEXT,
+    role TEXT CHECK(role IN ('owner', 'admin', 'member')),
+    CONSTRAINT invitations_target_check CHECK(
+        (kind = 'personal' AND organization_id IS NULL AND role IS NULL) OR
+        (kind = 'organization' AND organization_id IS NOT NULL AND role IS NOT NULL)
+    ),
     FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE
 );
-CREATE UNIQUE INDEX IF NOT EXISTS invitations_pending_owner
-    ON invitations(organization_id) WHERE role = 'owner' AND used_at IS NULL;
+
+-- Upgrade invitations created before invite kinds were explicit. Existing
+-- initial-owner invitations remain valid organization invitations.
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS kind TEXT;
+UPDATE invitations SET kind = 'organization' WHERE kind IS NULL;
+ALTER TABLE invitations ALTER COLUMN kind SET NOT NULL;
+ALTER TABLE invitations ALTER COLUMN organization_id DROP NOT NULL;
+ALTER TABLE invitations ALTER COLUMN role DROP NOT NULL;
+DROP INDEX IF EXISTS invitations_pending_owner;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'invitations'::regclass
+          AND conname = 'invitations_kind_check'
+    ) THEN
+        ALTER TABLE invitations ADD CONSTRAINT invitations_kind_check
+            CHECK(kind IN ('personal', 'organization'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'invitations'::regclass
+          AND conname = 'invitations_target_check'
+    ) THEN
+        ALTER TABLE invitations ADD CONSTRAINT invitations_target_check CHECK(
+            (kind = 'personal' AND organization_id IS NULL AND role IS NULL) OR
+            (kind = 'organization' AND organization_id IS NOT NULL AND role IS NOT NULL)
+        );
+    END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,

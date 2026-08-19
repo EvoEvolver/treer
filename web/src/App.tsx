@@ -21,7 +21,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, websocketUrl, type AdminOrganization, type Agent, type Machine, type MachineService, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -92,7 +92,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
     <form onSubmit={submit} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm">
       <div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] font-serif text-lg font-bold text-white">T</div>
       <h1 className="text-xl font-semibold">{registering ? "Join Treer" : "Sign in to Treer"}</h1>
-      <p className="mt-1 text-sm text-muted-foreground">{registering ? "Create your account to join the workspace." : "Open your agent workspace."}</p>
+      <p className="mt-1 text-sm text-muted-foreground">{registering ? "Create your account from this invitation." : "Open your agent workspace."}</p>
       <div className="mt-6 space-y-2"><Label htmlFor="email">Email</Label><Input id="email" type="text" inputMode="email" autoComplete="email" value={email} maxLength={254} onChange={(event) => setEmail(event.target.value)} required autoFocus /></div>
       {registering && <div className="mt-4 space-y-2"><Label htmlFor="preferred-name">Preferred name</Label><Input id="preferred-name" autoComplete="name" value={preferredName} maxLength={80} onChange={(event) => setPreferredName(event.target.value)} required /></div>}
       <div className="mt-4 space-y-2"><Label htmlFor="password">Password</Label><Input id="password" type="password" autoComplete={registering ? "new-password" : "current-password"} value={password} minLength={registering ? 8 : undefined} onChange={(event) => setPassword(event.target.value)} required /></div>
@@ -108,51 +108,50 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
 function AdminPanel() {
   const [authenticated, setAuthenticated] = useState<boolean | undefined>(undefined)
   const [password, setPassword] = useState("")
-  const [organizations, setOrganizations] = useState<AdminOrganization[]>([])
+  const [dashboard, setDashboard] = useState<AdminDashboard | null>(null)
   const [inviteUrl, setInviteUrl] = useState("")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
-  const loadOrganizations = useCallback(async () => {
-    const data = await api<{ organizations: AdminOrganization[] }>("/api/admin/organizations")
-    setOrganizations(data.organizations)
+  const loadDashboard = useCallback(async () => {
+    setDashboard(await api<AdminDashboard>("/api/admin/dashboard"))
   }, [])
 
   useEffect(() => {
     api<{ admin: boolean }>("/api/admin/me")
-      .then(() => { setAuthenticated(true); return loadOrganizations() })
+      .then(() => { setAuthenticated(true); return loadDashboard() })
       .catch((reason) => {
         if (reason instanceof ApiError && reason.status === 401) setAuthenticated(false)
         else setError(reason instanceof Error ? reason.message : "Unable to load admin panel")
       })
-  }, [loadOrganizations])
+  }, [loadDashboard])
 
   async function login(event: FormEvent) {
     event.preventDefault(); setSubmitting(true); setError("")
     try {
       await api("/api/admin/login", { method: "POST", body: JSON.stringify({ password }) })
-      setPassword(""); setAuthenticated(true); await loadOrganizations()
+      setPassword(""); setAuthenticated(true); await loadDashboard()
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Authentication failed") }
     finally { setSubmitting(false) }
   }
 
-  async function createInitialInvite(organizationId: string) {
+  async function createInvite() {
     setError("")
     try {
-      const data = await api<{ url: string }>(`/api/admin/organizations/${encodeURIComponent(organizationId)}/initial-invitation`, { method: "POST", body: "{}" })
-      setInviteUrl(data.url); await loadOrganizations()
+      const data = await api<{ url: string }>("/api/admin/invitations", { method: "POST", body: "{}" })
+      setInviteUrl(data.url)
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to create invitation") }
   }
 
   async function logout() {
     await api("/api/admin/logout", { method: "POST", body: "{}" })
-    setAuthenticated(false); setOrganizations([]); setInviteUrl("")
+    setAuthenticated(false); setDashboard(null); setInviteUrl("")
   }
 
   if (authenticated === undefined) return <div className="grid min-h-dvh place-items-center bg-[#f7f7f5] text-sm text-muted-foreground">Loading admin...</div>
   if (!authenticated) return <main className="grid min-h-dvh place-items-center bg-[#f7f7f5] p-4"><form onSubmit={login} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm"><div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] text-white"><ShieldCheck className="size-4" /></div><h1 className="text-xl font-semibold">Treer administration</h1><p className="mt-1 text-sm text-muted-foreground">Platform access is separate from user accounts.</p><div className="mt-6 space-y-2"><Label htmlFor="admin-password">Admin password</Label><Input id="admin-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></div><div className="mt-3 min-h-5 text-xs text-destructive">{error}</div><div className="mt-4 flex justify-end"><Button type="submit" disabled={submitting}>{submitting ? "Please wait" : "Open admin panel"}</Button></div></form></main>
 
-  return <main className="min-h-dvh bg-[#f7f7f5]"><header className="border-b bg-background"><div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-5"><div className="flex items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span>Treer administration</div><div className="flex items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-7"><h1 className="text-2xl font-semibold">Organizations</h1><p className="mt-1 text-sm text-muted-foreground">Bootstrap organizations that do not have an owner yet.</p></div>{error && <div className="mb-4 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="divide-y border-y">{organizations.map((organization) => { const initialized = organization.owner_count > 0; const unavailable = initialized || organization.initial_invitation_pending; return <div key={organization.organization_id} className="grid min-h-16 grid-cols-1 items-start gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div className="min-w-0"><div className="truncate text-sm font-medium">{organization.name}</div><div className="mt-1 text-xs text-muted-foreground">{organization.member_count} members · {initialized ? "Initialized" : organization.initial_invitation_pending ? "Invitation pending" : "No owner"}</div></div><Button size="sm" className="w-full sm:w-auto" variant={unavailable ? "outline" : "default"} disabled={unavailable} onClick={() => createInitialInvite(organization.organization_id)}><KeyRound />Create initial invite</Button></div> })}</div></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>Initial owner invitation</DialogTitle><DialogDescription>This one-time link creates the organization's first owner account.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
+  return <main className="min-h-dvh bg-[#f7f7f5]"><header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div><Button size="sm" onClick={loadDashboard}><RotateCw />Refresh</Button></div>{error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="grid grid-cols-2 border-y"><div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div><div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div></div><section className="mt-12"><h2 className="text-sm font-semibold">User invitations</h2><div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div><Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button></div></section></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
 }
 
 function WorkspaceApp() {

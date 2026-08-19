@@ -160,15 +160,18 @@ installation flow.
 
 The platform administrator is not a Treer user and does not belong to an
 organization. Open `/admin` and use the password supplied in `ADMIN_PASSWORD`
-to access the separate admin panel. For an organization without an owner, the
-panel can create a single-use initial invitation. That invitation lets the
-first owner register with an email address, preferred name, and password.
+to access the separate admin dashboard. It reports the current platform-wide
+machine and Agent totals and creates single-use user invitations. A user who
+registers from an administrator invitation receives an organization named
+`<preferred name> Personal` and owns it. Treer does not seed an initial
+organization or workspace.
 
-Organization owners and administrators can create subsequent member
-invitations from **Members**. Users sign in with email, and can update their
-email or preferred name without changing their stable identity or organization
-access. Organization owners and administrators can also rename their
-organization.
+Organization owners and administrators can create member invitations from
+**Members**. Registering from an organization invitation only joins that
+organization; it does not create another personal organization. Users sign in
+with email, and can update their email or preferred name without changing their
+stable identity or organization access. Organization owners and administrators
+can also rename their organization.
 
 Users, invitations, sessions, organizations, machine credentials, services,
 and workload signing keys are stored in PostgreSQL. The Proxy requires
