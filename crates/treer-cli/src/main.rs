@@ -13,10 +13,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
-    AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
+    AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, InputAgentRequest, MachineServiceProtocol, RenameRequest,
-    ServerInfo, ServerStatus, TerminalClientMessage, TerminalServerMessage, TransferBinaryFrame,
-    TransferServerMessage, TransferStats, UpdateMachineServiceRequest,
+    SendAgentMailRequest, ServerInfo, ServerStatus, TerminalClientMessage, TerminalServerMessage,
+    TransferBinaryFrame, TransferServerMessage, TransferStats, UpdateMachineServiceRequest,
     WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
     AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
@@ -80,6 +80,19 @@ enum Command {
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
     Discover,
+    #[command(about = "Send durable mail without interrupting recipient agents")]
+    Mail {
+        #[arg(short = 't', long = "to", required = true)]
+        recipients: Vec<String>,
+        #[arg(short = 'c', long = "context")]
+        context_ids: Vec<String>,
+        body: String,
+    },
+    #[command(about = "Read and mark the current agent's unread mail")]
+    Inbox {
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+    },
     #[command(about = "Open a shell on another workspace machine")]
     Ssh {
         target: String,
@@ -458,6 +471,36 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Whoami => whoami(&client).await?,
         Command::Discover => discover(&client).await?,
+        Command::Mail {
+            recipients,
+            context_ids,
+            body,
+        } => {
+            let recipients = recipients
+                .into_iter()
+                .map(|target| normalize_target(&target))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            client
+                .value(
+                    Method::POST,
+                    "api/mail",
+                    Some(serde_json::to_value(SendAgentMailRequest {
+                        recipients,
+                        context_ids,
+                        body,
+                    })?),
+                )
+                .await?
+        }
+        Command::Inbox { limit } => {
+            client
+                .value(
+                    Method::POST,
+                    "api/inbox",
+                    Some(serde_json::to_value(AgentInboxRequest { limit })?),
+                )
+                .await?
+        }
         Command::List => client.value(Method::GET, "api/agents", None).await?,
         Command::Create {
             server,
@@ -1647,6 +1690,40 @@ mod tests {
                 }
             }) if audience == "api"
         ));
+    }
+
+    #[test]
+    fn mail_and_inbox_commands_parse_agent_friendly_repeated_options() {
+        let mail = Args::try_parse_from([
+            "treer",
+            "mail",
+            "--to",
+            "reviewer",
+            "-t",
+            "tester",
+            "--context",
+            "msg_one",
+            "-c",
+            "msg_two",
+            "Review complete.",
+        ])
+        .expect("mail command should parse");
+        assert!(matches!(
+            mail.command,
+            Some(Command::Mail {
+                recipients,
+                context_ids,
+                body,
+            }) if recipients == ["reviewer", "tester"]
+                && context_ids == ["msg_one", "msg_two"]
+                && body == "Review complete."
+        ));
+        assert!(Args::try_parse_from(["treer", "mail", "no recipient"]).is_err());
+
+        let inbox = Args::try_parse_from(["treer", "inbox", "--limit", "100"])
+            .expect("inbox command should parse");
+        assert!(matches!(inbox.command, Some(Command::Inbox { limit: 100 })));
+        assert!(Args::try_parse_from(["treer", "inbox", "--limit", "101"]).is_err());
     }
 
     #[test]

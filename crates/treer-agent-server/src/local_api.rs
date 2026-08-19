@@ -14,10 +14,10 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
-    ApiError, CreateAgentRequest, CreateMachineServiceRequest, CreateVirtualNetworkHostRequest,
-    InputAgentRequest, PromptAgentRequest, ProtocolError, RenameRequest, TerminalServerMessage,
-    UpdateMachineServiceRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
-    WORKLOAD_CREDENTIAL_HEADER,
+    AgentInboxRequest, ApiError, CreateAgentRequest, CreateMachineServiceRequest,
+    CreateVirtualNetworkHostRequest, InputAgentRequest, PromptAgentRequest, ProtocolError,
+    RenameRequest, SendAgentMailRequest, TerminalServerMessage, UpdateMachineServiceRequest,
+    WorkloadIdentityTokenRequest, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -166,6 +166,8 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/health", get(health))
         .route("/api/discovery", get(discovery))
         .route("/api/identity/token", post(issue_identity_token))
+        .route("/api/mail", post(send_mail))
+        .route("/api/inbox", post(read_inbox))
         .route(
             "/api/machines/{server_id}",
             axum::routing::patch(rename_machine).delete(delete_machine),
@@ -236,6 +238,36 @@ async fn issue_identity_token(
             .post_as("identity/token", &body, Some(agent_id))
             .await?,
     ))
+}
+
+async fn send_mail(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<SendAgentMailRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let (agent_id, workload_credential) = workload_identity(&headers)?;
+    state
+        .runtime
+        .authenticate_agent(agent_id, workload_credential)
+        .map_err(LocalApiError::unauthorized)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(state.post_as("mail", &body, Some(agent_id)).await?))
+}
+
+async fn read_inbox(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<AgentInboxRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let (agent_id, workload_credential) = workload_identity(&headers)?;
+    state
+        .runtime
+        .authenticate_agent(agent_id, workload_credential)
+        .map_err(LocalApiError::unauthorized)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(state.post_as("inbox", &body, Some(agent_id)).await?))
 }
 
 async fn list_agents(State(state): State<LocalApiState>) -> Result<Json<Value>, LocalApiError> {

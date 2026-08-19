@@ -97,6 +97,48 @@ pub struct WorkspaceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailAddress {
+    pub agent_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailMessage {
+    pub message_id: String,
+    pub workspace_id: String,
+    pub sender: AgentMailAddress,
+    pub recipients: Vec<AgentMailAddress>,
+    #[serde(default)]
+    pub context_ids: Vec<String>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendAgentMailRequest {
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub context_ids: Vec<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendAgentMailResponse {
+    pub message: AgentMailMessage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInboxRequest {
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInboxResponse {
+    pub messages: Vec<AgentMailMessage>,
+    pub remaining_unread: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadIdentityTokenRequest {
     pub audience: String,
 }
@@ -1167,6 +1209,27 @@ mod tests {
         assert_eq!(
             serde_json::to_value(inactive).expect("serialize verification"),
             serde_json::json!({ "active": false })
+        );
+    }
+
+    #[test]
+    fn agent_mail_requests_have_stable_wire_shapes() {
+        let request = SendAgentMailRequest {
+            recipients: vec!["reviewer".to_string(), "agent_2".to_string()],
+            context_ids: vec!["msg_parent".to_string()],
+            body: "Review complete.".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize mail request"),
+            serde_json::json!({
+                "recipients": ["reviewer", "agent_2"],
+                "context_ids": ["msg_parent"],
+                "body": "Review complete."
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(AgentInboxRequest { limit: 50 }).expect("serialize inbox request"),
+            serde_json::json!({ "limit": 50 })
         );
     }
 

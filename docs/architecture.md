@@ -61,6 +61,9 @@ flowchart TB
 - Shared wire models live in protocol crates. A client and server must not grow
   parallel copies of the same contract.
 - Every distributed lookup is scoped by workspace before machine or Agent ID.
+- Agent mail is a pull-only PostgreSQL path. Sending mail never becomes terminal
+  input or a runtime event, and reading an inbox marks only that recipient's
+  returned deliveries read.
 - Enrolled machines establish outbound connections to the Proxy.
 - Remote working directories and file paths are resolved beneath the machine's
   configured workspace root. This path rule is not filesystem sandboxing.
@@ -90,17 +93,27 @@ flowchart TB
 | Browser to App | HTTPS static files and runtime JSON configuration | None |
 | Browser to Proxy | Cross-origin HTTP/JSON and WebSocket frames | Host-only user or admin session cookie; exact App origin allowlist |
 | Controller to Proxy | Persistent WebSocket, JSON and binary frames | Workspace-bound machine Bearer credential |
-| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; workload-token requests require the Agent credential |
+| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; mail, inbox, and workload-token requests require the Agent credential |
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
 | Host to child process | PTY raw bytes | Host process ownership |
 | Proxy replica to Proxy replica | Core NATS MessagePack request/reply and broadcast; JetStream KV for leases, snapshots, and durable projections | Private NATS boundary |
 
 PostgreSQL persists users, organizations, memberships, sessions, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
-display names, machine services, and virtual hosts. Administrator invitations
+display names, Agent messages, per-recipient read state, message context edges,
+machine services, and virtual hosts. Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
+
+Agent mail travels from the caller's loopback API to the Proxy under the
+Controller's machine credential and caller Agent ID. The Controller first
+validates the private workload credential, and the Proxy verifies that the
+Agent belongs to that machine and workspace. Recipient names resolve to stable
+Agent IDs before one message and its recipient deliveries are committed.
+`inbox` locks an oldest-first unread batch, marks that recipient's rows read,
+and returns the messages with sender, recipient, and context IDs. This path is
+shared PostgreSQL state and neither requires NATS nor interrupts a live Agent.
 
 Each Controller connection,
 pending command, browser session, terminal leg, transfer, and network route is

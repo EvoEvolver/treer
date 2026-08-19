@@ -79,7 +79,7 @@ members share a broad operational surface.
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
 | Machine Bearer credential | One machine record and workspace | Controller operations are attributed primarily to the machine |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
-| Agent workload credential | One managed Agent process | Same-account host processes may be able to inspect another process environment or Host metadata |
+| Agent workload credential | One managed Agent process; inbox, mail, and workload-token requests | Same-account host processes may be able to inspect another process environment or Host metadata |
 | Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
 
@@ -92,8 +92,11 @@ scoping alone does not isolate those credentials.
 
 ## Data and control-plane exposure
 
-The Proxy can observe control messages, every requested network destination,
-and relayed terminal, transfer, and workspace virtual-host data. Ordinary
+The Proxy can observe control messages, durable Agent mail bodies and metadata,
+every requested network destination, and relayed terminal, transfer, and
+workspace virtual-host data. Agent mail is stored as plaintext in PostgreSQL;
+context IDs may reference only same-workspace messages the sender previously
+sent or received. Ordinary
 outbound TCP payload stays between the source Controller and destination; the
 Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy

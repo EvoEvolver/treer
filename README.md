@@ -178,8 +178,8 @@ with email, and can update their email or preferred name without changing their
 stable identity or organization access. Organization owners and administrators
 can also rename their organization.
 
-Users, invitations, sessions, organizations, machine credentials, services,
-and workload signing keys are stored in PostgreSQL. The Proxy requires
+Users, invitations, sessions, organizations, machine credentials, Agent mail,
+services, and workload signing keys are stored in PostgreSQL. The Proxy requires
 `DATABASE_URL`; `just test-db-up` starts the local Docker database used by the
 test suite. Changing `ADMIN_PASSWORD` changes the administrator's next login
 password without rewriting user accounts.
@@ -429,6 +429,24 @@ treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
 treer agent send-keys reviewer ctrl-c
 ```
+
+For asynchronous coordination, `mail` persists a message without writing to a
+recipient's PTY or changing its runtime state. Recipients see mail only when
+they explicitly call `inbox`; the returned batch is then marked read:
+
+```bash
+treer mail --to reviewer "Review the parser when you next check your inbox."
+treer inbox
+treer mail --to coordinator --context msg_RETURNED_BY_INBOX "Review complete."
+treer mail -t coordinator -t tester -c msg_first -c msg_second "Checks agree."
+treer inbox --limit 100
+```
+
+Both `--to` and `--context` may be repeated. A first message omits context;
+replies use one or more exact prior message IDs to form a message graph. Mail
+is workspace-scoped and requires a managed Agent workload credential. Messages,
+recipient-specific unread state, and context edges live in PostgreSQL, so any
+Proxy replica can serve the next inbox call without NATS or sticky routing.
 
 ## Workload identity
 

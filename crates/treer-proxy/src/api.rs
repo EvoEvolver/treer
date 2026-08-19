@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,9 +18,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
-    AgentCommand, ApiError, CreateAgentRequest, CreateMachineServiceRequest,
-    CreateVirtualNetworkHostRequest, InputAgentRequest, MachineEnrollmentRequest,
-    MachineEnrollmentResponse, MachineService, PromptAgentRequest, ProtocolError, RenameRequest,
+    AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentMailAddress, ApiError,
+    CreateAgentRequest, CreateMachineServiceRequest, CreateVirtualNetworkHostRequest,
+    InputAgentRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
+    PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest, SendAgentMailResponse,
     TerminalClientMessage, TerminalServerMessage, TransferServerMessage,
     UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
     WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
@@ -33,9 +34,10 @@ use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
 use crate::identity::IdentityIssuer;
 use crate::policy::{
     PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_IDENTITY_TOKEN_ISSUE,
-    ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE,
-    ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE,
-    ACTION_VIRTUAL_HOST_LIST, RESOURCE_MACHINE_SERVICE, RESOURCE_VIRTUAL_HOST,
+    ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE,
+    ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
+    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT_MAILBOX,
+    RESOURCE_MACHINE_SERVICE, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, ShellOptions, SocketFrame, TransferDirection, TransferOptions};
 
@@ -144,6 +146,14 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/identity/token",
             post(agent_issue_identity_token),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/mail",
+            post(agent_send_mail),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/inbox",
+            post(agent_read_inbox),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents",
@@ -431,6 +441,100 @@ async fn agent_issue_identity_token(
             ApiFailure::internal("identity_signing_failed", "failed to sign identity token")
         })?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(token)).into_response())
+}
+
+async fn agent_send_mail(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<SendAgentMailRequest>,
+) -> Result<Json<SendAgentMailResponse>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let PolicySubject::Agent { agent_id, .. } = &subject else {
+        return Err(ApiFailure::internal(
+            "mail_subject_error",
+            "mail sender was not an agent",
+        ));
+    };
+    if request.recipients.is_empty() || request.recipients.len() > 32 {
+        return Err(ApiFailure::bad_request(
+            "invalid_mail_recipients",
+            "mail must have 1-32 recipients",
+        ));
+    }
+    let sender = state.resolve_agent(&workspace_id, agent_id).await?;
+    let mut seen = HashSet::new();
+    let mut recipients = Vec::new();
+    for target in &request.recipients {
+        let target = target.trim();
+        let target = if matches!(target, "self" | ".") {
+            agent_id.as_str()
+        } else {
+            target
+        };
+        let recipient = state.resolve_agent(&workspace_id, target).await?;
+        if !seen.insert(recipient.agent_id.clone()) {
+            continue;
+        }
+        policy
+            .authorize(&PolicyRequest::new(
+                &workspace_id,
+                subject.clone(),
+                ACTION_MAIL_SEND,
+                PolicyResource::new(RESOURCE_AGENT_MAILBOX, &recipient.agent_id),
+            ))
+            .await?;
+        recipients.push(AgentMailAddress {
+            agent_id: recipient.agent_id,
+            name: recipient.name,
+        });
+    }
+    let message = auth
+        .send_agent_mail(
+            &workspace_id,
+            AgentMailAddress {
+                agent_id: sender.agent_id,
+                name: sender.name,
+            },
+            recipients,
+            request.context_ids,
+            &request.body,
+        )
+        .await?;
+    Ok(Json(SendAgentMailResponse { message }))
+}
+
+async fn agent_read_inbox(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<AgentInboxRequest>,
+) -> Result<Json<AgentInboxResponse>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let PolicySubject::Agent { agent_id, .. } = &subject else {
+        return Err(ApiFailure::internal(
+            "mail_subject_error",
+            "mailbox reader was not an agent",
+        ));
+    };
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_MAIL_READ,
+            PolicyResource::new(RESOURCE_AGENT_MAILBOX, agent_id),
+        ))
+        .await?;
+    Ok(Json(
+        auth.read_agent_inbox(&workspace_id, agent_id, request.limit)
+            .await?,
+    ))
 }
 
 async fn bootstrap_info(
@@ -2098,6 +2202,9 @@ mod tests {
             exit_code: None,
             output_revision: 0,
         };
+        let mut recipient = agent.clone();
+        recipient.agent_id = "agent-b".to_string();
+        recipient.name = "reviewer".to_string();
         let connection_id = Uuid::new_v4();
         let (outgoing, _incoming) = tokio::sync::mpsc::unbounded_channel();
         state
@@ -2109,7 +2216,7 @@ mod tests {
                 connection_id,
                 treer_protocol::AgentServerSnapshot {
                     server,
-                    agents: vec![agent],
+                    agents: vec![agent, recipient],
                 },
             )
             .await
@@ -2513,6 +2620,62 @@ mod tests {
         let claims = verified.claims.expect("verified claims");
         assert_eq!(claims.sub, "agent-a");
         assert_eq!(claims.machine_id, "machine-a");
+    }
+
+    #[tokio::test]
+    async fn managed_agent_mail_resolves_recipients_without_interrupting_runtime() {
+        let state = state_with_managed_agent().await;
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let policy = PolicyEngine::allow_all();
+        let machine = MachineSession {
+            server_id: Some("machine-a".to_string()),
+            workspace_id: Some("default".to_string()),
+        };
+        let mut sender_headers = HeaderMap::new();
+        sender_headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+
+        let sent = agent_send_mail(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(machine.clone()),
+            sender_headers,
+            Path("default".to_string()),
+            Json(SendAgentMailRequest {
+                recipients: vec!["reviewer".to_string()],
+                context_ids: vec![],
+                body: "Check this when convenient.".to_string(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("send mail: {}", error.error.message));
+        assert_eq!(sent.0.message.sender.agent_id, "agent-a");
+        assert_eq!(sent.0.message.recipients[0].agent_id, "agent-b");
+        assert_eq!(
+            state
+                .resolve_agent("default", "agent-b")
+                .await
+                .expect("recipient remains available")
+                .status,
+            treer_protocol::AgentStatus::Idle
+        );
+
+        let mut recipient_headers = HeaderMap::new();
+        recipient_headers.insert(AGENT_ID_HEADER, "agent-b".parse().expect("agent header"));
+        let inbox = agent_read_inbox(
+            State(state),
+            Extension(auth),
+            Extension(policy),
+            Extension(machine),
+            recipient_headers,
+            Path("default".to_string()),
+            Json(AgentInboxRequest { limit: 50 }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("read inbox: {}", error.error.message));
+        assert_eq!(inbox.0.messages, [sent.0.message]);
+        assert_eq!(inbox.0.remaining_unread, 0);
     }
 
     #[tokio::test]

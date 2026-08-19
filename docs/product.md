@@ -24,8 +24,9 @@ In concrete terms:
 2. A short-lived, single-use link enrolls that machine into one workspace.
 3. Workspace members can create, observe, prompt, and stop Codex, Claude, or
    shell agents through the web application or CLI.
-4. Managed agents can discover and coordinate with peers through a stable CLI
-   contract rather than knowing machine addresses.
+4. Managed agents can discover peers, exchange pull-only durable mail, and
+   coordinate through a stable CLI contract rather than knowing machine
+   addresses.
 5. Agents can register and maintain long-running machine services, then expose
    stable workspace aliases without making service ports public.
 6. Machines connect outward to the Proxy; local Agent Server, service, and SSH

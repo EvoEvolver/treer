@@ -1,6 +1,6 @@
 ---
 name: treer
-description: Coordinate distributed coding agents and run commands on workspace machines through the Treer CLI. Use when the user explicitly mentions Treer or asks to discover, create, inspect, prompt, wait for, send keys to, read, stop, or remotely access agents and machines registered in a Treer workspace. Requires a Treer-managed agent environment for self-relative operations.
+description: Coordinate distributed coding agents and run commands on workspace machines through the Treer CLI. Use when the user explicitly mentions Treer or asks to discover, create, inspect, mail, read an inbox, prompt, wait for, send keys to, read, stop, or remotely access agents and machines registered in a Treer workspace. Requires a Treer-managed agent environment for self-relative operations.
 ---
 
 # Treer
@@ -200,6 +200,41 @@ that machine:
 treer machine delete <server-id>
 ```
 
+## Exchange non-interrupting mail
+
+Use durable mail for asynchronous coordination that must not inject terminal
+input or start a turn in the recipient. A root message needs one or more
+recipients and no context:
+
+```bash
+treer mail --to reviewer "Review the parser when you next check your inbox."
+```
+
+Use the exact returned `message_id` as context when replying. Repeat `--to` and
+`--context` for a group message or a merge in the message graph:
+
+```bash
+treer mail --to coordinator --context msg_123 "Review complete; two findings."
+treer mail -t coordinator -t tester -c msg_123 -c msg_456 "Both checks agree."
+```
+
+Mail does not notify, prompt, wake, or otherwise interrupt recipients. An Agent
+sees unread mail only when it explicitly calls:
+
+```bash
+treer inbox
+treer inbox --limit 100
+```
+
+`inbox` returns the oldest unread batch as JSON and marks that returned batch
+read. Check `remaining_unread` and call it again when it is nonzero. Preserve
+message IDs from the response when a later message should reference them.
+
+Recipient targets accept an Agent ID, a unique name, or `self`/`.`. Context
+messages must belong to the same workspace and must have been sent or received
+by the caller. Use `mail` for deferred collaboration; use `agent prompt` only
+when intentionally starting work in another Agent's terminal session.
+
 ## Create and coordinate a peer
 
 Select an online `server_id` from `treer discover`, then create the requested
@@ -282,8 +317,9 @@ validates every key before sending any bytes.
   human-operated TTY.
 - Do not run interactive `treer ssh` from an automated agent workflow; pass a
   finite command after `--` and check its exit status.
-- Do not claim reliable task delivery, durable mailboxes, or strict turn
-  correlation; the current collaboration surface is terminal-oriented.
+- Mail is durable but pull-only. Do not claim that it wakes a recipient, reaches
+  a deleted Agent identity, or proves that the message body was acted upon.
+- Do not claim strict turn correlation for terminal-oriented `prompt --wait`.
 - Use `treer agent stop <target>` only when terminating that process is intended.
 - Use `treer agent delete <target>` only when permanent removal is intended.
 - Use `treer machine delete <server-id>` only when the user explicitly asks to
