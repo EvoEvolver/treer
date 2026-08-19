@@ -6,6 +6,7 @@ import {
   Copy,
   ExternalLink,
   FolderKanban,
+  Github,
   GitBranch,
   KeyRound,
   LogOut,
@@ -41,6 +42,7 @@ type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
 type MainView = "terminal" | "inbox" | "network"
 type AuthMode = "login" | "register" | "forgot" | "reset"
+type AuthConfig = { github: boolean; google: boolean; invitation_required: boolean }
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 type DeleteTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 
@@ -70,14 +72,21 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
   const parameters = new URLSearchParams(window.location.search)
   const invite = parameters.get("invite")
   const resetToken = parameters.get("reset")
+  const oauthError = parameters.get("oauth_error")
   const [mode, setMode] = useState<AuthMode>(resetToken ? "reset" : invite ? "register" : "login")
+  const [authConfig, setAuthConfig] = useState<AuthConfig>({ github: false, google: false, invitation_required: true })
   const [email, setEmail] = useState("")
   const [preferredName, setPreferredName] = useState("")
   const [password, setPassword] = useState("")
   const [passwordConfirmation, setPasswordConfirmation] = useState("")
-  const [error, setError] = useState("")
+  const [error, setError] = useState(oauthError ? "OAuth sign-in failed. Try again." : "")
   const [notice, setNotice] = useState("")
   const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    api<AuthConfig>("/api/auth/config").then(setAuthConfig).catch(() => undefined)
+    if (oauthError) window.history.replaceState(null, "", window.location.pathname)
+  }, [oauthError])
 
   function showSignIn(message = "") {
     window.history.replaceState(null, "", window.location.pathname)
@@ -121,15 +130,26 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
     }
   }
 
+  function oauthUrl(provider: "github" | "google") {
+    const url = new URL(proxyUrl(`/api/auth/oauth/${provider}/start`))
+    if (invite) url.searchParams.set("invite", invite)
+    return url.toString()
+  }
+
   const title = mode === "register" ? "Join Treer" : mode === "forgot" ? "Reset your password" : mode === "reset" ? "Choose a new password" : "Sign in to Treer"
-  const description = mode === "register" ? "Create your account from this invitation." : mode === "forgot" ? "Enter the email associated with your account." : mode === "reset" ? "Use at least 8 characters for your new password." : "Open your agent workspace."
+  const description = mode === "register" ? invite ? "Create your account from this invitation." : "Create your account and personal organization." : mode === "forgot" ? "Enter the email associated with your account." : mode === "reset" ? "Use at least 8 characters for your new password." : "Open your agent workspace."
 
   return <main className="grid min-h-dvh place-items-center bg-[#f7f7f5] p-4">
     <form onSubmit={submit} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm">
       <div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] font-serif text-lg font-bold text-white">T</div>
       <h1 className="text-xl font-semibold">{title}</h1>
       <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-      {mode !== "reset" && <div className="mt-6 space-y-2"><Label htmlFor="email">Email</Label><Input id="email" type="email" autoComplete="email" value={email} maxLength={254} onChange={(event) => setEmail(event.target.value)} required autoFocus /></div>}
+      {(mode === "login" || mode === "register") && (authConfig.github || authConfig.google) && <div className="mt-6 space-y-2">
+        {authConfig.github && <Button type="button" variant="outline" className="w-full" onClick={() => { window.location.href = oauthUrl("github") }}><Github />Continue with GitHub</Button>}
+        {authConfig.google && <Button type="button" variant="outline" className="w-full" onClick={() => { window.location.href = oauthUrl("google") }}><Mail />Continue with Google</Button>}
+        <div className="flex items-center gap-3 py-2 text-[11px] text-muted-foreground"><span className="h-px flex-1 bg-border" /><span>or use email</span><span className="h-px flex-1 bg-border" /></div>
+      </div>}
+      {mode !== "reset" && <div className={cn("space-y-2", (mode === "login" || mode === "register") && (authConfig.github || authConfig.google) ? "mt-2" : "mt-6")}><Label htmlFor="email">Email</Label><Input id="email" type="email" autoComplete="email" value={email} maxLength={254} onChange={(event) => setEmail(event.target.value)} required autoFocus /></div>}
       {mode === "register" && <div className="mt-4 space-y-2"><Label htmlFor="preferred-name">Preferred name</Label><Input id="preferred-name" autoComplete="name" value={preferredName} maxLength={80} onChange={(event) => setPreferredName(event.target.value)} required /></div>}
       {(mode === "login" || mode === "register" || mode === "reset") && <div className={cn("space-y-2", mode === "reset" ? "mt-6" : "mt-4")}><Label htmlFor="password">{mode === "reset" ? "New password" : "Password"}</Label><Input id="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} minLength={mode === "login" ? undefined : 8} maxLength={1024} onChange={(event) => setPassword(event.target.value)} required autoFocus={mode === "reset"} /></div>}
       {mode === "reset" && <div className="mt-4 space-y-2"><Label htmlFor="password-confirmation">Confirm new password</Label><Input id="password-confirmation" type="password" autoComplete="new-password" value={passwordConfirmation} minLength={8} maxLength={1024} onChange={(event) => setPasswordConfirmation(event.target.value)} required /></div>}
@@ -138,6 +158,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
       {notice && <div className="mt-2 text-xs leading-5 text-emerald-700">{notice}</div>}
       <div className="mt-4 flex items-center justify-between gap-3">
         {(mode === "register" || mode === "forgot" || mode === "reset") && <Button type="button" variant="ghost" className="px-0 text-primary" onClick={() => showSignIn()}>Back to sign in</Button>}
+        {mode === "login" && !authConfig.invitation_required && <Button type="button" variant="ghost" className="px-0 text-primary" onClick={() => { setMode("register"); setError(""); setNotice("") }}>Create account</Button>}
         <Button type="submit" className="ml-auto" disabled={submitting}>{submitting ? "Please wait" : mode === "register" ? "Create account" : mode === "forgot" ? "Send reset link" : mode === "reset" ? "Update password" : "Sign in"}</Button>
       </div>
     </form>

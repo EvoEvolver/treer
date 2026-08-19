@@ -357,6 +357,12 @@ pub fn router(
         .route("/.well-known/jwks.json", get(workload_identity_jwks))
         .route("/.treer/identity/verify", post(verify_workload_identity))
         .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/config", get(auth::oauth_config))
+        .route("/api/auth/oauth/{provider}/start", get(auth::oauth_start))
+        .route(
+            "/api/auth/oauth/{provider}/callback",
+            get(auth::oauth_callback),
+        )
         .route(
             "/api/auth/request-password-reset",
             post(auth::request_password_reset),

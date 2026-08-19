@@ -99,14 +99,21 @@ flowchart TB
 | Host to child process | PTY raw bytes | Host process ownership |
 | Proxy replica to Proxy replica | Core NATS MessagePack request/reply and broadcast; JetStream KV for leases, snapshots, and durable projections | Private NATS boundary |
 
-PostgreSQL persists users, organizations, memberships, sessions, password
-reset tokens, invitations,
+PostgreSQL persists users, OAuth identities and short-lived OAuth states,
+organizations, memberships, sessions, password reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, Agent messages, per-Agent and per-human read state, message
 context edges, machine services, and virtual hosts. Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
+
+OAuth authorization-code callbacks terminate at the Proxy. PostgreSQL-backed,
+single-use state makes callbacks valid across Proxy replicas. The Proxy uses the
+provider token only to fetch the current stable subject and verified email, then
+discards it. A new provider identity links to an existing user only when that
+verified email matches; subsequent logins resolve the stored provider and
+subject pair even if the provider email changes.
 
 Agent mail and human-directory requests travel from the caller's loopback API
 to the Proxy under the Controller's machine credential and caller Agent ID. The

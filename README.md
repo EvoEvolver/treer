@@ -181,9 +181,10 @@ organization or workspace.
 Organization owners and administrators can create member invitations from
 **Members**. Registering from an organization invitation only joins that
 organization; it does not create another personal organization. Users sign in
-with email, and can update their email or preferred name without changing their
-stable identity or organization access. Organization owners and administrators
-can also rename their organization.
+with email/password or a configured GitHub or Google account, and can update
+their email or preferred name without changing their stable identity or
+organization access. Organization owners and administrators can also rename
+their organization.
 
 Users, invitations, sessions, organizations, machine credentials, Agent mail,
 services, and workload signing keys are stored in PostgreSQL. The Proxy requires
@@ -200,6 +201,33 @@ default sender is `service@treer.ai`; override them with
 after 30 minutes, can be used once, and revoke every existing user session when
 the password changes. Requests return the same response for known and unknown
 email addresses.
+
+GitHub and Google OAuth are optional. Configure either provider with both its
+client ID and client secret:
+
+```text
+GITHUB_OAUTH_CLIENT_ID=...
+GITHUB_OAUTH_CLIENT_SECRET=...
+GOOGLE_OAUTH_CLIENT_ID=...
+GOOGLE_OAUTH_CLIENT_SECRET=...
+```
+
+Register these exact server-side callback URLs, using the public Proxy origin:
+
+```text
+https://<proxy-origin>/api/auth/oauth/github/callback
+https://<proxy-origin>/api/auth/oauth/google/callback
+```
+
+GitHub requests `user:email`; Google requests `openid email profile`. Treer only
+links accounts using provider-verified email addresses, then persists the
+provider's stable subject ID for later logins. Provider access tokens are not
+stored. When a verified OAuth email first claims an existing account whose
+email was not previously verified, Treer revokes that account's old password
+and sessions to prevent email pre-registration attacks. New accounts still
+require an invitation by default. Set
+`TREER_INVITATION_REQUIRED=false` to allow open password and OAuth registration;
+every open registration creates a user-owned personal organization.
 
 ## NATS event bus and multi-Proxy routing
 
@@ -283,7 +311,8 @@ automatically by the Proxy.
 3. For more than one Treer replica, add a NATS service with JetStream enabled
    and expose its private URL as `TREER_NATS_URL`.
 4. Set `ADMIN_PASSWORD`, `CLOUDFLARE_API_TOKEN`, `TREER_PROXY_PUBLIC_URL`, and
-   `TREER_APP_PUBLIC_URL` on the Proxy service.
+   `TREER_APP_PUBLIC_URL` on the Proxy service. Add the GitHub and/or Google
+   OAuth client variables above when those login methods are enabled.
 5. Create an App service from the `web` directory and set its
    `TREER_PROXY_PUBLIC_URL` variable.
 6. Add the Proxy and App public domains, then increase the Proxy replica count.

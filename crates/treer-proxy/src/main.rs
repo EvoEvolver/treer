@@ -56,6 +56,21 @@ struct Args {
     admin_password: Option<String>,
     #[arg(long, env = "CLOUDFLARE_API_TOKEN", hide_env_values = true)]
     cloudflare_api_token: Option<String>,
+    #[arg(long, env = "GITHUB_OAUTH_CLIENT_ID")]
+    github_oauth_client_id: Option<String>,
+    #[arg(long, env = "GITHUB_OAUTH_CLIENT_SECRET", hide_env_values = true)]
+    github_oauth_client_secret: Option<String>,
+    #[arg(long, env = "GOOGLE_OAUTH_CLIENT_ID")]
+    google_oauth_client_id: Option<String>,
+    #[arg(long, env = "GOOGLE_OAUTH_CLIENT_SECRET", hide_env_values = true)]
+    google_oauth_client_secret: Option<String>,
+    #[arg(
+        long,
+        env = "TREER_INVITATION_REQUIRED",
+        default_value_t = true,
+        help = "Require a valid invitation when a new user account is created"
+    )]
+    invitation_required: bool,
     #[arg(
         long,
         env = "CLOUDFLARE_ACCOUNT_ID",
@@ -139,13 +154,36 @@ async fn main() -> anyhow::Result<()> {
     if !args.disable_auth && email_config.is_none() {
         warn!("CLOUDFLARE_API_TOKEN is not configured; account emails are disabled");
     }
+    let github_oauth = match (args.github_oauth_client_id, args.github_oauth_client_secret) {
+        (Some(client_id), Some(client_secret)) => {
+            Some(auth::OAuthProviderConfig::github(client_id, client_secret)?)
+        }
+        (None, None) => None,
+        _ => anyhow::bail!(
+            "GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET must be configured together"
+        ),
+    };
+    let google_oauth = match (args.google_oauth_client_id, args.google_oauth_client_secret) {
+        (Some(client_id), Some(client_secret)) => {
+            Some(auth::OAuthProviderConfig::google(client_id, client_secret)?)
+        }
+        (None, None) => None,
+        _ => anyhow::bail!(
+            "GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be configured together"
+        ),
+    };
+    let oauth = auth::OAuthConfig::new(github_oauth, google_oauth, args.invitation_required);
     let auth = auth::AuthStore::open(
         &args.database_url,
         admin_password,
-        app_public_url.clone(),
-        proxy_public_url.scheme() == "https",
-        args.disable_auth,
-        email_config,
+        auth::AuthStoreConfig {
+            app_public_url: app_public_url.clone(),
+            proxy_public_url: proxy_public_url.clone(),
+            secure_cookies: proxy_public_url.scheme() == "https",
+            disabled: args.disable_auth,
+            email: email_config,
+            oauth,
+        },
     )
     .await
     .context("failed to connect to PostgreSQL")?;

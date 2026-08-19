@@ -7,11 +7,34 @@ CREATE TABLE IF NOT EXISTS proxy_secrets (
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
     preferred_name TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower ON users(lower(email));
+
+CREATE TABLE IF NOT EXISTS oauth_identities (
+    provider TEXT NOT NULL CHECK(provider IN ('github', 'google')),
+    subject TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(provider, subject),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS oauth_identities_user_id ON oauth_identities(user_id);
+
+CREATE TABLE IF NOT EXISTS oauth_states (
+    state TEXT PRIMARY KEY,
+    provider TEXT NOT NULL CHECK(provider IN ('github', 'google')),
+    invite_token TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS oauth_states_expires_at ON oauth_states(expires_at);
 
 CREATE TABLE IF NOT EXISTS organizations (
     organization_id TEXT PRIMARY KEY,

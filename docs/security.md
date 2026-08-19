@@ -35,6 +35,13 @@ The following statements are grounded in current behavior:
 - Passwords, enrollment secrets, and machine credentials are hashed at rest.
 - Password reset links contain a short-lived single-use secret whose Argon2
   hash is stored in PostgreSQL. A successful reset revokes all user sessions.
+- GitHub and Google use server-side OAuth authorization-code flows with
+  PostgreSQL-backed, ten-minute, single-use state. Provider access tokens are
+  discarded after fetching identity data.
+- OAuth account merging accepts only provider-verified email addresses. Later
+  logins use the provider's stable subject ID rather than a mutable email or
+  username. Merging into an account with an unverified email rotates its
+  password and revokes its sessions to prevent account pre-hijacking.
 - The stable Host owns processes on the enrolled machine rather than moving the
   runtime into an opaque hosted control plane.
 - Linux Agent network traffic crosses a namespace and Controller policy
@@ -75,6 +82,8 @@ members share a broad operational surface.
 | Credential or identity | Scope | Important limitation |
 | --- | --- | --- |
 | User session cookie | User plus organization memberships | Browser identity is not propagated to Host operations end to end |
+| OAuth state | One provider login attempt, ten minutes, single use | Protects the callback against login CSRF; provider availability remains an external dependency |
+| OAuth provider identity | One provider subject linked to one Treer user | A verified provider email may merge into an existing account, making provider email verification an account-linking trust boundary |
 | Password reset token | One user, 30 minutes, single use | Delivered through the configured email account; email access becomes an account-recovery trust boundary |
 | Admin session cookie | User invitation creation and aggregate platform resource counts | Separate high-impact trust boundary |
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |

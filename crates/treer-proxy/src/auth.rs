@@ -5,16 +5,16 @@ use std::time::Duration as StdDuration;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{Extension, Path as AxumPath, Request, State};
+use axum::extract::{Extension, Path as AxumPath, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentInboxResponse,
     AgentMailMessage, AgentServerSnapshot, ApiError, CreateMachineServiceRequest,
@@ -33,6 +33,7 @@ const SESSION_TTL_DAYS: i64 = 30;
 const ADMIN_SESSION_TTL_HOURS: i64 = 8;
 const PASSWORD_RESET_TTL_MINUTES: i64 = 30;
 const PASSWORD_RESET_RATE_LIMIT_SECONDS: i64 = 60;
+const OAUTH_STATE_TTL_MINUTES: i64 = 10;
 const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
 const MAX_MAIL_BODY_BYTES: usize = 32 * 1024;
 const MAX_MAIL_RECIPIENTS: usize = 32;
@@ -44,9 +45,12 @@ pub struct AuthStore {
     pool: PgPool,
     admin_password: Arc<str>,
     app_public_url: Url,
+    proxy_public_url: Url,
     secure_cookies: bool,
     disabled: bool,
     email_sender: Option<CloudflareEmailSender>,
+    oauth: Arc<OAuthConfig>,
+    oauth_client: reqwest::Client,
     virtual_hosts: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, VirtualNetworkHost>>>>,
     virtual_hosts_update: Arc<tokio::sync::Mutex<()>>,
     virtual_hosts_revision: Arc<AtomicU64>,
@@ -56,6 +60,99 @@ pub struct CloudflareEmailConfig {
     pub account_id: String,
     pub api_token: String,
     pub from: String,
+}
+
+#[derive(Clone)]
+pub struct OAuthProviderConfig {
+    client_id: Arc<str>,
+    client_secret: Arc<str>,
+    authorize_url: Url,
+    token_url: Url,
+    user_url: Url,
+    emails_url: Option<Url>,
+}
+
+#[derive(Clone)]
+pub struct OAuthConfig {
+    github: Option<OAuthProviderConfig>,
+    google: Option<OAuthProviderConfig>,
+    invitation_required: bool,
+}
+
+pub struct AuthStoreConfig {
+    pub app_public_url: Url,
+    pub proxy_public_url: Url,
+    pub secure_cookies: bool,
+    pub disabled: bool,
+    pub email: Option<CloudflareEmailConfig>,
+    pub oauth: OAuthConfig,
+}
+
+impl OAuthProviderConfig {
+    pub fn github(client_id: String, client_secret: String) -> anyhow::Result<Self> {
+        Self::new(
+            client_id,
+            client_secret,
+            "https://github.com/login/oauth/authorize",
+            "https://github.com/login/oauth/access_token",
+            "https://api.github.com/user",
+            Some("https://api.github.com/user/emails"),
+        )
+    }
+
+    pub fn google(client_id: String, client_secret: String) -> anyhow::Result<Self> {
+        Self::new(
+            client_id,
+            client_secret,
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "https://oauth2.googleapis.com/token",
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            None,
+        )
+    }
+
+    fn new(
+        client_id: String,
+        client_secret: String,
+        authorize_url: &str,
+        token_url: &str,
+        user_url: &str,
+        emails_url: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        if client_id.trim().is_empty() || client_secret.is_empty() {
+            anyhow::bail!("OAuth client ID and secret must not be empty");
+        }
+        Ok(Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            authorize_url: Url::parse(authorize_url)?,
+            token_url: Url::parse(token_url)?,
+            user_url: Url::parse(user_url)?,
+            emails_url: emails_url.map(Url::parse).transpose()?,
+        })
+    }
+}
+
+impl OAuthConfig {
+    pub fn new(
+        github: Option<OAuthProviderConfig>,
+        google: Option<OAuthProviderConfig>,
+        invitation_required: bool,
+    ) -> Self {
+        Self {
+            github,
+            google,
+            invitation_required,
+        }
+    }
+
+    fn provider(&self, provider: &str) -> Option<&OAuthProviderConfig> {
+        match provider {
+            "github" => self.github.as_ref(),
+            "google" => self.google.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -139,7 +236,7 @@ pub struct LoginRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
-    invite: String,
+    invite: Option<String>,
     email: String,
     preferred_name: String,
     password: String,
@@ -154,6 +251,62 @@ pub struct RequestPasswordResetRequest {
 pub struct ResetPasswordRequest {
     token: String,
     password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthStartQuery {
+    invite: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct OAuthProfile {
+    provider: &'static str,
+    subject: String,
+    email: String,
+    preferred_name: String,
+}
+
+struct RegistrationInvitation {
+    token: String,
+    kind: String,
+    organization_id: Option<String>,
+    role: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubUser {
+    id: u64,
+    login: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubEmail {
+    email: String,
+    primary: bool,
+    verified: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleUser {
+    sub: String,
+    email: String,
+    email_verified: bool,
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,10 +450,7 @@ impl AuthStore {
     pub async fn open(
         database_url: &str,
         admin_password: String,
-        app_public_url: Url,
-        secure_cookies: bool,
-        disabled: bool,
-        email_config: Option<CloudflareEmailConfig>,
+        config: AuthStoreConfig,
     ) -> anyhow::Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
@@ -309,10 +459,16 @@ impl AuthStore {
         let store = Self {
             pool,
             admin_password: admin_password.into(),
-            app_public_url,
-            secure_cookies,
-            disabled,
-            email_sender: email_config.map(CloudflareEmailSender::new).transpose()?,
+            app_public_url: config.app_public_url,
+            proxy_public_url: config.proxy_public_url,
+            secure_cookies: config.secure_cookies,
+            disabled: config.disabled,
+            email_sender: config.email.map(CloudflareEmailSender::new).transpose()?,
+            oauth: Arc::new(config.oauth),
+            oauth_client: reqwest::Client::builder()
+                .timeout(StdDuration::from_secs(10))
+                .user_agent("Treer/0.1")
+                .build()?,
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
@@ -355,9 +511,12 @@ impl AuthStore {
             pool,
             admin_password: admin_password.to_string().into(),
             app_public_url: Url::parse("https://app.treer.example/").expect("valid URL"),
+            proxy_public_url: Url::parse("https://proxy.treer.example/").expect("valid URL"),
             secure_cookies: true,
             disabled: false,
             email_sender: None,
+            oauth: Arc::new(OAuthConfig::new(None, None, true)),
+            oauth_client: reqwest::Client::new(),
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
@@ -2142,7 +2301,7 @@ impl AuthStore {
         }
         let user_id: String = row.get("user_id");
         let password_hash = hash_password(&password)?;
-        sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        sqlx::query("UPDATE users SET password_hash = $1, email_verified = TRUE WHERE id = $2")
             .bind(password_hash)
             .bind(&user_id)
             .execute(&mut *transaction)
@@ -2236,22 +2395,26 @@ impl AuthStore {
         let email = normalize_email(email)?;
         let preferred_name = validate_preferred_name(preferred_name)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        sqlx::query("UPDATE users SET email = $1, preferred_name = $2 WHERE id = $3")
-            .bind(&email)
-            .bind(&preferred_name)
-            .bind(user_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                if error
-                    .as_database_error()
-                    .is_some_and(|error| error.is_unique_violation())
-                {
-                    AuthFailure::conflict("email_exists", "email is already registered")
-                } else {
-                    AuthFailure::database(error)
-                }
-            })?;
+        sqlx::query(
+            "UPDATE users SET email = $1, preferred_name = $2, \
+             email_verified = CASE WHEN lower(email) = lower($1) \
+                 THEN email_verified ELSE FALSE END WHERE id = $3",
+        )
+        .bind(&email)
+        .bind(&preferred_name)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict("email_exists", "email is already registered")
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
         sqlx::query(
             "UPDATE password_reset_tokens SET used_at = $1 \
              WHERE user_id = $2 AND used_at IS NULL",
@@ -2430,9 +2593,390 @@ impl AuthStore {
         Ok(())
     }
 
+    fn oauth_public_config(&self) -> Value {
+        json!({
+            "github": self.oauth.github.is_some(),
+            "google": self.oauth.google.is_some(),
+            "invitation_required": self.oauth.invitation_required,
+        })
+    }
+
+    fn oauth_callback_url(&self, provider: &str) -> Url {
+        let mut url = self.proxy_public_url.clone();
+        url.set_path(&format!("/api/auth/oauth/{provider}/callback"));
+        url.set_query(None);
+        url.set_fragment(None);
+        url
+    }
+
+    async fn oauth_authorization_url(
+        &self,
+        provider: &str,
+        invite: Option<&str>,
+    ) -> Result<Url, AuthFailure> {
+        let config = self
+            .oauth
+            .provider(provider)
+            .ok_or_else(oauth_provider_unavailable)?;
+        if invite.is_some_and(|value| value.is_empty() || value.len() > 256) {
+            return Err(invalid_invitation());
+        }
+        let state = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM oauth_states WHERE expires_at <= $1")
+            .bind(&now_text)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO oauth_states(state, provider, invite_token, created_at, expires_at) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&state)
+        .bind(provider)
+        .bind(invite)
+        .bind(&now_text)
+        .bind((now + Duration::minutes(OAUTH_STATE_TTL_MINUTES)).to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+
+        let callback_url = self.oauth_callback_url(provider);
+        let mut url = config.authorize_url.clone();
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("client_id", &config.client_id)
+            .append_pair("redirect_uri", callback_url.as_str())
+            .append_pair("response_type", "code")
+            .append_pair("state", &state);
+        match provider {
+            "github" => {
+                query.append_pair("scope", "user:email");
+            }
+            "google" => {
+                query
+                    .append_pair("scope", "openid email profile")
+                    .append_pair("prompt", "select_account");
+            }
+            _ => return Err(oauth_provider_unavailable()),
+        }
+        drop(query);
+        Ok(url)
+    }
+
+    async fn consume_oauth_state(
+        &self,
+        provider: &str,
+        state: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        if state.len() != 64 || !state.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid_oauth_state());
+        }
+        sqlx::query_scalar::<_, Option<String>>(
+            "DELETE FROM oauth_states WHERE state = $1 AND provider = $2 AND expires_at > $3 \
+             RETURNING invite_token",
+        )
+        .bind(state)
+        .bind(provider)
+        .bind(Utc::now().to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(invalid_oauth_state)
+    }
+
+    async fn exchange_oauth_code(
+        &self,
+        provider: &str,
+        code: &str,
+    ) -> Result<OAuthProfile, AuthFailure> {
+        if code.is_empty() || code.len() > 2048 {
+            return Err(oauth_login_failed());
+        }
+        let config = self
+            .oauth
+            .provider(provider)
+            .cloned()
+            .ok_or_else(oauth_provider_unavailable)?;
+        let callback_url = self.oauth_callback_url(provider);
+        let response = self
+            .oauth_client
+            .post(config.token_url.clone())
+            .header(header::ACCEPT, "application/json")
+            .form(&[
+                ("client_id", config.client_id.as_ref()),
+                ("client_secret", config.client_secret.as_ref()),
+                ("code", code),
+                ("redirect_uri", callback_url.as_str()),
+                ("grant_type", "authorization_code"),
+            ])
+            .send()
+            .await
+            .map_err(oauth_request_failed)?;
+        let status = response.status();
+        let token = response
+            .json::<OAuthTokenResponse>()
+            .await
+            .map_err(oauth_request_failed)?;
+        let Some(access_token) = token.access_token else {
+            tracing::warn!(
+                provider,
+                %status,
+                error = token.error.as_deref().unwrap_or("unknown"),
+                description = token.error_description.as_deref().unwrap_or(""),
+                "OAuth token exchange failed"
+            );
+            return Err(oauth_login_failed());
+        };
+        if !status.is_success() {
+            tracing::warn!(provider, %status, "OAuth token endpoint returned an error");
+            return Err(oauth_login_failed());
+        }
+        match provider {
+            "github" => self.github_profile(&config, &access_token).await,
+            "google" => self.google_profile(&config, &access_token).await,
+            _ => Err(oauth_provider_unavailable()),
+        }
+    }
+
+    async fn github_profile(
+        &self,
+        config: &OAuthProviderConfig,
+        access_token: &str,
+    ) -> Result<OAuthProfile, AuthFailure> {
+        let user_response = self
+            .oauth_client
+            .get(config.user_url.clone())
+            .bearer_auth(access_token)
+            .header(header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(oauth_request_failed)?;
+        if !user_response.status().is_success() {
+            tracing::warn!(status = %user_response.status(), "GitHub user API failed");
+            return Err(oauth_login_failed());
+        }
+        let user = user_response
+            .json::<GithubUser>()
+            .await
+            .map_err(oauth_request_failed)?;
+        let emails_url = config
+            .emails_url
+            .clone()
+            .ok_or_else(oauth_provider_unavailable)?;
+        let emails_response = self
+            .oauth_client
+            .get(emails_url)
+            .bearer_auth(access_token)
+            .header(header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(oauth_request_failed)?;
+        if !emails_response.status().is_success() {
+            tracing::warn!(status = %emails_response.status(), "GitHub email API failed");
+            return Err(verified_email_required());
+        }
+        let emails = emails_response
+            .json::<Vec<GithubEmail>>()
+            .await
+            .map_err(oauth_request_failed)?;
+        let email = emails
+            .iter()
+            .find(|email| email.primary && email.verified)
+            .or_else(|| emails.iter().find(|email| email.verified))
+            .ok_or_else(verified_email_required)?;
+        let email = normalize_email(&email.email)?;
+        let preferred_name = provider_preferred_name(user.name.as_deref(), &user.login, &email)?;
+        Ok(OAuthProfile {
+            provider: "github",
+            subject: user.id.to_string(),
+            email,
+            preferred_name,
+        })
+    }
+
+    async fn google_profile(
+        &self,
+        config: &OAuthProviderConfig,
+        access_token: &str,
+    ) -> Result<OAuthProfile, AuthFailure> {
+        let response = self
+            .oauth_client
+            .get(config.user_url.clone())
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(oauth_request_failed)?;
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "Google UserInfo API failed");
+            return Err(oauth_login_failed());
+        }
+        let user = response
+            .json::<GoogleUser>()
+            .await
+            .map_err(oauth_request_failed)?;
+        if !user.email_verified {
+            return Err(verified_email_required());
+        }
+        let email = normalize_email(&user.email)?;
+        let fallback = email.split('@').next().unwrap_or("Treer user");
+        let preferred_name = provider_preferred_name(user.name.as_deref(), fallback, &email)?;
+        if user.sub.is_empty() || user.sub.len() > 255 {
+            return Err(oauth_login_failed());
+        }
+        Ok(OAuthProfile {
+            provider: "google",
+            subject: user.sub,
+            email,
+            preferred_name,
+        })
+    }
+
+    async fn complete_oauth_login(
+        &self,
+        profile: OAuthProfile,
+        invite: Option<&str>,
+    ) -> Result<CurrentSession, AuthFailure> {
+        let now = Utc::now().to_rfc3339();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let linked = sqlx::query(
+            "SELECT u.id, u.email, u.preferred_name FROM oauth_identities i \
+             JOIN users u ON u.id = i.user_id \
+             WHERE i.provider = $1 AND i.subject = $2 FOR UPDATE",
+        )
+        .bind(profile.provider)
+        .bind(&profile.subject)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if let Some(user) = linked {
+            sqlx::query(
+                "UPDATE oauth_identities SET email = $1, updated_at = $2 \
+                 WHERE provider = $3 AND subject = $4",
+            )
+            .bind(&profile.email)
+            .bind(&now)
+            .bind(profile.provider)
+            .bind(&profile.subject)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+            let user_id = user.get("id");
+            let email = user.get("email");
+            let preferred_name = user.get("preferred_name");
+            transaction.commit().await.map_err(AuthFailure::database)?;
+            return self.create_session(user_id, email, preferred_name).await;
+        }
+
+        let existing_user = sqlx::query(
+            "SELECT id, email, preferred_name, email_verified FROM users \
+             WHERE lower(email) = lower($1) FOR UPDATE",
+        )
+        .bind(&profile.email)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        let (user_id, email, preferred_name, created) = if let Some(user) = existing_user {
+            if !user.get::<bool, _>("email_verified") {
+                let password_hash = hash_password(&format!(
+                    "{}{}",
+                    Uuid::new_v4().simple(),
+                    Uuid::new_v4().simple()
+                ))?;
+                let user_id: String = user.get("id");
+                sqlx::query(
+                    "UPDATE users SET password_hash = $1, email_verified = TRUE WHERE id = $2",
+                )
+                .bind(password_hash)
+                .bind(&user_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+                sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+                    .bind(&user_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(AuthFailure::database)?;
+            }
+            (
+                user.get("id"),
+                user.get("email"),
+                user.get("preferred_name"),
+                false,
+            )
+        } else {
+            let invitation = self
+                .load_registration_invitation(&mut transaction, invite)
+                .await?;
+            let password_hash = hash_password(&format!(
+                "{}{}",
+                Uuid::new_v4().simple(),
+                Uuid::new_v4().simple()
+            ))?;
+            let user_id = insert_user(
+                &mut transaction,
+                &profile.email,
+                &profile.preferred_name,
+                password_hash,
+                true,
+                &now,
+            )
+            .await?;
+            apply_registration_membership(
+                &mut transaction,
+                invitation,
+                &user_id,
+                &profile.preferred_name,
+                &now,
+            )
+            .await?;
+            (
+                user_id,
+                profile.email.clone(),
+                profile.preferred_name.clone(),
+                true,
+            )
+        };
+        sqlx::query(
+            "INSERT INTO oauth_identities(provider, subject, user_id, email, created_at, updated_at) \
+             VALUES($1, $2, $3, $4, $5, $5)",
+        )
+        .bind(profile.provider)
+        .bind(&profile.subject)
+        .bind(&user_id)
+        .bind(&profile.email)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict(
+                    "oauth_identity_conflict",
+                    "this OAuth identity is already linked",
+                )
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        let session = self.create_session(user_id, email, preferred_name).await?;
+        if created {
+            self.send_welcome_email(&session);
+        }
+        Ok(session)
+    }
+
     async fn register(
         &self,
-        invite: &str,
+        invite: Option<&str>,
         email: &str,
         preferred_name: &str,
         password: &str,
@@ -2442,136 +2986,199 @@ impl AuthStore {
         let password = validate_new_password(password)?;
         let password_hash = hash_password(&password)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let invitation = self
+            .load_registration_invitation(&mut transaction, invite)
+            .await?;
+        let now = Utc::now().to_rfc3339();
+        let user_id = insert_user(
+            &mut transaction,
+            &email,
+            &preferred_name,
+            password_hash,
+            false,
+            &now,
+        )
+        .await?;
+        apply_registration_membership(
+            &mut transaction,
+            invitation,
+            &user_id,
+            &preferred_name,
+            &now,
+        )
+        .await?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        let session = self.create_session(user_id, email, preferred_name).await?;
+        self.send_welcome_email(&session);
+        Ok(session)
+    }
+
+    async fn load_registration_invitation(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        invite: Option<&str>,
+    ) -> Result<Option<RegistrationInvitation>, AuthFailure> {
+        let Some(invite) = invite.filter(|value| !value.is_empty()) else {
+            if self.oauth.invitation_required {
+                return Err(AuthFailure::bad_request(
+                    "invitation_required",
+                    "a valid invitation is required to create an account",
+                ));
+            }
+            return Ok(None);
+        };
         let invitation = sqlx::query(
             "SELECT kind, organization_id, role FROM invitations \
              WHERE token = $1 AND used_at IS NULL FOR UPDATE",
         )
         .bind(invite)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(AuthFailure::database)?
-        .ok_or_else(|| {
-            AuthFailure::bad_request(
-                "invalid_invitation",
-                "invitation is invalid or already used",
-            )
-        })?;
-        let kind: String = invitation.get("kind");
-        let organization_id: Option<String> = invitation.get("organization_id");
-        let role: Option<String> = invitation.get("role");
-        let user_id = format!("usr_{}", Uuid::new_v4().simple());
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO users(id, email, preferred_name, password_hash, created_at) \
-             VALUES($1, $2, $3, $4, $5)",
-        )
-        .bind(&user_id)
-        .bind(&email)
-        .bind(&preferred_name)
-        .bind(password_hash)
-        .bind(&now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| {
-            if error
-                .as_database_error()
-                .is_some_and(|error| error.is_unique_violation())
+        .ok_or_else(invalid_invitation)?;
+        Ok(Some(RegistrationInvitation {
+            token: invite.to_string(),
+            kind: invitation.get("kind"),
+            organization_id: invitation.get("organization_id"),
+            role: invitation.get("role"),
+        }))
+    }
+
+    fn send_welcome_email(&self, session: &CurrentSession) {
+        let Some(sender) = self.email_sender.clone() else {
+            return;
+        };
+        let recipient = session.email.clone();
+        let preferred_name = session.preferred_name.clone();
+        let app_url = self.app_public_url.clone();
+        tokio::spawn(async move {
+            if let Err(error) = sender
+                .send_welcome(&recipient, &preferred_name, &app_url)
+                .await
             {
-                AuthFailure::conflict("email_exists", "email is already registered")
-            } else {
-                AuthFailure::database(error)
+                tracing::error!(%error, "failed to send registration welcome email");
             }
-        })?;
+        });
+    }
+}
+
+async fn insert_user(
+    transaction: &mut Transaction<'_, Postgres>,
+    email: &str,
+    preferred_name: &str,
+    password_hash: String,
+    email_verified: bool,
+    now: &str,
+) -> Result<String, AuthFailure> {
+    let user_id = format!("usr_{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO users(id, email, preferred_name, password_hash, email_verified, created_at) \
+         VALUES($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(&user_id)
+    .bind(email)
+    .bind(preferred_name)
+    .bind(password_hash)
+    .bind(email_verified)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        if error
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation())
+        {
+            AuthFailure::conflict("email_exists", "email is already registered")
+        } else {
+            AuthFailure::database(error)
+        }
+    })?;
+    Ok(user_id)
+}
+
+async fn apply_registration_membership(
+    transaction: &mut Transaction<'_, Postgres>,
+    invitation: Option<RegistrationInvitation>,
+    user_id: &str,
+    preferred_name: &str,
+    now: &str,
+) -> Result<(), AuthFailure> {
+    if let Some(invitation) = &invitation {
         let result = sqlx::query(
-            "UPDATE invitations SET used_at = $1, used_by = $2 WHERE token = $3 AND used_at IS NULL",
+            "UPDATE invitations SET used_at = $1, used_by = $2 \
+             WHERE token = $3 AND used_at IS NULL",
         )
-        .bind(&now)
-        .bind(&user_id)
-        .bind(invite)
-        .execute(&mut *transaction)
+        .bind(now)
+        .bind(user_id)
+        .bind(&invitation.token)
+        .execute(&mut **transaction)
         .await
         .map_err(AuthFailure::database)?;
         if result.rows_affected() != 1 {
-            return Err(AuthFailure::bad_request(
-                "invalid_invitation",
-                "invitation is invalid or already used",
+            return Err(invalid_invitation());
+        }
+    }
+
+    match invitation.as_ref().map(|value| value.kind.as_str()) {
+        None | Some("personal") => {
+            let organization_id = format!("org_{}", Uuid::new_v4().simple());
+            let organization_name = format!("{preferred_name} Personal");
+            sqlx::query(
+                "INSERT INTO organizations(organization_id, name, created_at, created_by) \
+                 VALUES($1, $2, $3, $4)",
+            )
+            .bind(&organization_id)
+            .bind(organization_name)
+            .bind(now)
+            .bind(user_id)
+            .execute(&mut **transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+            sqlx::query(
+                "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+                 VALUES($1, $2, 'owner', $3)",
+            )
+            .bind(organization_id)
+            .bind(user_id)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        }
+        Some("organization") => {
+            let invitation = invitation.as_ref().expect("matched invitation");
+            let organization_id = invitation.organization_id.as_deref().ok_or_else(|| {
+                AuthFailure::internal(
+                    "invalid_invitation_state",
+                    "organization invitation has no organization".to_string(),
+                )
+            })?;
+            let role = invitation.role.as_deref().ok_or_else(|| {
+                AuthFailure::internal(
+                    "invalid_invitation_state",
+                    "organization invitation has no role".to_string(),
+                )
+            })?;
+            sqlx::query(
+                "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+                 VALUES($1, $2, $3, $4)",
+            )
+            .bind(organization_id)
+            .bind(user_id)
+            .bind(role)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        }
+        Some(_) => {
+            return Err(AuthFailure::internal(
+                "invalid_invitation_state",
+                "invitation has an unsupported kind".to_string(),
             ));
         }
-        match kind.as_str() {
-            "personal" => {
-                let organization_id = format!("org_{}", Uuid::new_v4().simple());
-                let organization_name = format!("{preferred_name} Personal");
-                sqlx::query(
-                    "INSERT INTO organizations(organization_id, name, created_at, created_by) \
-                     VALUES($1, $2, $3, $4)",
-                )
-                .bind(&organization_id)
-                .bind(organization_name)
-                .bind(&now)
-                .bind(&user_id)
-                .execute(&mut *transaction)
-                .await
-                .map_err(AuthFailure::database)?;
-                sqlx::query(
-                    "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
-                     VALUES($1, $2, 'owner', $3)",
-                )
-                .bind(organization_id)
-                .bind(&user_id)
-                .bind(&now)
-                .execute(&mut *transaction)
-                .await
-                .map_err(AuthFailure::database)?;
-            }
-            "organization" => {
-                let organization_id = organization_id.ok_or_else(|| {
-                    AuthFailure::internal(
-                        "invalid_invitation_state",
-                        "organization invitation has no organization".to_string(),
-                    )
-                })?;
-                let role = role.ok_or_else(|| {
-                    AuthFailure::internal(
-                        "invalid_invitation_state",
-                        "organization invitation has no role".to_string(),
-                    )
-                })?;
-                sqlx::query(
-                    "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
-                     VALUES($1, $2, $3, $4)",
-                )
-                .bind(organization_id)
-                .bind(&user_id)
-                .bind(role)
-                .bind(&now)
-                .execute(&mut *transaction)
-                .await
-                .map_err(AuthFailure::database)?;
-            }
-            _ => {
-                return Err(AuthFailure::internal(
-                    "invalid_invitation_state",
-                    "invitation has an unsupported kind".to_string(),
-                ));
-            }
-        }
-        transaction.commit().await.map_err(AuthFailure::database)?;
-        let session = self.create_session(user_id, email, preferred_name).await?;
-        if let Some(sender) = self.email_sender.clone() {
-            let recipient = session.email.clone();
-            let preferred_name = session.preferred_name.clone();
-            let app_url = self.app_public_url.clone();
-            tokio::spawn(async move {
-                if let Err(error) = sender
-                    .send_welcome(&recipient, &preferred_name, &app_url)
-                    .await
-                {
-                    tracing::error!(%error, "failed to send registration welcome email");
-                }
-            });
-        }
-        Ok(session)
     }
+    Ok(())
 }
 
 pub async fn require_user(
@@ -2687,6 +3294,46 @@ pub async fn login(
     Ok(session_response(&auth, &session))
 }
 
+pub async fn oauth_config(Extension(auth): Extension<AuthStore>) -> Json<Value> {
+    Json(auth.oauth_public_config())
+}
+
+pub async fn oauth_start(
+    Extension(auth): Extension<AuthStore>,
+    AxumPath(provider): AxumPath<String>,
+    Query(query): Query<OAuthStartQuery>,
+) -> Result<Redirect, AuthFailure> {
+    let url = auth
+        .oauth_authorization_url(&provider, query.invite.as_deref())
+        .await?;
+    Ok(Redirect::temporary(url.as_str()))
+}
+
+pub async fn oauth_callback(
+    Extension(auth): Extension<AuthStore>,
+    AxumPath(provider): AxumPath<String>,
+    Query(query): Query<OAuthCallbackQuery>,
+) -> Response {
+    let result = async {
+        let state = query.state.as_deref().ok_or_else(invalid_oauth_state)?;
+        let invite = auth.consume_oauth_state(&provider, state).await?;
+        if query.error.is_some() {
+            return Err(oauth_login_failed());
+        }
+        let code = query.code.as_deref().ok_or_else(oauth_login_failed)?;
+        let profile = auth.exchange_oauth_code(&provider, code).await?;
+        auth.complete_oauth_login(profile, invite.as_deref()).await
+    }
+    .await;
+    match result {
+        Ok(session) => oauth_session_redirect(&auth, &session),
+        Err(error) => {
+            tracing::warn!(?error, provider, "OAuth callback failed");
+            oauth_error_redirect(&auth)
+        }
+    }
+}
+
 pub async fn request_password_reset(
     Extension(auth): Extension<AuthStore>,
     Json(request): Json<RequestPasswordResetRequest>,
@@ -2710,7 +3357,7 @@ pub async fn register(
 ) -> Result<Response, AuthFailure> {
     let session = auth
         .register(
-            &request.invite,
+            request.invite.as_deref(),
             &request.email,
             &request.preferred_name,
             &request.password,
@@ -2894,6 +3541,30 @@ fn session_response(auth: &AuthStore, session: &CurrentSession) -> Response {
     ([(header::SET_COOKIE, cookie)], Json(user_json(session))).into_response()
 }
 
+fn oauth_session_redirect(auth: &AuthStore, session: &CurrentSession) -> Response {
+    let cookie = format!(
+        "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        session.token,
+        SESSION_TTL_DAYS * 24 * 60 * 60,
+        secure_cookie_suffix(auth)
+    );
+    let mut response = Redirect::to(auth.app_public_url.as_str()).into_response();
+    match HeaderValue::from_str(&cookie) {
+        Ok(cookie) => {
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+            response
+        }
+        Err(error) => AuthFailure::header(error).into_response(),
+    }
+}
+
+fn oauth_error_redirect(auth: &AuthStore) -> Response {
+    let mut url = auth.app_public_url.clone();
+    url.query_pairs_mut()
+        .append_pair("oauth_error", "login_failed");
+    Redirect::to(url.as_str()).into_response()
+}
+
 fn user_json(session: &CurrentSession) -> Value {
     json!({
         "user_id": session.user_id,
@@ -2983,6 +3654,59 @@ fn invalid_password_reset() -> AuthFailure {
         "invalid_password_reset",
         "password reset link is invalid or expired",
     )
+}
+
+fn invalid_invitation() -> AuthFailure {
+    AuthFailure::bad_request(
+        "invalid_invitation",
+        "invitation is invalid or already used",
+    )
+}
+
+fn oauth_provider_unavailable() -> AuthFailure {
+    AuthFailure::not_found(
+        "oauth_provider_unavailable",
+        "this OAuth provider is not configured",
+    )
+}
+
+fn invalid_oauth_state() -> AuthFailure {
+    AuthFailure::bad_request(
+        "invalid_oauth_state",
+        "the OAuth login request is invalid or expired",
+    )
+}
+
+fn oauth_login_failed() -> AuthFailure {
+    AuthFailure::unauthorized("oauth_login_failed", "OAuth login failed")
+}
+
+fn verified_email_required() -> AuthFailure {
+    AuthFailure::forbidden(
+        "verified_email_required",
+        "the OAuth provider must provide a verified email address",
+    )
+}
+
+fn oauth_request_failed(error: reqwest::Error) -> AuthFailure {
+    tracing::warn!(%error, "OAuth provider request failed");
+    oauth_login_failed()
+}
+
+fn provider_preferred_name(
+    candidate: Option<&str>,
+    fallback: &str,
+    email: &str,
+) -> Result<String, AuthFailure> {
+    if let Some(candidate) = candidate {
+        if let Ok(name) = validate_preferred_name(candidate) {
+            return Ok(name);
+        }
+    }
+    if let Ok(name) = validate_preferred_name(fallback) {
+        return Ok(name);
+    }
+    validate_preferred_name(email.split('@').next().unwrap_or("Treer user"))
 }
 
 fn parse_password_reset_token(token: &str) -> Result<(&str, &str), AuthFailure> {
@@ -3317,7 +4041,8 @@ impl IntoResponse for AuthFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::post;
+    use axum::extract::Form;
+    use axum::routing::{get, post};
     use axum::Router;
     use tokio::sync::{oneshot, Mutex};
     use treer_protocol::{AgentInfo, AgentStatus, CreateVirtualNetworkHostRequest, ServerStatus};
@@ -3335,13 +4060,55 @@ mod tests {
         Json(json!({ "success": true }))
     }
 
+    async fn oauth_token(Form(form): Form<HashMap<String, String>>) -> Json<Value> {
+        assert_eq!(form.get("client_id").map(String::as_str), Some("client-id"));
+        assert_eq!(
+            form.get("client_secret").map(String::as_str),
+            Some("client-secret")
+        );
+        assert_eq!(form.get("code").map(String::as_str), Some("oauth-code"));
+        Json(json!({ "access_token": "provider-access-token" }))
+    }
+
+    fn assert_oauth_bearer(headers: &HeaderMap) {
+        assert_eq!(
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-access-token")
+        );
+    }
+
+    async fn github_user(headers: HeaderMap) -> Json<Value> {
+        assert_oauth_bearer(&headers);
+        Json(json!({ "id": 12345, "login": "octocat", "name": "Octo Cat" }))
+    }
+
+    async fn github_emails(headers: HeaderMap) -> Json<Value> {
+        assert_oauth_bearer(&headers);
+        Json(json!([
+            { "email": "unverified@example.com", "primary": true, "verified": false },
+            { "email": "octo@example.com", "primary": false, "verified": true }
+        ]))
+    }
+
+    async fn google_user(headers: HeaderMap) -> Json<Value> {
+        assert_oauth_bearer(&headers);
+        Json(json!({
+            "sub": "google-subject",
+            "email": "google@example.com",
+            "email_verified": true,
+            "name": "Google User"
+        }))
+    }
+
     async fn bootstrap_owner(store: &AuthStore, email: &str, name: &str) -> CurrentSession {
         let (invite, _) = store
             .create_personal_invitation()
             .await
             .expect("personal invitation");
         store
-            .register(&invite, email, name, "password123")
+            .register(Some(&invite), email, name, "password123")
             .await
             .expect("owner registration")
     }
@@ -3690,7 +4457,7 @@ mod tests {
             .starts_with("https://app.treer.example/?invite="));
 
         let registered = store
-            .register(&invite, "Alice@Example.com", "Alice", "password123")
+            .register(Some(&invite), "Alice@Example.com", "Alice", "password123")
             .await
             .expect("registration");
         assert_eq!(registered.email, "alice@example.com");
@@ -3703,7 +4470,7 @@ mod tests {
         assert_eq!(organizations[0].name, "Alice Personal");
         assert_eq!(organizations[0].role, "owner");
         assert!(store
-            .register(&invite, "bob@example.com", "Bob", "password123")
+            .register(Some(&invite), "bob@example.com", "Bob", "password123")
             .await
             .is_err());
 
@@ -3752,7 +4519,7 @@ mod tests {
             .await
             .expect("invitation");
         store
-            .register(&invite, "Alice@Example.com", "Alice", "password123")
+            .register(Some(&invite), "Alice@Example.com", "Alice", "password123")
             .await
             .expect("registration");
 
@@ -3772,6 +4539,193 @@ mod tests {
         assert!(body["text"].as_str().expect("text body").contains("Alice"));
         assert!(body["html"].as_str().expect("HTML body").contains("Alice"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn oauth_provider_exchange_uses_verified_provider_profiles() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind OAuth provider");
+        let address = listener.local_addr().expect("OAuth provider address");
+        let base = format!("http://{address}");
+        let app = Router::new()
+            .route("/token", post(oauth_token))
+            .route("/github/user", get(github_user))
+            .route("/github/emails", get(github_emails))
+            .route("/google/user", get(google_user));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let github = OAuthProviderConfig::new(
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            &format!("{base}/authorize"),
+            &format!("{base}/token"),
+            &format!("{base}/github/user"),
+            Some(&format!("{base}/github/emails")),
+        )
+        .expect("GitHub OAuth config");
+        let google = OAuthProviderConfig::new(
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            &format!("{base}/authorize"),
+            &format!("{base}/token"),
+            &format!("{base}/google/user"),
+            None,
+        )
+        .expect("Google OAuth config");
+        let mut store = AuthStore::for_test("owner-password").await;
+        store.oauth = Arc::new(OAuthConfig::new(Some(github), Some(google), true));
+
+        let github = store
+            .exchange_oauth_code("github", "oauth-code")
+            .await
+            .expect("GitHub profile");
+        assert_eq!(github.subject, "12345");
+        assert_eq!(github.email, "octo@example.com");
+        assert_eq!(github.preferred_name, "Octo Cat");
+        let google = store
+            .exchange_oauth_code("google", "oauth-code")
+            .await
+            .expect("Google profile");
+        assert_eq!(google.subject, "google-subject");
+        assert_eq!(google.email, "google@example.com");
+        assert_eq!(google.preferred_name, "Google User");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oauth_state_is_provider_scoped_and_single_use() {
+        let github =
+            OAuthProviderConfig::github("client-id".to_string(), "client-secret".to_string())
+                .expect("GitHub OAuth config");
+        let mut store = AuthStore::for_test("owner-password").await;
+        store.oauth = Arc::new(OAuthConfig::new(Some(github), None, true));
+        let authorization = store
+            .oauth_authorization_url("github", Some("invite-token"))
+            .await
+            .expect("authorization URL");
+        assert_eq!(authorization.host_str(), Some("github.com"));
+        assert!(authorization.query_pairs().any(|(key, value)| {
+            key == "redirect_uri"
+                && value == "https://proxy.treer.example/api/auth/oauth/github/callback"
+        }));
+        let state = authorization
+            .query_pairs()
+            .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+            .expect("OAuth state");
+        assert!(store.consume_oauth_state("google", &state).await.is_err());
+        assert_eq!(
+            store
+                .consume_oauth_state("github", &state)
+                .await
+                .expect("consume state")
+                .as_deref(),
+            Some("invite-token")
+        );
+        assert!(store.consume_oauth_state("github", &state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn oauth_merges_verified_email_and_keeps_stable_provider_identity() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let merged = store
+            .complete_oauth_login(
+                OAuthProfile {
+                    provider: "github",
+                    subject: "github-123".to_string(),
+                    email: "OWNER@example.com".to_string(),
+                    preferred_name: "Provider Name".to_string(),
+                },
+                None,
+            )
+            .await
+            .expect("merge by verified email");
+        assert_eq!(merged.user_id, owner.user_id);
+        assert_eq!(merged.preferred_name, "Owner");
+        assert!(store
+            .session(&owner.token)
+            .await
+            .expect("old session")
+            .is_none());
+        assert!(store
+            .login("owner@example.com", "password123")
+            .await
+            .is_err());
+
+        let stable = store
+            .complete_oauth_login(
+                OAuthProfile {
+                    provider: "github",
+                    subject: "github-123".to_string(),
+                    email: "changed@example.com".to_string(),
+                    preferred_name: "Changed Provider Name".to_string(),
+                },
+                None,
+            )
+            .await
+            .expect("login by stable provider identity");
+        assert_eq!(stable.user_id, owner.user_id);
+        assert_eq!(stable.email, "owner@example.com");
+        let identity_user: String = sqlx::query_scalar(
+            "SELECT user_id FROM oauth_identities WHERE provider = 'github' AND subject = $1",
+        )
+        .bind("github-123")
+        .fetch_one(&store.pool)
+        .await
+        .expect("linked identity");
+        assert_eq!(identity_user, owner.user_id);
+    }
+
+    #[tokio::test]
+    async fn invitation_switch_controls_new_password_and_oauth_accounts() {
+        let mut required = AuthStore::for_test("owner-password").await;
+        assert!(required
+            .complete_oauth_login(
+                OAuthProfile {
+                    provider: "google",
+                    subject: "new-google-user".to_string(),
+                    email: "new@example.com".to_string(),
+                    preferred_name: "New User".to_string(),
+                },
+                None,
+            )
+            .await
+            .is_err());
+
+        required.oauth = Arc::new(OAuthConfig::new(None, None, false));
+        let oauth_user = required
+            .complete_oauth_login(
+                OAuthProfile {
+                    provider: "google",
+                    subject: "new-google-user".to_string(),
+                    email: "new@example.com".to_string(),
+                    preferred_name: "New User".to_string(),
+                },
+                None,
+            )
+            .await
+            .expect("OAuth registration without invite");
+        assert_eq!(
+            required
+                .list_organizations(&oauth_user.user_id)
+                .await
+                .expect("OAuth personal organization")[0]
+                .name,
+            "New User Personal"
+        );
+        let password_user = required
+            .register(None, "password@example.com", "Password User", "password123")
+            .await
+            .expect("password registration without invite");
+        assert_eq!(
+            required
+                .list_organizations(&password_user.user_id)
+                .await
+                .expect("password personal organization")[0]
+                .name,
+            "Password User Personal"
+        );
     }
 
     #[tokio::test]
@@ -3928,7 +4882,12 @@ mod tests {
             .await
             .expect("invite alice");
         let alice = store
-            .register(&alice_invite, "alice@example.com", "Alice", "password123")
+            .register(
+                Some(&alice_invite),
+                "alice@example.com",
+                "Alice",
+                "password123",
+            )
             .await
             .expect("register alice");
         let alice_organizations = store
@@ -3975,7 +4934,7 @@ mod tests {
             .await
             .expect("admin invite");
         let bob = store
-            .register(&bob_invite, "bob@example.com", "Bob", "password123")
+            .register(Some(&bob_invite), "bob@example.com", "Bob", "password123")
             .await
             .expect("register bob");
         store
@@ -4008,7 +4967,7 @@ mod tests {
             .await
             .expect("personal organization invite");
         let alice = store
-            .register(&invite, "alice@example.com", "Alice", "password123")
+            .register(Some(&invite), "alice@example.com", "Alice", "password123")
             .await
             .expect("register alice");
         let private = store
