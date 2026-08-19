@@ -103,8 +103,8 @@ flowchart TB
 PostgreSQL persists users, organizations, memberships, sessions, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, Agent messages, per-Agent and per-human read state, message
-context edges, machine services, and virtual hosts. Administrator invitations
-create a user-owned personal organization during registration; organization
+context edges, machine services, Agent UI declarations, and virtual hosts.
+Administrator invitations create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
 
@@ -155,6 +155,19 @@ workspace event; the browser keeps its last valid snapshot while reconnecting.
 This avoids cross-replica HTTP refresh races. A globally sequenced incremental
 event reducer can replace the full-snapshot stream when workspace size requires
 it.
+
+An Agent UI declaration maps one Agent to an HTTP machine service on that
+Agent's machine plus an absolute service path. The declaration is durable in
+PostgreSQL and is carried in the workspace snapshot; NATS control projections
+make updates visible across Proxy replicas. When present, the web application
+embeds `/api/workspaces/{workspace}/agents/{agent}/ui/proxy/` instead of mounting
+the PTY terminal. The UI tunnel and virtual-host tunnel share the same HTTP/1.1
+bridge. WebSocket Upgrade requests become bidirectional byte streams over the
+existing Controller WebSocket and network binary frames; the custom page never
+connects directly to a machine. Relative URLs are required so assets, fetches,
+and WebSocket endpoints remain beneath the Agent UI tunnel prefix. Deleting the
+service, changing it to TCP, or moving it away from the Agent's machine clears
+the declaration and restores the terminal view.
 
 ## Primary information flow
 

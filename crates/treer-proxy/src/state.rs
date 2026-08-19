@@ -8,11 +8,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tracing::warn;
 use treer_protocol::{
-    AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult, DomainEventActor,
-    DomainEventEnvelope, DomainEventResource, NetworkBinaryFrame, NetworkBinaryKind,
-    NetworkConnectRequest, NetworkDirectTarget, ProtocolError, ProxyMessage, ServerInfo,
-    ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage, WorkspaceEvent,
-    WorkspaceInfo, WorkspaceSnapshot, DOMAIN_EVENT_SCHEMA_VERSION,
+    AgentCommand, AgentInfo, AgentServerSnapshot, AgentUi, CommandEnvelope, CommandResult,
+    DomainEventActor, DomainEventEnvelope, DomainEventResource, NetworkBinaryFrame,
+    NetworkBinaryKind, NetworkConnectRequest, NetworkDirectTarget, ProtocolError, ProxyMessage,
+    ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalServerMessage,
+    WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use uuid::Uuid;
 
@@ -103,6 +103,7 @@ struct WorkspaceState {
     revision: u64,
     servers: HashMap<String, ServerInfo>,
     agents: HashMap<String, AgentInfo>,
+    agent_uis: HashMap<String, AgentUi>,
     server_names: HashMap<String, String>,
     agent_names: HashMap<String, String>,
     deleted_servers: HashSet<String>,
@@ -115,11 +116,19 @@ impl WorkspaceState {
         servers.sort_by(|left, right| left.server_id.cmp(&right.server_id));
         let mut agents: Vec<_> = self.agents.values().cloned().collect();
         agents.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        let mut agent_uis: Vec<_> = self
+            .agent_uis
+            .values()
+            .filter(|ui| self.agents.contains_key(&ui.agent_id))
+            .cloned()
+            .collect();
+        agent_uis.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
         WorkspaceSnapshot {
             revision: self.revision,
             workspace: self.info.clone(),
             servers,
             agents,
+            agent_uis,
         }
     }
 
@@ -253,6 +262,7 @@ impl AppState {
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
+                agent_uis: HashMap::new(),
                 server_names: HashMap::new(),
                 agent_names: HashMap::new(),
                 deleted_servers: HashSet::new(),
@@ -281,6 +291,7 @@ impl AppState {
                     revision: 0,
                     servers: HashMap::new(),
                     agents: HashMap::new(),
+                    agent_uis: HashMap::new(),
                     server_names: HashMap::new(),
                     agent_names: HashMap::new(),
                     deleted_servers: HashSet::new(),
@@ -2088,6 +2099,38 @@ impl AppState {
         self.inner.cluster.broadcast_projection(update).await
     }
 
+    pub async fn restore_agent_uis(&self, uis: Vec<AgentUi>) {
+        let mut workspaces = self.inner.workspaces.write().await;
+        for workspace in workspaces.values_mut() {
+            workspace.agent_uis.clear();
+        }
+        for ui in uis {
+            if let Some(workspace) = workspaces.get_mut(&ui.workspace_id) {
+                workspace.agent_uis.insert(ui.agent_id.clone(), ui);
+            }
+        }
+    }
+
+    pub async fn update_agent_ui(&self, ui: AgentUi) -> Result<(), ProtocolError> {
+        self.apply_cluster_projection(ClusterProjectionUpdate::AgentUiSet { ui: ui.clone() })
+            .await;
+        self.broadcast_projection(ClusterProjectionUpdate::AgentUiSet { ui })
+            .await
+    }
+
+    pub async fn clear_agent_ui(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+    ) -> Result<(), ProtocolError> {
+        let update = ClusterProjectionUpdate::AgentUiCleared {
+            workspace_id: workspace_id.to_string(),
+            agent_id: agent_id.to_string(),
+        };
+        self.apply_cluster_projection(update.clone()).await;
+        self.broadcast_projection(update).await
+    }
+
     pub(crate) async fn apply_cluster_projection(&self, update: ClusterProjectionUpdate) {
         match update {
             ClusterProjectionUpdate::WorkspaceUpsert { workspace } => {
@@ -2179,6 +2222,48 @@ impl AppState {
                 };
                 let _ = self.inner.events.send(event);
                 self.close_agent_terminals(&workspace_id, &agent_id).await;
+            }
+            ClusterProjectionUpdate::AgentUiSet { ui } => {
+                let event = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.get_mut(&ui.workspace_id) else {
+                        return;
+                    };
+                    if workspace.agent_uis.get(&ui.agent_id) == Some(&ui) {
+                        return;
+                    }
+                    workspace.agent_uis.insert(ui.agent_id.clone(), ui.clone());
+                    workspace.revision = workspace.revision.saturating_add(1);
+                    WorkspaceEvent {
+                        revision: workspace.revision,
+                        workspace_id: ui.workspace_id.clone(),
+                        event: "agent.ui.updated".to_string(),
+                        data: serde_json::json!({ "agent_id": ui.agent_id }),
+                    }
+                };
+                let _ = self.inner.events.send(event);
+            }
+            ClusterProjectionUpdate::AgentUiCleared {
+                workspace_id,
+                agent_id,
+            } => {
+                let event = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                        return;
+                    };
+                    if workspace.agent_uis.remove(&agent_id).is_none() {
+                        return;
+                    }
+                    workspace.revision = workspace.revision.saturating_add(1);
+                    WorkspaceEvent {
+                        revision: workspace.revision,
+                        workspace_id: workspace_id.clone(),
+                        event: "agent.ui.cleared".to_string(),
+                        data: serde_json::json!({ "agent_id": agent_id }),
+                    }
+                };
+                let _ = self.inner.events.send(event);
             }
             ClusterProjectionUpdate::ServerDeleted {
                 workspace_id,

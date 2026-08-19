@@ -16,10 +16,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentInboxResponse,
-    AgentMailAddress, AgentMailMessage, AgentServerSnapshot, ApiError, CreateMachineServiceRequest,
-    CreateVirtualNetworkHostRequest, HumanMailAddress, MachineService, MachineServiceProtocol,
-    ProtocolError, ServerInfo, UpdateMachineServiceRequest, VirtualNetworkHost, WorkspaceHuman,
-    WorkspaceInfo,
+    AgentMailAddress, AgentMailMessage, AgentServerSnapshot, AgentUi, ApiError,
+    CreateMachineServiceRequest, CreateVirtualNetworkHostRequest, HumanMailAddress, MachineService,
+    MachineServiceProtocol, ProtocolError, ServerInfo, UpdateMachineServiceRequest,
+    VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
 };
 use url::Url;
 use uuid::Uuid;
@@ -599,6 +599,102 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         rows.into_iter().map(machine_service_from_row).collect()
+    }
+
+    pub async fn all_agent_uis(&self) -> Result<Vec<AgentUi>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT workspace_id, agent_id, service_id, path, updated_at, updated_by \
+             FROM agent_uis ORDER BY workspace_id, agent_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(agent_ui_from_row).collect()
+    }
+
+    pub async fn get_agent_ui(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<AgentUi>, AuthFailure> {
+        sqlx::query(
+            "SELECT workspace_id, agent_id, service_id, path, updated_at, updated_by \
+             FROM agent_uis WHERE workspace_id = $1 AND agent_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .map(agent_ui_from_row)
+        .transpose()
+    }
+
+    pub async fn list_agent_uis_for_service(
+        &self,
+        workspace_id: &str,
+        service_id: &str,
+    ) -> Result<Vec<AgentUi>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT workspace_id, agent_id, service_id, path, updated_at, updated_by \
+             FROM agent_uis WHERE workspace_id = $1 AND service_id = $2 ORDER BY agent_id",
+        )
+        .bind(workspace_id)
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(agent_ui_from_row).collect()
+    }
+
+    pub async fn set_agent_ui(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        service_id: &str,
+        path: &str,
+        actor: &str,
+    ) -> Result<AgentUi, AuthFailure> {
+        let path = validate_agent_ui_path(path)?;
+        let ui = AgentUi {
+            workspace_id: workspace_id.to_string(),
+            agent_id: agent_id.to_string(),
+            service_id: service_id.to_string(),
+            path,
+            updated_at: Utc::now(),
+            updated_by: actor.to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO agent_uis(workspace_id, agent_id, service_id, path, updated_at, updated_by) \
+             VALUES($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT(workspace_id, agent_id) DO UPDATE SET \
+             service_id = excluded.service_id, path = excluded.path, \
+             updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+        )
+        .bind(&ui.workspace_id)
+        .bind(&ui.agent_id)
+        .bind(&ui.service_id)
+        .bind(&ui.path)
+        .bind(ui.updated_at.to_rfc3339())
+        .bind(&ui.updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(ui)
+    }
+
+    pub async fn clear_agent_ui(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+    ) -> Result<bool, AuthFailure> {
+        let result = sqlx::query("DELETE FROM agent_uis WHERE workspace_id = $1 AND agent_id = $2")
+            .bind(workspace_id)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn resolve_machine_service(
@@ -1532,6 +1628,12 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM agent_names WHERE agent_id = $1 AND workspace_id = $2")
+            .bind(agent_id)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM agent_uis WHERE agent_id = $1 AND workspace_id = $2")
             .bind(agent_id)
             .bind(workspace_id)
             .execute(&mut *transaction)
@@ -2804,6 +2906,17 @@ fn machine_service_from_row(row: sqlx::postgres::PgRow) -> Result<MachineService
     })
 }
 
+fn agent_ui_from_row(row: sqlx::postgres::PgRow) -> Result<AgentUi, AuthFailure> {
+    Ok(AgentUi {
+        workspace_id: row.get("workspace_id"),
+        agent_id: row.get("agent_id"),
+        service_id: row.get("service_id"),
+        path: row.get("path"),
+        updated_at: parse_database_timestamp(&row, "updated_at", "agent UI")?,
+        updated_by: row.get("updated_by"),
+    })
+}
+
 fn parse_database_timestamp(
     row: &sqlx::postgres::PgRow,
     column: &str,
@@ -2828,6 +2941,25 @@ fn validate_service_target_host(value: &str) -> Result<String, AuthFailure> {
         return Err(AuthFailure::bad_request(
             "invalid_service",
             "target_host must be a non-empty hostname or address",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_agent_ui_path(value: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value.starts_with('/')
+        || value.len() > 1024
+        || value.contains("//")
+        || value.split('/').any(|segment| segment == "..")
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_agent_ui_path",
+            "Agent UI path must be an absolute service path without whitespace or parent traversal",
         ));
     }
     Ok(value.to_string())
@@ -3273,6 +3405,27 @@ mod tests {
             )
             .await
             .expect("create alias");
+        let ui = store
+            .set_agent_ui(
+                "default",
+                "agent-a",
+                &service.service_id,
+                "/dashboard/",
+                "agent:agent-a",
+            )
+            .await
+            .expect("set Agent UI");
+        assert_eq!(ui.path, "/dashboard/");
+        assert!(store
+            .set_agent_ui(
+                "default",
+                "agent-a",
+                &service.service_id,
+                "../escape",
+                "agent:agent-a",
+            )
+            .await
+            .is_err());
 
         let updated = store
             .update_machine_service(
@@ -3302,6 +3455,11 @@ mod tests {
             .resolve_virtual_network_host("default", "web.internal")
             .await
             .expect("resolve deleted alias")
+            .is_none());
+        assert!(store
+            .get_agent_ui("default", "agent-a")
+            .await
+            .expect("resolve cascaded Agent UI")
             .is_none());
     }
 

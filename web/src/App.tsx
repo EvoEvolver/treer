@@ -165,6 +165,7 @@ function WorkspaceApp() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionState>("connecting")
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
+  const [agentUiRevision, setAgentUiRevision] = useState(0)
   const [mainView, setMainView] = useState<MainView>("terminal")
   const [error, setError] = useState<string | null>(null)
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
@@ -284,10 +285,14 @@ function WorkspaceApp() {
   }, [snapshot])
 
   const selectedAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId)
+  const selectedAgentUi = snapshot?.agent_uis.find((ui) => ui.agent_id === selectedAgentId)
   const onlineMachines = snapshot?.servers.filter((machine) => machine.status === "online") ?? []
   const organization = organizations.find((item) => item.organization_id === organizationId)
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
+  const agentUiUrl = workspaceId && selectedAgentUi
+    ? proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgentUi.agent_id)}/ui/proxy/`)
+    : null
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
   const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)
@@ -564,6 +569,15 @@ function WorkspaceApp() {
     finally { window.location.href = "/" }
   }
 
+  function refreshAgentView() {
+    if (selectedAgentUi) {
+      setAgentUiRevision((value) => value + 1)
+      return
+    }
+    setSelectedAgentId(null)
+    requestAnimationFrame(() => setSelectedAgentId(selectedAgent?.agent_id ?? null))
+  }
+
   if (user === undefined) return <div className="grid min-h-dvh place-items-center bg-[#f7f7f5] text-sm text-muted-foreground">Loading Treer...</div>
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
@@ -624,12 +638,14 @@ function WorkspaceApp() {
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "network" ? "Network" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
-            <IconButton label="Reconnect terminal" disabled={!selectedAgent} onClick={() => { setSelectedAgentId(null); requestAnimationFrame(() => setSelectedAgentId(selectedAgent?.agent_id ?? null)) }}><RotateCw /></IconButton>
+            <IconButton label={selectedAgentUi ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={stopAgent}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button></div>}
         </header>
-        {mainView === "terminal" ? <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
+        {mainView === "terminal" && selectedAgentUi && agentUiUrl ? <div className="min-h-0 min-w-0 overflow-hidden bg-white">
+          <iframe key={`${selectedAgentUi.updated_at}:${agentUiRevision}`} src={agentUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full border-0" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" />
+        </div> : mainView === "terminal" ? <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className="grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]">
             <div className="flex min-w-0 items-center justify-between gap-4 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><span className="inline-flex shrink-0 items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} /></div>

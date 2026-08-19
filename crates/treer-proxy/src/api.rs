@@ -22,7 +22,7 @@ use treer_protocol::{
     CreateAgentRequest, CreateMachineServiceRequest, CreateVirtualNetworkHostRequest,
     InputAgentRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
     PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest, SendAgentMailResponse,
-    TerminalClientMessage, TerminalServerMessage, UpdateMachineServiceRequest,
+    SetAgentUiRequest, TerminalClientMessage, TerminalServerMessage, UpdateMachineServiceRequest,
     VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
     WorkspaceEvent, AGENT_ID_HEADER,
 };
@@ -33,12 +33,13 @@ use crate::agent_socket;
 use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
 use crate::identity::IdentityIssuer;
 use crate::policy::{
-    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_HUMAN_LIST,
-    ACTION_IDENTITY_TOKEN_ISSUE, ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE,
-    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
-    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
-    RESOURCE_AGENT_MAILBOX, RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX,
-    RESOURCE_MACHINE_SERVICE, RESOURCE_VIRTUAL_HOST,
+    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_UI_READ,
+    ACTION_AGENT_UI_SET, ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_MAIL_READ,
+    ACTION_MAIL_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST,
+    ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
+    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT_MAILBOX,
+    RESOURCE_AGENT_UI, RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX, RESOURCE_MACHINE_SERVICE,
+    RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
 
@@ -53,6 +54,7 @@ pub struct BootstrapConfig {
 pub struct BrowserAccess {
     origin: HeaderValue,
     origin_text: Arc<str>,
+    proxy_origin: HeaderValue,
 }
 
 #[derive(Clone)]
@@ -85,13 +87,16 @@ impl BootstrapConfig {
 }
 
 impl BrowserAccess {
-    pub fn new(app_public_url: &Url) -> anyhow::Result<Self> {
+    pub fn new(app_public_url: &Url, proxy_public_url: &Url) -> anyhow::Result<Self> {
         let origin_text: Arc<str> = app_public_url.origin().ascii_serialization().into();
         let origin = HeaderValue::from_str(&origin_text)
             .context("app public URL produced an invalid HTTP Origin")?;
+        let proxy_origin = HeaderValue::from_str(&proxy_public_url.origin().ascii_serialization())
+            .context("proxy public URL produced an invalid HTTP Origin")?;
         Ok(Self {
             origin,
             origin_text,
+            proxy_origin,
         })
     }
 
@@ -119,6 +124,20 @@ impl BrowserAccess {
             Err(ApiFailure::forbidden(
                 "browser_origin_denied",
                 &format!("browser requests must originate from {}", self.origin_text),
+            ))
+        }
+    }
+
+    fn validate_tunnel_if_present(&self, headers: &HeaderMap) -> Result<(), ApiFailure> {
+        let Some(origin) = headers.get(header::ORIGIN) else {
+            return Ok(());
+        };
+        if origin == self.origin || origin == self.proxy_origin {
+            Ok(())
+        } else {
+            Err(ApiFailure::forbidden(
+                "browser_origin_denied",
+                "browser tunnel request has an unrecognized origin",
             ))
         }
     }
@@ -167,6 +186,10 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}",
             get(get_agent).patch(rename_agent).delete(delete_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/ui",
+            get(agent_get_ui).put(agent_set_ui).delete(agent_clear_ui),
         )
         .route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
@@ -298,6 +321,22 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}",
             get(get_agent).patch(rename_agent).delete(delete_agent),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui",
+            get(get_agent_ui),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui/proxy",
+            any(proxy_agent_ui_root),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui/proxy/",
+            any(proxy_agent_ui_root),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui/proxy/{*path}",
+            any(proxy_agent_ui_path),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -940,6 +979,7 @@ async fn update_machine_service(
     let service = auth
         .update_machine_service(&workspace_id, &service_id, &session.user_id, request)
         .await?;
+    reconcile_agent_uis_for_service(&state, &auth, &service).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "service": service })))
 }
@@ -949,9 +989,18 @@ async fn delete_machine_service(
     Extension(auth): Extension<AuthStore>,
     Path((workspace_id, service_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let service = auth
-        .delete_machine_service(&workspace_id, &service_id)
+    let current = auth
+        .resolve_machine_service(&workspace_id, &service_id)
         .await?;
+    let agent_uis = auth
+        .list_agent_uis_for_service(&workspace_id, &current.service_id)
+        .await?;
+    let service = auth
+        .delete_machine_service(&workspace_id, &current.service_id)
+        .await?;
+    for ui in agent_uis {
+        state.clear_agent_ui(&workspace_id, &ui.agent_id).await?;
+    }
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({
         "deleted": true,
@@ -980,6 +1029,31 @@ async fn probe_machine_service(
         )
         .await?;
     Ok(Json(json!({ "service": service, "health": result })))
+}
+
+async fn reconcile_agent_uis_for_service(
+    state: &AppState,
+    auth: &AuthStore,
+    service: &MachineService,
+) -> Result<(), ApiFailure> {
+    let uis = auth
+        .list_agent_uis_for_service(&service.workspace_id, &service.service_id)
+        .await?;
+    for ui in uis {
+        let valid = service.protocol == treer_protocol::MachineServiceProtocol::Http
+            && state
+                .resolve_agent(&service.workspace_id, &ui.agent_id)
+                .await
+                .is_ok_and(|agent| agent.server_id == service.server_id);
+        if !valid {
+            auth.clear_agent_ui(&service.workspace_id, &ui.agent_id)
+                .await?;
+            state
+                .clear_agent_ui(&service.workspace_id, &ui.agent_id)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn list_virtual_network_hosts(
@@ -1023,7 +1097,7 @@ async fn proxy_virtual_network_host_root(
     Path((workspace_id, hostname)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
-    browser.validate_if_present(request.headers())?;
+    browser.validate_tunnel_if_present(request.headers())?;
     proxy_virtual_network_host(state, auth, workspace_id, hostname, String::new(), request).await
 }
 
@@ -1034,7 +1108,7 @@ async fn proxy_virtual_network_host_path(
     Path((workspace_id, hostname, path)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
-    browser.validate_if_present(request.headers())?;
+    browser.validate_tunnel_if_present(request.headers())?;
     proxy_virtual_network_host(state, auth, workspace_id, hostname, path, request).await
 }
 
@@ -1044,7 +1118,7 @@ async fn proxy_virtual_network_host(
     workspace_id: String,
     hostname: String,
     path: String,
-    mut request: Request<Body>,
+    request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     let host = auth
         .resolve_virtual_network_host(&workspace_id, &hostname)
@@ -1056,21 +1130,122 @@ async fn proxy_virtual_network_host(
             "browser access requires an HTTP service",
         ));
     }
+    proxy_http_service(
+        state,
+        &workspace_id,
+        &host.destination_server_id,
+        &host.target_host,
+        host.target_port.unwrap_or(80),
+        &host.hostname,
+        "/",
+        &path,
+        request,
+    )
+    .await
+}
+
+async fn get_agent_ui(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, target)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let ui = auth.get_agent_ui(&workspace_id, &agent.agent_id).await?;
+    Ok(Json(json!({ "ui": ui })))
+}
+
+async fn proxy_agent_ui_root(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(browser): Extension<BrowserAccess>,
+    Path((workspace_id, agent_id)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    browser.validate_tunnel_if_present(request.headers())?;
+    proxy_agent_ui(state, auth, workspace_id, agent_id, String::new(), request).await
+}
+
+async fn proxy_agent_ui_path(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(browser): Extension<BrowserAccess>,
+    Path((workspace_id, agent_id, path)): Path<(String, String, String)>,
+    request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    browser.validate_tunnel_if_present(request.headers())?;
+    proxy_agent_ui(state, auth, workspace_id, agent_id, path, request).await
+}
+
+async fn proxy_agent_ui(
+    state: AppState,
+    auth: AuthStore,
+    workspace_id: String,
+    target: String,
+    path: String,
+    request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let ui = auth
+        .get_agent_ui(&workspace_id, &agent.agent_id)
+        .await?
+        .ok_or_else(|| ApiFailure::not_found("agent_ui_not_found", &agent.agent_id))?;
+    let service = auth
+        .resolve_machine_service(&workspace_id, &ui.service_id)
+        .await?;
+    if service.protocol != treer_protocol::MachineServiceProtocol::Http {
+        return Err(ApiFailure::bad_request(
+            "service_protocol_mismatch",
+            "Agent UI requires an HTTP service",
+        ));
+    }
+    if service.server_id != agent.server_id {
+        return Err(ApiFailure::bad_request(
+            "agent_ui_machine_mismatch",
+            "Agent UI service no longer belongs to the Agent machine",
+        ));
+    }
+    let authority = format!("{}:{}", service.target_host, service.target_port);
+    proxy_http_service(
+        state,
+        &workspace_id,
+        &service.server_id,
+        &service.target_host,
+        service.target_port,
+        &authority,
+        &ui.path,
+        &path,
+        request,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn proxy_http_service(
+    state: AppState,
+    workspace_id: &str,
+    server_id: &str,
+    target_host: &str,
+    target_port: u16,
+    request_host: &str,
+    base_path: &str,
+    path: &str,
+    mut request: Request<Body>,
+) -> Result<Response, ApiFailure> {
     let stream = state
-        .open_browser_network_stream(
-            &workspace_id,
-            &host.destination_server_id,
-            &host.target_host,
-            host.target_port.unwrap_or(80),
-        )
+        .open_browser_network_stream(workspace_id, server_id, target_host, target_port)
         .await?;
 
     let query = request.uri().query();
-    let target = if path.is_empty() {
-        query.map_or_else(|| "/".to_string(), |query| format!("/?{query}"))
+    let target_path = if path.is_empty() {
+        base_path.to_string()
+    } else if base_path == "/" {
+        format!("/{path}")
     } else {
-        query.map_or_else(|| format!("/{path}"), |query| format!("/{path}?{query}"))
+        format!("{}/{path}", base_path.trim_end_matches('/'))
     };
+    let target = query.map_or(target_path.clone(), |query| {
+        format!("{target_path}?{query}")
+    });
     *request.uri_mut() = target
         .parse::<Uri>()
         .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
@@ -1078,7 +1253,7 @@ async fn proxy_virtual_network_host(
 
     let upgraded = request.headers().contains_key(header::UPGRADE);
     let downstream_upgrade = upgraded.then(|| hyper::upgrade::on(&mut request));
-    sanitize_tunnel_request_headers(request.headers_mut(), upgraded, &host.hostname)?;
+    sanitize_tunnel_request_headers(request.headers_mut(), upgraded, request_host)?;
 
     let io = TokioIo::new(stream);
     let (mut sender, connection) = hyper::client::conn::http1::handshake::<_, Body>(io)
@@ -1164,12 +1339,116 @@ async fn agent_list_machine_services(
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
-            subject,
+            subject.clone(),
             ACTION_SERVICE_LIST,
             PolicyResource::new(RESOURCE_MACHINE_SERVICE, "*"),
         ))
         .await?;
     list_machine_services(Extension(auth), Path(workspace_id)).await
+}
+
+async fn agent_get_ui(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let PolicySubject::Agent { agent_id, .. } = &subject else {
+        unreachable!("managed Agent route always produces an Agent subject")
+    };
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_AGENT_UI_READ,
+            PolicyResource::new(RESOURCE_AGENT_UI, agent_id),
+        ))
+        .await?;
+    let ui = auth.get_agent_ui(&workspace_id, agent_id).await?;
+    Ok(Json(json!({ "ui": ui })))
+}
+
+async fn agent_set_ui(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<SetAgentUiRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let PolicySubject::Agent {
+        server_id,
+        agent_id,
+    } = &subject
+    else {
+        unreachable!("managed Agent route always produces an Agent subject")
+    };
+    let service = auth
+        .resolve_machine_service(&workspace_id, &request.service_id)
+        .await?;
+    if service.protocol != treer_protocol::MachineServiceProtocol::Http {
+        return Err(ApiFailure::bad_request(
+            "service_protocol_mismatch",
+            "Agent UI requires an HTTP service",
+        ));
+    }
+    if &service.server_id != server_id {
+        return Err(ApiFailure::bad_request(
+            "agent_ui_machine_mismatch",
+            "Agent UI service must belong to the current Agent machine",
+        ));
+    }
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_AGENT_UI_SET,
+            PolicyResource::new(RESOURCE_AGENT_UI, agent_id)
+                .with_attribute("service_id", &service.service_id)
+                .with_attribute("server_id", &service.server_id),
+        ))
+        .await?;
+    let ui = auth
+        .set_agent_ui(
+            &workspace_id,
+            agent_id,
+            &service.service_id,
+            &request.path,
+            &policy_actor_name(&subject),
+        )
+        .await?;
+    state.update_agent_ui(ui.clone()).await?;
+    Ok(Json(json!({ "ui": ui })))
+}
+
+async fn agent_clear_ui(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let PolicySubject::Agent { agent_id, .. } = &subject else {
+        unreachable!("managed Agent route always produces an Agent subject")
+    };
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            ACTION_AGENT_UI_SET,
+            PolicyResource::new(RESOURCE_AGENT_UI, agent_id),
+        ))
+        .await?;
+    let deleted = auth.clear_agent_ui(&workspace_id, agent_id).await?;
+    state.clear_agent_ui(&workspace_id, agent_id).await?;
+    Ok(Json(json!({ "deleted": deleted })))
 }
 
 async fn agent_create_machine_service(
@@ -1250,6 +1529,7 @@ async fn agent_update_machine_service(
             request,
         )
         .await?;
+    reconcile_agent_uis_for_service(&state, &auth, &service).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "service": service })))
 }
@@ -1280,9 +1560,15 @@ async fn agent_delete_machine_service(
             ),
         ))
         .await?;
+    let agent_uis = auth
+        .list_agent_uis_for_service(&workspace_id, &service.service_id)
+        .await?;
     let service = auth
         .delete_machine_service(&workspace_id, &service.service_id)
         .await?;
+    for ui in agent_uis {
+        state.clear_agent_ui(&workspace_id, &ui.agent_id).await?;
+    }
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({
         "deleted": true,
@@ -1670,6 +1956,7 @@ async fn delete_agent(
             .await?;
     }
     auth.delete_agent(&workspace_id, &agent.agent_id).await?;
+    state.clear_agent_ui(&workspace_id, &agent.agent_id).await?;
     Ok(Json(serde_json::to_value(
         state.delete_agent(&workspace_id, &agent.agent_id).await?,
     )?))
@@ -2103,8 +2390,11 @@ mod tests {
     }
 
     fn test_browser_access() -> BrowserAccess {
-        BrowserAccess::new(&Url::parse("https://app.treer.ai/").expect("app URL"))
-            .expect("browser access")
+        BrowserAccess::new(
+            &Url::parse("https://app.treer.ai/").expect("app URL"),
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .expect("browser access")
     }
 
     #[tokio::test]
@@ -2137,7 +2427,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_access_accepts_only_the_configured_origin_when_present() {
+    fn browser_access_limits_control_routes_but_accepts_proxy_tunnels() {
         let browser = test_browser_access();
         assert!(browser.validate_if_present(&HeaderMap::new()).is_ok());
 
@@ -2147,6 +2437,14 @@ mod tests {
             HeaderValue::from_static("https://app.treer.ai"),
         );
         assert!(browser.validate_if_present(&allowed).is_ok());
+
+        let mut proxy = HeaderMap::new();
+        proxy.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://proxy.treer.ai"),
+        );
+        assert!(browser.validate_if_present(&proxy).is_err());
+        assert!(browser.validate_tunnel_if_present(&proxy).is_ok());
 
         let mut denied = HeaderMap::new();
         denied.insert(
@@ -2584,6 +2882,38 @@ mod tests {
             .to_string();
         assert_eq!(service.0["service"]["created_by"], "agent:agent-a");
 
+        let ui = agent_set_ui(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(machine.clone()),
+            headers.clone(),
+            Path("default".to_string()),
+            Json(SetAgentUiRequest {
+                service_id: service_id.clone(),
+                path: "/dashboard/".to_string(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("set Agent UI: {}", error.error.message));
+        assert_eq!(ui.0["ui"]["agent_id"], "agent-a");
+        assert_eq!(ui.0["ui"]["path"], "/dashboard/");
+        let snapshot = state.snapshot("default").await.expect("workspace snapshot");
+        assert_eq!(snapshot.agent_uis.len(), 1);
+        assert_eq!(snapshot.agent_uis[0].service_id, service_id);
+
+        let shown = agent_get_ui(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(machine.clone()),
+            headers.clone(),
+            Path("default".to_string()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("get Agent UI: {}", error.error.message));
+        assert_eq!(shown.0["ui"]["service_id"], service_id);
+
         let created = agent_create_virtual_network_host(
             State(state.clone()),
             Extension(auth.clone()),
@@ -2625,6 +2955,24 @@ mod tests {
         .unwrap_or_else(|error| panic!("delete virtual host: {}", error.error.message));
         assert_eq!(deleted.0["deleted"], true);
         assert_eq!(deleted.0["hostname"], "api.internal");
+
+        let cleared = agent_clear_ui(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(machine.clone()),
+            headers.clone(),
+            Path("default".to_string()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("clear Agent UI: {}", error.error.message));
+        assert_eq!(cleared.0["deleted"], true);
+        assert!(state
+            .snapshot("default")
+            .await
+            .expect("snapshot after clearing UI")
+            .agent_uis
+            .is_empty());
 
         let deleted_service = agent_delete_machine_service(
             State(state),
@@ -2683,7 +3031,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_tunnel_forwards_http_without_leaking_gateway_credentials() {
+    async fn agent_ui_tunnel_forwards_http_without_leaking_gateway_credentials() {
         let state = AppState::new();
         let now = chrono::Utc::now();
         let server = treer_protocol::ServerInfo {
@@ -2699,11 +3047,26 @@ mod tests {
         };
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = treer_protocol::AgentInfo {
+            agent_id: "agent-a".to_string(),
+            workspace_id: "default".to_string(),
+            server_id: "machine-a".to_string(),
+            kind: "command".to_string(),
+            name: "agent-a".to_string(),
+            cwd: ".".to_string(),
+            status: treer_protocol::AgentStatus::Idle,
+            pid: None,
+            started_at: now,
+            updated_at: now,
+            exited_at: None,
+            exit_code: None,
+            output_revision: 0,
+        };
         state
             .register_server(
                 treer_protocol::AgentServerSnapshot {
                     server,
-                    agents: Vec::new(),
+                    agents: vec![agent],
                 },
                 connection_id,
                 server_tx,
@@ -2727,16 +3090,15 @@ mod tests {
             )
             .await
             .expect("create machine service");
-        auth.create_virtual_network_host(
+        auth.set_agent_ui(
             "default",
-            "test-user",
-            CreateVirtualNetworkHostRequest {
-                hostname: "app.internal".to_string(),
-                service_id: service.service_id,
-            },
+            "agent-a",
+            &service.service_id,
+            "/dashboard/",
+            "agent:agent-a",
         )
         .await
-        .expect("create virtual host");
+        .expect("set Agent UI");
 
         let controller_state = state.clone();
         let controller = tokio::spawn(async move {
@@ -2772,8 +3134,8 @@ mod tests {
                     break String::from_utf8(frame.payload).expect("HTTP request text");
                 }
             };
-            assert!(request.starts_with("GET /status?full=1 HTTP/1.1\r\n"));
-            assert!(request.contains("host: app.internal\r\n"));
+            assert!(request.starts_with("GET /dashboard/status?full=1 HTTP/1.1\r\n"));
+            assert!(request.contains("host: 127.0.0.1:8080\r\n"));
             assert!(!request.to_ascii_lowercase().contains("cookie:"));
             assert!(!request.to_ascii_lowercase().contains("authorization:"));
 
@@ -2811,11 +3173,11 @@ mod tests {
             .header(header::AUTHORIZATION, "Bearer secret")
             .body(Body::empty())
             .expect("browser request");
-        let response = proxy_virtual_network_host(
+        let response = proxy_agent_ui(
             state,
             auth,
             "default".to_string(),
-            "app.internal".to_string(),
+            "agent-a".to_string(),
             "status".to_string(),
             request,
         )
@@ -2828,5 +3190,29 @@ mod tests {
             .expect("read tunnel response");
         assert_eq!(&body[..], b"hello");
         controller.await.expect("join controller");
+    }
+
+    #[test]
+    fn websocket_upgrade_headers_survive_the_shared_browser_tunnel() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, "Upgrade".parse().expect("connection"));
+        headers.insert(header::UPGRADE, "websocket".parse().expect("upgrade"));
+        headers.insert(
+            header::COOKIE,
+            "treer_session=secret".parse().expect("cookie"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer secret".parse().expect("authorization"),
+        );
+
+        sanitize_tunnel_request_headers(&mut headers, true, "127.0.0.1:8080")
+            .unwrap_or_else(|error| panic!("sanitize upgraded request: {}", error.error.message));
+
+        assert_eq!(headers.get(header::CONNECTION).unwrap(), "Upgrade");
+        assert_eq!(headers.get(header::UPGRADE).unwrap(), "websocket");
+        assert_eq!(headers.get(header::HOST).unwrap(), "127.0.0.1:8080");
+        assert!(!headers.contains_key(header::COOKIE));
+        assert!(!headers.contains_key(header::AUTHORIZATION));
     }
 }

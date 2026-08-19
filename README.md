@@ -391,6 +391,9 @@ Server without receiving Proxy credentials:
 ```bash
 treer service register api --port 8080 --protocol http
 treer service probe api
+treer ui set api --path /
+treer ui show
+treer ui clear
 treer virtual-host list
 treer virtual-host add api.internal api
 treer virtual-host delete api.internal

@@ -16,8 +16,9 @@ use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
     AgentInboxRequest, ApiError, CreateAgentRequest, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, InputAgentRequest, PromptAgentRequest, ProtocolError,
-    RenameRequest, SendAgentMailRequest, TerminalServerMessage, UpdateMachineServiceRequest,
-    WorkloadIdentityTokenRequest, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    RenameRequest, SendAgentMailRequest, SetAgentUiRequest, TerminalServerMessage,
+    UpdateMachineServiceRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
+    WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -131,6 +132,16 @@ impl LocalApiState {
             .await
     }
 
+    async fn put_as(
+        &self,
+        suffix: &str,
+        body: &Value,
+        source_agent_id: Option<&str>,
+    ) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::PUT, suffix, Some(body), source_agent_id)
+            .await
+    }
+
     async fn patch(&self, suffix: &str, body: &Value) -> Result<Value, LocalApiError> {
         self.request(reqwest::Method::PATCH, suffix, Some(body), None)
             .await
@@ -185,6 +196,10 @@ pub fn router(state: LocalApiState) -> Router {
         .route(
             "/api/services/{service_id}/probe",
             post(probe_machine_service),
+        )
+        .route(
+            "/api/ui",
+            get(get_agent_ui).put(set_agent_ui).delete(clear_agent_ui),
         )
         .route(
             "/api/virtual-hosts",
@@ -358,6 +373,40 @@ async fn probe_machine_service(
                 &json!({}),
                 Some(source_agent_id(&headers)?),
             )
+            .await?,
+    ))
+}
+
+async fn get_agent_ui(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state.get_as("ui", Some(source_agent_id(&headers)?)).await?,
+    ))
+}
+
+async fn set_agent_ui(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<SetAgentUiRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .put_as("ui", &body, Some(source_agent_id(&headers)?))
+            .await?,
+    ))
+}
+
+async fn clear_agent_ui(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    Ok(Json(
+        state
+            .delete_as("ui", Some(source_agent_id(&headers)?))
             .await?,
     ))
 }

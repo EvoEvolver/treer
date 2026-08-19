@@ -29,9 +29,12 @@ In concrete terms:
    stable CLI contract rather than knowing machine addresses.
 5. Agents can register and maintain long-running machine services, then expose
    stable workspace aliases without making service ports public.
-6. Machines connect outward to the Proxy; local Agent Server and service ports
+6. An Agent can select one HTTP machine service as its custom interface. The
+   control plane embeds that page in place of the Agent terminal, and relative
+   HTTP and WebSocket traffic uses the existing browser network tunnel.
+7. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed.
-7. The central Proxy is open source and can be privately deployed.
+8. The central Proxy is open source and can be privately deployed.
 
 This is a convenience-first promise with a comprehensible security reason. It
 is not a claim that the current runtime safely hosts mutually untrusted users.

@@ -15,6 +15,8 @@ pub const ACTION_SERVICE_CREATE: &str = "service.create";
 pub const ACTION_SERVICE_UPDATE: &str = "service.update";
 pub const ACTION_SERVICE_DELETE: &str = "service.delete";
 pub const ACTION_SERVICE_PROBE: &str = "service.probe";
+pub const ACTION_AGENT_UI_READ: &str = "agent_ui.read";
+pub const ACTION_AGENT_UI_SET: &str = "agent_ui.set";
 pub const ACTION_VIRTUAL_HOST_LIST: &str = "virtual_host.list";
 pub const ACTION_VIRTUAL_HOST_CREATE: &str = "virtual_host.create";
 pub const ACTION_VIRTUAL_HOST_DELETE: &str = "virtual_host.delete";
@@ -23,6 +25,7 @@ pub const RESOURCE_AGENT_MAILBOX: &str = "agent.mailbox";
 pub const RESOURCE_HUMAN_DIRECTORY: &str = "human.directory";
 pub const RESOURCE_HUMAN_MAILBOX: &str = "human.mailbox";
 pub const RESOURCE_MACHINE_SERVICE: &str = "machine.service";
+pub const RESOURCE_AGENT_UI: &str = "agent.ui";
 pub const RESOURCE_VIRTUAL_HOST: &str = "virtual_host";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

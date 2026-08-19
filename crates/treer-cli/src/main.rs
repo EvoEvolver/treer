@@ -15,9 +15,9 @@ use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, InputAgentRequest, MachineServiceProtocol, RenameRequest,
-    SendAgentMailRequest, ServerInfo, TerminalClientMessage, TerminalServerMessage,
-    UpdateMachineServiceRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
-    WorkspaceSnapshot, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    SendAgentMailRequest, ServerInfo, SetAgentUiRequest, TerminalClientMessage,
+    TerminalServerMessage, UpdateMachineServiceRequest, WorkloadIdentityTokenRequest,
+    WorkloadIdentityTokenResponse, WorkspaceSnapshot, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -72,6 +72,11 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    #[command(about = "Show this Agent's custom web interface instead of its terminal")]
+    Ui {
+        #[command(subcommand)]
+        command: UiCommand,
     },
     #[command(about = "Obtain a short-lived identity token for a workspace service")]
     Identity {
@@ -247,6 +252,20 @@ enum IdentityCommand {
         #[arg(long, help = "Print the complete JSON token response")]
         json: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum UiCommand {
+    #[command(about = "Show the current custom interface declaration")]
+    Show,
+    #[command(about = "Use an HTTP machine service as this Agent's interface")]
+    Set {
+        service: String,
+        #[arg(long, default_value = "/")]
+        path: String,
+    },
+    #[command(about = "Return this Agent to the terminal interface")]
+    Clear,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -430,6 +449,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
         Command::Service { command } => run_service_command(&client, command).await?,
+        Command::Ui { command } => run_ui_command(&client, command).await?,
         Command::Identity { command } => {
             let IdentityCommand::Token { audience, json } = command;
             let response: WorkloadIdentityTokenResponse = client
@@ -730,6 +750,25 @@ async fn run_service_command(client: &ApiClient, command: ServiceCommand) -> any
                 )
                 .await
         }
+    }
+}
+
+async fn run_ui_command(client: &ApiClient, command: UiCommand) -> anyhow::Result<Value> {
+    match command {
+        UiCommand::Show => client.value(Method::GET, "api/ui", None).await,
+        UiCommand::Set { service, path } => {
+            client
+                .value(
+                    Method::PUT,
+                    "api/ui",
+                    Some(serde_json::to_value(SetAgentUiRequest {
+                        service_id: service,
+                        path,
+                    })?),
+                )
+                .await
+        }
+        UiCommand::Clear => client.value(Method::DELETE, "api/ui", None).await,
     }
 }
 
@@ -1305,6 +1344,27 @@ mod tests {
             Some(Command::VirtualHost {
                 command: VirtualHostCommand::Delete { hostname }
             }) if hostname == "api.internal"
+        ));
+    }
+
+    #[test]
+    fn agent_ui_commands_parse() {
+        let set = Args::try_parse_from(["treer", "ui", "set", "dashboard", "--path", "/treer/"])
+            .expect("Agent UI set should parse");
+        assert!(matches!(
+            set.command,
+            Some(Command::Ui {
+                command: UiCommand::Set { service, path }
+            }) if service == "dashboard" && path == "/treer/"
+        ));
+
+        let clear =
+            Args::try_parse_from(["treer", "ui", "clear"]).expect("Agent UI clear should parse");
+        assert!(matches!(
+            clear.command,
+            Some(Command::Ui {
+                command: UiCommand::Clear
+            })
         ));
     }
 

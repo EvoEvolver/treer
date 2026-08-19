@@ -29,8 +29,10 @@ The following statements are grounded in current behavior:
   bound to one server and one workspace.
 - Browser users authenticate, and Proxy lookups are scoped through organization
   membership and workspace identity.
-- The browser application and Proxy use separate origins. Credentialed CORS and
-  browser WebSocket checks accept only the configured App origin; session
+- The browser application and Proxy use separate origins. Credentialed control
+  API CORS and terminal/event WebSocket checks accept only the configured App
+  origin. Browser-to-service tunnel entries additionally accept the configured
+  Proxy origin so an embedded service can use relative WebSocket URLs; session
   cookies remain HttpOnly and scoped to the Proxy host.
 - Passwords, enrollment secrets, and machine credentials are hashed at rest.
 - The stable Host owns processes on the enrolled machine rather than moving the
@@ -103,6 +105,15 @@ Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy
 authorization, and response `Set-Cookie` before forwarding, but this is not
 end-to-end confidentiality from the Proxy.
+
+Custom Agent interfaces are active content supplied by a workspace Agent and
+are currently served from the Proxy origin inside a sandboxed iframe. The
+iframe blocks top-level navigation and direct parent access, and gateway
+credentials are not forwarded to its machine service. This is not a hostile
+content boundary: code in that page shares the Proxy origin and may attempt
+same-origin control API requests using the viewer's session. Enable custom
+interfaces only for trusted Agents and workspaces until Treer gives tunnel
+content a separate cookie-free origin and capability-scoped browser session.
 
 The workload signing private key is stored in the Proxy PostgreSQL database. Its
 Ed25519 public key is intentionally exposed through `/.well-known/jwks.json`;

@@ -31,10 +31,18 @@ export interface Agent {
   status: string
 }
 
+export interface AgentUi {
+  agent_id: string
+  service_id: string
+  path: string
+  updated_at: string
+}
+
 export interface Snapshot {
   revision: number
   servers: Machine[]
   agents: Agent[]
+  agent_uis: AgentUi[]
 }
 
 export interface Member {
