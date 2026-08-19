@@ -35,7 +35,12 @@ just stage-artifacts
 cargo run -p treer-proxy -- \
   --disable-auth \
   --listen 0.0.0.0:8787 \
-  --public-url http://PROXY_HOST:8787
+  --public-url http://PROXY_HOST:8787 \
+  --app-public-url http://127.0.0.1:5173
+
+# In another terminal:
+cd web
+pnpm dev
 ```
 
 `--disable-auth` is intended for local testing. It skips the login screen and
@@ -207,7 +212,7 @@ Controller connections may land on different replicas.
 Each Controller heartbeat also rechecks its machine against PostgreSQL, so a
 revoked machine is disconnected even if NATS delivery is interrupted.
 
-For a single-host deployment with separate PostgreSQL, Proxy, and NATS
+For a single-host deployment with separate PostgreSQL, NATS, Proxy, and App
 processes, use the checked-in Compose stack:
 
 ```bash
@@ -219,10 +224,11 @@ curl -fsS http://127.0.0.1:8222/jsz
 ```
 
 This persists PostgreSQL and JetStream data in separate volumes. NATS client
-and monitoring ports bind only to host loopback; the Proxy remains available
-on port 8787. Set `TREER_PROXY_PUBLIC_URL` in the command environment when
-other machines must reach the Proxy. If credentials contain URL-reserved
-characters, percent-encode them in `DATABASE_URL`.
+and monitoring ports bind only to host loopback; the Proxy is available on port
+8787 and the App on port 3000. Set `TREER_PROXY_PUBLIC_URL` when other machines
+must reach the Proxy and `TREER_APP_PUBLIC_URL` to the exact browser origin. If
+credentials contain URL-reserved characters, percent-encode them in
+`DATABASE_URL`.
 
 For a Proxy started outside Compose, configure:
 
@@ -250,22 +256,26 @@ therefore remains authoritative until the outbox is implemented.
 
 ## Railway
 
-The root `Dockerfile` and `railway.json` make the repository directly
-deployable as a Railway service. Railway's injected `PORT` and
-`RAILWAY_PUBLIC_DOMAIN` are detected automatically.
+The root `Dockerfile` and `railway.json` deploy `treer-proxy`. The independent
+`web/Dockerfile` and `web/railway.json` deploy the static `treer-app` service.
+Railway's injected `PORT` and `RAILWAY_PUBLIC_DOMAIN` are detected
+automatically by the Proxy.
 
-1. Create a Railway service from this GitHub repository.
+1. Create a Proxy Railway service from the repository root.
 2. Add a Railway PostgreSQL service and expose its `DATABASE_URL` to Treer.
 3. For more than one Treer replica, add a NATS service with JetStream enabled
    and expose its private URL as `TREER_NATS_URL`.
-4. Set the required `ADMIN_PASSWORD` service variable.
-5. Generate a public domain for the service, then increase the Treer service's
-   replica count. Railway supplies a distinct `RAILWAY_REPLICA_ID` to each.
+4. Set `ADMIN_PASSWORD`, `TREER_PROXY_PUBLIC_URL`, and
+   `TREER_APP_PUBLIC_URL` on the Proxy service.
+5. Create an App service from the `web` directory and set its
+   `TREER_PROXY_PUBLIC_URL` variable.
+6. Add the Proxy and App public domains, then increase the Proxy replica count.
+   Railway supplies a distinct `RAILWAY_REPLICA_ID` to each Proxy replica.
 
-The image builds and serves Linux agent binaries for its own CPU architecture.
-Set `TREER_PROXY_PUBLIC_URL` only when overriding the Railway-generated domain.
+The Proxy image builds and serves Linux agent binaries for its own CPU
+architecture. The App image contains no Proxy or machine binaries.
 
-Open `http://PROXY_HOST:8787` to discover servers, create agents, and attach to
+Open the App URL to discover servers, create agents, and attach to
 their live terminals. The browser terminal supports ANSI colors, alternate
 screens, cursor movement, per-keystroke input, paste, and dynamic resize. PTY
 input, replay, and live output remain raw bytes from the Host through the

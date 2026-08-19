@@ -27,11 +27,17 @@ struct Args {
     #[arg(long, env = "PORT", help = "Listen on 0.0.0.0:<PORT>")]
     port: Option<u16>,
     #[arg(
-        long,
+        long = "public-url",
         env = "TREER_PROXY_PUBLIC_URL",
         help = "Externally reachable proxy URL embedded in machine install commands"
     )]
-    public_url: Option<Url>,
+    proxy_public_url: Option<Url>,
+    #[arg(
+        long,
+        env = "TREER_APP_PUBLIC_URL",
+        help = "Externally reachable browser application URL used for invitations and CORS"
+    )]
+    app_public_url: Option<Url>,
     #[arg(
         long,
         env = "TREER_ARTIFACTS_DIR",
@@ -96,23 +102,28 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let admin_password = resolve_admin_password(args.admin_password, args.disable_auth)?;
     let listen = listen_address(args.listen, args.port);
-    let public_url = public_url(
-        args.public_url,
+    let proxy_public_url = public_url(
+        args.proxy_public_url,
         args.railway_public_domain.as_deref(),
         listen,
     )?;
-    if !args.disable_auth && public_url.scheme() != "https" {
-        warn!(%public_url, "authenticated proxy is using an insecure HTTP public URL");
+    let app_public_url = app_public_url(args.app_public_url, &proxy_public_url)?;
+    if !args.disable_auth && proxy_public_url.scheme() != "https" {
+        warn!(%proxy_public_url, "authenticated proxy is using an insecure HTTP public URL");
+    }
+    if !args.disable_auth && app_public_url.scheme() != "https" {
+        warn!(%app_public_url, "browser application is using an insecure HTTP public URL");
     }
     let bootstrap = api::BootstrapConfig::new(
-        public_url.clone(),
+        proxy_public_url.clone(),
         args.artifacts_dir,
         args.release_artifact_base_url,
     );
     let auth = auth::AuthStore::open(
         &args.database_url,
         admin_password,
-        public_url.clone(),
+        app_public_url.clone(),
+        proxy_public_url.scheme() == "https",
         args.disable_auth,
     )
     .await
@@ -157,16 +168,23 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to start NATS cluster consumers")?;
     let policy = policy::PolicyEngine::allow_all();
-    let identity = identity::IdentityIssuer::load(&auth, &public_url)
+    let identity = identity::IdentityIssuer::load(&auth, &proxy_public_url)
         .await
         .context("failed to initialize workload identity issuer")?;
     api::spawn_virtual_network_host_refresh(state.clone(), auth.clone());
-    let app =
-        api::router(state, bootstrap, auth, policy, identity).layer(TraceLayer::new_for_http());
+    let app = api::router(
+        state,
+        bootstrap,
+        auth,
+        policy,
+        identity,
+        api::BrowserAccess::new(&app_public_url)?,
+    )
+    .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
-    info!(address = %listen, %public_url, %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
+    info!(address = %listen, %proxy_public_url, %app_public_url, %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
     axum::serve(listener, app)
         .await
         .context("proxy server failed")
@@ -215,6 +233,17 @@ fn public_url(
     Ok(url)
 }
 
+fn app_public_url(configured: Option<Url>, proxy_public_url: &Url) -> Result<Url> {
+    let mut url = configured.unwrap_or_else(|| proxy_public_url.clone());
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!("app public URL must use http or https");
+    }
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +265,21 @@ mod tests {
         )
         .expect("public URL");
         assert_eq!(url.as_str(), "https://treer.example/");
+    }
+
+    #[test]
+    fn configured_app_url_is_normalized_independently() {
+        let proxy = Url::parse("https://proxy.treer.ai/").expect("proxy URL");
+        let app = app_public_url(
+            Some(Url::parse("https://app.treer.ai/admin?old=1").expect("app URL")),
+            &proxy,
+        )
+        .expect("normalized app URL");
+        assert_eq!(app.as_str(), "https://app.treer.ai/");
+        assert_eq!(
+            app_public_url(None, &proxy).expect("default app URL"),
+            proxy
+        );
     }
 
     #[test]

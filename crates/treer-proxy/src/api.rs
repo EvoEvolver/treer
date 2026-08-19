@@ -1,19 +1,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, Path, Query, State, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode, Uri, Version};
+use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, Version};
 use axum::middleware;
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tower_http::cors::CorsLayer;
 use treer_protocol::{
     AgentCommand, ApiError, CreateAgentRequest, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, InputAgentRequest, MachineEnrollmentRequest,
@@ -36,16 +39,17 @@ use crate::policy::{
 };
 use crate::state::{AppState, ShellOptions, SocketFrame, TransferDirection, TransferOptions};
 
-const INDEX_HTML: &str = include_str!("../../../web/dist/index.html");
-const XTERM_JS: &str = include_str!("../../../web/vendor/xterm.js");
-const XTERM_CSS: &str = include_str!("../../../web/vendor/xterm.css");
-const XTERM_FIT_JS: &str = include_str!("../../../web/vendor/addon-fit.js");
-
 #[derive(Clone)]
 pub struct BootstrapConfig {
     public_url: Url,
     artifacts_dir: PathBuf,
     release_artifact_base_url: Url,
+}
+
+#[derive(Clone)]
+pub struct BrowserAccess {
+    origin: HeaderValue,
+    origin_text: Arc<str>,
 }
 
 #[derive(Clone)]
@@ -77,13 +81,55 @@ impl BootstrapConfig {
     }
 }
 
+impl BrowserAccess {
+    pub fn new(app_public_url: &Url) -> anyhow::Result<Self> {
+        let origin_text: Arc<str> = app_public_url.origin().ascii_serialization().into();
+        let origin = HeaderValue::from_str(&origin_text)
+            .context("app public URL produced an invalid HTTP Origin")?;
+        Ok(Self {
+            origin,
+            origin_text,
+        })
+    }
+
+    fn cors_layer(&self) -> CorsLayer {
+        CorsLayer::new()
+            .allow_origin(self.origin.clone())
+            .allow_credentials(true)
+            .allow_methods([
+                Method::GET,
+                Method::HEAD,
+                Method::POST,
+                Method::PATCH,
+                Method::DELETE,
+            ])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+    }
+
+    fn validate_if_present(&self, headers: &HeaderMap) -> Result<(), ApiFailure> {
+        let Some(origin) = headers.get(header::ORIGIN) else {
+            return Ok(());
+        };
+        if origin == self.origin {
+            Ok(())
+        } else {
+            Err(ApiFailure::forbidden(
+                "browser_origin_denied",
+                &format!("browser requests must originate from {}", self.origin_text),
+            ))
+        }
+    }
+}
+
 pub fn router(
     state: AppState,
     bootstrap: BootstrapConfig,
     auth_store: AuthStore,
     policy: PolicyEngine,
     identity: IdentityIssuer,
+    browser: BrowserAccess,
 ) -> Router {
+    let cors = browser.cors_layer();
     let workload_identity = WorkloadIdentityApi {
         auth: auth_store.clone(),
         policy: policy.clone(),
@@ -293,14 +339,9 @@ pub fn router(
             auth::require_admin,
         ));
     Router::new()
-        .route("/", get(index))
-        .route("/admin", get(index))
         .route("/install.sh", get(install_script))
         .route("/api/machines/enroll", post(enroll_machine))
         .route("/artifacts/{platform}/{binary}", get(download_artifact))
-        .route("/assets/xterm.js", get(xterm_js))
-        .route("/assets/xterm.css", get(xterm_css))
-        .route("/assets/addon-fit.js", get(xterm_fit_js))
         .route("/api/health", get(health))
         .route("/.well-known/jwks.json", get(workload_identity_jwks))
         .route("/.treer/identity/verify", post(verify_workload_identity))
@@ -316,32 +357,9 @@ pub fn router(
         .layer(Extension(identity))
         .layer(Extension(workload_identity))
         .layer(Extension(auth_store))
+        .layer(Extension(browser))
         .with_state(state)
-}
-
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
-}
-
-async fn xterm_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        XTERM_JS,
-    )
-}
-
-async fn xterm_css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        XTERM_CSS,
-    )
-}
-
-async fn xterm_fit_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        XTERM_FIT_JS,
-    )
+        .layer(cors)
 }
 
 async fn health() -> Json<Value> {
@@ -841,18 +859,22 @@ async fn delete_virtual_network_host(
 async fn proxy_virtual_network_host_root(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(browser): Extension<BrowserAccess>,
     Path((workspace_id, hostname)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
+    browser.validate_if_present(request.headers())?;
     proxy_virtual_network_host(state, auth, workspace_id, hostname, String::new(), request).await
 }
 
 async fn proxy_virtual_network_host_path(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(browser): Extension<BrowserAccess>,
     Path((workspace_id, hostname, path)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
+    browser.validate_if_present(request.headers())?;
     proxy_virtual_network_host(state, auth, workspace_id, hostname, path, request).await
 }
 
@@ -1647,10 +1669,13 @@ const fn default_terminal_rows() -> u16 {
 
 async fn agent_terminal(
     State(state): State<AppState>,
+    Extension(browser): Extension<BrowserAccess>,
     Path((workspace_id, agent_id)): Path<(String, String)>,
     Query(query): Query<TerminalQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiFailure> {
+    browser.validate_if_present(&headers)?;
     state.resolve_agent_server(&workspace_id, &agent_id).await?;
     Ok(ws.on_upgrade(move |socket| {
         stream_terminal(
@@ -1666,10 +1691,13 @@ async fn agent_terminal(
 
 async fn shell_terminal(
     State(state): State<AppState>,
+    Extension(browser): Extension<BrowserAccess>,
     Path((workspace_id, server_id)): Path<(String, String)>,
     Query(query): Query<ShellQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiFailure> {
+    browser.validate_if_present(&headers)?;
     state.resolve_server(&workspace_id, &server_id).await?;
     Ok(ws.on_upgrade(move |socket| {
         stream_terminal(
@@ -1689,10 +1717,13 @@ async fn shell_terminal(
 
 async fn file_transfer(
     State(state): State<AppState>,
+    Extension(browser): Extension<BrowserAccess>,
     Path((workspace_id, server_id)): Path<(String, String)>,
     Query(query): Query<TransferQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiFailure> {
+    browser.validate_if_present(&headers)?;
     state.resolve_server(&workspace_id, &server_id).await?;
     Ok(ws.on_upgrade(move |socket| {
         stream_file_transfer(socket, state, workspace_id, server_id, query)
@@ -1882,9 +1913,12 @@ async fn stream_terminal(
 
 async fn workspace_events(
     State(state): State<AppState>,
+    Extension(browser): Extension<BrowserAccess>,
     Path(workspace_id): Path<String>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiFailure> {
+    browser.validate_if_present(&headers)?;
     state.snapshot(&workspace_id).await?;
     Ok(ws.on_upgrade(move |socket| stream_workspace_events(socket, state, workspace_id)))
 }
@@ -1950,6 +1984,13 @@ pub struct ApiFailure {
 }
 
 impl ApiFailure {
+    fn forbidden(code: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            error: ProtocolError::new(code, message),
+        }
+    }
+
     fn bad_request(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -2085,6 +2126,11 @@ mod tests {
         )
     }
 
+    fn test_browser_access() -> BrowserAccess {
+        BrowserAccess::new(&Url::parse("https://app.treer.ai/").expect("app URL"))
+            .expect("browser access")
+    }
+
     #[tokio::test]
     async fn trailing_slash_browser_tunnel_route_is_registered() {
         let auth = AuthStore::for_test("admin-password").await;
@@ -2100,6 +2146,7 @@ mod tests {
             auth,
             PolicyEngine::allow_all(),
             identity,
+            test_browser_access(),
         );
         let response = app
             .oneshot(
@@ -2111,6 +2158,113 @@ mod tests {
             .await
             .expect("route response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn browser_access_accepts_only_the_configured_origin_when_present() {
+        let browser = test_browser_access();
+        assert!(browser.validate_if_present(&HeaderMap::new()).is_ok());
+
+        let mut allowed = HeaderMap::new();
+        allowed.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://app.treer.ai"),
+        );
+        assert!(browser.validate_if_present(&allowed).is_ok());
+
+        let mut denied = HeaderMap::new();
+        denied.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://other.treer.ai"),
+        );
+        let error = browser
+            .validate_if_present(&denied)
+            .expect_err("other browser origin must be denied");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.error.code, "browser_origin_denied");
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_the_configured_app_with_credentials() {
+        let auth = AuthStore::for_test("admin-password").await;
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/auth/login")
+                    .header(header::ORIGIN, "https://app.treer.ai")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                    .body(Body::empty())
+                    .expect("preflight request"),
+            )
+            .await
+            .expect("preflight response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("https://app.treer.ai"))
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            Some(&HeaderValue::from_static("true"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_headers_are_present_on_authenticated_route_errors() {
+        let auth = AuthStore::for_test("admin-password").await;
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header(header::ORIGIN, "https://app.treer.ai")
+                    .body(Body::empty())
+                    .expect("authenticated request"),
+            )
+            .await
+            .expect("authenticated response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("https://app.treer.ai"))
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            Some(&HeaderValue::from_static("true"))
+        );
     }
 
     #[test]

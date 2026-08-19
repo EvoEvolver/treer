@@ -11,7 +11,8 @@ and CLI remain clients of those contracts.
 
 ```mermaid
 flowchart TB
-    Browser[Browser user] -->|HTTPS and WSS, session cookie| Proxy
+    Browser[Browser user] -->|HTTPS static assets| Web
+    Browser -->|Cross-origin HTTPS and WSS, session cookie| Proxy
     CLI[treer CLI] -->|loopback HTTP and WS| Controller
     Agent[Managed agent] -->|loopback HTTP and WS| Controller
 
@@ -19,10 +20,9 @@ flowchart TB
         Proxy["treer-proxy replicas<br/>auth, metadata, routing"]
         DB[(PostgreSQL)]
         NATS[(NATS Core + JetStream KV<br/>routing and events)]
-        Web[Embedded React application]
+        Web[treer-app<br/>static React application]
         Proxy <--> DB
         Proxy --> NATS
-        Proxy --> Web
     end
 
     subgraph Machine[Each enrolled machine]
@@ -50,7 +50,7 @@ flowchart TB
 | [`treer-protocol`](../crates/treer-protocol/src/lib.rs) | Shared public and Controller protocol models and frames | Runtime implementation |
 | [`treer-host-protocol`](../crates/treer-host-protocol/src/lib.rs) | Controller-to-Host request, response, and event contract | Proxy or browser concepts |
 | [`treer-transfer`](../crates/treer-transfer/src/lib.rs) | Transfer manifests, validation, path containment, atomic upload commit | Session authorization |
-| [`web`](../web/src/App.tsx) | Browser control-plane interaction and terminal UI | Backend policy or hidden business state |
+| [`web`](../web/src/App.tsx) | Standalone static browser application, runtime Proxy discovery, control-plane interaction, and terminal UI | Backend policy or hidden business state |
 
 ## Architectural invariants
 
@@ -76,8 +76,10 @@ flowchart TB
   not republish full snapshots. PTY output, terminal input, file transfer
   payloads, and virtual-network TCP bytes are not retained in JetStream; live
   bytes use Core NATS only when their endpoints use different Proxy replicas.
-- The web build is embedded into `treer-proxy`; frontend API changes and Proxy
-  routes must be changed and verified together.
+- The browser application is deployed independently from `treer-proxy`. It
+  reads the Proxy origin from `/config.json` at startup; the Proxy allows
+  credentialed requests and browser WebSockets only from its configured App
+  origin.
 - `skills/treer/SKILL.md` is embedded into the CLI at build time and is the
   managed-Agent operations contract.
 
@@ -85,7 +87,8 @@ flowchart TB
 
 | Link | Transport and encoding | Authentication |
 | --- | --- | --- |
-| Browser to Proxy | HTTP/JSON and WebSocket frames | User or admin session cookie |
+| Browser to App | HTTPS static files and runtime JSON configuration | None |
+| Browser to Proxy | Cross-origin HTTP/JSON and WebSocket frames | Host-only user or admin session cookie; exact App origin allowlist |
 | Controller to Proxy | Persistent WebSocket, JSON and binary frames | Workspace-bound machine Bearer credential |
 | CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; workload-token requests require the Agent credential |
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |

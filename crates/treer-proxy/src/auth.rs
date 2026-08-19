@@ -35,7 +35,8 @@ const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
 pub struct AuthStore {
     pool: PgPool,
     admin_password: Arc<str>,
-    public_url: Url,
+    app_public_url: Url,
+    secure_cookies: bool,
     disabled: bool,
     virtual_hosts: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, VirtualNetworkHost>>>>,
     virtual_hosts_update: Arc<tokio::sync::Mutex<()>>,
@@ -145,7 +146,8 @@ impl AuthStore {
     pub async fn open(
         database_url: &str,
         admin_password: String,
-        public_url: Url,
+        app_public_url: Url,
+        secure_cookies: bool,
         disabled: bool,
     ) -> anyhow::Result<Self> {
         let pool = PgPoolOptions::new()
@@ -155,7 +157,8 @@ impl AuthStore {
         let store = Self {
             pool,
             admin_password: admin_password.into(),
-            public_url,
+            app_public_url,
+            secure_cookies,
             disabled,
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
@@ -198,7 +201,8 @@ impl AuthStore {
         let store = Self {
             pool,
             admin_password: admin_password.to_string().into(),
-            public_url: Url::parse("https://treer.example/").expect("valid URL"),
+            app_public_url: Url::parse("https://app.treer.example/").expect("valid URL"),
+            secure_cookies: true,
             disabled: false,
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
@@ -1590,7 +1594,7 @@ impl AuthStore {
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        let mut url = self.public_url.clone();
+        let mut url = self.app_public_url.clone();
         url.set_path("/");
         url.query_pairs_mut().clear().append_pair("invite", &token);
         Ok((token, url))
@@ -1607,7 +1611,7 @@ impl AuthStore {
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        let mut url = self.public_url.clone();
+        let mut url = self.app_public_url.clone();
         url.set_path("/");
         url.query_pairs_mut().clear().append_pair("invite", &token);
         Ok((token, url))
@@ -2130,7 +2134,7 @@ fn user_json(session: &CurrentSession) -> Value {
 }
 
 fn secure_cookie_suffix(auth: &AuthStore) -> &'static str {
-    if auth.public_url.scheme() == "https" {
+    if auth.secure_cookies {
         "; Secure"
     } else {
         ""
@@ -2701,6 +2705,9 @@ mod tests {
             .await
             .expect("invitation");
         assert!(url.as_str().contains(&invite));
+        assert!(url
+            .as_str()
+            .starts_with("https://app.treer.example/?invite="));
 
         let registered = store
             .register(&invite, "Alice@Example.com", "Alice", "password123")

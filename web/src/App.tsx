@@ -21,7 +21,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -472,7 +472,7 @@ function WorkspaceApp() {
 
   function openVirtualHost(hostname: string) {
     if (!workspaceId) return
-    const url = `/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(hostname)}/proxy/`
+    const url = proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(hostname)}/proxy/`)
     window.open(url, "_blank", "noopener,noreferrer")
   }
 

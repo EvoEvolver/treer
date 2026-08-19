@@ -42,8 +42,21 @@ services:
       TREER_NATS_STREAM: "TREER_EVENTS"
       TREER_NATS_SUBJECT_PREFIX: "treer.v1.events"
       TREER_NATS_CLUSTER_SUBJECT_PREFIX: "treer.v1.cluster"
+      TREER_APP_PUBLIC_URL: "http://127.0.0.1:3000/"
     ports:
       - "8787:8787"
+
+  app:
+    build:
+      context: ./web
+    environment:
+      PORT: "8080"
+      TREER_PROXY_PUBLIC_URL: "http://127.0.0.1:8787/"
+    depends_on:
+      proxy:
+        condition: service_started
+    ports:
+      - "3000:8080"
 
 volumes:
   postgres-data:

@@ -29,6 +29,9 @@ The following statements are grounded in current behavior:
   bound to one server and one workspace.
 - Browser users authenticate, and Proxy lookups are scoped through organization
   membership and workspace identity.
+- The browser application and Proxy use separate origins. Credentialed CORS and
+  browser WebSocket checks accept only the configured App origin; session
+  cookies remain HttpOnly and scoped to the Proxy host.
 - Passwords, enrollment secrets, and machine credentials are hashed at rest.
 - The stable Host owns processes on the enrolled machine rather than moving the
   runtime into an opaque hosted control plane.
@@ -103,9 +106,9 @@ the online verify endpoint exposes only claims already contained in a supplied
 valid token. Tokens are not automatically attached to HTTP or generic TCP
 traffic.
 
-Durable identity data is stored in PostgreSQL. Live connections, pending commands,
-terminal streams, transfers, and tunnels are held in process memory. Current
-availability and routing assume one active Proxy instance.
+Durable identity data is stored in PostgreSQL. Live connections, pending
+commands, terminal streams, transfers, and tunnels are owned by one Proxy
+replica and routed across replicas through NATS when necessary.
 
 ## Hardening order
 

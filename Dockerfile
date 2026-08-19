@@ -1,20 +1,9 @@
-FROM node:22-bookworm-slim AS web-builder
-
-RUN corepack enable
-WORKDIR /app/web
-COPY web/package.json web/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-COPY web ./
-RUN pnpm build
-
 FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY skills ./skills
-COPY web ./web
-COPY --from=web-builder /app/web/dist ./web/dist
 RUN set -eu; \
     cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
     case "$(uname -m)" in \

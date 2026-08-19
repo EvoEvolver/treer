@@ -82,9 +82,35 @@ export class ApiError extends Error {
   }
 }
 
+interface RuntimeConfig {
+  proxy_url?: string
+}
+
+let proxyOrigin = window.location.origin
+
+export async function loadRuntimeConfig() {
+  if (import.meta.env.DEV) return
+  const response = await fetch("/config.json", { cache: "no-store" })
+  if (!response.ok) {
+    throw new Error(`Unable to load Treer runtime configuration (HTTP ${response.status})`)
+  }
+  const config = (await response.json()) as RuntimeConfig
+  if (!config.proxy_url) throw new Error("Treer runtime configuration has no proxy URL")
+  const url = new URL(config.proxy_url)
+  if (!(["http:", "https:"] as string[]).includes(url.protocol) || url.username || url.password) {
+    throw new Error("Treer runtime configuration has an invalid proxy URL")
+  }
+  proxyOrigin = url.origin
+}
+
+export function proxyUrl(path: string) {
+  return new URL(path, `${proxyOrigin}/`).toString()
+}
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(proxyUrl(path), {
     ...options,
+    credentials: "include",
     headers: { "content-type": "application/json", ...options?.headers },
   })
   const body = (await response.json()) as T & ApiErrorBody
@@ -97,6 +123,7 @@ export function machineName(machine: Machine | undefined, fallback = "Unknown ma
 }
 
 export function websocketUrl(path: string) {
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws"
-  return `${protocol}://${window.location.host}${path}`
+  const url = new URL(proxyUrl(path))
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  return url.toString()
 }
