@@ -37,7 +37,6 @@ second manual.
 | `crates/treer-cli` | Human and managed-agent command surface |
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
-| `crates/treer-transfer` | Workspace-relative file transfer and validation |
 | `web` | Standalone React control plane with runtime Proxy URL configuration |
 
 ## Change discipline

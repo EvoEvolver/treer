@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use treer_protocol::{
     AgentServerMessage, NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest,
     NetworkDirectTarget, NetworkOpenRequest, ProtocolError, ProxyMessage, TerminalBinaryFrame,
-    TerminalBinaryKind, TransferBinaryFrame, VirtualNetworkHost, PROTOCOL_VERSION,
+    TerminalBinaryKind, VirtualNetworkHost, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
 
@@ -94,32 +94,6 @@ async fn handle(
                         };
                         if let Err((stream_id, error)) = result {
                             send_network_reset(&outgoing_tx, &stream_id, error);
-                        }
-                        continue;
-                    }
-                    if TransferBinaryFrame::is_transfer_frame(&encoded) {
-                        let frame = match TransferBinaryFrame::decode(&encoded) {
-                            Ok(frame) => frame,
-                            Err(error) => {
-                                send_error(&outgoing_tx, error);
-                                continue;
-                            }
-                        };
-                        let Some((workspace_id, server_id)) = identity.as_ref() else {
-                            send_error(&outgoing_tx, identity_error());
-                            continue;
-                        };
-                        if let Err(error) = state
-                            .transfer_output(
-                                workspace_id,
-                                server_id,
-                                connection_id,
-                                frame,
-                                encoded.to_vec(),
-                            )
-                            .await
-                        {
-                            send_error(&outgoing_tx, error);
                         }
                         continue;
                     }
@@ -342,60 +316,6 @@ async fn handle(
                             reason,
                             exit_code,
                         )
-                        .await
-                    {
-                        send_error(&outgoing_tx, error);
-                    }
-                } else {
-                    send_error(&outgoing_tx, identity_error());
-                }
-            }
-            AgentServerMessage::TransferReady { session_id } => {
-                if let Some((workspace_id, server_id)) = identity.as_ref() {
-                    if let Err(error) = state
-                        .transfer_ready(workspace_id, server_id, connection_id, &session_id)
-                        .await
-                    {
-                        send_error(&outgoing_tx, error);
-                    }
-                } else {
-                    send_error(&outgoing_tx, identity_error());
-                }
-            }
-            AgentServerMessage::TransferProgress { session_id } => {
-                if let Some((workspace_id, server_id)) = identity.as_ref() {
-                    if let Err(error) = state
-                        .transfer_progress(workspace_id, server_id, connection_id, &session_id)
-                        .await
-                    {
-                        send_error(&outgoing_tx, error);
-                    }
-                } else {
-                    send_error(&outgoing_tx, identity_error());
-                }
-            }
-            AgentServerMessage::TransferComplete { session_id, stats } => {
-                if let Some((workspace_id, server_id)) = identity.as_ref() {
-                    if let Err(error) = state
-                        .transfer_complete(
-                            workspace_id,
-                            server_id,
-                            connection_id,
-                            &session_id,
-                            stats,
-                        )
-                        .await
-                    {
-                        send_error(&outgoing_tx, error);
-                    }
-                } else {
-                    send_error(&outgoing_tx, identity_error());
-                }
-            }
-            AgentServerMessage::TransferFailed { session_id, error } => {
-                if let Some((workspace_id, server_id)) = identity.as_ref() {
-                    if let Err(error) = state
-                        .transfer_failed(workspace_id, server_id, connection_id, &session_id, error)
                         .await
                     {
                         send_error(&outgoing_tx, error);

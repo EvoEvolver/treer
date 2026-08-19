@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -53,7 +53,6 @@ pub struct ControllerRuntime {
 pub struct ControllerConfig {
     pub workspace_id: String,
     pub server_id: String,
-    pub workspace_root: PathBuf,
     pub agent_server_url: String,
     pub network_proxy_url: String,
     pub treer_binary: Option<PathBuf>,
@@ -64,7 +63,6 @@ struct ControllerInner {
     host: HostClient,
     workspace_id: String,
     server_id: String,
-    workspace_root: PathBuf,
     agent_server_url: String,
     network_proxy_url: String,
     treer_binary: Option<PathBuf>,
@@ -73,7 +71,6 @@ struct ControllerInner {
     events: broadcast::Sender<AgentInfo>,
     terminal_events: broadcast::Sender<TerminalOutput>,
     process_events: broadcast::Sender<HostProcessInfo>,
-    transient_shells: RwLock<HashSet<String>>,
     virtual_hosts: RwLock<Option<VirtualNetworkHostsSnapshot>>,
 }
 
@@ -123,7 +120,6 @@ impl ControllerRuntime {
                 host,
                 workspace_id: config.workspace_id,
                 server_id: config.server_id,
-                workspace_root: config.workspace_root,
                 agent_server_url: config.agent_server_url,
                 network_proxy_url: config.network_proxy_url,
                 treer_binary: config.treer_binary,
@@ -132,7 +128,6 @@ impl ControllerRuntime {
                 events: agent_events,
                 terminal_events,
                 process_events,
-                transient_shells: RwLock::new(HashSet::new()),
                 virtual_hosts: RwLock::new(None),
             }),
         };
@@ -141,19 +136,6 @@ impl ControllerRuntime {
             .map(|replay| (replay.process_id.clone(), replay))
             .collect();
         for mut process in processes {
-            if is_transient_shell(&process.metadata) {
-                if process.running {
-                    runtime
-                        .inner
-                        .transient_shells
-                        .write()
-                        .map_err(|_| {
-                            ProtocolError::new("state_error", "shell registry lock poisoned")
-                        })?
-                        .insert(process.process_id.clone());
-                }
-                continue;
-            }
             let Some(replay) = replays.get(&process.process_id) else {
                 continue;
             };
@@ -164,15 +146,6 @@ impl ControllerRuntime {
         let disconnected = events.disconnected.clone();
         runtime.start_event_tasks(events);
         runtime.start_idle_monitor();
-        if runtime
-            .inner
-            .transient_shells
-            .read()
-            .is_ok_and(|shells| !shells.is_empty())
-        {
-            let cleanup = runtime.clone();
-            tokio::spawn(async move { cleanup.cleanup_transient_shells().await });
-        }
         Ok((runtime, disconnected))
     }
 
@@ -217,10 +190,6 @@ impl ControllerRuntime {
             .map_err(|_| ProtocolError::new("state_error", "virtual-host cache lock poisoned"))? =
             None;
         Ok(())
-    }
-
-    pub fn workspace_root(&self) -> &std::path::Path {
-        &self.inner.workspace_root
     }
 
     pub fn list(&self) -> Vec<AgentInfo> {
@@ -315,109 +284,6 @@ impl ControllerRuntime {
             .await
             .map_err(|error| protocol_error("host_error", error))?;
         self.process_response(response, AgentStatus::Working)
-    }
-
-    pub async fn open_shell(
-        &self,
-        operation_id: &str,
-        shell_id: &str,
-        cwd: &str,
-        command: Option<&str>,
-        cols: u16,
-        rows: u16,
-    ) -> Result<TerminalSnapshot, ProtocolError> {
-        let shell = interactive_shell();
-        let args = command.map_or_else(
-            || vec!["-i".to_string()],
-            |command| vec!["-lc".to_string(), command.to_string()],
-        );
-        self.inner
-            .transient_shells
-            .write()
-            .map_err(|_| ProtocolError::new("state_error", "shell registry lock poisoned"))?
-            .insert(shell_id.to_string());
-        let response = self
-            .inner
-            .host
-            .request(
-                HostCommand::Spawn {
-                    request: HostSpawnRequest {
-                        process_id: shell_id.to_string(),
-                        command: shell,
-                        args,
-                        cwd: cwd.to_string(),
-                        env: self.process_environment(None),
-                        cols: cols.max(1),
-                        rows: rows.max(1),
-                        metadata: serde_json::json!({ "treer_transient": "ssh" }).to_string(),
-                    },
-                },
-                Some(operation_id.to_string()),
-            )
-            .await;
-        match response {
-            Ok(HostResponse::Process { process }) if process.process_id == shell_id => {}
-            Ok(_) => {
-                let cleanup_id = format!("{operation_id}:cleanup");
-                let _ = self.stop_transient_shell(&cleanup_id, shell_id).await;
-                return Err(ProtocolError::new(
-                    "host_protocol_error",
-                    "spawn returned an unexpected response",
-                ));
-            }
-            Err(error) => {
-                self.finish_transient_shell(shell_id);
-                return Err(protocol_error("host_error", error));
-            }
-        }
-        match self.terminal_snapshot(shell_id).await {
-            Ok(snapshot) => Ok(snapshot),
-            Err(error) => {
-                let cleanup_id = format!("{operation_id}:cleanup");
-                let _ = self.stop_transient_shell(&cleanup_id, shell_id).await;
-                Err(error)
-            }
-        }
-    }
-
-    pub async fn stop_transient_shell(
-        &self,
-        operation_id: &str,
-        shell_id: &str,
-    ) -> Result<(), ProtocolError> {
-        self.inner
-            .host
-            .request(
-                HostCommand::Stop {
-                    process_id: shell_id.to_string(),
-                },
-                Some(operation_id.to_string()),
-            )
-            .await
-            .map_err(|error| protocol_error("host_error", error))?;
-        self.finish_transient_shell(shell_id);
-        Ok(())
-    }
-
-    pub async fn cleanup_transient_shells(&self) {
-        let shell_ids = self
-            .inner
-            .transient_shells
-            .read()
-            .map(|shells| shells.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for shell_id in shell_ids {
-            let operation_id = format!("{shell_id}:cleanup");
-            if let Err(error) = self.stop_transient_shell(&operation_id, &shell_id).await {
-                warn!(shell_id, message = %error.message, "failed to clean up remote shell");
-            }
-        }
-    }
-
-    pub fn finish_transient_shell(&self, shell_id: &str) {
-        if let Ok(mut shells) = self.inner.transient_shells.write() {
-            shells.remove(shell_id);
-        }
     }
 
     fn process_environment(&self, agent: Option<(&str, &str)>) -> BTreeMap<String, String> {
@@ -802,12 +668,6 @@ impl ControllerRuntime {
 
     fn apply_process(&self, process: HostProcessInfo) {
         let _ = self.inner.process_events.send(process.clone());
-        if is_transient_shell(&process.metadata) {
-            if !process.running {
-                self.finish_transient_shell(&process.process_id);
-            }
-            return;
-        }
         let Ok(agent) = self.get(&process.process_id) else {
             let _ = self.upsert_process(process, None);
             return;
@@ -971,18 +831,6 @@ fn interactive_shell() -> String {
                 "/bin/sh".to_string()
             }
         })
-}
-
-fn is_transient_shell(metadata: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(metadata)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("treer_transient")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .is_some_and(|kind| kind == "ssh")
 }
 
 fn shell_join(command: &str, args: &[String]) -> String {

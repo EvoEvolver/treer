@@ -23,8 +23,8 @@ tiers optimize for different cost and trust requirements.
 
 The following statements are grounded in current behavior:
 
-- Machines connect outward to the Proxy; operators do not need to publish SSH,
-  Agent Server, or local service ports.
+- Machines connect outward to the Proxy; operators do not need to publish Agent
+  Server or local service ports.
 - A short-lived, single-use enrollment key creates a long-lived credential
   bound to one server and one workspace.
 - Browser users authenticate, and Proxy lookups are scoped through organization
@@ -35,8 +35,6 @@ The following statements are grounded in current behavior:
 - Passwords, enrollment secrets, and machine credentials are hashed at rest.
 - The stable Host owns processes on the enrolled machine rather than moving the
   runtime into an opaque hosted control plane.
-- Remote working directories and transfer paths are constrained to the declared
-  workspace root.
 - Linux Agent network traffic crosses a namespace and Controller policy
   boundary, which can support stronger egress rules later.
 - Linux Agent DNS resolution uses namespace-private resolver mounts and cannot
@@ -79,7 +77,7 @@ members share a broad operational surface.
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
 | Machine Bearer credential | One machine record and workspace | Controller operations are attributed primarily to the machine |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
-| Agent workload credential | One managed Agent process; inbox, mail, and workload-token requests | Same-account host processes may be able to inspect another process environment or Host metadata |
+| Agent workload credential | One managed Agent process; human discovery, inbox, mail, and workload-token requests | Same-account host processes may be able to inspect another process environment or Host metadata |
 | Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
 
@@ -93,10 +91,13 @@ scoping alone does not isolate those credentials.
 ## Data and control-plane exposure
 
 The Proxy can observe control messages, durable Agent mail bodies and metadata,
-every requested network destination, and relayed terminal, transfer, and
-workspace virtual-host data. Agent mail is stored as plaintext in PostgreSQL;
+every requested network destination, and relayed terminal and workspace
+virtual-host data. Agent mail is stored as plaintext in PostgreSQL;
 context IDs may reference only same-workspace messages the sender previously
-sent or received. Ordinary
+sent or received. Managed Agents may list the stable user ID, preferred name,
+and organization role of humans in their workspace organization, but the Agent
+directory does not expose member email addresses. Human inbox reads require a
+current user session and current membership in the workspace organization. Ordinary
 outbound TCP payload stays between the source Controller and destination; the
 Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy
@@ -110,7 +111,7 @@ valid token. Tokens are not automatically attached to HTTP or generic TCP
 traffic.
 
 Durable identity data is stored in PostgreSQL. Live connections, pending
-commands, terminal streams, transfers, and tunnels are owned by one Proxy
+commands, terminal streams, and tunnels are owned by one Proxy
 replica and routed across replicas through NATS when necessary.
 
 ## Hardening order

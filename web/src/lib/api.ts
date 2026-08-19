@@ -44,6 +44,27 @@ export interface Member {
   role: "owner" | "admin" | "member"
 }
 
+export interface MailAddress {
+  agent_id: string
+  name: string
+}
+
+export interface HumanMailAddress {
+  user_id: string
+  preferred_name: string
+}
+
+export interface MailMessage {
+  message_id: string
+  workspace_id: string
+  sender: MailAddress
+  recipients: MailAddress[]
+  human_recipients: HumanMailAddress[]
+  context_ids: string[]
+  body: string
+  created_at: string
+}
+
 export interface AdminDashboard {
   machine_count: number
   agent_count: number

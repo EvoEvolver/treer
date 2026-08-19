@@ -199,9 +199,9 @@ With NATS configured, Treer uses four broker paths:
   updates the full machine snapshot only when machine or Agent state changes;
 - file-backed JetStream KV retains the latest workspace, rename, and deletion
   projections so replicas that reconnect do not miss control-plane changes;
-- Core NATS request/reply routes commands, terminal and transfer sessions, and
+- Core NATS request/reply routes commands, terminal sessions, and
   virtual-network frames to the owning or initiating Proxy;
-- JetStream stores versioned domain events. PTY, transfer, and TCP bytes are
+- JetStream stores versioned domain events. PTY and TCP bytes are
   never retained in JetStream.
 
 Replica IDs come from `TREER_PROXY_INSTANCE_ID`, then
@@ -333,8 +333,8 @@ Managed agents reach the Controller's local API through the reserved TEST-NET-1
 address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
 SOCKS endpoint recognizes this address and bridges HTTP and WebSocket traffic
 directly to the Controller's loopback listener; it is not a workspace virtual
-host and never traverses the Proxy. This keeps `treer`, `treer ssh`, and
-`treer scp` usable inside transparent network namespaces.
+host and never traverses the Proxy. This keeps `treer` usable inside transparent
+network namespaces.
 
 Every TCP connection asks the Proxy to resolve the destination and apply network
 policy. For an ordinary hostname or IP address, the Proxy returns a direct route
@@ -342,8 +342,8 @@ and the source Controller opens the outbound socket locally; application payload
 bytes do not traverse the Proxy. Workspace virtual-host streams are multiplexed
 as binary frames over the Controllers' existing `/agent/connect` WebSockets, so
 target machines need no inbound port. Each relayed stream has an independent
-flow-control window, and terminal, transfer, and relayed network frames share the
-same authenticated connection.
+flow-control window, and terminal and relayed network frames share the same
+authenticated connection.
 
 Network access is allowed by default. A machine service is a durable record for
 a long-running host-network process: machine, target host, target port, and TCP
@@ -419,10 +419,6 @@ treer agent get reviewer
 treer agent rename reviewer code-reviewer
 treer machine rename self build-machine
 treer machine delete srv_obsolete
-treer ssh build-machine
-treer ssh build-machine -- cargo test
-treer scp results.json build-machine:artifacts/results.json
-treer scp -r build-machine:artifacts ./downloaded-artifacts
 treer agent attach reviewer
 treer agent delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
@@ -447,6 +443,22 @@ replies use one or more exact prior message IDs to form a message graph. Mail
 is workspace-scoped and requires a managed Agent workload credential. Messages,
 recipient-specific unread state, and context edges live in PostgreSQL, so any
 Proxy replica can serve the next inbox call without NATS or sticky routing.
+
+Agents can also discover and address the humans who belong to the workspace's
+organization. The directory deliberately returns stable user IDs, preferred
+names, and roles without exposing email addresses:
+
+```bash
+treer human list
+treer mail --to-human usr_123 "The deployment is ready."
+treer mail --to reviewer --to-human usr_123 "Please coordinate on this result."
+```
+
+`--to-human` is repeatable and accepts only a listed `user_id`; preferred names
+are display-only because they can collide or change. Human recipients open
+**Inbox** in the web sidebar for the selected workspace. Like Agent inboxes,
+the web inbox marks only the returned unread batch read and does not receive a
+push notification.
 
 ## Workload identity
 
@@ -480,39 +492,6 @@ agent's live PTY in the current native terminal. Input, colors, cursor control,
 and terminal resize are passed through directly. Press `Ctrl-]` to detach
 without stopping the agent. The shorter `treer attach <target>` alias is also
 available.
-
-`treer ssh <machine>` opens a new native PTY on another online machine in the
-same workspace. It is routed through the local Agent Server and Proxy; the
-target does not need an SSH daemon, network address, or SSH keys. The target can
-be a server ID, a unique machine name, or `self`/`.`. Use `--cwd <path>` to
-select the target working directory, or put a command after `--` for a
-non-interactive session:
-
-```bash
-treer ssh gpu-worker
-treer ssh gpu-worker --cwd project -- cargo test --workspace
-```
-
-Remote shells are transient and are not registered as agents. Detaching an
-interactive session with `Ctrl-]`, closing the client, or losing the connection
-stops that shell and its child process. Non-interactive sessions forward stdin,
-stdout, and the remote exit code.
-
-`treer scp` copies regular files or directory trees through the same authenticated
-workspace connection. Exactly one operand uses `machine:path`; add `-r` for a
-directory:
-
-```bash
-treer scp report.json gpu-worker:artifacts/report.json
-treer scp gpu-worker:artifacts/report.json ./report.json
-treer scp -r results gpu-worker:archive/results
-```
-
-Remote paths are relative to the target machine's configured workspace root.
-Transfers use binary WebSocket frames, preserve Unix permission bits, verify
-declared file sizes and transfer totals, and commit each file with an atomic
-rename. Symbolic links and special files are rejected. The current version does
-not copy directly between two remote machines.
 
 Targets accept an agent id, a unique agent name, or `self`/`.` from inside a
 managed agent. `prompt --wait` waits for observed activity followed by `idle`,

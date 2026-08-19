@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -7,7 +6,6 @@ use anyhow::{anyhow, Context};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
@@ -17,13 +15,12 @@ use tracing::{info, warn};
 use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
     NetworkBinaryFrame, ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame,
-    TerminalBinaryKind, TransferBinaryFrame, TransferStats, PROTOCOL_VERSION,
+    TerminalBinaryKind, PROTOCOL_VERSION,
 };
 use url::Url;
 
 use crate::controller::ControllerRuntime;
 use crate::network::NetworkRuntime;
-use treer_transfer::TransferReceiver;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const RESULT_CACHE_LIMIT: usize = 256;
@@ -31,21 +28,12 @@ const RESULT_CACHE_LIMIT: usize = 256;
 struct TerminalRelay {
     process_id: String,
     last_revision: u64,
-    transient: bool,
 }
 
 struct PendingClose {
     deadline: Instant,
     final_revision: u64,
     exit_code: Option<i32>,
-}
-
-struct DownloadTask(tokio::task::JoinHandle<()>);
-
-impl Drop for DownloadTask {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 #[derive(Clone)]
@@ -84,7 +72,6 @@ impl ProxyClient {
                 Err(err) => warn!(error = %format_args!("{err:#}"), "proxy connection failed"),
             }
             self.network.reset_all().await;
-            self.runtime.cleanup_transient_shells().await;
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(5));
         }
@@ -133,11 +120,6 @@ impl ProxyClient {
         let mut process_events = self.runtime.subscribe_processes();
         let mut terminal_sessions = HashMap::<String, TerminalRelay>::new();
         let mut pending_closes = HashMap::<String, PendingClose>::new();
-        let mut upload_sessions = HashMap::<String, TransferReceiver>::new();
-        let mut download_tasks = HashMap::<String, DownloadTask>::new();
-        let (download_frame_tx, mut download_frame_rx) = mpsc::channel::<TransferBinaryFrame>(16);
-        let (download_failed_tx, mut download_failed_rx) =
-            mpsc::unbounded_channel::<(String, ProtocolError)>();
         let mut close_tick = tokio::time::interval(Duration::from_millis(25));
         close_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         info!(proxy = %self.proxy_ws, "connected to proxy");
@@ -225,10 +207,7 @@ impl ProxyClient {
                         .collect::<Vec<_>>();
                     for session_id in due {
                         let Some(close) = pending_closes.remove(&session_id) else { continue };
-                        let Some(relay) = terminal_sessions.remove(&session_id) else { continue };
-                        if relay.transient {
-                            self.runtime.finish_transient_shell(&relay.process_id);
-                        }
+                        let Some(_) = terminal_sessions.remove(&session_id) else { continue };
                         send(&mut outgoing, &AgentServerMessage::TerminalClosed {
                             session_id,
                             reason: Some("remote process exited".to_string()),
@@ -236,32 +215,6 @@ impl ProxyClient {
                         }).await?;
                     }
                 },
-                Some(frame) = download_frame_rx.recv() => {
-                    let completed = if frame.kind == treer_protocol::TransferBinaryKind::TransferEnd {
-                        Some(
-                            serde_json::from_slice::<TransferStats>(&frame.payload)
-                                .context("failed to decode transfer summary")?
-                        )
-                    } else {
-                        None
-                    };
-                    let session_id = frame.session_id.clone();
-                    send_transfer_binary(&mut outgoing, frame).await?;
-                    if let Some(stats) = completed {
-                        download_tasks.remove(&session_id);
-                        send(&mut outgoing, &AgentServerMessage::TransferComplete {
-                            session_id,
-                            stats,
-                        }).await?;
-                    }
-                }
-                Some((session_id, error)) = download_failed_rx.recv() => {
-                    download_tasks.remove(&session_id);
-                    send(&mut outgoing, &AgentServerMessage::TransferFailed {
-                        session_id,
-                        error,
-                    }).await?;
-                }
                 frame = self.network.next_outgoing() => {
                     let frame = frame.ok_or_else(|| anyhow!("network runtime stopped"))?;
                     send_network_binary(&mut outgoing, frame).await?;
@@ -279,45 +232,6 @@ impl ProxyClient {
                                         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
                                     if let Err(error) = self.network.handle_incoming(frame).await {
                                         warn!(%error, "failed to handle network frame");
-                                    }
-                                    continue;
-                                }
-                                if TransferBinaryFrame::is_transfer_frame(&encoded) {
-                                    let frame = TransferBinaryFrame::decode(&encoded)
-                                        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
-                                    let session_id = frame.session_id.clone();
-                                    let result = match upload_sessions.get_mut(&session_id) {
-                                        Some(session) => session.receive(frame).await,
-                                        None => Err(ProtocolError::new(
-                                            "transfer_not_found",
-                                            &session_id,
-                                        )),
-                                    };
-                                    match result {
-                                        Ok(Some(stats)) => {
-                                            upload_sessions.remove(&session_id);
-                                            send(&mut outgoing, &AgentServerMessage::TransferProgress {
-                                                session_id: session_id.clone(),
-                                            }).await?;
-                                            send(&mut outgoing, &AgentServerMessage::TransferComplete {
-                                                session_id,
-                                                stats,
-                                            }).await?;
-                                        }
-                                        Ok(None) => {
-                                            send(&mut outgoing, &AgentServerMessage::TransferProgress {
-                                                session_id,
-                                            }).await?;
-                                        }
-                                        Err(error) => {
-                                            if let Some(mut session) = upload_sessions.remove(&session_id) {
-                                                session.cancel().await;
-                                            }
-                                            send(&mut outgoing, &AgentServerMessage::TransferFailed {
-                                                session_id,
-                                                error,
-                                            }).await?;
-                                        }
                                     }
                                     continue;
                                 }
@@ -342,14 +256,7 @@ impl ProxyClient {
                                     None => Err(anyhow!("unknown terminal session {}", frame.session_id)),
                                 };
                                 if let Err(error) = result {
-                                    if let Some(relay) = terminal_sessions.remove(&frame.session_id) {
-                                        if relay.transient {
-                                            let operation_id = format!("{}:input-error", frame.session_id);
-                                            let _ = self.runtime
-                                                .stop_transient_shell(&operation_id, &relay.process_id)
-                                                .await;
-                                        }
-                                    }
+                                    terminal_sessions.remove(&frame.session_id);
                                     pending_closes.remove(&frame.session_id);
                                     send(&mut outgoing, &AgentServerMessage::TerminalClosed {
                                         session_id: frame.session_id,
@@ -396,7 +303,6 @@ impl ProxyClient {
                                                 TerminalRelay {
                                                     process_id: agent_id,
                                                     last_revision: replay.revision,
-                                                    transient: false,
                                                 },
                                             );
                                             send_binary(&mut outgoing, TerminalBinaryFrame {
@@ -424,56 +330,11 @@ impl ProxyClient {
                                 }
                             }
                         }
-                        ProxyMessage::ShellOpen { session_id, cols, rows, cwd, command } => {
-                            let operation_id = format!("{session_id}:open");
-                            match self.runtime
-                                .open_shell(
-                                    &operation_id,
-                                    &session_id,
-                                    &cwd,
-                                    command.as_deref(),
-                                    cols,
-                                    rows,
-                                )
-                                .await
-                            {
-                                Ok(replay) => {
-                                    terminal_sessions.insert(
-                                        session_id.clone(),
-                                        TerminalRelay {
-                                            process_id: session_id.clone(),
-                                            last_revision: replay.revision,
-                                            transient: true,
-                                        },
-                                    );
-                                    send_binary(&mut outgoing, TerminalBinaryFrame {
-                                        kind: TerminalBinaryKind::Ready,
-                                        session_id,
-                                        revision: replay.revision,
-                                        payload: replay.data,
-                                    }).await?;
-                                }
-                                Err(error) => {
-                                    send(&mut outgoing, &AgentServerMessage::TerminalClosed {
-                                        session_id,
-                                        reason: Some(error.message),
-                                        exit_code: None,
-                                    }).await?;
-                                }
-                            }
-                        }
                         ProxyMessage::TerminalResize { session_id, cols, rows } => {
                             if let Some(relay) = terminal_sessions.get(&session_id) {
                                 let operation_id = format!("{session_id}:resize:{}", uuid::Uuid::new_v4().simple());
                                 if let Err(error) = self.runtime.resize(&operation_id, &relay.process_id, cols, rows).await {
-                                    if let Some(relay) = terminal_sessions.remove(&session_id) {
-                                        if relay.transient {
-                                            let cleanup_id = format!("{session_id}:resize-error");
-                                            let _ = self.runtime
-                                                .stop_transient_shell(&cleanup_id, &relay.process_id)
-                                                .await;
-                                        }
-                                    }
+                                    terminal_sessions.remove(&session_id);
                                     pending_closes.remove(&session_id);
                                     send(&mut outgoing, &AgentServerMessage::TerminalClosed {
                                         session_id,
@@ -486,78 +347,6 @@ impl ProxyClient {
                         ProxyMessage::TerminalDetach { session_id } => {
                             terminal_sessions.remove(&session_id);
                             pending_closes.remove(&session_id);
-                        }
-                        ProxyMessage::ShellDetach { session_id } => {
-                            pending_closes.remove(&session_id);
-                            if let Some(relay) = terminal_sessions.remove(&session_id) {
-                                let operation_id = format!("{session_id}:detach");
-                                if let Err(error) = self.runtime
-                                    .stop_transient_shell(&operation_id, &relay.process_id)
-                                    .await
-                                {
-                                    warn!(session_id, message = %error.message, "failed to stop remote shell");
-                                }
-                            }
-                        }
-                        ProxyMessage::TransferUpload { session_id, destination, recursive } => {
-                            match TransferReceiver::new(
-                                PathBuf::from(destination),
-                                Some(self.runtime.workspace_root().to_path_buf()),
-                                recursive,
-                                session_id.clone(),
-                            ).await {
-                                Ok(receiver) => {
-                                    upload_sessions.insert(session_id.clone(), receiver);
-                                    send(&mut outgoing, &AgentServerMessage::TransferReady {
-                                        session_id,
-                                    }).await?;
-                                }
-                                Err(error) => {
-                                    send(&mut outgoing, &AgentServerMessage::TransferFailed {
-                                        session_id,
-                                        error,
-                                    }).await?;
-                                }
-                            }
-                        }
-                        ProxyMessage::TransferDownload { session_id, source, recursive } => {
-                            let source = treer_transfer::validate_remote_source(
-                                self.runtime.workspace_root(),
-                                std::path::Path::new(&source),
-                            );
-                            match source {
-                                Ok(source) => {
-                                    send(&mut outgoing, &AgentServerMessage::TransferReady {
-                                        session_id: session_id.clone(),
-                                    }).await?;
-                                    let frames = download_frame_tx.clone();
-                                    let failed = download_failed_tx.clone();
-                                    let task_session = session_id.clone();
-                                    let task = tokio::spawn(async move {
-                                        if let Err(error) = treer_transfer::stream_path(
-                                            source,
-                                            recursive,
-                                            task_session.clone(),
-                                            frames,
-                                        ).await {
-                                            let _ = failed.send((task_session, error));
-                                        }
-                                    });
-                                    download_tasks.insert(session_id, DownloadTask(task));
-                                }
-                                Err(error) => {
-                                    send(&mut outgoing, &AgentServerMessage::TransferFailed {
-                                        session_id,
-                                        error,
-                                    }).await?;
-                                }
-                            }
-                        }
-                        ProxyMessage::TransferCancel { session_id } => {
-                            if let Some(mut session) = upload_sessions.remove(&session_id) {
-                                session.cancel().await;
-                            }
-                            download_tasks.remove(&session_id);
                         }
                     }
                 }
@@ -687,8 +476,6 @@ pub fn server_info(
         labels: std::collections::BTreeMap::from([
             ("os".to_string(), std::env::consts::OS.to_string()),
             ("arch".to_string(), std::env::consts::ARCH.to_string()),
-            ("treer.ssh".to_string(), "1".to_string()),
-            ("treer.scp".to_string(), "1".to_string()),
             ("treer.network".to_string(), "1".to_string()),
             ("treer.shutdown".to_string(), "1".to_string()),
         ]),
@@ -722,20 +509,6 @@ where
         .send(Message::Binary(encoded.into()))
         .await
         .context("failed to send terminal binary frame")
-}
-
-async fn send_transfer_binary<S>(outgoing: &mut S, frame: TransferBinaryFrame) -> anyhow::Result<()>
-where
-    S: futures_util::Sink<Message> + Unpin,
-    S::Error: std::error::Error + Send + Sync + 'static,
-{
-    let encoded = frame
-        .encode()
-        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
-    outgoing
-        .send(Message::Binary(encoded.into()))
-        .await
-        .context("failed to send transfer binary frame")
 }
 
 async fn send_network_binary<S>(outgoing: &mut S, frame: NetworkBinaryFrame) -> anyhow::Result<()>

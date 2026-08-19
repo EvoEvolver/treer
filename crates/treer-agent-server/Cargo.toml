@@ -22,7 +22,6 @@ tracing-subscriber.workspace = true
 treer-agent-runtime = { path = "../treer-agent-runtime" }
 treer-host-protocol = { path = "../treer-host-protocol" }
 treer-protocol = { path = "../treer-protocol" }
-treer-transfer = { path = "../treer-transfer" }
 url.workspace = true
 uuid.workspace = true
 

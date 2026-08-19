@@ -7,11 +7,11 @@
 
 Treer is a self-hostable collaboration layer for interactive coding agents. It
 connects machines into organization-scoped workspaces, keeps agent processes
-alive on those machines, and provides browser, CLI, terminal, transfer, and
-private-service paths through one open control plane.
+alive on those machines, and provides browser, CLI, terminal, and private-service
+paths through one open control plane.
 
 The first useful product is for an individual or a trusted research group that
-wants to share long-running Agent sessions without publishing SSH ports or
+wants to share long-running Agent sessions without publishing machine ports or
 handing every collaborator unrestricted direct machine access.
 
 ## Current product promise
@@ -24,13 +24,13 @@ In concrete terms:
 2. A short-lived, single-use link enrolls that machine into one workspace.
 3. Workspace members can create, observe, prompt, and stop Codex, Claude, or
    shell agents through the web application or CLI.
-4. Managed agents can discover peers, exchange pull-only durable mail, and
-   coordinate through a stable CLI contract rather than knowing machine
-   addresses.
+4. Managed agents can discover peers and organization members, exchange
+   pull-only durable mail with Agents or humans, and coordinate through a
+   stable CLI contract rather than knowing machine addresses.
 5. Agents can register and maintain long-running machine services, then expose
    stable workspace aliases without making service ports public.
-6. Machines connect outward to the Proxy; local Agent Server, service, and SSH
-   ports do not need to be publicly exposed.
+6. Machines connect outward to the Proxy; local Agent Server and service ports
+   do not need to be publicly exposed.
 7. The central Proxy is open source and can be privately deployed.
 
 This is a convenience-first promise with a comprehensible security reason. It

@@ -207,7 +207,6 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         controller::ControllerConfig {
             workspace_id: args.workspace.clone(),
             server_id: server_id.clone(),
-            workspace_root: root.clone(),
             agent_server_url,
             network_proxy_url: network.proxy_url(),
             treer_binary: sibling_treer_binary(),

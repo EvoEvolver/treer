@@ -35,13 +35,10 @@ treer agent --help
 treer machine --help
 treer service --help
 treer virtual-host --help
-treer ssh --help
-treer scp --help
 ```
 
 Control commands print JSON. Read IDs and state from the response instead of
-predicting them; `ssh` and `scp` instead preserve terminal and file-copy
-semantics.
+predicting them.
 
 ## Understand identity and scope
 
@@ -154,44 +151,6 @@ expire after 60 seconds, so request one immediately before use. Treer does not
 automatically add the token to virtual-network requests, and services that do
 not implement Treer identity continue to work unchanged.
 
-## Access another workspace machine
-
-Use `treer ssh` to start a transient shell on an online machine in the current
-workspace. This is a Treer-native PTY routed through the Proxy, not OpenSSH, so
-it does not require an SSH daemon, machine address, or SSH keys.
-
-For automated agent work, always provide a command after `--`:
-
-```bash
-treer ssh <server-id> --cwd . -- git status --short
-treer ssh build-machine -- cargo test --workspace
-```
-
-Machine targets accept a server ID, a unique machine name, or `self`/`.`. If
-names are duplicated, Treer returns `server_ambiguous`; use the exact server ID.
-The working directory is resolved on the target machine. The remote command's
-stdout, stderr, and exit code are forwarded to the caller, and stdin is
-forwarded when piped.
-
-Interactive `treer ssh <machine>` is reserved for a human-operated TTY. Press
-`Ctrl-]` to disconnect. Remote shells are transient, are not registered as
-agents, and are stopped when the client disconnects.
-
-Use `treer scp` to move files between the caller's machine and another online
-workspace machine:
-
-```bash
-treer scp output.json build-machine:artifacts/output.json
-treer scp build-machine:artifacts/result.json ./result.json
-treer scp -r build-machine:results ./downloaded-results
-```
-
-Exactly one operand must use `machine:path`. Machine resolution follows `ssh`:
-use a server ID, unique machine name, or `self`/`.`. Remote paths are relative
-to that machine's configured workspace root. Use `-r` only when copying a
-directory. Treer rejects symbolic links and special files, and it does not yet
-support direct remote-to-remote copies.
-
 Delete a machine only when it and all of its agents should be removed from the
 workspace. This revokes its credential but does not uninstall the service on
 that machine:
@@ -234,6 +193,26 @@ Recipient targets accept an Agent ID, a unique name, or `self`/`.`. Context
 messages must belong to the same workspace and must have been sent or received
 by the caller. Use `mail` for deferred collaboration; use `agent prompt` only
 when intentionally starting work in another Agent's terminal session.
+
+The human directory for a workspace is its parent organization's member list.
+Discover stable human addresses without exposing member email addresses:
+
+```bash
+treer human list
+```
+
+Send to the returned `user_id` with `--to-human`. Human and Agent recipients
+may share one message, and each option may be repeated:
+
+```bash
+treer mail --to-human usr_123 "The deployment is ready for review."
+treer mail --to reviewer --to-human usr_123 "Please coordinate on this result."
+```
+
+Do not address a human by preferred name: names are display-only, may collide,
+and may change. Humans read their workspace inbox from the web application;
+opening it marks only the returned batch read. Sending still does not notify or
+interrupt the human or any Agent.
 
 ## Create and coordinate a peer
 
@@ -315,8 +294,6 @@ validates every key before sending any bytes.
 - Read agent output before responding to an unexpected state.
 - Do not use `agent attach` from an automated agent workflow; it requires a
   human-operated TTY.
-- Do not run interactive `treer ssh` from an automated agent workflow; pass a
-  finite command after `--` and check its exit status.
 - Mail is durable but pull-only. Do not claim that it wakes a recipient, reaches
   a deleted Agent identity, or proves that the message body was acted upon.
 - Do not claim strict turn correlation for terminal-oriented `prompt --wait`.

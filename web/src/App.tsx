@@ -8,6 +8,7 @@ import {
   FolderKanban,
   KeyRound,
   LogOut,
+  Mail,
   MoreHorizontal,
   Network,
   Pencil,
@@ -21,7 +22,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type MailMessage, type Member, type Organization, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -171,6 +172,7 @@ function WorkspaceApp() {
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
+  const [inboxOpen, setInboxOpen] = useState(false)
   const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
   const [createServiceOpen, setCreateServiceOpen] = useState(false)
   const [editingService, setEditingService] = useState<MachineService | null>(null)
@@ -194,6 +196,8 @@ function WorkspaceApp() {
   const [connectCommand, setConnectCommand] = useState("")
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
+  const [inboxMessages, setInboxMessages] = useState<MailMessage[]>([])
+  const [remainingUnread, setRemainingUnread] = useState(0)
   const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
   const [services, setServices] = useState<MachineService[]>([])
   const [serviceHealth, setServiceHealth] = useState<Record<string, "healthy" | "unreachable">>({})
@@ -396,6 +400,16 @@ function WorkspaceApp() {
     try {
       const data = await api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/members`)
       setMembers(data.members); setMembersOpen(true)
+    } catch (reason) { showError(reason) }
+  }
+
+  async function loadInbox(append = false) {
+    if (!workspaceId) return
+    try {
+      const data = await api<{ messages: MailMessage[]; remaining_unread: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/inbox`, { method: "POST", body: JSON.stringify({ limit: 50 }) })
+      setInboxMessages((current) => append ? [...current, ...data.messages] : data.messages)
+      setRemainingUnread(data.remaining_unread)
+      setInboxOpen(true)
     } catch (reason) { showError(reason) }
   }
 
@@ -604,6 +618,7 @@ function WorkspaceApp() {
         </Tabs>
 
         <div className="shrink-0 border-t p-2">
+          <Button variant="ghost" className="h-8 w-full justify-start px-2 text-xs font-normal text-muted-foreground" onClick={() => loadInbox(false)} disabled={!workspaceId}><Mail className="size-3.5" />Inbox</Button>
           <Button variant="ghost" className="h-8 w-full justify-start px-2 text-xs font-normal text-muted-foreground" onClick={openMembers} disabled={!organizationId}><Users className="size-3.5" />Members</Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild><button className="mt-1 grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-black/[.05]"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
@@ -653,6 +668,8 @@ function WorkspaceApp() {
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget?.name} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="min-w-0"><span className="block truncate text-sm font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive" onClick={() => removeMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
+
+    <Dialog open={inboxOpen} onOpenChange={setInboxOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Inbox</DialogTitle><DialogDescription>Messages sent by Agents in {workspace?.name ?? "this workspace"}. Opening the inbox marks the returned batch read.</DialogDescription></DialogHeader><div className="max-h-[60vh] divide-y overflow-auto border-y">{inboxMessages.map((message) => <article key={message.message_id} className="py-4"><div className="flex items-start justify-between gap-4"><div className="min-w-0"><div className="truncate text-sm font-medium">{message.sender.name}</div><div className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground">{message.sender.agent_id} · {message.message_id}</div></div><time className="shrink-0 text-[10px] text-muted-foreground">{new Date(message.created_at).toLocaleString()}</time></div><p className="mt-3 whitespace-pre-wrap text-sm leading-6">{message.body}</p>{message.context_ids.length > 0 && <div className="mt-3 truncate font-mono text-[9px] text-muted-foreground">Context: {message.context_ids.join(", ")}</div>}</article>)}{!inboxMessages.length && <EmptyState icon={<Mail />} label="No unread messages" />}</div><DialogFooter><span className="mr-auto self-center text-xs text-muted-foreground">{remainingUnread > 0 ? `${remainingUnread} unread remaining` : "Inbox is up to date"}</span>{remainingUnread > 0 && <Button variant="outline" onClick={() => loadInbox(true)}>Load next</Button>}<Button onClick={() => setInboxOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
   </TooltipProvider>

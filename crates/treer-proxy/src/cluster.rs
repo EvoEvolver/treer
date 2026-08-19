@@ -36,7 +36,6 @@ pub(crate) struct ClusterServerSnapshot {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum ClusterSessionKind {
     Terminal,
-    Transfer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

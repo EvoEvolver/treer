@@ -46,10 +46,9 @@ flowchart TB
 | [`treer-agent-server`](../crates/treer-agent-server/src/main.rs) | Machine Controller, local API, Agent definitions, state detection, Proxy link, network bridge | Durable PTY ownership |
 | [`treer-agent-host`](../crates/treer-agent-host/src/main.rs) | Stable child processes, Controller supervision, idempotent mutation cache | Users, workspaces, Agent brands, product policy |
 | [`treer-agent-runtime`](../crates/treer-agent-runtime/src/lib.rs) | PTY lifecycle, raw input/output, bounded replay, root-relative working directories | Distributed routing or identity |
-| [`treer-cli`](../crates/treer-cli/src/main.rs) | Human and managed-Agent commands, attach, remote shell, file copy | Private wire-model variants |
+| [`treer-cli`](../crates/treer-cli/src/main.rs) | Human and managed-Agent commands and terminal attach | Private wire-model variants |
 | [`treer-protocol`](../crates/treer-protocol/src/lib.rs) | Shared public and Controller protocol models and frames | Runtime implementation |
 | [`treer-host-protocol`](../crates/treer-host-protocol/src/lib.rs) | Controller-to-Host request, response, and event contract | Proxy or browser concepts |
-| [`treer-transfer`](../crates/treer-transfer/src/lib.rs) | Transfer manifests, validation, path containment, atomic upload commit | Session authorization |
 | [`web`](../web/src/App.tsx) | Standalone static browser application, runtime Proxy discovery, control-plane interaction, and terminal UI | Backend policy or hidden business state |
 
 ## Architectural invariants
@@ -64,9 +63,10 @@ flowchart TB
 - Agent mail is a pull-only PostgreSQL path. Sending mail never becomes terminal
   input or a runtime event, and reading an inbox marks only that recipient's
   returned deliveries read.
+- A workspace's human directory is derived from its parent organization
+  membership. Human mail addresses use stable user IDs; preferred names are
+  display snapshots and member emails are not exposed to managed Agents.
 - Enrolled machines establish outbound connections to the Proxy.
-- Remote working directories and file paths are resolved beneath the machine's
-  configured workspace root. This path rule is not filesystem sandboxing.
 - Durable identity metadata lives in PostgreSQL. With NATS configured, live
   Controller ownership and machine snapshots are shared across Proxy replicas;
   session and stream coordination remains in the initiating Proxy and is
@@ -76,8 +76,8 @@ flowchart TB
   envelope to an optional NATS JetStream.
 - JetStream carries durable domain events, durable control projections,
   expiring ownership leases, and change-driven live snapshots. Heartbeats do
-  not republish full snapshots. PTY output, terminal input, file transfer
-  payloads, and virtual-network TCP bytes are not retained in JetStream; live
+  not republish full snapshots. PTY output, terminal input, and virtual-network
+  TCP bytes are not retained in JetStream; live
   bytes use Core NATS only when their endpoints use different Proxy replicas.
 - The browser application is deployed independently from `treer-proxy`. It
   reads the Proxy origin from `/config.json` at startup; the Proxy allows
@@ -100,28 +100,30 @@ flowchart TB
 
 PostgreSQL persists users, organizations, memberships, sessions, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
-display names, Agent messages, per-recipient read state, message context edges,
-machine services, and virtual hosts. Administrator invitations
+display names, Agent messages, per-Agent and per-human read state, message
+context edges, machine services, and virtual hosts. Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
 
-Agent mail travels from the caller's loopback API to the Proxy under the
-Controller's machine credential and caller Agent ID. The Controller first
-validates the private workload credential, and the Proxy verifies that the
-Agent belongs to that machine and workspace. Recipient names resolve to stable
-Agent IDs before one message and its recipient deliveries are committed.
-`inbox` locks an oldest-first unread batch, marks that recipient's rows read,
-and returns the messages with sender, recipient, and context IDs. This path is
-shared PostgreSQL state and neither requires NATS nor interrupts a live Agent.
+Agent mail and human-directory requests travel from the caller's loopback API
+to the Proxy under the Controller's machine credential and caller Agent ID. The
+Controller first validates the private workload credential, and the Proxy
+verifies that the Agent belongs to that machine and workspace. Agent recipient
+names resolve to stable Agent IDs; human recipients must use stable user IDs
+from the workspace organization directory. One message and its typed recipient
+deliveries are committed together. Agent `inbox` and the web workspace Inbox
+each lock an oldest-first unread batch and mark only that recipient's rows read.
+This path is shared PostgreSQL state and neither requires NATS nor interrupts a
+live Agent or human.
 
 Each Controller connection,
-pending command, browser session, terminal leg, transfer, and network route is
+pending command, browser session, terminal leg, and network route is
 owned by one Proxy process. A small expiring NATS KV lease maps a Controller to
 that process; a separate KV entry changes only when its machine snapshot
 changes. File-backed projection entries retain the latest workspace,
 rename/delete, and restoration state across replica disconnects. Routed
-terminal, transfer, and network IDs encode the initiating Proxy so return
+terminal and network IDs encode the initiating Proxy so return
 traffic reaches its in-memory state. Connection IDs and JetStream revisions
 fence stale owners and out-of-order snapshot delivery. Heartbeats revalidate
 machine revocation against PostgreSQL before renewing ownership.
@@ -176,7 +178,7 @@ the stable service ID. Services validate through the Proxy JWKS document or the
 online verify endpoint. Tokens are requested explicitly and are never injected
 into arbitrary virtual-network traffic.
 
-## Network and transfer paths
+## Network paths
 
 On Linux, managed Agent TCP and DNS traffic enters a per-Agent network namespace
 and TUN interface, then reaches a Controller-owned SOCKS5 boundary. Ordinary
@@ -192,12 +194,6 @@ not a VM or private filesystem. A private mount namespace supplies the Agent's
 resolver configuration and masks the host `nscd` socket, ensuring DNS lookups
 reach the TUN virtual resolver instead of host NSS plugins or caches. These mounts do not
 modify the host resolver files or cache service.
-
-`treer scp` creates an authenticated Proxy transfer session between Controllers.
-Remote operands are workspace-relative; the transfer engine rejects symlinks
-and special files, enforces declared limits, and commits uploads by atomic
-rename. Treer does not continuously synchronize project trees or resolve file
-conflicts.
 
 For route-level details and additional diagrams, use the dated
 [project review](research/2026-08-18-project-review.md). Review this document

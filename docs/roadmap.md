@@ -22,7 +22,7 @@ At `bd3115d`, Treer already provides:
 - organizations, members, invitations, and organization-scoped workspaces;
 - enrolled machines with a stable Host and replaceable Controller;
 - long-running Codex, Claude, and command Agents with PTY replay;
-- browser and CLI discovery, control, terminal, remote shell, and transfer;
+- browser and CLI discovery, control, and terminal attach;
 - durable machine-service records and workspace virtual hosts;
 - generic TCP relay for virtual hosts and direct source-machine egress for
   ordinary Agent traffic;
@@ -249,8 +249,7 @@ adapters without claiming one injected header can authenticate every protocol.
 
 ### Artifacts, context, and search
 
-`treer scp` moves files but does not create a durable collaboration record. An
-Artifact registry should add content hash, media type, size, producer Run,
+An Artifact registry should add content hash, media type, size, producer Run,
 workspace, retention, provenance, preview, and storage reference. Large data
 belongs in object storage; metadata and relationships belong in the control
 plane.

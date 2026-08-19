@@ -15,17 +15,14 @@ use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
     CreateVirtualNetworkHostRequest, InputAgentRequest, MachineServiceProtocol, RenameRequest,
-    SendAgentMailRequest, ServerInfo, ServerStatus, TerminalClientMessage, TerminalServerMessage,
-    TransferBinaryFrame, TransferServerMessage, TransferStats, UpdateMachineServiceRequest,
-    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
-    AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    SendAgentMailRequest, ServerInfo, TerminalClientMessage, TerminalServerMessage,
+    UpdateMachineServiceRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
+    WorkspaceSnapshot, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
-use treer_transfer::TransferReceiver;
 use url::Url;
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 const ATTACH_DETACH_BYTE: u8 = 0x1d;
-const TRANSFER_WINDOW_FRAMES: usize = 16;
 const SKILL: &str = include_str!("../../../skills/treer/SKILL.md");
 
 #[derive(Debug, Parser)]
@@ -56,6 +53,11 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    #[command(about = "Discover human members of the workspace organization")]
+    Human {
+        #[command(subcommand)]
+        command: HumanCommand,
+    },
     #[command(about = "Manage workspace machines")]
     Machine {
         #[command(subcommand)]
@@ -82,8 +84,10 @@ enum Command {
     Discover,
     #[command(about = "Send durable mail without interrupting recipient agents")]
     Mail {
-        #[arg(short = 't', long = "to", required = true)]
+        #[arg(short = 't', long = "to")]
         recipients: Vec<String>,
+        #[arg(long = "to-human")]
+        human_recipients: Vec<String>,
         #[arg(short = 'c', long = "context")]
         context_ids: Vec<String>,
         body: String,
@@ -92,21 +96,6 @@ enum Command {
     Inbox {
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
         limit: u16,
-    },
-    #[command(about = "Open a shell on another workspace machine")]
-    Ssh {
-        target: String,
-        #[arg(long, default_value = ".")]
-        cwd: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-    #[command(about = "Copy files to or from another workspace machine")]
-    Scp {
-        #[arg(short = 'r', long)]
-        recursive: bool,
-        source: String,
-        destination: String,
     },
     #[command(about = "List agents (compatibility alias for `agent list`)")]
     List,
@@ -144,6 +133,12 @@ enum Command {
     Attach { target: String },
     #[command(about = "Stop an agent (compatibility alias for `agent stop`)")]
     Stop { target: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum HumanCommand {
+    #[command(about = "List organization members addressable from this workspace")]
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -428,26 +423,10 @@ async fn main() -> anyhow::Result<()> {
         .context("a command is required; run `treer --help` for usage")?;
     let client = ApiClient::new(resolve_server_url(args.url, &args.workspace)?);
     let value = match command {
-        Command::Ssh {
-            target,
-            cwd,
-            command,
-        } => {
-            let exit_code = ssh_machine(&client, &target, cwd, command).await?;
-            if exit_code != 0 {
-                std::process::exit(exit_code.clamp(1, 255));
-            }
-            return Ok(());
-        }
-        Command::Scp {
-            recursive,
-            source,
-            destination,
-        } => {
-            scp(&client, recursive, &source, &destination).await?;
-            return Ok(());
-        }
         Command::Agent { command } => run_agent_command(&client, command).await?,
+        Command::Human { command } => match command {
+            HumanCommand::List => client.value(Method::GET, "api/humans", None).await?,
+        },
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
         Command::Service { command } => run_service_command(&client, command).await?,
@@ -473,9 +452,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Discover => discover(&client).await?,
         Command::Mail {
             recipients,
+            human_recipients,
             context_ids,
             body,
         } => {
+            validate_mail_recipients(&recipients, &human_recipients)?;
             let recipients = recipients
                 .into_iter()
                 .map(|target| normalize_target(&target))
@@ -486,6 +467,7 @@ async fn main() -> anyhow::Result<()> {
                     "api/mail",
                     Some(serde_json::to_value(SendAgentMailRequest {
                         recipients,
+                        human_recipients,
                         context_ids,
                         body,
                     })?),
@@ -836,334 +818,6 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
     Ok(json!({ "agent": target, "status": "detached", "reason": outcome.reason }))
 }
 
-async fn ssh_machine(
-    client: &ApiClient,
-    target: &str,
-    cwd: String,
-    command: Vec<String>,
-) -> anyhow::Result<i32> {
-    let server = resolve_machine(client, target).await?;
-    if server.status != ServerStatus::Online {
-        bail!("machine {} is offline", server.name);
-    }
-    let interactive = command.is_empty();
-    let mut url = client
-        .base
-        .join(&format!("api/ssh/{}", path_segment(&server.server_id)))
-        .context("failed to build remote shell URL")?;
-    url.query_pairs_mut().append_pair("cwd", &cwd);
-    if !command.is_empty() {
-        url.query_pairs_mut()
-            .append_pair("command", &command.join(" "));
-    }
-    let outcome = relay_terminal(url, &server.name, interactive).await?;
-    if interactive {
-        return Ok(outcome.exit_code.unwrap_or(0));
-    }
-    Ok(outcome.exit_code.unwrap_or(1))
-}
-
-#[derive(Debug)]
-struct RemotePath {
-    machine: String,
-    path: String,
-}
-
-async fn scp(
-    client: &ApiClient,
-    recursive: bool,
-    source: &str,
-    destination: &str,
-) -> anyhow::Result<()> {
-    let remote_source = parse_remote_path(source);
-    let remote_destination = parse_remote_path(destination);
-    match (remote_source, remote_destination) {
-        (Some(_), Some(_)) => {
-            bail!("remote-to-remote copies are not supported; exactly one path must be local")
-        }
-        (None, None) => bail!("exactly one path must use the machine:path form"),
-        (None, Some(remote)) => upload_path(client, PathBuf::from(source), remote, recursive).await,
-        (Some(remote), None) => {
-            download_path(client, remote, PathBuf::from(destination), recursive).await
-        }
-    }
-}
-
-fn parse_remote_path(value: &str) -> Option<RemotePath> {
-    if value.starts_with('/') || value.starts_with("./") || value.starts_with("../") {
-        return None;
-    }
-    let (machine, path) = value.split_once(':')?;
-    if machine.is_empty()
-        || path.is_empty()
-        || machine.contains('/')
-        || machine.contains(std::path::MAIN_SEPARATOR)
-    {
-        return None;
-    }
-    Some(RemotePath {
-        machine: machine.to_string(),
-        path: path.to_string(),
-    })
-}
-
-async fn upload_path(
-    client: &ApiClient,
-    source: PathBuf,
-    remote: RemotePath,
-    recursive: bool,
-) -> anyhow::Result<()> {
-    let metadata = tokio::fs::symlink_metadata(&source)
-        .await
-        .with_context(|| format!("source does not exist: {}", source.display()))?;
-    if metadata.is_dir() && !recursive {
-        bail!("{} is a directory; use --recursive", source.display());
-    }
-    let server = resolve_machine(client, &remote.machine).await?;
-    require_online_machine(&server)?;
-    let url = transfer_url(client, &server, "upload", &remote.path, recursive)?;
-    let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
-        .await
-        .with_context(|| format!("failed to connect to {}", server.name))?;
-    let session_id = wait_for_transfer_ready(&mut socket).await?;
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel(16);
-    let task_session = session_id.clone();
-    let mut producer = tokio::spawn(async move {
-        treer_transfer::stream_path(source, recursive, task_session, frame_tx).await
-    });
-    let (mut outgoing, mut incoming) = socket.split();
-    let mut producer_finished = false;
-    let mut local_stats = None;
-    let mut in_flight = 0_usize;
-    let outcome: anyhow::Result<TransferStats> = loop {
-        tokio::select! {
-            frame = frame_rx.recv(), if !producer_finished && in_flight < TRANSFER_WINDOW_FRAMES => {
-                let Some(frame) = frame else {
-                    producer_finished = true;
-                    local_stats = Some(
-                        (&mut producer)
-                            .await
-                            .context("file reader task failed")?
-                            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
-                    );
-                    continue;
-                };
-                let encoded = frame
-                    .encode()
-                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
-                outgoing
-                    .send(Message::Binary(encoded.into()))
-                    .await
-                    .context("failed to send file data")?;
-                in_flight += 1;
-            }
-            message = incoming.next() => {
-                let Some(message) = message else {
-                    break Err(anyhow::anyhow!("transfer connection closed"));
-                };
-                match message.context("failed to read transfer response")? {
-                    Message::Text(text) => match serde_json::from_str::<TransferServerMessage>(&text)
-                        .context("invalid transfer response")? {
-                        TransferServerMessage::Complete { stats, .. } => break Ok(stats),
-                        TransferServerMessage::Progress { .. } => {
-                            in_flight = in_flight.saturating_sub(1);
-                        }
-                        TransferServerMessage::Error { error } => {
-                            break Err(anyhow::anyhow!("{}: {}", error.code, error.message));
-                        }
-                        TransferServerMessage::Ready { .. } => {}
-                    },
-                    Message::Ping(data) => {
-                        outgoing.send(Message::Pong(data)).await.context("failed to reply to ping")?;
-                    }
-                    Message::Close(_) => break Err(anyhow::anyhow!("transfer connection closed")),
-                    Message::Binary(_) => {
-                        break Err(anyhow::anyhow!("upload received unexpected file data"));
-                    }
-                    Message::Pong(_) | Message::Frame(_) => {}
-                }
-            }
-        }
-    };
-    let remote_stats = match outcome {
-        Ok(stats) => stats,
-        Err(error) => {
-            if !producer_finished {
-                producer.abort();
-                let _ = producer.await;
-            }
-            return Err(error);
-        }
-    };
-    let local_stats = match local_stats {
-        Some(stats) => stats,
-        None => producer
-            .await
-            .context("file reader task failed")?
-            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?,
-    };
-    if local_stats != remote_stats {
-        bail!("remote transfer summary did not match the local file data");
-    }
-    eprintln!(
-        "copied {} entr{} ({} bytes) to {}:{}",
-        remote_stats.entries,
-        if remote_stats.entries == 1 {
-            "y"
-        } else {
-            "ies"
-        },
-        remote_stats.bytes,
-        server.name,
-        remote.path
-    );
-    Ok(())
-}
-
-async fn download_path(
-    client: &ApiClient,
-    remote: RemotePath,
-    destination: PathBuf,
-    recursive: bool,
-) -> anyhow::Result<()> {
-    let server = resolve_machine(client, &remote.machine).await?;
-    require_online_machine(&server)?;
-    let url = transfer_url(client, &server, "download", &remote.path, recursive)?;
-    let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
-        .await
-        .with_context(|| format!("failed to connect to {}", server.name))?;
-    let session_id = wait_for_transfer_ready(&mut socket).await?;
-    let mut receiver = TransferReceiver::new(destination, None, recursive, session_id)
-        .await
-        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
-    let mut local_stats = None;
-    let remote_stats = loop {
-        let Some(message) = socket.next().await else {
-            receiver.cancel().await;
-            bail!("transfer connection closed");
-        };
-        match message.context("failed to read file data")? {
-            Message::Binary(encoded) => {
-                let frame = TransferBinaryFrame::decode(&encoded)
-                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
-                if let Some(stats) = receiver
-                    .receive(frame)
-                    .await
-                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
-                {
-                    local_stats = Some(stats);
-                }
-            }
-            Message::Text(text) => match serde_json::from_str::<TransferServerMessage>(&text)
-                .context("invalid transfer response")?
-            {
-                TransferServerMessage::Complete { stats, .. } => break stats,
-                TransferServerMessage::Progress { .. } => {}
-                TransferServerMessage::Error { error } => {
-                    receiver.cancel().await;
-                    bail!("{}: {}", error.code, error.message);
-                }
-                TransferServerMessage::Ready { .. } => {}
-            },
-            Message::Ping(data) => {
-                socket
-                    .send(Message::Pong(data))
-                    .await
-                    .context("failed to reply to ping")?;
-            }
-            Message::Close(_) => {
-                receiver.cancel().await;
-                bail!("transfer connection closed");
-            }
-            Message::Pong(_) | Message::Frame(_) => {}
-        }
-    };
-    if local_stats != Some(remote_stats) {
-        receiver.cancel().await;
-        bail!("local transfer summary did not match the remote file data");
-    }
-    eprintln!(
-        "copied {} entr{} ({} bytes) from {}:{}",
-        remote_stats.entries,
-        if remote_stats.entries == 1 {
-            "y"
-        } else {
-            "ies"
-        },
-        remote_stats.bytes,
-        server.name,
-        remote.path
-    );
-    Ok(())
-}
-
-fn transfer_url(
-    client: &ApiClient,
-    server: &ServerInfo,
-    direction: &str,
-    path: &str,
-    recursive: bool,
-) -> anyhow::Result<Url> {
-    let mut url = client
-        .base
-        .join(&format!("api/scp/{}", path_segment(&server.server_id)))
-        .context("failed to build file transfer URL")?;
-    url.query_pairs_mut()
-        .append_pair("direction", direction)
-        .append_pair("path", path)
-        .append_pair("recursive", &recursive.to_string());
-    let scheme = match url.scheme() {
-        "http" => "ws",
-        "https" => "wss",
-        scheme => bail!("unsupported agent server URL scheme {scheme}"),
-    };
-    url.set_scheme(scheme)
-        .map_err(|_| anyhow::anyhow!("invalid agent server URL scheme"))?;
-    Ok(url)
-}
-
-async fn wait_for_transfer_ready(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) -> anyhow::Result<String> {
-    loop {
-        let Some(message) = socket.next().await else {
-            bail!("transfer connection closed before it was ready");
-        };
-        match message.context("failed to initialize transfer")? {
-            Message::Text(text) => match serde_json::from_str::<TransferServerMessage>(&text)
-                .context("invalid transfer response")?
-            {
-                TransferServerMessage::Ready { session_id } => return Ok(session_id),
-                TransferServerMessage::Progress { .. } => {
-                    bail!("transfer reported progress before it became ready")
-                }
-                TransferServerMessage::Error { error } => {
-                    bail!("{}: {}", error.code, error.message)
-                }
-                TransferServerMessage::Complete { .. } => {
-                    bail!("transfer completed before it became ready")
-                }
-            },
-            Message::Ping(data) => socket
-                .send(Message::Pong(data))
-                .await
-                .context("failed to reply to ping")?,
-            Message::Close(_) => bail!("transfer connection closed before it was ready"),
-            Message::Binary(_) => bail!("transfer sent data before it was ready"),
-            Message::Pong(_) | Message::Frame(_) => {}
-        }
-    }
-}
-
-fn require_online_machine(server: &ServerInfo) -> anyhow::Result<()> {
-    if server.status != ServerStatus::Online {
-        bail!("machine {} is offline", server.name);
-    }
-    Ok(())
-}
-
 async fn resolve_machine(client: &ApiClient, target: &str) -> anyhow::Result<ServerInfo> {
     let target = normalize_machine_target(target)?;
     let snapshot: WorkspaceSnapshot = client.request(Method::GET, "api/discovery", None).await?;
@@ -1189,7 +843,6 @@ async fn resolve_machine(client: &ApiClient, target: &str) -> anyhow::Result<Ser
 
 struct TerminalOutcome {
     reason: String,
-    exit_code: Option<i32>,
 }
 
 async fn relay_terminal(
@@ -1199,7 +852,7 @@ async fn relay_terminal(
 ) -> anyhow::Result<TerminalOutcome> {
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     if interactive_required && !interactive {
-        bail!("remote shell requires an interactive terminal when no command is provided");
+        bail!("terminal attach requires an interactive terminal");
     }
     let (cols, rows) = if interactive {
         terminal_size().context("failed to read terminal size")?
@@ -1329,7 +982,7 @@ async fn relay_terminal(
     if !interactive && exit_code.is_none() && !detached {
         bail!("remote command ended without an exit status: {reason}");
     }
-    Ok(TerminalOutcome { reason, exit_code })
+    Ok(TerminalOutcome { reason })
 }
 
 struct RawModeGuard;
@@ -1394,6 +1047,13 @@ fn normalize_target(target: &str) -> anyhow::Result<String> {
             .context("self target requires TREER_AGENT_ID inside a managed agent");
     }
     Ok(target.to_string())
+}
+
+fn validate_mail_recipients(agents: &[String], humans: &[String]) -> anyhow::Result<()> {
+    if agents.is_empty() && humans.is_empty() {
+        bail!("mail requires at least one --to or --to-human recipient");
+    }
+    Ok(())
 }
 
 fn path_segment(value: &str) -> String {
@@ -1712,69 +1372,46 @@ mod tests {
             mail.command,
             Some(Command::Mail {
                 recipients,
+                human_recipients,
                 context_ids,
                 body,
             }) if recipients == ["reviewer", "tester"]
+                && human_recipients.is_empty()
                 && context_ids == ["msg_one", "msg_two"]
                 && body == "Review complete."
         ));
-        assert!(Args::try_parse_from(["treer", "mail", "no recipient"]).is_err());
+        let no_recipient = Args::try_parse_from(["treer", "mail", "no recipient"])
+            .expect("recipient validation happens after parsing");
+        let Some(Command::Mail {
+            recipients,
+            human_recipients,
+            ..
+        }) = no_recipient.command
+        else {
+            panic!("expected mail command");
+        };
+        assert!(validate_mail_recipients(&recipients, &human_recipients).is_err());
+
+        let human_mail =
+            Args::try_parse_from(["treer", "mail", "--to-human", "usr_123", "Human update."])
+                .expect("human mail should parse");
+        assert!(matches!(
+            human_mail.command,
+            Some(Command::Mail { human_recipients, .. }) if human_recipients == ["usr_123"]
+        ));
+
+        let humans =
+            Args::try_parse_from(["treer", "human", "list"]).expect("human list should parse");
+        assert!(matches!(
+            humans.command,
+            Some(Command::Human {
+                command: HumanCommand::List
+            })
+        ));
 
         let inbox = Args::try_parse_from(["treer", "inbox", "--limit", "100"])
             .expect("inbox command should parse");
         assert!(matches!(inbox.command, Some(Command::Inbox { limit: 100 })));
         assert!(Args::try_parse_from(["treer", "inbox", "--limit", "101"]).is_err());
-    }
-
-    #[test]
-    fn ssh_commands_parse_interactive_and_remote_commands() {
-        let interactive = Args::try_parse_from(["treer", "ssh", "builder"])
-            .expect("interactive ssh should parse");
-        assert!(matches!(
-            interactive.command,
-            Some(Command::Ssh { target, cwd, command })
-                if target == "builder" && cwd == "." && command.is_empty()
-        ));
-
-        let command = Args::try_parse_from([
-            "treer", "ssh", "builder", "--cwd", "src", "--", "cargo", "test", "-q",
-        ])
-        .expect("remote ssh command should parse");
-        assert!(matches!(
-            command.command,
-            Some(Command::Ssh { target, cwd, command })
-                if target == "builder"
-                    && cwd == "src"
-                    && command == ["cargo", "test", "-q"]
-        ));
-    }
-
-    #[test]
-    fn scp_commands_parse_uploads_and_recursive_downloads() {
-        let upload = Args::try_parse_from(["treer", "scp", "notes.txt", "builder:notes.txt"])
-            .expect("scp upload should parse");
-        assert!(matches!(
-            upload.command,
-            Some(Command::Scp { recursive: false, source, destination })
-                if source == "notes.txt" && destination == "builder:notes.txt"
-        ));
-
-        let download =
-            Args::try_parse_from(["treer", "scp", "-r", "builder:results", "./downloaded"])
-                .expect("recursive scp download should parse");
-        assert!(matches!(
-            download.command,
-            Some(Command::Scp { recursive: true, source, destination })
-                if source == "builder:results" && destination == "./downloaded"
-        ));
-    }
-
-    #[test]
-    fn scp_remote_paths_require_machine_prefixes() {
-        let remote = parse_remote_path("builder:src/main.rs").expect("remote path");
-        assert_eq!(remote.machine, "builder");
-        assert_eq!(remote.path, "src/main.rs");
-        assert!(parse_remote_path("./local:file").is_none());
-        assert!(parse_remote_path("/tmp/local:file").is_none());
     }
 }

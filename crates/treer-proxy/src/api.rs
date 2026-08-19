@@ -22,9 +22,9 @@ use treer_protocol::{
     CreateAgentRequest, CreateMachineServiceRequest, CreateVirtualNetworkHostRequest,
     InputAgentRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
     PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest, SendAgentMailResponse,
-    TerminalClientMessage, TerminalServerMessage, TransferServerMessage,
-    UpdateMachineServiceRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
-    WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
+    TerminalClientMessage, TerminalServerMessage, UpdateMachineServiceRequest,
+    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
+    WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -33,13 +33,14 @@ use crate::agent_socket;
 use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
 use crate::identity::IdentityIssuer;
 use crate::policy::{
-    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_IDENTITY_TOKEN_ISSUE,
-    ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE,
-    ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
-    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT_MAILBOX,
+    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_HUMAN_LIST,
+    ACTION_IDENTITY_TOKEN_ISSUE, ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE,
+    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
+    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
+    RESOURCE_AGENT_MAILBOX, RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX,
     RESOURCE_MACHINE_SERVICE, RESOURCE_VIRTUAL_HOST,
 };
-use crate::state::{AppState, ShellOptions, SocketFrame, TransferDirection, TransferOptions};
+use crate::state::{AppState, SocketFrame};
 
 #[derive(Clone)]
 pub struct BootstrapConfig {
@@ -156,6 +157,10 @@ pub fn router(
             post(agent_read_inbox),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/humans",
+            get(agent_list_humans),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/agents",
             get(list_agents).post(create_agent),
         )
@@ -207,14 +212,6 @@ pub fn router(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
         )
-        .route(
-            "/agent/workspaces/{workspace_id}/ssh/{server_id}",
-            get(shell_terminal),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/scp/{server_id}",
-            get(file_transfer),
-        )
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
             auth::require_machine,
@@ -252,6 +249,10 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/snapshot",
             get(workspace_snapshot),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/inbox",
+            post(human_read_inbox),
         )
         .route("/api/workspaces/{workspace_id}/servers", get(list_servers))
         .route(
@@ -459,7 +460,8 @@ async fn agent_send_mail(
             "mail sender was not an agent",
         ));
     };
-    if request.recipients.is_empty() || request.recipients.len() > 32 {
+    let recipient_count = request.recipients.len() + request.human_recipients.len();
+    if recipient_count == 0 || recipient_count > 32 {
         return Err(ApiFailure::bad_request(
             "invalid_mail_recipients",
             "mail must have 1-32 recipients",
@@ -492,6 +494,25 @@ async fn agent_send_mail(
             name: recipient.name,
         });
     }
+    let mut seen_humans = HashSet::new();
+    let mut human_recipients = Vec::new();
+    for user_id in &request.human_recipients {
+        let human = auth
+            .resolve_workspace_human(&workspace_id, user_id.trim())
+            .await?;
+        if !seen_humans.insert(human.user_id.clone()) {
+            continue;
+        }
+        policy
+            .authorize(&PolicyRequest::new(
+                &workspace_id,
+                subject.clone(),
+                ACTION_MAIL_SEND,
+                PolicyResource::new(RESOURCE_HUMAN_MAILBOX, &human.user_id),
+            ))
+            .await?;
+        human_recipients.push(human);
+    }
     let message = auth
         .send_agent_mail(
             &workspace_id,
@@ -500,11 +521,34 @@ async fn agent_send_mail(
                 name: sender.name,
             },
             recipients,
+            human_recipients,
             request.context_ids,
             &request.body,
         )
         .await?;
     Ok(Json(SendAgentMailResponse { message }))
+}
+
+async fn agent_list_humans(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            ACTION_HUMAN_LIST,
+            PolicyResource::new(RESOURCE_HUMAN_DIRECTORY, &workspace_id),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "humans": auth.list_workspace_humans(&workspace_id).await?
+    })))
 }
 
 async fn agent_read_inbox(
@@ -533,6 +577,18 @@ async fn agent_read_inbox(
         .await?;
     Ok(Json(
         auth.read_agent_inbox(&workspace_id, agent_id, request.limit)
+            .await?,
+    ))
+}
+
+async fn human_read_inbox(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<AgentInboxRequest>,
+) -> Result<Json<AgentInboxResponse>, ApiFailure> {
+    Ok(Json(
+        auth.read_human_inbox(&workspace_id, &session.user_id, request.limit)
             .await?,
     ))
 }
@@ -1732,37 +1788,6 @@ struct TerminalQuery {
     rows: u16,
 }
 
-#[derive(Debug, Deserialize)]
-struct ShellQuery {
-    #[serde(default = "default_terminal_cols")]
-    cols: u16,
-    #[serde(default = "default_terminal_rows")]
-    rows: u16,
-    #[serde(default = "default_shell_cwd")]
-    cwd: String,
-    #[serde(default)]
-    command: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TransferDirectionQuery {
-    Upload,
-    Download,
-}
-
-#[derive(Debug, Deserialize)]
-struct TransferQuery {
-    direction: TransferDirectionQuery,
-    path: String,
-    #[serde(default)]
-    recursive: bool,
-}
-
-fn default_shell_cwd() -> String {
-    ".".to_string()
-}
-
 const fn default_terminal_cols() -> u16 {
     120
 }
@@ -1786,184 +1811,26 @@ async fn agent_terminal(
             socket,
             state,
             workspace_id,
-            TerminalTarget::Agent(agent_id),
+            agent_id,
             query.cols,
             query.rows,
         )
     }))
-}
-
-async fn shell_terminal(
-    State(state): State<AppState>,
-    Extension(browser): Extension<BrowserAccess>,
-    Path((workspace_id, server_id)): Path<(String, String)>,
-    Query(query): Query<ShellQuery>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiFailure> {
-    browser.validate_if_present(&headers)?;
-    state.resolve_server(&workspace_id, &server_id).await?;
-    Ok(ws.on_upgrade(move |socket| {
-        stream_terminal(
-            socket,
-            state,
-            workspace_id,
-            TerminalTarget::Shell {
-                server_id,
-                cwd: query.cwd,
-                command: query.command,
-            },
-            query.cols,
-            query.rows,
-        )
-    }))
-}
-
-async fn file_transfer(
-    State(state): State<AppState>,
-    Extension(browser): Extension<BrowserAccess>,
-    Path((workspace_id, server_id)): Path<(String, String)>,
-    Query(query): Query<TransferQuery>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiFailure> {
-    browser.validate_if_present(&headers)?;
-    state.resolve_server(&workspace_id, &server_id).await?;
-    Ok(ws.on_upgrade(move |socket| {
-        stream_file_transfer(socket, state, workspace_id, server_id, query)
-    }))
-}
-
-async fn stream_file_transfer(
-    socket: WebSocket,
-    state: AppState,
-    workspace_id: String,
-    server_id: String,
-    query: TransferQuery,
-) {
-    let (mut outgoing, mut incoming) = socket.split();
-    let (transfer_tx, mut transfer_rx) = tokio::sync::mpsc::channel::<SocketFrame>(16);
-    let direction = match query.direction {
-        TransferDirectionQuery::Upload => TransferDirection::Upload,
-        TransferDirectionQuery::Download => TransferDirection::Download,
-    };
-    let session_id = match state
-        .attach_transfer(
-            &workspace_id,
-            &server_id,
-            TransferOptions {
-                path: query.path,
-                recursive: query.recursive,
-                direction,
-            },
-            transfer_tx,
-        )
-        .await
-    {
-        Ok(session_id) => session_id,
-        Err(error) => {
-            let message = TransferServerMessage::Error { error };
-            if let Ok(encoded) = serde_json::to_string(&message) {
-                let _ = outgoing.send(Message::Text(encoded.into())).await;
-            }
-            return;
-        }
-    };
-
-    loop {
-        tokio::select! {
-            frame = transfer_rx.recv() => {
-                let Some(frame) = frame else { break };
-                let finished = matches!(
-                    &frame,
-                    SocketFrame::Text(encoded)
-                        if serde_json::from_str::<TransferServerMessage>(encoded).is_ok_and(
-                            |message| matches!(
-                                message,
-                                TransferServerMessage::Complete { .. }
-                                    | TransferServerMessage::Error { .. }
-                            )
-                        )
-                );
-                let message = match frame {
-                    SocketFrame::Text(encoded) => Message::Text(encoded.into()),
-                    SocketFrame::Binary(data) => Message::Binary(data.into()),
-                    SocketFrame::Close => Message::Close(None),
-                };
-                if outgoing.send(message).await.is_err() || finished {
-                    break;
-                }
-            }
-            message = incoming.next() => {
-                let Some(Ok(message)) = message else { break };
-                let result = match message {
-                    Message::Binary(data) => state.transfer_input(&session_id, data.to_vec()).await,
-                    Message::Close(_) => break,
-                    Message::Text(_) => Err(ProtocolError::new(
-                        "invalid_transfer_message",
-                        "file transfers accept binary data frames only",
-                    )),
-                    _ => continue,
-                };
-                if let Err(error) = result {
-                    let message = TransferServerMessage::Error { error };
-                    if let Ok(encoded) = serde_json::to_string(&message) {
-                        if outgoing.send(Message::Text(encoded.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    state.detach_transfer(&session_id).await;
-}
-
-enum TerminalTarget {
-    Agent(String),
-    Shell {
-        server_id: String,
-        cwd: String,
-        command: Option<String>,
-    },
 }
 
 async fn stream_terminal(
     socket: WebSocket,
     state: AppState,
     workspace_id: String,
-    target: TerminalTarget,
+    agent_id: String,
     cols: u16,
     rows: u16,
 ) {
     let (mut outgoing, mut incoming) = socket.split();
     let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<SocketFrame>();
-    let attached = match target {
-        TerminalTarget::Agent(agent_id) => {
-            state
-                .attach_terminal(&workspace_id, &agent_id, cols, rows, terminal_tx)
-                .await
-        }
-        TerminalTarget::Shell {
-            server_id,
-            cwd,
-            command,
-        } => {
-            state
-                .attach_shell(
-                    &workspace_id,
-                    &server_id,
-                    ShellOptions {
-                        cwd,
-                        command,
-                        cols,
-                        rows,
-                    },
-                    terminal_tx,
-                )
-                .await
-        }
-    };
+    let attached = state
+        .attach_terminal(&workspace_id, &agent_id, cols, rows, terminal_tx)
+        .await;
     let session_id = match attached {
         Ok(session_id) => session_id,
         Err(error) => {
@@ -2644,6 +2511,7 @@ mod tests {
             Path("default".to_string()),
             Json(SendAgentMailRequest {
                 recipients: vec!["reviewer".to_string()],
+                human_recipients: vec![],
                 context_ids: vec![],
                 body: "Check this when convenient.".to_string(),
             }),

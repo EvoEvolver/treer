@@ -9,6 +9,7 @@ pub const ACTION_NETWORK_CONNECT: &str = "network.connect";
 pub const ACTION_IDENTITY_TOKEN_ISSUE: &str = "identity.token.issue";
 pub const ACTION_MAIL_SEND: &str = "mail.send";
 pub const ACTION_MAIL_READ: &str = "mail.read";
+pub const ACTION_HUMAN_LIST: &str = "human.list";
 pub const ACTION_SERVICE_LIST: &str = "service.list";
 pub const ACTION_SERVICE_CREATE: &str = "service.create";
 pub const ACTION_SERVICE_UPDATE: &str = "service.update";
@@ -19,6 +20,8 @@ pub const ACTION_VIRTUAL_HOST_CREATE: &str = "virtual_host.create";
 pub const ACTION_VIRTUAL_HOST_DELETE: &str = "virtual_host.delete";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT_MAILBOX: &str = "agent.mailbox";
+pub const RESOURCE_HUMAN_DIRECTORY: &str = "human.directory";
+pub const RESOURCE_HUMAN_MAILBOX: &str = "human.mailbox";
 pub const RESOURCE_MACHINE_SERVICE: &str = "machine.service";
 pub const RESOURCE_VIRTUAL_HOST: &str = "virtual_host";
 

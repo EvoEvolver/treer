@@ -84,7 +84,7 @@ repeated bottleneck or blocks the current product tier.
 | Shared protocol or frames | Round-trip/unit tests plus all affected endpoints |
 | Proxy auth, membership, or routing | Authorization and cross-workspace isolation tests |
 | Host mutation or Controller restart | Idempotency and process-survival tests |
-| Runtime path or transfer logic | Escape, symlink, size, and partial-failure tests |
+| Runtime path logic | Working-directory containment and escape tests |
 | Network namespace, DNS, SOCKS, or virtual host | Destination routing and containment tests on Linux |
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |
 | Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, and affected-flow validation |
