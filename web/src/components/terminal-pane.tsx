@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
@@ -11,10 +11,25 @@ interface TerminalPaneProps {
   agentId: string | null
   active: boolean
   onStatusChange: (status: TerminalStatus) => void
+  transformInput?: (data: string) => string
 }
 
-export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: TerminalPaneProps) {
+export interface TerminalPaneHandle {
+  focus: () => void
+  send: (data: string) => void
+}
+
+export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function TerminalPane({ workspaceId, agentId, active, onStatusChange, transformInput }, ref) {
   const hostRef = useRef<HTMLDivElement>(null)
+  const focusRef = useRef<() => void>(() => undefined)
+  const sendRef = useRef<(data: string) => void>(() => undefined)
+  const transformInputRef = useRef(transformInput)
+  transformInputRef.current = transformInput
+
+  useImperativeHandle(ref, () => ({
+    focus: () => focusRef.current(),
+    send: (data) => sendRef.current(data),
+  }), [])
 
   useEffect(() => {
     const host = hostRef.current
@@ -58,6 +73,12 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
     const fit = new FitAddon()
     terminal.loadAddon(fit)
     terminal.open(host)
+    focusRef.current = () => terminal.focus()
+
+    const send = (data: string) => {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data))
+    }
+    sendRef.current = send
 
     const sendResize = () => {
       if (socket?.readyState === WebSocket.OPEN) {
@@ -120,7 +141,7 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
     }
 
     const input = terminal.onData((data) => {
-      if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data))
+      send(transformInputRef.current?.(data) ?? data)
     })
     const observer = new ResizeObserver(() => {
       window.clearTimeout(resizeTimer)
@@ -144,10 +165,12 @@ export function TerminalPane({ workspaceId, agentId, active, onStatusChange }: T
       input.dispose()
       socket?.close()
       terminal.dispose()
+      focusRef.current = () => undefined
+      sendRef.current = () => undefined
     }
   }, [workspaceId, agentId, active, onStatusChange])
 
   if (!workspaceId) return <div className="grid h-full place-items-center text-xs text-zinc-500">No workspace selected</div>
   if (!agentId) return <div className="grid h-full place-items-center text-xs text-zinc-500">Select an agent to attach</div>
   return <div ref={hostRef} className="h-full min-h-0 min-w-0 w-full max-w-full overflow-hidden p-3" />
-}
+})

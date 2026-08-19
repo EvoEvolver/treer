@@ -23,7 +23,8 @@ In concrete terms:
 1. A user installs a small persistent service on a machine they control.
 2. A short-lived, single-use link enrolls that machine into one workspace.
 3. Workspace members can create, observe, prompt, and stop Codex, Claude, or
-   shell agents through the web application or CLI.
+   shell agents through the web application or CLI, including a full-screen
+   mobile terminal with touch controls for navigation and control keys.
 4. Managed agents can discover peers and organization members, exchange
    pull-only durable mail with Agents or humans, while browser users can read
    message history and trace visible context chains without knowing machine
