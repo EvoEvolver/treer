@@ -6,6 +6,7 @@ mod proxy;
 #[cfg(target_os = "linux")]
 mod sandbox;
 mod service;
+mod tui;
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::SocketAddr;
@@ -26,6 +27,9 @@ use host_client::HostClient;
 #[derive(Debug, Parser)]
 #[command(name = "treer-agent-server", about = "Treer machine agent runtime")]
 struct Args {
+    /// Open the interactive local Controller dashboard.
+    #[arg(long)]
+    tui: bool,
     #[command(subcommand)]
     command: Option<Command>,
     #[command(flatten)]
@@ -145,6 +149,12 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
+    if args.tui {
+        if args.command.is_some() {
+            anyhow::bail!("--tui cannot be combined with a subcommand");
+        }
+        return tui::run(&args.server.workspace).await;
+    }
     match args.command {
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
@@ -596,6 +606,16 @@ mod tests {
         let address = "127.0.0.1:8790".parse().expect("local API address");
         assert_eq!(agent_server_url(address, true), "http://192.0.2.1:8790");
         assert_eq!(agent_server_url(address, false), "http://127.0.0.1:8790");
+    }
+
+    #[test]
+    fn tui_mode_accepts_a_workspace() {
+        let args =
+            Args::try_parse_from(["treer-agent-server", "--tui", "--workspace", "workspace-a"])
+                .expect("parse TUI mode");
+        assert!(args.tui);
+        assert!(args.command.is_none());
+        assert_eq!(args.server.workspace, "workspace-a");
     }
 
     #[test]

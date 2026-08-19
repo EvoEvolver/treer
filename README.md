@@ -142,6 +142,7 @@ the agent-facing `treer` command:
 
 ```bash
 treer-agent-server update --workspace default
+treer-agent-server --tui --workspace default
 treer-agent-server service status
 treer-agent-server service logs --follow
 treer-agent-server service restart-controller
@@ -154,6 +155,12 @@ treer-agent-server service uninstall
 `restart-controller` activates a Controller binary installed manually and
 preserves running agents. `restart` restarts the long-lived Host itself and
 therefore terminates the agents and PTYs owned by that Host.
+
+`--tui` opens an interactive dashboard for the installed workspace. It shows
+the local Controller health, Proxy reachability, and Agents on this machine,
+and provides start, stop, full restart, and Controller-only restart actions.
+Stop and full restart require confirmation because they terminate Host-owned
+Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 
 Add `--workspace WORKSPACE_ID` after `service` when managing a workspace other
 than `default`. On Linux, installation prints an actionable warning if systemd
