@@ -4166,6 +4166,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "percent-encoding",
+ "reqwest",
  "rmp-serde",
  "serde",
  "serde_bytes",

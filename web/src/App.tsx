@@ -38,6 +38,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
 type MainView = "terminal" | "network"
+type AuthMode = "login" | "register" | "forgot" | "reset"
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 type DeleteTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 
@@ -64,19 +65,48 @@ function IconButton({ label, children, ...props }: React.ComponentProps<typeof B
 }
 
 function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
-  const invite = new URLSearchParams(window.location.search).get("invite")
-  const [registering, setRegistering] = useState(Boolean(invite))
+  const parameters = new URLSearchParams(window.location.search)
+  const invite = parameters.get("invite")
+  const resetToken = parameters.get("reset")
+  const [mode, setMode] = useState<AuthMode>(resetToken ? "reset" : invite ? "register" : "login")
   const [email, setEmail] = useState("")
   const [preferredName, setPreferredName] = useState("")
   const [password, setPassword] = useState("")
+  const [passwordConfirmation, setPasswordConfirmation] = useState("")
   const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
   const [submitting, setSubmitting] = useState(false)
+
+  function showSignIn(message = "") {
+    window.history.replaceState(null, "", window.location.pathname)
+    setMode("login")
+    setPassword("")
+    setPasswordConfirmation("")
+    setError("")
+    setNotice(message)
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError("")
+    setNotice("")
+    if (mode === "reset" && password !== passwordConfirmation) {
+      setError("Passwords do not match")
+      return
+    }
     setSubmitting(true)
     try {
+      if (mode === "forgot") {
+        await api<{ ok: boolean }>("/api/auth/request-password-reset", { method: "POST", body: JSON.stringify({ email }) })
+        setNotice("If an account exists for this email, a reset link has been sent.")
+        return
+      }
+      if (mode === "reset") {
+        await api<{ ok: boolean }>("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ token: resetToken, password }) })
+        showSignIn("Password updated. Sign in with your new password.")
+        return
+      }
+      const registering = mode === "register"
       const path = registering ? "/api/auth/register" : "/api/auth/login"
       const body = registering ? { invite, email, preferred_name: preferredName, password } : { email, password }
       const user = await api<User>(path, { method: "POST", body: JSON.stringify(body) })
@@ -89,18 +119,24 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
     }
   }
 
+  const title = mode === "register" ? "Join Treer" : mode === "forgot" ? "Reset your password" : mode === "reset" ? "Choose a new password" : "Sign in to Treer"
+  const description = mode === "register" ? "Create your account from this invitation." : mode === "forgot" ? "Enter the email associated with your account." : mode === "reset" ? "Use at least 8 characters for your new password." : "Open your agent workspace."
+
   return <main className="grid min-h-dvh place-items-center bg-[#f7f7f5] p-4">
     <form onSubmit={submit} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm">
       <div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] font-serif text-lg font-bold text-white">T</div>
-      <h1 className="text-xl font-semibold">{registering ? "Join Treer" : "Sign in to Treer"}</h1>
-      <p className="mt-1 text-sm text-muted-foreground">{registering ? "Create your account from this invitation." : "Open your agent workspace."}</p>
-      <div className="mt-6 space-y-2"><Label htmlFor="email">Email</Label><Input id="email" type="text" inputMode="email" autoComplete="email" value={email} maxLength={254} onChange={(event) => setEmail(event.target.value)} required autoFocus /></div>
-      {registering && <div className="mt-4 space-y-2"><Label htmlFor="preferred-name">Preferred name</Label><Input id="preferred-name" autoComplete="name" value={preferredName} maxLength={80} onChange={(event) => setPreferredName(event.target.value)} required /></div>}
-      <div className="mt-4 space-y-2"><Label htmlFor="password">Password</Label><Input id="password" type="password" autoComplete={registering ? "new-password" : "current-password"} value={password} minLength={registering ? 8 : undefined} onChange={(event) => setPassword(event.target.value)} required /></div>
+      <h1 className="text-xl font-semibold">{title}</h1>
+      <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+      {mode !== "reset" && <div className="mt-6 space-y-2"><Label htmlFor="email">Email</Label><Input id="email" type="email" autoComplete="email" value={email} maxLength={254} onChange={(event) => setEmail(event.target.value)} required autoFocus /></div>}
+      {mode === "register" && <div className="mt-4 space-y-2"><Label htmlFor="preferred-name">Preferred name</Label><Input id="preferred-name" autoComplete="name" value={preferredName} maxLength={80} onChange={(event) => setPreferredName(event.target.value)} required /></div>}
+      {(mode === "login" || mode === "register" || mode === "reset") && <div className={cn("space-y-2", mode === "reset" ? "mt-6" : "mt-4")}><Label htmlFor="password">{mode === "reset" ? "New password" : "Password"}</Label><Input id="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} minLength={mode === "login" ? undefined : 8} maxLength={1024} onChange={(event) => setPassword(event.target.value)} required autoFocus={mode === "reset"} /></div>}
+      {mode === "reset" && <div className="mt-4 space-y-2"><Label htmlFor="password-confirmation">Confirm new password</Label><Input id="password-confirmation" type="password" autoComplete="new-password" value={passwordConfirmation} minLength={8} maxLength={1024} onChange={(event) => setPasswordConfirmation(event.target.value)} required /></div>}
+      {mode === "login" && <div className="mt-2 text-right"><Button type="button" variant="ghost" size="sm" className="h-auto px-0 py-1 text-xs text-muted-foreground" onClick={() => { setMode("forgot"); setError(""); setNotice("") }}>Forgot password?</Button></div>}
       <div className="mt-3 min-h-5 text-xs text-destructive">{error}</div>
+      {notice && <div className="mt-2 text-xs leading-5 text-emerald-700">{notice}</div>}
       <div className="mt-4 flex items-center justify-between gap-3">
-        {registering && <Button type="button" variant="ghost" className="px-0 text-primary" onClick={() => setRegistering(false)}>Sign in instead</Button>}
-        <Button type="submit" className="ml-auto" disabled={submitting}>{submitting ? "Please wait" : registering ? "Create account" : "Sign in"}</Button>
+        {(mode === "register" || mode === "forgot" || mode === "reset") && <Button type="button" variant="ghost" className="px-0 text-primary" onClick={() => showSignIn()}>Back to sign in</Button>}
+        <Button type="submit" className="ml-auto" disabled={submitting}>{submitting ? "Please wait" : mode === "register" ? "Create account" : mode === "forgot" ? "Send reset link" : mode === "reset" ? "Update password" : "Sign in"}</Button>
       </div>
     </form>
   </main>

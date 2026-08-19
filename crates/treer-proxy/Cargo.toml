@@ -17,6 +17,7 @@ futures-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 percent-encoding.workspace = true
+reqwest.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true

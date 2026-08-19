@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -30,6 +31,8 @@ const SESSION_COOKIE: &str = "treer_session";
 const ADMIN_SESSION_COOKIE: &str = "treer_admin_session";
 const SESSION_TTL_DAYS: i64 = 30;
 const ADMIN_SESSION_TTL_HOURS: i64 = 8;
+const PASSWORD_RESET_TTL_MINUTES: i64 = 30;
+const PASSWORD_RESET_RATE_LIMIT_SECONDS: i64 = 60;
 const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
 const MAX_MAIL_BODY_BYTES: usize = 32 * 1024;
 const MAX_MAIL_RECIPIENTS: usize = 32;
@@ -43,9 +46,30 @@ pub struct AuthStore {
     app_public_url: Url,
     secure_cookies: bool,
     disabled: bool,
+    password_reset_email: Option<PasswordResetEmailSender>,
     virtual_hosts: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, VirtualNetworkHost>>>>,
     virtual_hosts_update: Arc<tokio::sync::Mutex<()>>,
     virtual_hosts_revision: Arc<AtomicU64>,
+}
+
+pub struct PasswordResetEmailConfig {
+    pub account_id: String,
+    pub api_token: String,
+    pub from: String,
+}
+
+#[derive(Clone)]
+struct PasswordResetEmailSender {
+    client: reqwest::Client,
+    endpoint: Url,
+    api_token: Arc<str>,
+    from: Arc<str>,
+}
+
+struct PendingPasswordReset {
+    token_id: String,
+    recipient: String,
+    url: Url,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +146,17 @@ pub struct RegisterRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RequestPasswordResetRequest {
+    email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    token: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateProfileRequest {
     email: String,
     preferred_name: String,
@@ -147,6 +182,88 @@ pub struct UpdateMemberRoleRequest {
     role: String,
 }
 
+impl PasswordResetEmailSender {
+    fn new(config: PasswordResetEmailConfig) -> anyhow::Result<Self> {
+        if config.account_id.trim().is_empty() {
+            anyhow::bail!("Cloudflare account ID must not be empty");
+        }
+        if config.api_token.is_empty() {
+            anyhow::bail!("Cloudflare API token must not be empty");
+        }
+        if !config.from.contains('@')
+            || config
+                .from
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        {
+            anyhow::bail!("password reset sender must be an email address");
+        }
+        let mut endpoint = Url::parse("https://api.cloudflare.com/client/v4/accounts/")?;
+        endpoint
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Cloudflare API base URL cannot be a base"))?
+            .push(&config.account_id)
+            .push("email")
+            .push("sending")
+            .push("send");
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .timeout(StdDuration::from_secs(10))
+                .build()?,
+            endpoint,
+            api_token: config.api_token.into(),
+            from: config.from.into(),
+        })
+    }
+
+    async fn send(&self, recipient: &str, reset_url: &Url) -> anyhow::Result<()> {
+        let text = format!(
+            "Reset your Treer password\n\nOpen this link within 30 minutes:\n\n{}\n\nIf you did not request this, you can ignore this email.",
+            reset_url.as_str()
+        );
+        let html_url = escape_html(reset_url.as_str());
+        let html = format!(
+            "<h1>Reset your Treer password</h1><p>Open the link below within 30 minutes.</p><p><a href=\"{html_url}\">Reset password</a></p><p>If you did not request this, you can ignore this email.</p>"
+        );
+        let response = self
+            .client
+            .post(self.endpoint.clone())
+            .bearer_auth(self.api_token.as_ref())
+            .json(&json!({
+                "to": recipient,
+                "from": self.from.as_ref(),
+                "subject": "Reset your Treer password",
+                "html": html,
+                "text": text,
+            }))
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.json::<CloudflareEmailResponse>().await?;
+        if !status.is_success() || !body.success {
+            let message = body
+                .errors
+                .first()
+                .map(|error| error.message.as_str())
+                .unwrap_or("unknown Cloudflare email error");
+            anyhow::bail!("Cloudflare email API returned {status}: {message}");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CloudflareEmailResponse {
+    success: bool,
+    #[serde(default)]
+    errors: Vec<CloudflareEmailError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloudflareEmailError {
+    message: String,
+}
+
 impl AuthStore {
     pub async fn open(
         database_url: &str,
@@ -154,6 +271,7 @@ impl AuthStore {
         app_public_url: Url,
         secure_cookies: bool,
         disabled: bool,
+        password_reset_email: Option<PasswordResetEmailConfig>,
     ) -> anyhow::Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
@@ -165,6 +283,9 @@ impl AuthStore {
             app_public_url,
             secure_cookies,
             disabled,
+            password_reset_email: password_reset_email
+                .map(PasswordResetEmailSender::new)
+                .transpose()?,
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
@@ -209,6 +330,7 @@ impl AuthStore {
             app_public_url: Url::parse("https://app.treer.example/").expect("valid URL"),
             secure_cookies: true,
             disabled: false,
+            password_reset_email: None,
             virtual_hosts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             virtual_hosts_update: Arc::new(tokio::sync::Mutex::new(())),
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
@@ -1849,6 +1971,167 @@ impl AuthStore {
             .await
     }
 
+    async fn request_password_reset(&self, email: &str) -> Result<(), AuthFailure> {
+        normalize_email(email)?;
+        let Some(sender) = &self.password_reset_email else {
+            tracing::warn!("password reset requested but CLOUDFLARE_API_TOKEN is not configured");
+            return Ok(());
+        };
+        let Some(pending) = self.create_password_reset(email).await? else {
+            return Ok(());
+        };
+        let sender = sender.clone();
+        let auth = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = sender.send(&pending.recipient, &pending.url).await {
+                tracing::error!(%error, "failed to send password reset email");
+                if let Err(error) = auth.revoke_password_reset(&pending.token_id).await {
+                    tracing::error!(?error, "failed to revoke undelivered password reset token");
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn create_password_reset(
+        &self,
+        email: &str,
+    ) -> Result<Option<PendingPasswordReset>, AuthFailure> {
+        let email = normalize_email(email)?;
+        let token_id = format!("pwd_{}", Uuid::new_v4().simple());
+        let secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let secret_hash = hash_password(&secret)?;
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query(
+            "DELETE FROM password_reset_tokens WHERE expires_at <= $1 \
+             OR (used_at IS NOT NULL AND created_at <= $2)",
+        )
+        .bind(&now_text)
+        .bind((now - Duration::days(1)).to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        let user =
+            sqlx::query("SELECT id, email FROM users WHERE lower(email) = lower($1) FOR UPDATE")
+                .bind(email)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        let Some(user) = user else {
+            transaction.commit().await.map_err(AuthFailure::database)?;
+            return Ok(None);
+        };
+        let user_id: String = user.get("id");
+        let recent = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM password_reset_tokens \
+             WHERE user_id = $1 AND used_at IS NULL AND created_at > $2",
+        )
+        .bind(&user_id)
+        .bind((now - Duration::seconds(PASSWORD_RESET_RATE_LIMIT_SECONDS)).to_rfc3339())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if recent > 0 {
+            transaction.commit().await.map_err(AuthFailure::database)?;
+            return Ok(None);
+        }
+        sqlx::query(
+            "UPDATE password_reset_tokens SET used_at = $1 \
+             WHERE user_id = $2 AND used_at IS NULL",
+        )
+        .bind(&now_text)
+        .bind(&user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO password_reset_tokens(\
+                 token_id, user_id, secret_hash, created_at, expires_at\
+             ) VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&token_id)
+        .bind(&user_id)
+        .bind(secret_hash)
+        .bind(&now_text)
+        .bind((now + Duration::minutes(PASSWORD_RESET_TTL_MINUTES)).to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+
+        let token = format!("{token_id}.{secret}");
+        let mut url = self.app_public_url.clone();
+        url.set_path("/");
+        url.set_query(None);
+        url.set_fragment(None);
+        url.query_pairs_mut().append_pair("reset", &token);
+        Ok(Some(PendingPasswordReset {
+            token_id,
+            recipient: user.get("email"),
+            url,
+        }))
+    }
+
+    async fn revoke_password_reset(&self, token_id: &str) -> Result<(), AuthFailure> {
+        sqlx::query(
+            "UPDATE password_reset_tokens SET used_at = $1 \
+             WHERE token_id = $2 AND used_at IS NULL",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(token_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    async fn reset_password(&self, token: &str, password: &str) -> Result<(), AuthFailure> {
+        let password = validate_new_password(password)?;
+        let (token_id, secret) = parse_password_reset_token(token)?;
+        let now = Utc::now().to_rfc3339();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let row = sqlx::query(
+            "SELECT user_id, secret_hash FROM password_reset_tokens \
+             WHERE token_id = $1 AND used_at IS NULL AND expires_at > $2 FOR UPDATE",
+        )
+        .bind(token_id)
+        .bind(&now)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(invalid_password_reset)?;
+        let secret_hash: String = row.get("secret_hash");
+        if !verify_password(secret, &secret_hash) {
+            return Err(invalid_password_reset());
+        }
+        let user_id: String = row.get("user_id");
+        let password_hash = hash_password(&password)?;
+        sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+            .bind(password_hash)
+            .bind(&user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE password_reset_tokens SET used_at = $1 \
+             WHERE user_id = $2 AND used_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
     async fn create_session(
         &self,
         user_id: String,
@@ -1918,11 +2201,12 @@ impl AuthStore {
     ) -> Result<CurrentSession, AuthFailure> {
         let email = normalize_email(email)?;
         let preferred_name = validate_preferred_name(preferred_name)?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query("UPDATE users SET email = $1, preferred_name = $2 WHERE id = $3")
             .bind(&email)
             .bind(&preferred_name)
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|error| {
                 if error
@@ -1934,6 +2218,16 @@ impl AuthStore {
                     AuthFailure::database(error)
                 }
             })?;
+        sqlx::query(
+            "UPDATE password_reset_tokens SET used_at = $1 \
+             WHERE user_id = $2 AND used_at IS NULL",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(CurrentSession {
             token: String::new(),
             user_id: user_id.to_string(),
@@ -2111,13 +2405,8 @@ impl AuthStore {
     ) -> Result<CurrentSession, AuthFailure> {
         let email = normalize_email(email)?;
         let preferred_name = validate_preferred_name(preferred_name)?;
-        if password.len() < 8 {
-            return Err(AuthFailure::bad_request(
-                "invalid_password",
-                "password must contain at least 8 characters",
-            ));
-        }
-        let password_hash = hash_password(password)?;
+        let password = validate_new_password(password)?;
+        let password_hash = hash_password(&password)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let invitation = sqlx::query(
             "SELECT kind, organization_id, role FROM invitations \
@@ -2348,6 +2637,23 @@ pub async fn login(
 ) -> Result<Response, AuthFailure> {
     let session = auth.login(&request.email, &request.password).await?;
     Ok(session_response(&auth, &session))
+}
+
+pub async fn request_password_reset(
+    Extension(auth): Extension<AuthStore>,
+    Json(request): Json<RequestPasswordResetRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    auth.request_password_reset(&request.email).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn reset_password(
+    Extension(auth): Extension<AuthStore>,
+    Json(request): Json<ResetPasswordRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    auth.reset_password(&request.token, &request.password)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn register(
@@ -2622,6 +2928,50 @@ fn invalid_machine_enrollment() -> AuthFailure {
         "invalid_machine_enrollment",
         "machine enrollment token is invalid, expired, or already used",
     )
+}
+
+fn invalid_password_reset() -> AuthFailure {
+    AuthFailure::bad_request(
+        "invalid_password_reset",
+        "password reset link is invalid or expired",
+    )
+}
+
+fn parse_password_reset_token(token: &str) -> Result<(&str, &str), AuthFailure> {
+    let (token_id, secret) = token.split_once('.').ok_or_else(invalid_password_reset)?;
+    if token_id.len() != 36
+        || !token_id.starts_with("pwd_")
+        || !token_id[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        || secret.len() != 64
+        || !secret.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid_password_reset());
+    }
+    Ok((token_id, secret))
+}
+
+fn validate_new_password(password: &str) -> Result<String, AuthFailure> {
+    if password.len() < 8 {
+        return Err(AuthFailure::bad_request(
+            "invalid_password",
+            "password must contain at least 8 characters",
+        ));
+    }
+    if password.len() > 1024 {
+        return Err(AuthFailure::bad_request(
+            "invalid_password",
+            "password must contain at most 1024 characters",
+        ));
+    }
+    Ok(password.to_string())
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn normalize_email(email: &str) -> Result<String, AuthFailure> {
@@ -2919,7 +3269,23 @@ impl IntoResponse for AuthFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::post;
+    use axum::Router;
+    use tokio::sync::{oneshot, Mutex};
     use treer_protocol::{AgentInfo, AgentStatus, CreateVirtualNetworkHostRequest, ServerStatus};
+
+    type EmailCapture = Arc<Mutex<Option<oneshot::Sender<(HeaderMap, Value)>>>>;
+
+    async fn capture_email(
+        State(capture): State<EmailCapture>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        if let Some(sender) = capture.lock().await.take() {
+            let _ = sender.send((headers, body));
+        }
+        Json(json!({ "success": true }))
+    }
 
     async fn bootstrap_owner(store: &AuthStore, email: &str, name: &str) -> CurrentSession {
         let (invite, _) = store
@@ -3309,6 +3675,133 @@ mod tests {
             .login("alicia@example.com", "password123")
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn password_reset_is_single_use_rate_limited_and_revokes_sessions() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let pending = store
+            .create_password_reset("OWNER@example.com")
+            .await
+            .expect("create password reset")
+            .expect("known user reset");
+        assert!(pending
+            .url
+            .as_str()
+            .starts_with("https://app.treer.example/?reset="));
+        assert!(store
+            .create_password_reset("owner@example.com")
+            .await
+            .expect("rate limit reset")
+            .is_none());
+        assert!(store
+            .create_password_reset("missing@example.com")
+            .await
+            .expect("unknown email")
+            .is_none());
+
+        let token = pending
+            .url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "reset").then(|| value.into_owned()))
+            .expect("reset token in URL");
+        let stored_hash = sqlx::query_scalar::<_, String>(
+            "SELECT secret_hash FROM password_reset_tokens WHERE token_id = $1",
+        )
+        .bind(&pending.token_id)
+        .fetch_one(&store.pool)
+        .await
+        .expect("stored reset hash");
+        assert!(!stored_hash.contains(&token));
+
+        store
+            .reset_password(&token, "new-password-123")
+            .await
+            .expect("reset password");
+        assert!(store
+            .session(&owner.token)
+            .await
+            .expect("read old session")
+            .is_none());
+        assert!(store
+            .login("owner@example.com", "password123")
+            .await
+            .is_err());
+        assert!(store
+            .login("owner@example.com", "new-password-123")
+            .await
+            .is_ok());
+        assert!(store
+            .reset_password(&token, "another-password")
+            .await
+            .is_err());
+
+        let pending = store
+            .create_password_reset("owner@example.com")
+            .await
+            .expect("create second password reset")
+            .expect("second reset");
+        let token = pending
+            .url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "reset").then(|| value.into_owned()))
+            .expect("second reset token in URL");
+        store
+            .update_profile(&owner.user_id, "renamed@example.com", "Owner")
+            .await
+            .expect("change account email");
+        assert!(store
+            .reset_password(&token, "newer-password")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn cloudflare_password_reset_email_uses_structured_send_api() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind email API");
+        let address = listener.local_addr().expect("email API address");
+        let (capture_tx, capture_rx) = oneshot::channel();
+        let capture = Arc::new(Mutex::new(Some(capture_tx)));
+        let app = Router::new()
+            .route("/send", post(capture_email))
+            .with_state(capture);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let sender = PasswordResetEmailSender {
+            client: reqwest::Client::new(),
+            endpoint: Url::parse(&format!("http://{address}/send")).expect("email endpoint"),
+            api_token: "cloudflare-test-token".into(),
+            from: "service@treer.ai".into(),
+        };
+        let reset_url = Url::parse(
+            "https://app.treer.example/?reset=pwd_0123456789abcdef0123456789abcdef.secret&source=test",
+        )
+        .expect("reset URL");
+        sender
+            .send("owner@example.com", &reset_url)
+            .await
+            .expect("send reset email");
+        let (headers, body) = capture_rx.await.expect("captured email");
+        assert_eq!(
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer cloudflare-test-token")
+        );
+        assert_eq!(body["to"], "owner@example.com");
+        assert_eq!(body["from"], "service@treer.ai");
+        assert_eq!(body["subject"], "Reset your Treer password");
+        assert!(body["text"]
+            .as_str()
+            .expect("text body")
+            .contains(reset_url.as_str()));
+        assert!(body["html"]
+            .as_str()
+            .expect("HTML body")
+            .contains("&amp;source=test"));
+        server.abort();
     }
 
     #[tokio::test]

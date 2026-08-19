@@ -191,6 +191,15 @@ services, and workload signing keys are stored in PostgreSQL. The Proxy requires
 test suite. Changing `ADMIN_PASSWORD` changes the administrator's next login
 password without rewriting user accounts.
 
+Password recovery uses Cloudflare Email Sending. Set `CLOUDFLARE_API_TOKEN` on
+the Proxy service; the token must be allowed to send email for the configured
+account. The default account ID is `84188a5eaca91f5c9914fa67494c84c1` and the
+default sender is `service@treer.ai`; override them with
+`CLOUDFLARE_ACCOUNT_ID` and `TREER_PASSWORD_RESET_FROM`. Reset links expire
+after 30 minutes, can be used once, and revoke every existing user session when
+the password changes. Requests return the same response for known and unknown
+email addresses.
+
 ## NATS event bus and multi-Proxy routing
 
 The Proxy can publish revisioned workspace changes as versioned domain events
@@ -272,7 +281,7 @@ automatically by the Proxy.
 2. Add a Railway PostgreSQL service and expose its `DATABASE_URL` to Treer.
 3. For more than one Treer replica, add a NATS service with JetStream enabled
    and expose its private URL as `TREER_NATS_URL`.
-4. Set `ADMIN_PASSWORD`, `TREER_PROXY_PUBLIC_URL`, and
+4. Set `ADMIN_PASSWORD`, `CLOUDFLARE_API_TOKEN`, `TREER_PROXY_PUBLIC_URL`, and
    `TREER_APP_PUBLIC_URL` on the Proxy service.
 5. Create an App service from the `web` directory and set its
    `TREER_PROXY_PUBLIC_URL` variable.

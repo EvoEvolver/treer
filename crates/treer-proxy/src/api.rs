@@ -357,6 +357,11 @@ pub fn router(
         .route("/.well-known/jwks.json", get(workload_identity_jwks))
         .route("/.treer/identity/verify", post(verify_workload_identity))
         .route("/api/auth/login", post(auth::login))
+        .route(
+            "/api/auth/request-password-reset",
+            post(auth::request_password_reset),
+        )
+        .route("/api/auth/reset-password", post(auth::reset_password))
         .route("/api/auth/register", post(auth::register))
         .route("/api/admin/login", post(auth::admin_login))
         .route("/agent/connect", get(agent_socket::upgrade))

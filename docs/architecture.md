@@ -99,7 +99,8 @@ flowchart TB
 | Host to child process | PTY raw bytes | Host process ownership |
 | Proxy replica to Proxy replica | Core NATS MessagePack request/reply and broadcast; JetStream KV for leases, snapshots, and durable projections | Private NATS boundary |
 
-PostgreSQL persists users, organizations, memberships, sessions, invitations,
+PostgreSQL persists users, organizations, memberships, sessions, password
+reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, Agent messages, per-Agent and per-human read state, message
 context edges, machine services, and virtual hosts. Administrator invitations

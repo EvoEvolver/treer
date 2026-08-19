@@ -54,6 +54,20 @@ struct Args {
     release_artifact_base_url: Url,
     #[arg(long, env = "ADMIN_PASSWORD")]
     admin_password: Option<String>,
+    #[arg(long, env = "CLOUDFLARE_API_TOKEN", hide_env_values = true)]
+    cloudflare_api_token: Option<String>,
+    #[arg(
+        long,
+        env = "CLOUDFLARE_ACCOUNT_ID",
+        default_value = "84188a5eaca91f5c9914fa67494c84c1"
+    )]
+    cloudflare_account_id: String,
+    #[arg(
+        long,
+        env = "TREER_PASSWORD_RESET_FROM",
+        default_value = "service@treer.ai"
+    )]
+    password_reset_from: String,
     #[arg(
         long,
         env = "TREER_DISABLE_AUTH",
@@ -119,12 +133,23 @@ async fn main() -> anyhow::Result<()> {
         args.artifacts_dir,
         args.release_artifact_base_url,
     );
+    let password_reset_email =
+        args.cloudflare_api_token
+            .map(|api_token| auth::PasswordResetEmailConfig {
+                account_id: args.cloudflare_account_id,
+                api_token,
+                from: args.password_reset_from,
+            });
+    if !args.disable_auth && password_reset_email.is_none() {
+        warn!("CLOUDFLARE_API_TOKEN is not configured; password reset emails are disabled");
+    }
     let auth = auth::AuthStore::open(
         &args.database_url,
         admin_password,
         app_public_url.clone(),
         proxy_public_url.scheme() == "https",
         args.disable_auth,
+        password_reset_email,
     )
     .await
     .context("failed to connect to PostgreSQL")?;

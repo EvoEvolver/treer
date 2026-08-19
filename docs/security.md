@@ -33,6 +33,8 @@ The following statements are grounded in current behavior:
   browser WebSocket checks accept only the configured App origin; session
   cookies remain HttpOnly and scoped to the Proxy host.
 - Passwords, enrollment secrets, and machine credentials are hashed at rest.
+- Password reset links contain a short-lived single-use secret whose Argon2
+  hash is stored in PostgreSQL. A successful reset revokes all user sessions.
 - The stable Host owns processes on the enrolled machine rather than moving the
   runtime into an opaque hosted control plane.
 - Linux Agent network traffic crosses a namespace and Controller policy
@@ -73,6 +75,7 @@ members share a broad operational surface.
 | Credential or identity | Scope | Important limitation |
 | --- | --- | --- |
 | User session cookie | User plus organization memberships | Browser identity is not propagated to Host operations end to end |
+| Password reset token | One user, 30 minutes, single use | Delivered through the configured email account; email access becomes an account-recovery trust boundary |
 | Admin session cookie | User invitation creation and aggregate platform resource counts | Separate high-impact trust boundary |
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
 | Machine Bearer credential | One machine record and workspace | Controller operations are attributed primarily to the machine |
