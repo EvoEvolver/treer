@@ -68,15 +68,17 @@ flowchart TB
   display snapshots and member emails are not exposed to managed Agents.
 - Enrolled machines establish outbound connections to the Proxy.
 - Durable identity metadata lives in PostgreSQL. With NATS configured, live
-  Controller ownership and machine snapshots are shared across Proxy replicas;
+  Controller ownership and retained machine inventory snapshots are shared across Proxy replicas;
   session and stream coordination remains in the initiating Proxy and is
   reached through routed IDs.
 - Workspace mutations emit a shared, versioned domain-event envelope. The
   broker-neutral event bus stays in process by default and can publish the same
   envelope to an optional NATS JetStream.
 - JetStream carries durable domain events, durable control projections,
-  expiring ownership leases, and change-driven live snapshots. Heartbeats do
-  not republish full snapshots. PTY output, terminal input, and virtual-network
+  expiring ownership leases, and change-driven retained inventory snapshots.
+  Losing a Controller connection releases only its ownership lease; its last
+  machine and Agent inventory remains visible as offline until an explicit
+  delete. Heartbeats do not republish full snapshots. PTY output, terminal input, and virtual-network
   TCP bytes are not retained in JetStream; live
   bytes use Core NATS only when their endpoints use different Proxy replicas.
 - The browser application is deployed independently from `treer-proxy`. It
@@ -117,11 +119,15 @@ each lock an oldest-first unread batch and mark only that recipient's rows read.
 This path is shared PostgreSQL state and neither requires NATS nor interrupts a
 live Agent or human.
 
-Each Controller connection,
+Each Controller connection begins with one atomic registration snapshot containing
+the machine and its complete Host-backed Agent inventory. There is no visible
+registered-but-unsynchronized intermediate state. Each Controller connection,
 pending command, browser session, terminal leg, and network route is
 owned by one Proxy process. A small expiring NATS KV lease maps a Controller to
-that process; a separate KV entry changes only when its machine snapshot
-changes. File-backed projection entries retain the latest workspace,
+that process; a separate file-backed KV inventory entry changes only when its
+machine snapshot changes and is purged only when the machine is explicitly
+deleted. Proxy startup restores retained inventory before accepting traffic and
+derives online state from the independent lease. File-backed projection entries retain the latest workspace,
 rename/delete, and restoration state across replica disconnects. Routed
 terminal and network IDs encode the initiating Proxy so return
 traffic reaches its in-memory state. Connection IDs and JetStream revisions
@@ -142,6 +148,13 @@ database and a shared NATS server with JetStream enabled. Sticky load-balancer
 sessions are not required. NATS loss interrupts cross-replica routing; the
 Controller reconnect loop and Host-owned terminal revisions recover live state
 after the backplane returns.
+
+The browser receives workspace state from one WebSocket stream. The stream
+sends an initial full snapshot and another full snapshot after each relevant
+workspace event; the browser keeps its last valid snapshot while reconnecting.
+This avoids cross-replica HTTP refresh races. A globally sequenced incremental
+event reducer can replace the full-snapshot stream when workspace size requires
+it.
 
 ## Primary information flow
 

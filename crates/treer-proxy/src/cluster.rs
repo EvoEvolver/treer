@@ -9,13 +9,15 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
-use treer_protocol::{AgentCommand, AgentServerSnapshot, ProtocolError, WorkspaceInfo};
+use treer_protocol::{
+    AgentCommand, AgentServerSnapshot, ProtocolError, ServerStatus, WorkspaceInfo,
+};
 use uuid::Uuid;
 
 use crate::state::{AppState, SocketFrame};
 
 const LEASE_BUCKET: &str = "TREER_LIVE_OWNERS";
-const SNAPSHOT_BUCKET: &str = "TREER_LIVE_SNAPSHOTS";
+const SNAPSHOT_BUCKET: &str = "TREER_MACHINE_INVENTORY";
 const PROJECTION_BUCKET: &str = "TREER_CONTROL_PROJECTIONS";
 pub(crate) const LIVE_STATE_TTL: Duration = Duration::from_secs(30);
 const CLUSTER_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
@@ -153,9 +155,9 @@ impl ClusterBus {
         let snapshots = open_kv(
             &context,
             SNAPSHOT_BUCKET,
-            "Treer current live machine snapshots",
+            "Treer retained machine inventory snapshots",
             Duration::ZERO,
-            jetstream::stream::StorageType::Memory,
+            jetstream::stream::StorageType::File,
         )
         .await?;
         let projections = open_kv(
@@ -322,6 +324,67 @@ impl ClusterBus {
             }
         });
 
+        let mut projection_keys = backend
+            .projections
+            .keys()
+            .await
+            .context("failed to enumerate durable control projections")?;
+        while let Some(key) = projection_keys.next().await {
+            let key = key.context("failed to read a durable control projection key")?;
+            let Some(entry) = backend
+                .projections
+                .entry(&key)
+                .await
+                .context("failed to read a durable control projection")?
+            else {
+                continue;
+            };
+            if entry.operation != Operation::Put {
+                continue;
+            }
+            match decode::<ClusterProjectionUpdate>(&entry.value) {
+                Ok(update) => state.apply_cluster_projection(update).await,
+                Err(error) => {
+                    warn!(key = %entry.key, %error, "failed to decode durable control projection");
+                }
+            }
+        }
+
+        let mut snapshot_keys = backend
+            .snapshots
+            .keys()
+            .await
+            .context("failed to enumerate retained machine snapshots")?;
+        while let Some(key) = snapshot_keys.next().await {
+            let key = key.context("failed to read a retained machine snapshot key")?;
+            let Some(entry) = backend
+                .snapshots
+                .entry(&key)
+                .await
+                .context("failed to read a retained machine snapshot")?
+            else {
+                continue;
+            };
+            if entry.operation != Operation::Put {
+                continue;
+            }
+            match decode::<ClusterServerSnapshot>(&entry.value) {
+                Ok(snapshot) => {
+                    apply_inventory_snapshot(
+                        &state,
+                        &backend.leases,
+                        &self.instance_id,
+                        entry.revision,
+                        snapshot,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    warn!(key = %entry.key, %error, "failed to decode retained machine snapshot");
+                }
+            }
+        }
+
         let mut snapshots = backend
             .snapshots
             .watch_with_history(">")
@@ -335,22 +398,16 @@ impl ClusterBus {
                 match entry {
                     Ok(entry) if entry.operation == Operation::Put => {
                         match decode::<ClusterServerSnapshot>(&entry.value) {
-                            Ok(mut snapshot) if snapshot.owner.proxy_id != local_instance => {
-                                let key = server_key(
-                                    &snapshot.snapshot.server.workspace_id,
-                                    &snapshot.snapshot.server.server_id,
-                                );
-                                let current_owner = match snapshot_leases.get(&key).await {
-                                    Ok(Some(value)) => decode::<ConnectionOwner>(&value).ok(),
-                                    _ => None,
-                                };
-                                if current_owner.as_ref() != Some(&snapshot.owner) {
-                                    continue;
-                                }
-                                snapshot.revision = entry.revision;
-                                snapshot_state.apply_cluster_snapshot(snapshot).await;
+                            Ok(snapshot) => {
+                                apply_inventory_snapshot(
+                                    &snapshot_state,
+                                    &snapshot_leases,
+                                    &local_instance,
+                                    entry.revision,
+                                    snapshot,
+                                )
+                                .await;
                             }
-                            Ok(_) => {}
                             Err(error) => {
                                 warn!(key = %entry.key, %error, "failed to decode live machine snapshot");
                             }
@@ -587,23 +644,16 @@ impl ClusterBus {
             .await
         {
             warn!(%error, %server_id, "failed to release cluster connection owner");
-            return;
         }
-        let Ok(Some(snapshot_entry)) = backend.snapshots.entry(&key).await else {
+    }
+
+    pub async fn delete_inventory(&self, workspace_id: &str, server_id: &str) {
+        let Some(backend) = &self.backend else {
             return;
         };
-        let Ok(snapshot) = decode::<ClusterServerSnapshot>(&snapshot_entry.value) else {
-            return;
-        };
-        if snapshot.owner != record {
-            return;
-        }
-        if let Err(error) = backend
-            .snapshots
-            .delete_expect_revision(&key, Some(snapshot_entry.revision))
-            .await
-        {
-            warn!(%error, %server_id, "failed to delete cluster machine snapshot");
+        let key = server_key(workspace_id, server_id);
+        if let Err(error) = backend.snapshots.delete(&key).await {
+            warn!(%error, %server_id, "failed to delete retained machine inventory");
         }
     }
 
@@ -799,6 +849,46 @@ impl NatsCluster {
     }
 }
 
+async fn apply_inventory_snapshot(
+    state: &AppState,
+    leases: &Store,
+    local_instance: &str,
+    revision: u64,
+    mut snapshot: ClusterServerSnapshot,
+) {
+    let key = server_key(
+        &snapshot.snapshot.server.workspace_id,
+        &snapshot.snapshot.server.server_id,
+    );
+    let current_owner = match leases.get(&key).await {
+        Ok(Some(value)) => match decode::<ConnectionOwner>(&value) {
+            Ok(owner) => Some(owner),
+            Err(error) => {
+                warn!(%key, %error, "failed to decode Controller ownership lease");
+                return;
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            warn!(%key, %error, "failed to read Controller ownership lease");
+            return;
+        }
+    };
+    if current_owner
+        .as_ref()
+        .is_some_and(|owner| owner == &snapshot.owner && owner.proxy_id == local_instance)
+    {
+        return;
+    }
+    snapshot.snapshot.server.status = if current_owner.is_some() {
+        ServerStatus::Online
+    } else {
+        ServerStatus::Offline
+    };
+    snapshot.revision = revision;
+    state.apply_cluster_snapshot(snapshot).await;
+}
+
 async fn open_kv(
     context: &jetstream::Context,
     bucket: &str,
@@ -918,7 +1008,7 @@ fn cluster_error(error: impl std::fmt::Display) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use treer_protocol::{ServerInfo, ServerStatus};
+    use treer_protocol::{AgentInfo, AgentStatus, ServerInfo, ServerStatus};
 
     use super::*;
 
@@ -993,7 +1083,21 @@ mod tests {
                     connected_at: now,
                     last_seen_at: now,
                 },
-                agents: Vec::new(),
+                agents: vec![AgentInfo {
+                    agent_id: format!("agent-{suffix}"),
+                    workspace_id: workspace_id.clone(),
+                    server_id: server_id.clone(),
+                    kind: "command".to_string(),
+                    name: "test agent".to_string(),
+                    cwd: ".".to_string(),
+                    status: AgentStatus::Idle,
+                    pid: None,
+                    started_at: now,
+                    updated_at: now,
+                    exited_at: None,
+                    exit_code: None,
+                    output_revision: 0,
+                }],
             },
         )
         .await
@@ -1043,6 +1147,42 @@ mod tests {
         );
 
         bus.release(&workspace_id, &server_id, connection_id).await;
+        assert!(backend
+            .leases
+            .get(&key)
+            .await
+            .expect("read released lease")
+            .is_none());
+        let retained = backend
+            .snapshots
+            .entry(&key)
+            .await
+            .expect("read retained inventory")
+            .expect("inventory survives lease release");
+        let restored_state = AppState::new();
+        apply_inventory_snapshot(
+            &restored_state,
+            &backend.leases,
+            "restored-proxy",
+            retained.revision,
+            decode(&retained.value).expect("decode retained inventory"),
+        )
+        .await;
+        let restored = restored_state
+            .snapshot(&workspace_id)
+            .await
+            .expect("restored workspace inventory");
+        assert_eq!(restored.servers.len(), 1);
+        assert_eq!(restored.servers[0].status, ServerStatus::Offline);
+        assert_eq!(restored.agents.len(), 1);
+
+        bus.delete_inventory(&workspace_id, &server_id).await;
+        assert!(backend
+            .snapshots
+            .get(&key)
+            .await
+            .expect("read deleted inventory")
+            .is_none());
         let projection = ClusterProjectionUpdate::ServerRenamed {
             workspace_id,
             server_id,

@@ -122,6 +122,40 @@ impl WorkspaceState {
             agents,
         }
     }
+
+    fn replace_server_inventory(
+        &mut self,
+        mut server: ServerInfo,
+        agents: Vec<AgentInfo>,
+    ) -> ServerInfo {
+        let server_id = server.server_id.clone();
+        if let Some(name) = self.server_names.get(&server_id) {
+            server.name.clone_from(name);
+        } else if let Some(current) = self.servers.get(&server_id) {
+            server.name.clone_from(&current.name);
+        }
+        self.servers.insert(server_id.clone(), server.clone());
+
+        let names = self
+            .agents
+            .values()
+            .filter(|agent| agent.server_id == server_id)
+            .map(|agent| (agent.agent_id.clone(), agent.name.clone()))
+            .collect::<HashMap<_, _>>();
+        self.agents.retain(|_, agent| agent.server_id != server_id);
+        for mut agent in agents {
+            if self.deleted_agents.contains(&agent.agent_id) {
+                continue;
+            }
+            if let Some(name) = self.agent_names.get(&agent.agent_id) {
+                agent.name.clone_from(name);
+            } else if let Some(name) = names.get(&agent.agent_id) {
+                agent.name.clone_from(name);
+            }
+            self.agents.insert(agent.agent_id.clone(), agent);
+        }
+        server
+    }
 }
 
 impl AppState {
@@ -286,10 +320,20 @@ impl AppState {
 
     pub async fn register_server(
         &self,
-        mut server: ServerInfo,
+        snapshot: AgentServerSnapshot,
         connection_id: Uuid,
         outgoing: mpsc::UnboundedSender<SocketFrame>,
     ) -> Result<u64, ProtocolError> {
+        let mut server = snapshot.server;
+        let agents = snapshot.agents;
+        if agents.iter().any(|agent| {
+            agent.workspace_id != server.workspace_id || agent.server_id != server.server_id
+        }) {
+            return Err(ProtocolError::new(
+                "invalid_snapshot",
+                "all agents in a registration snapshot must belong to its machine and workspace",
+            ));
+        }
         self.ensure_workspace(&server.workspace_id, &server.workspace_id)
             .await;
         if self
@@ -322,18 +366,22 @@ impl AppState {
             },
         );
 
-        let event = self
-            .mutate_workspace(
-                &server.workspace_id,
-                "server.updated",
-                &server,
-                |workspace| {
-                    workspace
-                        .servers
-                        .insert(server.server_id.clone(), server.clone());
-                },
-            )
-            .await?;
+        let event = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(&server.workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", &server.workspace_id))?;
+            server = workspace.replace_server_inventory(server, agents);
+            workspace.revision = workspace.revision.saturating_add(1);
+            WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: server.workspace_id.clone(),
+                event: "server.updated".to_string(),
+                data: serde_json::to_value(&server).map_err(|error| {
+                    ProtocolError::new("encode_error", format!("failed to encode event: {error}"))
+                })?,
+            }
+        };
         let snapshot = self
             .server_snapshot(&server.workspace_id, &server.server_id)
             .await?;
@@ -352,8 +400,22 @@ impl AppState {
                 workspace_id: server.workspace_id.clone(),
                 server_id: server.server_id.clone(),
             });
+            if let Some(current) = self
+                .inner
+                .workspaces
+                .write()
+                .await
+                .get_mut(&server.workspace_id)
+                .and_then(|workspace| workspace.servers.get_mut(&server.server_id))
+            {
+                current.status = ServerStatus::Offline;
+                current.last_seen_at = Utc::now();
+            }
             return Err(error);
         }
+        self.publish_workspace_event(event.clone());
+        self.resend_pending(&server.workspace_id, &server.server_id)
+            .await;
         Ok(event.revision)
     }
 
@@ -383,30 +445,13 @@ impl AppState {
             if workspace.deleted_servers.contains(&server_id) {
                 return Err(ProtocolError::new("server_deleted", &server_id));
             }
-            if let Some(current) = workspace.servers.get(&server_id) {
-                server.name.clone_from(&current.name);
-            }
-            workspace.servers.insert(server_id.clone(), server.clone());
-            let names: HashMap<_, _> = workspace
-                .agents
-                .values()
-                .filter(|agent| agent.server_id == server_id)
-                .map(|agent| (agent.agent_id.clone(), agent.name.clone()))
+            let agents = agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.workspace_id == snapshot_workspace_id && agent.server_id == server_id
+                })
                 .collect();
-            workspace
-                .agents
-                .retain(|_, agent| agent.server_id != server_id);
-            for mut agent in agents {
-                if agent.workspace_id == snapshot_workspace_id && agent.server_id == server_id {
-                    if workspace.deleted_agents.contains(&agent.agent_id) {
-                        continue;
-                    }
-                    if let Some(name) = names.get(&agent.agent_id) {
-                        agent.name.clone_from(name);
-                    }
-                    workspace.agents.insert(agent.agent_id.clone(), agent);
-                }
-            }
+            server = workspace.replace_server_inventory(server, agents);
             workspace.revision = workspace.revision.saturating_add(1);
             WorkspaceEvent {
                 revision: workspace.revision,
@@ -740,6 +785,10 @@ impl AppState {
             );
         }
         self.close_server_network_streams(workspace_id, server_id)
+            .await;
+        self.inner
+            .cluster
+            .delete_inventory(workspace_id, server_id)
             .await;
         self.broadcast_projection(ClusterProjectionUpdate::ServerDeleted {
             workspace_id: workspace_id.to_string(),
@@ -1891,33 +1940,10 @@ impl AppState {
             let Some(workspace) = workspaces.get_mut(&workspace_id) else {
                 return;
             };
-            workspace.deleted_servers.remove(&server_id);
-            let mut server = snapshot.server;
-            if let Some(name) = workspace.server_names.get(&server_id) {
-                server.name.clone_from(name);
-            } else if let Some(current) = workspace.servers.get(&server_id) {
-                server.name.clone_from(&current.name);
+            if workspace.deleted_servers.contains(&server_id) {
+                return;
             }
-            workspace.servers.insert(server_id.clone(), server);
-            let names = workspace
-                .agents
-                .values()
-                .filter(|agent| agent.server_id == server_id)
-                .map(|agent| (agent.agent_id.clone(), agent.name.clone()))
-                .collect::<HashMap<_, _>>();
-            workspace
-                .agents
-                .retain(|_, agent| agent.server_id != server_id);
-            for mut agent in snapshot.agents {
-                if !workspace.deleted_agents.contains(&agent.agent_id) {
-                    if let Some(name) = workspace.agent_names.get(&agent.agent_id) {
-                        agent.name.clone_from(name);
-                    } else if let Some(name) = names.get(&agent.agent_id) {
-                        agent.name.clone_from(name);
-                    }
-                    workspace.agents.insert(agent.agent_id.clone(), agent);
-                }
-            }
+            workspace.replace_server_inventory(snapshot.server, snapshot.agents);
             workspace.revision = workspace.revision.saturating_add(1);
             WorkspaceEvent {
                 revision: workspace.revision,
@@ -2474,14 +2500,14 @@ mod tests {
         let state = AppState::new();
         let (alpha_tx, mut alpha_rx) = mpsc::unbounded_channel();
         state
-            .register_server(test_server(), Uuid::new_v4(), alpha_tx)
+            .register_server(test_snapshot(test_server()), Uuid::new_v4(), alpha_tx)
             .await
             .expect("register alpha controller");
         let mut beta = test_server();
         beta.workspace_id = "beta".to_string();
         let (beta_tx, mut beta_rx) = mpsc::unbounded_channel();
         state
-            .register_server(beta, Uuid::new_v4(), beta_tx)
+            .register_server(test_snapshot(beta), Uuid::new_v4(), beta_tx)
             .await
             .expect("register beta controller");
         let message = ProxyMessage::VirtualNetworkHosts {
@@ -2519,6 +2545,48 @@ mod tests {
             exit_code: None,
             output_revision: 0,
         }
+    }
+
+    fn test_snapshot(server: ServerInfo) -> AgentServerSnapshot {
+        AgentServerSnapshot {
+            server,
+            agents: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn registration_and_disconnect_preserve_complete_inventory() {
+        let state = AppState::new();
+        let connection_id = Uuid::new_v4();
+        let (outgoing, _incoming) = mpsc::unbounded_channel();
+        state
+            .register_server(
+                AgentServerSnapshot {
+                    server: test_server(),
+                    agents: vec![test_agent("agent-1", "helper")],
+                },
+                connection_id,
+                outgoing,
+            )
+            .await
+            .expect("register complete Controller snapshot");
+
+        let connected = state.snapshot("alpha").await.expect("connected snapshot");
+        assert_eq!(connected.servers.len(), 1);
+        assert_eq!(connected.agents.len(), 1);
+        assert_eq!(connected.agents[0].agent_id, "agent-1");
+
+        state
+            .disconnect_server("alpha", "server", connection_id)
+            .await;
+        let disconnected = state
+            .snapshot("alpha")
+            .await
+            .expect("disconnected snapshot");
+        assert_eq!(disconnected.servers.len(), 1);
+        assert_eq!(disconnected.servers[0].status, ServerStatus::Offline);
+        assert_eq!(disconnected.agents.len(), 1);
+        assert_eq!(disconnected.agents[0].agent_id, "agent-1");
     }
 
     #[tokio::test]
@@ -2570,7 +2638,7 @@ mod tests {
         let (outgoing, _incoming) = mpsc::unbounded_channel();
 
         state
-            .register_server(test_server(), Uuid::new_v4(), outgoing)
+            .register_server(test_snapshot(test_server()), Uuid::new_v4(), outgoing)
             .await
             .expect("register server");
 
@@ -2643,7 +2711,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (outgoing, _messages) = mpsc::unbounded_channel();
         state
-            .register_server(server.clone(), connection_id, outgoing)
+            .register_server(test_snapshot(server.clone()), connection_id, outgoing)
             .await
             .expect("register server");
         state
@@ -2693,7 +2761,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (outgoing, _messages) = mpsc::unbounded_channel();
         state
-            .register_server(server.clone(), connection_id, outgoing)
+            .register_server(test_snapshot(server.clone()), connection_id, outgoing)
             .await
             .expect("register server");
         state
@@ -2749,7 +2817,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
-            .register_server(server.clone(), connection_id, server_tx)
+            .register_server(test_snapshot(server.clone()), connection_id, server_tx)
             .await
             .expect("register server");
         state
@@ -2818,7 +2886,7 @@ mod tests {
         let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
         assert_eq!(
             state
-                .register_server(server, Uuid::new_v4(), replacement_tx)
+                .register_server(test_snapshot(server), Uuid::new_v4(), replacement_tx)
                 .await
                 .expect_err("deleted server should not reconnect")
                 .code,
@@ -2833,7 +2901,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (server_tx, _server_rx) = mpsc::unbounded_channel();
         state
-            .register_server(server.clone(), connection_id, server_tx)
+            .register_server(test_snapshot(server.clone()), connection_id, server_tx)
             .await
             .expect("register machine");
         state
@@ -2844,7 +2912,7 @@ mod tests {
         let (blocked_tx, _blocked_rx) = mpsc::unbounded_channel();
         assert_eq!(
             state
-                .register_server(server.clone(), Uuid::new_v4(), blocked_tx)
+                .register_server(test_snapshot(server.clone()), Uuid::new_v4(), blocked_tx)
                 .await
                 .expect_err("deleted machine remains blocked")
                 .code,
@@ -2854,7 +2922,7 @@ mod tests {
         state.allow_server_reenrollment("alpha", "server").await;
         let (reenrolled_tx, _reenrolled_rx) = mpsc::unbounded_channel();
         state
-            .register_server(server, Uuid::new_v4(), reenrolled_tx)
+            .register_server(test_snapshot(server), Uuid::new_v4(), reenrolled_tx)
             .await
             .expect("reenrolled machine reconnects");
     }
@@ -2866,7 +2934,7 @@ mod tests {
         let first_connection = Uuid::new_v4();
         let (first_tx, mut first_rx) = mpsc::unbounded_channel();
         state
-            .register_server(server.clone(), first_connection, first_tx)
+            .register_server(test_snapshot(server.clone()), first_connection, first_tx)
             .await
             .expect("register first controller");
 
@@ -2900,7 +2968,7 @@ mod tests {
         let second_connection = Uuid::new_v4();
         let (second_tx, mut second_rx) = mpsc::unbounded_channel();
         state
-            .register_server(server.clone(), second_connection, second_tx)
+            .register_server(test_snapshot(server.clone()), second_connection, second_tx)
             .await
             .expect("register replacement controller");
         state
@@ -2950,7 +3018,7 @@ mod tests {
         let server = test_server();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
-            .register_server(server, Uuid::new_v4(), server_tx)
+            .register_server(test_snapshot(server), Uuid::new_v4(), server_tx)
             .await
             .expect("register controller");
 
@@ -2990,7 +3058,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
-            .register_server(test_server(), connection_id, server_tx)
+            .register_server(test_snapshot(test_server()), connection_id, server_tx)
             .await
             .expect("register controller");
 
@@ -3100,7 +3168,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
-            .register_server(test_server(), connection_id, server_tx)
+            .register_server(test_snapshot(test_server()), connection_id, server_tx)
             .await
             .expect("register controller");
 
@@ -3136,7 +3204,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
-            .register_server(test_server(), connection_id, server_tx)
+            .register_server(test_snapshot(test_server()), connection_id, server_tx)
             .await
             .expect("register controller");
 
@@ -3227,7 +3295,7 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
-            .register_server(server, connection_id, server_tx)
+            .register_server(test_snapshot(server), connection_id, server_tx)
             .await
             .expect("register controller");
         {
@@ -3451,7 +3519,7 @@ mod tests {
             last_seen_at: now,
         };
         state_a
-            .register_server(source, source_connection, source_tx)
+            .register_server(test_snapshot(source), source_connection, source_tx)
             .await
             .expect("register source on proxy A");
 
@@ -3467,35 +3535,33 @@ mod tests {
             connected_at: now,
             last_seen_at: now,
         };
-        state_b
-            .register_server(destination.clone(), destination_connection, destination_tx)
-            .await
-            .expect("register destination on proxy B");
         let agent_id = format!("agent-{suffix}");
+        let destination_agent = AgentInfo {
+            agent_id: agent_id.clone(),
+            workspace_id: workspace_id.clone(),
+            server_id: destination_id.clone(),
+            kind: "command".to_string(),
+            name: "remote-agent".to_string(),
+            cwd: ".".to_string(),
+            status: AgentStatus::Idle,
+            pid: None,
+            started_at: now,
+            updated_at: now,
+            exited_at: None,
+            exit_code: None,
+            output_revision: 0,
+        };
         state_b
-            .apply_snapshot(
-                destination_connection,
+            .register_server(
                 AgentServerSnapshot {
-                    server: destination,
-                    agents: vec![AgentInfo {
-                        agent_id: agent_id.clone(),
-                        workspace_id: workspace_id.clone(),
-                        server_id: destination_id.clone(),
-                        kind: "command".to_string(),
-                        name: "remote-agent".to_string(),
-                        cwd: ".".to_string(),
-                        status: AgentStatus::Idle,
-                        pid: None,
-                        started_at: now,
-                        updated_at: now,
-                        exited_at: None,
-                        exit_code: None,
-                        output_revision: 0,
-                    }],
+                    server: destination.clone(),
+                    agents: vec![destination_agent.clone()],
                 },
+                destination_connection,
+                destination_tx,
             )
             .await
-            .expect("publish destination snapshot");
+            .expect("register destination on proxy B");
 
         let replicated = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -3678,6 +3744,73 @@ mod tests {
             .expect("remote disconnect resets coordinating network stream")
             .expect("network reset frame");
         assert_eq!(expect_network(network_reset).kind, NetworkBinaryKind::Reset);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot_a = state_a
+                    .snapshot(&workspace_id)
+                    .await
+                    .expect("proxy A snapshot");
+                let snapshot_b = state_b
+                    .snapshot(&workspace_id)
+                    .await
+                    .expect("proxy B snapshot");
+                let inventory_is_retained = [&snapshot_a, &snapshot_b].iter().all(|snapshot| {
+                    snapshot
+                        .agents
+                        .iter()
+                        .any(|agent| agent.agent_id == agent_id)
+                        && snapshot.servers.iter().any(|server| {
+                            server.server_id == destination_id
+                                && server.status == ServerStatus::Offline
+                        })
+                });
+                if inventory_is_retained {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("disconnect keeps machine and Agent inventory on every proxy");
+
+        let replacement_connection = Uuid::new_v4();
+        let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
+        state_a
+            .register_server(
+                AgentServerSnapshot {
+                    server: destination,
+                    agents: vec![destination_agent],
+                },
+                replacement_connection,
+                replacement_tx,
+            )
+            .await
+            .expect("reconnect destination through proxy A");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = state_b
+                    .snapshot(&workspace_id)
+                    .await
+                    .expect("proxy B snapshot");
+                let online = snapshot.servers.iter().any(|server| {
+                    server.server_id == destination_id && server.status == ServerStatus::Online
+                });
+                let retained = snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| agent.agent_id == agent_id);
+                if online && retained {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cross-proxy reconnect restores presence without rebuilding inventory");
+        state_a
+            .disconnect_server(&workspace_id, &destination_id, replacement_connection)
+            .await;
         state_a
             .disconnect_server(&workspace_id, &source_id, source_connection)
             .await;

@@ -1897,36 +1897,24 @@ async fn workspace_events(
 async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_id: String) {
     let (mut outgoing, mut incoming) = socket.split();
     let mut events = state.subscribe();
-    if let Ok(snapshot) = state.snapshot(&workspace_id).await {
-        let initial = WorkspaceEvent {
-            revision: snapshot.revision,
-            workspace_id: workspace_id.clone(),
-            event: "workspace.snapshot".to_string(),
-            data: serde_json::to_value(snapshot).unwrap_or(Value::Null),
-        };
-        if send_event(&mut outgoing, &initial).await.is_err() {
-            return;
-        }
+    if send_workspace_snapshot(&mut outgoing, &state, &workspace_id)
+        .await
+        .is_err()
+    {
+        return;
     }
 
     loop {
         tokio::select! {
             event = events.recv() => match event {
                 Ok(event) if event.workspace_id == workspace_id => {
-                    if send_event(&mut outgoing, &event).await.is_err() {
+                    if send_workspace_snapshot(&mut outgoing, &state, &workspace_id).await.is_err() {
                         break;
                     }
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let Ok(snapshot) = state.snapshot(&workspace_id).await else { break };
-                    let event = WorkspaceEvent {
-                        revision: snapshot.revision,
-                        workspace_id: workspace_id.clone(),
-                        event: "workspace.snapshot".to_string(),
-                        data: serde_json::to_value(snapshot).unwrap_or(Value::Null),
-                    };
-                    if send_event(&mut outgoing, &event).await.is_err() {
+                    if send_workspace_snapshot(&mut outgoing, &state, &workspace_id).await.is_err() {
                         break;
                     }
                 }
@@ -1939,6 +1927,23 @@ async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_i
             }
         }
     }
+}
+
+async fn send_workspace_snapshot(
+    outgoing: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<(), axum::Error> {
+    let Ok(snapshot) = state.snapshot(workspace_id).await else {
+        return Ok(());
+    };
+    let event = WorkspaceEvent {
+        revision: snapshot.revision,
+        workspace_id: workspace_id.to_string(),
+        event: "workspace.snapshot".to_string(),
+        data: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+    };
+    send_event(outgoing, &event).await
 }
 
 async fn send_event(
@@ -2075,19 +2080,16 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (outgoing, _incoming) = tokio::sync::mpsc::unbounded_channel();
         state
-            .register_server(server.clone(), connection_id, outgoing)
-            .await
-            .expect("register server");
-        state
-            .apply_snapshot(
-                connection_id,
+            .register_server(
                 treer_protocol::AgentServerSnapshot {
                     server,
                     agents: vec![agent, recipient],
                 },
+                connection_id,
+                outgoing,
             )
             .await
-            .expect("apply agent snapshot");
+            .expect("register server");
         state
     }
 
@@ -2698,7 +2700,14 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
         state
-            .register_server(server, connection_id, server_tx)
+            .register_server(
+                treer_protocol::AgentServerSnapshot {
+                    server,
+                    agents: Vec::new(),
+                },
+                connection_id,
+                server_tx,
+            )
             .await
             .expect("register controller");
 

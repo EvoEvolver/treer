@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
@@ -686,7 +686,7 @@ impl CommandResult {
 pub enum AgentServerMessage {
     Register {
         protocol: u32,
-        server: ServerInfo,
+        snapshot: AgentServerSnapshot,
     },
     Snapshot {
         snapshot: AgentServerSnapshot,

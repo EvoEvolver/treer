@@ -94,17 +94,11 @@ impl ProxyClient {
             .await
             .with_context(|| format!("failed to connect to {}", self.proxy_ws))?;
         let (mut outgoing, mut incoming) = socket.split();
+        let mut events = self.runtime.subscribe();
         send(
             &mut outgoing,
             &AgentServerMessage::Register {
                 protocol: PROTOCOL_VERSION,
-                server: self.server.clone(),
-            },
-        )
-        .await?;
-        send(
-            &mut outgoing,
-            &AgentServerMessage::Snapshot {
                 snapshot: AgentServerSnapshot {
                     server: self.server.clone(),
                     agents: self.runtime.list(),
@@ -115,7 +109,6 @@ impl ProxyClient {
 
         let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut events = self.runtime.subscribe();
         let mut terminal_events = self.runtime.subscribe_terminal();
         let mut process_events = self.runtime.subscribe_processes();
         let mut terminal_sessions = HashMap::<String, TerminalRelay>::new();

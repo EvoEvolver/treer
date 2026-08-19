@@ -248,12 +248,6 @@ function WorkspaceApp() {
     return () => { cancelled = true }
   }, [organizationId, showError])
 
-  const refreshSnapshot = useCallback(async () => {
-    if (!workspaceId) return
-    const data = await api<Snapshot>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`)
-    setSnapshot(data)
-  }, [workspaceId])
-
   useEffect(() => {
     if (!workspaceId) {
       setSnapshot(null)
@@ -264,7 +258,6 @@ function WorkspaceApp() {
     let disposed = false
     let socket: WebSocket | null = null
     let timer: number | undefined
-    refreshSnapshot().catch(showError)
     const connect = (initial = false) => {
       if (disposed) return
       if (initial) setConnection("connecting")
@@ -274,7 +267,6 @@ function WorkspaceApp() {
         if (disposed) return
         const message = JSON.parse(event.data) as { event: string; data?: Snapshot }
         if (message.event === "workspace.snapshot" && message.data) setSnapshot(message.data)
-        else refreshSnapshot().catch(showError)
       }
       socket.onclose = () => {
         if (disposed) return
@@ -284,7 +276,7 @@ function WorkspaceApp() {
     }
     connect(true)
     return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
-  }, [workspaceId, refreshSnapshot, showError])
+  }, [workspaceId])
 
   useEffect(() => {
     const agents = snapshot?.agents ?? []
@@ -345,7 +337,7 @@ function WorkspaceApp() {
     if (!workspaceId) return
     try {
       const agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: agentKind, name: agentName, cwd: agentCwd, args: agentArgs.split("\n").map((value) => value.trim()).filter(Boolean), cols: 120, rows: 36 }) })
-      setCreateAgentOpen(false); setSelectedAgentId(agent.agent_id); await refreshSnapshot()
+      setCreateAgentOpen(false); setSelectedAgentId(agent.agent_id)
     } catch (reason) { showError(reason) }
   }
 
@@ -376,7 +368,7 @@ function WorkspaceApp() {
     const resource = renameTarget.kind === "machine" ? "servers" : "agents"
     try {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/${resource}/${encodeURIComponent(renameTarget.id)}`, { method: "PATCH", body: JSON.stringify({ name: renameName }) })
-      setRenameTarget(null); await refreshSnapshot()
+      setRenameTarget(null)
     } catch (reason) { showError(reason) }
   }
 
@@ -385,7 +377,7 @@ function WorkspaceApp() {
     const resource = deleteTarget.kind === "machine" ? "servers" : "agents"
     try {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/${resource}/${encodeURIComponent(deleteTarget.id)}`, { method: "DELETE" })
-      setDeleteTarget(null); await refreshSnapshot()
+      setDeleteTarget(null)
     } catch (reason) { showError(reason) }
   }
 

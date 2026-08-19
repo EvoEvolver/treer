@@ -161,7 +161,7 @@ async fn handle(
         match parsed {
             AgentServerMessage::Register {
                 protocol,
-                mut server,
+                mut snapshot,
             } => {
                 if protocol != PROTOCOL_VERSION {
                     send_error(
@@ -175,7 +175,8 @@ async fn handle(
                     );
                     break;
                 }
-                if !machine.allows_server(&server.workspace_id, &server.server_id) {
+                if !machine.allows_server(&snapshot.server.workspace_id, &snapshot.server.server_id)
+                {
                     send_error(
                         &outgoing_tx,
                         ProtocolError::new(
@@ -192,14 +193,29 @@ async fn handle(
                     );
                     continue;
                 }
-                let workspace_id = server.workspace_id.clone();
-                let server_id = server.server_id.clone();
-                if let Err(error) = auth.apply_server_name(&mut server).await {
+                let workspace_id = snapshot.server.workspace_id.clone();
+                let server_id = snapshot.server.server_id.clone();
+                state.ensure_workspace(&workspace_id, &workspace_id).await;
+                if let Err(error) = auth.apply_server_name(&mut snapshot.server).await {
                     send_error(&outgoing_tx, error.into_parts().1);
                     continue;
                 }
+                let deleted_agents = match auth.apply_agent_names(&mut snapshot).await {
+                    Ok(deleted_agents) => deleted_agents,
+                    Err(error) => {
+                        send_error(&outgoing_tx, error.into_parts().1);
+                        continue;
+                    }
+                };
+                if let Err(error) = state
+                    .restore_deleted_agents(&workspace_id, deleted_agents)
+                    .await
+                {
+                    send_error(&outgoing_tx, error);
+                    continue;
+                }
                 match state
-                    .register_server(server, connection_id, outgoing_tx.clone())
+                    .register_server(snapshot, connection_id, outgoing_tx.clone())
                     .await
                 {
                     Ok(workspace_revision) => {
