@@ -371,9 +371,13 @@ impl ProxyClient {
         }
         let command_id = envelope.command_id;
         let result = match envelope.command {
-            AgentCommand::Create { agent_id, request } => self
+            AgentCommand::Create {
+                agent_id,
+                workload_credential,
+                request,
+            } => self
                 .runtime
-                .create(&command_id, agent_id, request)
+                .create(&command_id, agent_id, workload_credential, request)
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),

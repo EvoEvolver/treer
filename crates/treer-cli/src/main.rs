@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::{env, fs};
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -19,7 +20,7 @@ use treer_protocol::{
     CreateVirtualNetworkHostRequest, InputAgentRequest, MachineServiceProtocol, RenameRequest,
     SendAgentMailRequest, ServerInfo, TerminalClientMessage, TerminalServerMessage,
     UpdateMachineServiceRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
-    WorkspaceSnapshot, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    WorkspaceSnapshot, AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -308,15 +309,26 @@ struct ApiClient {
     base: Url,
     source_agent_id: Option<String>,
     workload_credential: Option<String>,
+    operator_credential: Option<String>,
 }
 
 impl ApiClient {
-    fn new(base: Url) -> Self {
+    fn new(base: Url, workspace: &str) -> Self {
+        let source_agent_id = env::var("TREER_AGENT_ID").ok();
+        let workload_credential = env::var("TREER_WORKLOAD_CREDENTIAL").ok();
+        let operator_credential = if source_agent_id.is_none() && workload_credential.is_none() {
+            env::var("TREER_OPERATOR_CREDENTIAL")
+                .ok()
+                .or_else(|| load_operator_credential(workspace))
+        } else {
+            None
+        };
         Self {
             http: reqwest::Client::new(),
             base,
-            source_agent_id: std::env::var("TREER_AGENT_ID").ok(),
-            workload_credential: std::env::var("TREER_WORKLOAD_CREDENTIAL").ok(),
+            source_agent_id,
+            workload_credential,
+            operator_credential,
         }
     }
 
@@ -336,6 +348,9 @@ impl ApiClient {
         }
         if let Some(credential) = &self.workload_credential {
             request = request.header(WORKLOAD_CREDENTIAL_HEADER, credential);
+        }
+        if let Some(credential) = &self.operator_credential {
+            request = request.header(OPERATOR_CREDENTIAL_HEADER, credential);
         }
         if let Some(body) = body {
             request = request.json(&body);
@@ -411,6 +426,14 @@ impl ApiClient {
     }
 }
 
+fn load_operator_credential(workspace: &str) -> Option<String> {
+    let bytes = fs::read(local_controller_config(workspace)?).ok()?;
+    serde_json::from_slice::<LocalControllerConfig>(&bytes)
+        .ok()
+        .map(|config| config.operator_credential)
+        .filter(|credential| !credential.is_empty())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -421,7 +444,10 @@ async fn main() -> anyhow::Result<()> {
     let command = args
         .command
         .context("a command is required; run `treer --help` for usage")?;
-    let client = ApiClient::new(resolve_server_url(args.url, &args.workspace)?);
+    let client = ApiClient::new(
+        resolve_server_url(args.url, &args.workspace)?,
+        &args.workspace,
+    );
     let value = match command {
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::Human { command } => match command {
@@ -885,6 +911,12 @@ async fn relay_terminal(
             HeaderValue::from_str(credential).context("invalid Agent workload credential")?,
         );
     }
+    if let Some(credential) = &client.operator_credential {
+        request.headers_mut().insert(
+            OPERATOR_CREDENTIAL_HEADER,
+            HeaderValue::from_str(credential).context("invalid local operator credential")?,
+        );
+    }
     let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("failed to connect to {target}"))?;
@@ -1097,6 +1129,8 @@ fn resolve_server_url(configured: Option<Url>, workspace: &str) -> anyhow::Resul
 #[derive(serde::Deserialize)]
 struct LocalControllerConfig {
     listen: String,
+    #[serde(default)]
+    operator_credential: String,
 }
 
 fn local_controller_config(workspace: &str) -> Option<PathBuf> {

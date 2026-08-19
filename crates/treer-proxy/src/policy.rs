@@ -1,11 +1,28 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use treer_protocol::ProtocolError;
+use tokio::sync::RwLock;
+use treer_protocol::{
+    PolicyEffect, PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, PolicyResourceSelector,
+    PolicySubjectSelector, ProtocolError, WorkspacePolicy, WorkspacePolicyRule,
+};
+use treer_proxy::policy_store::WorkspacePolicyStore;
 
 pub const ACTION_NETWORK_CONNECT: &str = "network.connect";
+pub const ACTION_AGENT_DISCOVER: &str = "agent.discover";
+pub const ACTION_AGENT_METADATA_READ: &str = "agent.metadata.read";
+pub const ACTION_AGENT_OUTPUT_READ: &str = "agent.output.read";
+pub const ACTION_AGENT_PROMPT: &str = "agent.prompt";
+pub const ACTION_AGENT_INPUT: &str = "agent.input";
+pub const ACTION_AGENT_STOP: &str = "agent.stop";
+pub const ACTION_AGENT_UPDATE: &str = "agent.update";
+pub const ACTION_AGENT_DELETE: &str = "agent.delete";
+pub const ACTION_AGENT_CREATE: &str = "agent.create";
+pub const ACTION_MACHINE_UPDATE: &str = "machine.update";
+pub const ACTION_MACHINE_DELETE: &str = "machine.delete";
 pub const ACTION_IDENTITY_TOKEN_ISSUE: &str = "identity.token.issue";
 pub const ACTION_MAIL_SEND: &str = "mail.send";
 pub const ACTION_MAIL_READ: &str = "mail.read";
@@ -19,6 +36,8 @@ pub const ACTION_VIRTUAL_HOST_LIST: &str = "virtual_host.list";
 pub const ACTION_VIRTUAL_HOST_CREATE: &str = "virtual_host.create";
 pub const ACTION_VIRTUAL_HOST_DELETE: &str = "virtual_host.delete";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
+pub const RESOURCE_AGENT: &str = "agent";
+pub const RESOURCE_MACHINE: &str = "machine";
 pub const RESOURCE_AGENT_MAILBOX: &str = "agent.mailbox";
 pub const RESOURCE_HUMAN_DIRECTORY: &str = "human.directory";
 pub const RESOURCE_HUMAN_MAILBOX: &str = "human.mailbox";
@@ -162,6 +181,13 @@ impl PolicyEngine {
         Self::new(PolicyDecision::Allow, Vec::new())
     }
 
+    pub fn durable(store: WorkspacePolicyStore) -> Self {
+        Self::new(
+            PolicyDecision::Allow,
+            vec![Arc::new(DurablePolicyEvaluator::new(store))],
+        )
+    }
+
     pub fn new(
         default_decision: PolicyDecision,
         evaluators: Vec<Arc<dyn PolicyEvaluator>>,
@@ -183,6 +209,198 @@ impl PolicyEngine {
     }
 }
 
+const POLICY_CACHE_TTL: Duration = Duration::from_secs(5);
+
+struct CachedWorkspacePolicy {
+    loaded_at: Instant,
+    policy: Option<Arc<CompiledWorkspacePolicy>>,
+}
+
+struct CompiledWorkspacePolicy {
+    mode: PolicyMode,
+    defaults: BTreeMap<String, PolicyEffect>,
+    groups: HashMap<String, Vec<PolicyPrincipalRef>>,
+    rules_by_action: HashMap<String, Vec<WorkspacePolicyRule>>,
+}
+
+struct DurablePolicyEvaluator {
+    store: WorkspacePolicyStore,
+    cache: RwLock<HashMap<String, CachedWorkspacePolicy>>,
+}
+
+impl DurablePolicyEvaluator {
+    fn new(store: WorkspacePolicyStore) -> Self {
+        Self {
+            store,
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    async fn compiled(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<Arc<CompiledWorkspacePolicy>>, ProtocolError> {
+        if let Some(cached) = self.cache.read().await.get(workspace_id) {
+            if cached.loaded_at.elapsed() < POLICY_CACHE_TTL {
+                return Ok(cached.policy.clone());
+            }
+        }
+        let policy = self
+            .store
+            .get(workspace_id)
+            .await
+            .map_err(|error| ProtocolError::new(error.code(), error.to_string()))?
+            .map(CompiledWorkspacePolicy::compile)
+            .map(Arc::new);
+        self.cache.write().await.insert(
+            workspace_id.to_string(),
+            CachedWorkspacePolicy {
+                loaded_at: Instant::now(),
+                policy: policy.clone(),
+            },
+        );
+        Ok(policy)
+    }
+}
+
+impl PolicyEvaluator for DurablePolicyEvaluator {
+    fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a> {
+        Box::pin(async move {
+            let Some(policy) = self.compiled(&request.workspace_id).await? else {
+                return Ok(PolicyEvaluation::Abstain);
+            };
+            Ok(PolicyEvaluation::Decide(policy.evaluate(request)))
+        })
+    }
+}
+
+impl CompiledWorkspacePolicy {
+    fn compile(policy: WorkspacePolicy) -> Self {
+        let mut rules_by_action: HashMap<String, Vec<WorkspacePolicyRule>> = HashMap::new();
+        for rule in policy.document.rules {
+            for action in &rule.actions {
+                rules_by_action
+                    .entry(action.clone())
+                    .or_default()
+                    .push(rule.clone());
+            }
+        }
+        for rules in rules_by_action.values_mut() {
+            rules.sort_by(|left, right| {
+                right
+                    .priority
+                    .cmp(&left.priority)
+                    .then_with(|| effect_order(right.effect).cmp(&effect_order(left.effect)))
+            });
+        }
+        Self {
+            mode: policy.mode,
+            defaults: policy.document.defaults,
+            groups: policy
+                .document
+                .groups
+                .into_iter()
+                .map(|(name, group)| (name, group.principals))
+                .collect(),
+            rules_by_action,
+        }
+    }
+
+    fn evaluate(&self, request: &PolicyRequest) -> PolicyDecision {
+        let effect = self
+            .rules_by_action
+            .get(&request.action)
+            .and_then(|rules| {
+                rules.iter().find(|rule| {
+                    rule.subjects
+                        .iter()
+                        .any(|selector| self.subject_matches(selector, request))
+                        && rule
+                            .resources
+                            .iter()
+                            .any(|selector| self.resource_matches(selector, request))
+                })
+            })
+            .map(|rule| rule.effect)
+            .or_else(|| self.defaults.get(&request.action).copied())
+            .unwrap_or(PolicyEffect::Allow);
+        if self.mode == PolicyMode::Monitor || effect == PolicyEffect::Allow {
+            PolicyDecision::Allow
+        } else {
+            PolicyDecision::Deny(PolicyDenial::new(
+                "policy_denied",
+                "workspace policy denied this operation",
+            ))
+        }
+    }
+
+    fn subject_matches(&self, selector: &PolicySubjectSelector, request: &PolicyRequest) -> bool {
+        let (kind, id, machine_id) = subject_parts(&request.subject);
+        selector.kind.is_none_or(|expected| expected == kind)
+            && selector.id.as_deref().is_none_or(|expected| expected == id)
+            && selector
+                .machine_id
+                .as_deref()
+                .is_none_or(|expected| expected == machine_id)
+            && selector
+                .group
+                .as_deref()
+                .is_none_or(|group| self.group_contains(group, kind, id))
+            && (!selector.is_self || request.resource.id == id)
+    }
+
+    fn resource_matches(&self, selector: &PolicyResourceSelector, request: &PolicyRequest) -> bool {
+        selector
+            .kind
+            .as_deref()
+            .is_none_or(|kind| kind == request.resource.kind)
+            && selector
+                .id
+                .as_deref()
+                .is_none_or(|id| id == request.resource.id)
+            && selector.principal_group.as_deref().is_none_or(|group| {
+                resource_principal(&request.resource)
+                    .is_some_and(|(kind, id)| self.group_contains(group, kind, id))
+            })
+    }
+
+    fn group_contains(&self, group: &str, kind: PolicyPrincipalKind, id: &str) -> bool {
+        self.groups.get(group).is_some_and(|principals| {
+            principals
+                .iter()
+                .any(|principal| principal.kind == kind && principal.id == id)
+        })
+    }
+}
+
+const fn effect_order(effect: PolicyEffect) -> u8 {
+    match effect {
+        PolicyEffect::Allow => 0,
+        PolicyEffect::Deny => 1,
+    }
+}
+
+fn subject_parts(subject: &PolicySubject) -> (PolicyPrincipalKind, &str, &str) {
+    match subject {
+        PolicySubject::Agent {
+            server_id,
+            agent_id,
+        } => (PolicyPrincipalKind::Agent, agent_id, server_id),
+        PolicySubject::Machine { server_id } => {
+            (PolicyPrincipalKind::Machine, server_id, server_id)
+        }
+    }
+}
+
+fn resource_principal(resource: &PolicyResource) -> Option<(PolicyPrincipalKind, &str)> {
+    match resource.kind.as_str() {
+        RESOURCE_AGENT | RESOURCE_AGENT_MAILBOX => Some((PolicyPrincipalKind::Agent, &resource.id)),
+        RESOURCE_MACHINE => Some((PolicyPrincipalKind::Machine, &resource.id)),
+        RESOURCE_HUMAN_MAILBOX => Some((PolicyPrincipalKind::Human, &resource.id)),
+        _ => None,
+    }
+}
+
 impl PolicyDecision {
     fn into_result(self) -> Result<(), ProtocolError> {
         match self {
@@ -195,6 +413,8 @@ impl PolicyDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use treer_protocol::{PolicyPrincipalGroup, WorkspacePolicyDocument, POLICY_SCHEMA_VERSION};
 
     struct StaticEvaluator(PolicyEvaluation);
 
@@ -298,5 +518,97 @@ mod tests {
             request.resource.attributes["destination_server_id"],
             "machine-b"
         );
+    }
+
+    #[test]
+    fn compiled_policy_applies_priority_deny_ties_and_monitor_mode() {
+        let document = WorkspacePolicyDocument {
+            schema_version: POLICY_SCHEMA_VERSION,
+            defaults: BTreeMap::from([(ACTION_AGENT_PROMPT.to_string(), PolicyEffect::Deny)]),
+            groups: BTreeMap::from([(
+                "reviewers".to_string(),
+                PolicyPrincipalGroup {
+                    principals: vec![PolicyPrincipalRef {
+                        kind: PolicyPrincipalKind::Agent,
+                        id: "target".to_string(),
+                    }],
+                },
+            )]),
+            rules: vec![
+                WorkspacePolicyRule {
+                    id: "allow-reviewer".to_string(),
+                    priority: 10,
+                    effect: PolicyEffect::Allow,
+                    subjects: vec![PolicySubjectSelector {
+                        kind: Some(PolicyPrincipalKind::Agent),
+                        id: Some("source".to_string()),
+                        machine_id: Some("machine-a".to_string()),
+                        group: None,
+                        is_self: false,
+                    }],
+                    actions: vec![ACTION_AGENT_PROMPT.to_string()],
+                    resources: vec![PolicyResourceSelector {
+                        kind: Some(RESOURCE_AGENT.to_string()),
+                        id: None,
+                        principal_group: Some("reviewers".to_string()),
+                    }],
+                },
+                WorkspacePolicyRule {
+                    id: "deny-tie".to_string(),
+                    priority: 10,
+                    effect: PolicyEffect::Deny,
+                    subjects: vec![PolicySubjectSelector {
+                        kind: Some(PolicyPrincipalKind::Agent),
+                        id: Some("source".to_string()),
+                        machine_id: None,
+                        group: None,
+                        is_self: false,
+                    }],
+                    actions: vec![ACTION_AGENT_PROMPT.to_string()],
+                    resources: vec![PolicyResourceSelector {
+                        kind: Some(RESOURCE_AGENT.to_string()),
+                        id: Some("target".to_string()),
+                        principal_group: None,
+                    }],
+                },
+            ],
+        };
+        let request = PolicyRequest::new(
+            "workspace-a",
+            PolicySubject::Agent {
+                server_id: "machine-a".to_string(),
+                agent_id: "source".to_string(),
+            },
+            ACTION_AGENT_PROMPT,
+            PolicyResource::new(RESOURCE_AGENT, "target"),
+        );
+        let enforce = CompiledWorkspacePolicy::compile(WorkspacePolicy {
+            workspace_id: "workspace-a".to_string(),
+            revision: 1,
+            mode: PolicyMode::Enforce,
+            document: document.clone(),
+            updated_at: Utc::now(),
+            updated_by: PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".to_string(),
+            },
+        });
+        assert!(matches!(
+            enforce.evaluate(&request),
+            PolicyDecision::Deny(_)
+        ));
+
+        let monitor = CompiledWorkspacePolicy::compile(WorkspacePolicy {
+            workspace_id: "workspace-a".to_string(),
+            revision: 1,
+            mode: PolicyMode::Monitor,
+            document,
+            updated_at: Utc::now(),
+            updated_by: PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".to_string(),
+            },
+        });
+        assert_eq!(monitor.evaluate(&request), PolicyDecision::Allow);
     }
 }

@@ -24,6 +24,8 @@ pub struct ServiceConfig {
     pub workspace: String,
     pub server_id: String,
     pub machine_token: String,
+    #[serde(default)]
+    pub operator_credential: String,
     pub root: PathBuf,
     pub listen: String,
     pub host_socket: PathBuf,
@@ -1174,6 +1176,7 @@ mod tests {
             workspace: "default".to_string(),
             server_id: "srv_test".to_string(),
             machine_token: "srv_test.secret".to_string(),
+            operator_credential: "op_test".to_string(),
             root: PathBuf::from("/tmp"),
             listen: address.to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),

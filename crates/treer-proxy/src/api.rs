@@ -33,12 +33,15 @@ use crate::agent_socket;
 use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
 use crate::identity::IdentityIssuer;
 use crate::policy::{
-    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_HUMAN_LIST,
-    ACTION_IDENTITY_TOKEN_ISSUE, ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE,
-    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
-    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
-    RESOURCE_AGENT_MAILBOX, RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX,
-    RESOURCE_MACHINE_SERVICE, RESOURCE_VIRTUAL_HOST,
+    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_CREATE,
+    ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT, ACTION_AGENT_METADATA_READ,
+    ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP, ACTION_AGENT_UPDATE,
+    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE,
+    ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE,
+    ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
+    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT, RESOURCE_AGENT_MAILBOX,
+    RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX, RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE,
+    RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
 
@@ -932,11 +935,46 @@ async fn create_workspace(
 
 async fn workspace_snapshot(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    Ok(Json(serde_json::to_value(
-        state.snapshot(&workspace_id).await?,
-    )?))
+    let mut snapshot = state.snapshot(&workspace_id).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    if let Some(PolicySubject::Machine { server_id }) = subject.as_ref() {
+        snapshot
+            .servers
+            .retain(|server| &server.server_id == server_id);
+        snapshot
+            .agents
+            .retain(|agent| &agent.server_id == server_id);
+    } else if subject.is_some() {
+        let mut visible = Vec::new();
+        for agent in snapshot.agents {
+            match authorize_control(
+                &policy,
+                &workspace_id,
+                subject.as_ref(),
+                ACTION_AGENT_DISCOVER,
+                agent_policy_resource(&agent),
+            )
+            .await
+            {
+                Ok(()) => visible.push(agent),
+                Err(error) if error.error.code == "policy_denied" => {}
+                Err(error) => return Err(error),
+            }
+        }
+        snapshot.agents = visible;
+    }
+    Ok(Json(serde_json::to_value(snapshot)?))
 }
 
 async fn list_servers(
@@ -1567,6 +1605,70 @@ async fn agent_policy_subject(
     })
 }
 
+async fn control_policy_subject(
+    state: &AppState,
+    machine: Option<&MachineSession>,
+    headers: &HeaderMap,
+    workspace_id: &str,
+) -> Result<Option<PolicySubject>, ApiFailure> {
+    let Some(machine) = machine else {
+        return Ok(None);
+    };
+    if headers.contains_key(AGENT_ID_HEADER) {
+        agent_policy_subject(state, machine, headers, workspace_id)
+            .await
+            .map(Some)
+    } else {
+        Ok(Some(PolicySubject::Machine {
+            server_id: machine.server_id.clone().ok_or_else(|| {
+                ProtocolError::new("machine_identity_required", "machine identity is required")
+            })?,
+        }))
+    }
+}
+
+fn require_machine_target(
+    subject: Option<&PolicySubject>,
+    target_server_id: &str,
+) -> Result<(), ApiFailure> {
+    if let Some(PolicySubject::Machine { server_id }) = subject {
+        if server_id != target_server_id {
+            return Err(ProtocolError::new(
+                "agent_identity_required",
+                "cross-machine operations require an authenticated Agent workload credential",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+async fn authorize_control(
+    policy: &PolicyEngine,
+    workspace_id: &str,
+    subject: Option<&PolicySubject>,
+    action: &str,
+    resource: PolicyResource,
+) -> Result<(), ApiFailure> {
+    let Some(subject) = subject else {
+        return Ok(());
+    };
+    policy
+        .authorize(&PolicyRequest::new(
+            workspace_id,
+            subject.clone(),
+            action,
+            resource,
+        ))
+        .await?;
+    Ok(())
+}
+
+fn agent_policy_resource(agent: &AgentInfo) -> PolicyResource {
+    PolicyResource::new(RESOURCE_AGENT, &agent.agent_id)
+        .with_attribute("server_id", &agent.server_id)
+}
+
 fn policy_actor_name(subject: &PolicySubject) -> String {
     match subject {
         PolicySubject::Agent { agent_id, .. } => format!("agent:{agent_id}"),
@@ -1598,28 +1700,95 @@ fn machine_service_policy_resource(
 
 async fn list_agents(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
     let snapshot = state.snapshot(&workspace_id).await?;
-    Ok(Json(json!({ "agents": snapshot.agents })))
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    let mut agents = Vec::new();
+    for agent in snapshot.agents {
+        if matches!(subject.as_ref(), Some(PolicySubject::Machine { server_id }) if server_id != &agent.server_id)
+        {
+            continue;
+        }
+        match authorize_control(
+            &policy,
+            &workspace_id,
+            subject.as_ref(),
+            ACTION_AGENT_DISCOVER,
+            agent_policy_resource(&agent),
+        )
+        .await
+        {
+            Ok(()) => agents.push(agent),
+            Err(error) if error.error.code == "policy_denied" => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Json(json!({ "agents": agents })))
 }
 
 async fn get_agent(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    Ok(Json(serde_json::to_value(
-        state.resolve_agent(&workspace_id, &target).await?,
-    )?))
+    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_METADATA_READ,
+        agent_policy_resource(&agent),
+    )
+    .await?;
+    Ok(Json(serde_json::to_value(agent)?))
 }
 
 async fn rename_server(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, server_id)): Path<(String, String)>,
     Json(request): Json<RenameRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     state.resolve_server(&workspace_id, &server_id).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_MACHINE_UPDATE,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
     let name = normalize_display_name(request.name)?;
     auth.set_machine_name(&workspace_id, &server_id, &name)
         .await?;
@@ -1631,9 +1800,28 @@ async fn rename_server(
 async fn delete_server(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, server_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let server = state.resolve_server(&workspace_id, &server_id).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_MACHINE_DELETE,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
     let agents = state
         .snapshot(&workspace_id)
         .await?
@@ -1689,10 +1877,29 @@ async fn delete_server(
 async fn rename_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<RenameRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_UPDATE,
+        agent_policy_resource(&agent),
+    )
+    .await?;
     let name = normalize_display_name(request.name)?;
     auth.set_agent_name(&workspace_id, &agent.agent_id, &name)
         .await?;
@@ -1706,9 +1913,28 @@ async fn rename_agent(
 async fn delete_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_DELETE,
+        agent_policy_resource(&agent),
+    )
+    .await?;
     if !agent.status.is_terminal() {
         state
             .send_command(
@@ -1739,18 +1965,45 @@ fn normalize_display_name(name: String) -> Result<String, ProtocolError> {
 
 async fn create_agent(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path(workspace_id): Path<String>,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     let server_id = state
         .select_server(&workspace_id, request.server_id.as_deref())
         .await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_CREATE,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
+    let workload_credential = auth
+        .create_agent_credential(&workspace_id, &server_id, &agent_id)
+        .await?;
     let data = state
         .send_command(
             &workspace_id,
             &server_id,
-            AgentCommand::Create { agent_id, request },
+            AgentCommand::Create {
+                agent_id: agent_id.clone(),
+                workload_credential,
+                request,
+            },
         )
         .await?;
     Ok(Json(data))
@@ -1758,10 +2011,29 @@ async fn create_agent(
 
 async fn prompt_agent(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<PromptAgentRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_PROMPT,
+        agent_policy_resource(&agent),
+    )
+    .await?;
     let data = state
         .send_command(
             &workspace_id,
@@ -1777,10 +2049,29 @@ async fn prompt_agent(
 
 async fn input_agent(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<InputAgentRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_INPUT,
+        agent_policy_resource(&agent),
+    )
+    .await?;
     let data = state
         .send_command(
             &workspace_id,
@@ -1796,10 +2087,29 @@ async fn input_agent(
 
 async fn read_agent(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_OUTPUT_READ,
+        agent_policy_resource(&agent),
+    )
+    .await?;
     let lines = query.get("lines").and_then(|value| value.parse().ok());
     let data = state
         .send_command(
@@ -1816,9 +2126,28 @@ async fn read_agent(
 
 async fn stop_agent(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_STOP,
+        agent_policy_resource(&agent),
+    )
+    .await?;
     let data = state
         .send_command(
             &workspace_id,
@@ -1847,16 +2176,35 @@ const fn default_terminal_rows() -> u16 {
     36
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn agent_terminal(
     State(state): State<AppState>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
     Path((workspace_id, agent_id)): Path<(String, String)>,
     Query(query): Query<TerminalQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiFailure> {
     browser.validate_if_present(&headers)?;
-    state.resolve_agent_server(&workspace_id, &agent_id).await?;
+    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_INPUT,
+        agent_policy_resource(&agent),
+    )
+    .await?;
     Ok(ws.on_upgrade(move |socket| {
         stream_terminal(
             socket,
@@ -2433,6 +2781,17 @@ mod tests {
         assert!(normalize_display_name("  ".to_string()).is_err());
         assert!(normalize_display_name("bad\nname".to_string()).is_err());
         assert!(normalize_display_name("x".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn machine_principals_cannot_target_another_machine() {
+        let subject = PolicySubject::Machine {
+            server_id: "machine-a".to_string(),
+        };
+        assert!(require_machine_target(Some(&subject), "machine-a").is_ok());
+        let error = require_machine_target(Some(&subject), "machine-b")
+            .expect_err("cross-machine operation must require Agent identity");
+        assert_eq!(error.error.code, "agent_identity_required");
     }
 
     #[tokio::test]

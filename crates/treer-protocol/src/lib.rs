@@ -10,6 +10,7 @@ pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
 pub const WORKLOAD_CREDENTIAL_HEADER: &str = "x-treer-workload-credential";
+pub const OPERATOR_CREDENTIAL_HEADER: &str = "x-treer-operator-credential";
 pub const TERMINAL_BINARY_VERSION: u8 = 1;
 const TERMINAL_BINARY_HEADER_LEN: usize = 12;
 pub const NETWORK_BINARY_VERSION: u8 = 1;
@@ -385,6 +386,7 @@ pub struct AgentServerSnapshot {
 pub enum AgentCommand {
     Create {
         agent_id: String,
+        workload_credential: String,
         request: CreateAgentRequest,
     },
     Prompt {

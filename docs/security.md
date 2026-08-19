@@ -26,7 +26,8 @@ The following statements are grounded in current behavior:
 - Machines connect outward to the Proxy; operators do not need to publish Agent
   Server or local service ports.
 - A short-lived, single-use enrollment key creates a long-lived credential
-  bound to one server and one workspace.
+  bound to one server and one workspace. Machine-only control requests cannot
+  target another machine.
 - Browser users authenticate, and Proxy lookups are scoped through organization
   membership and workspace identity.
 - The browser application and Proxy use separate origins. Credentialed CORS and
@@ -46,7 +47,9 @@ The following statements are grounded in current behavior:
   health probing, and routing do not cause Treer to own or sandbox the external
   service process.
 - The Proxy is open source and can be self-hosted, inspected, and replaced.
-- Managed Agents can exchange their private workload credential for a
+- Managed Agents authenticate to both the Controller and Proxy with their
+  private workload credential. The Proxy stores only its SHA-256 hash and binds
+  it to the Agent, machine, and workspace. Managed Agents can exchange it for a
   60-second, Ed25519-signed token bound to one registered service. The Proxy
   resolves the stable Agent, machine, workspace, and service IDs before signing.
 
@@ -66,15 +69,15 @@ Do not describe the current system as:
 
 The current Controller launches coding agents with permission-bypass flags. The
 Linux wrapper isolates networking but not the host filesystem. The production
-policy implementation currently permits all evaluated actions. Local
-Controller access trusts the loopback boundary, and authorized workspace
-members share a broad operational surface.
+policy implementation preserves allow behavior when a workspace has no policy
+document. Local Controller control routes require either an Agent workload
+credential or a separate operator credential.
 
-The Controller preserves a validated managed-Agent identity when proxying Agent
-control HTTP and terminal WebSocket requests. This is attribution plumbing, not
-authorization: the Proxy does not yet apply the stored workspace policy
-document to those routes, and header-free local operator requests still use the
-loopback/machine trust path.
+The Controller preserves a validated managed-Agent identity and workload
+credential when proxying Agent control HTTP and terminal WebSocket requests.
+The Proxy validates the credential again and applies the stored workspace
+policy. Machine-only requests are restricted to their own machine; an
+authenticated Agent credential is mandatory for cross-machine control.
 
 ## Credential and identity boundaries
 
@@ -84,9 +87,10 @@ loopback/machine trust path.
 | Password reset token | One user, 30 minutes, single use | Delivered through the configured email account; email access becomes an account-recovery trust boundary |
 | Admin session cookie | User invitation creation and aggregate platform resource counts | Separate high-impact trust boundary |
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
-| Machine Bearer credential | One machine record and workspace | Controller operations are attributed primarily to the machine |
+| Machine Bearer credential | One machine record and workspace | Machine-only control is limited to resources on that machine; the credential remains long-lived |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
-| Agent workload credential | One managed Agent process; Controller validation and identity propagation for managed-Agent discovery, control, terminal, mail, service, inbox, and workload-token requests | The Proxy does not yet enforce Agent policy on control routes; same-account host processes may inspect another process environment or Host metadata |
+| Agent workload credential | One managed Agent process; independently validated by Controller and Proxy for managed-Agent discovery, control, terminal, mail, service, inbox, and workload-token requests | Same-account host processes may inspect another process environment or Host metadata |
+| Local operator credential | One installed Controller; used by the human CLI and never injected into managed-Agent environments | Stored under the same OS account, so it is not a sandbox boundary against a hostile same-account process |
 | Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
 

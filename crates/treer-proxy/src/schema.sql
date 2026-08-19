@@ -153,6 +153,17 @@ CREATE TABLE IF NOT EXISTS machines (
 CREATE UNIQUE INDEX IF NOT EXISTS machines_workspace_installation
     ON machines(workspace_id, installation_id) WHERE installation_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS agent_credentials (
+    agent_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    secret_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS agent_credentials_workspace_server
+    ON agent_credentials(workspace_id, server_id) WHERE revoked_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS machine_names (
     server_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

@@ -792,14 +792,6 @@ impl AppState {
         Ok(agent)
     }
 
-    pub async fn resolve_agent_server(
-        &self,
-        workspace_id: &str,
-        target: &str,
-    ) -> Result<String, ProtocolError> {
-        Ok(self.resolve_agent(workspace_id, target).await?.server_id)
-    }
-
     pub async fn resolve_agent(
         &self,
         workspace_id: &str,

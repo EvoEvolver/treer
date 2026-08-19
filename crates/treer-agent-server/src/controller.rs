@@ -16,6 +16,7 @@ use treer_protocol::{
     AgentInfo, AgentStatus, CreateAgentRequest, ProtocolError, ReadAgentOutputResponse,
     VirtualNetworkHostsSnapshot,
 };
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::host_client::{HostClient, HostEvents};
@@ -208,6 +209,7 @@ impl ControllerRuntime {
         &self,
         operation_id: &str,
         agent_id: String,
+        workload_credential: String,
         request: CreateAgentRequest,
     ) -> Result<AgentInfo, ProtocolError> {
         if request.name.trim().is_empty() {
@@ -217,7 +219,12 @@ impl ControllerRuntime {
             ));
         }
         let launch = resolve_launch(&request)?;
-        let workload_credential = new_workload_credential();
+        if !valid_workload_credential(&workload_credential) {
+            return Err(ProtocolError::new(
+                "invalid_workload_credential",
+                "Proxy supplied an invalid workload credential",
+            ));
+        }
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
             workspace_id: self.inner.workspace_id.clone(),
@@ -718,8 +725,15 @@ impl ControllerRuntime {
     }
 }
 
+#[cfg(test)]
 fn new_workload_credential() -> String {
     format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn valid_workload_credential(credential: &str) -> bool {
+    credential.starts_with("wlc_")
+        && credential.len() == 68
+        && credential[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn workload_credential_matches(expected: &str, supplied: &str) -> bool {

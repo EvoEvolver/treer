@@ -1,7 +1,7 @@
 # Agent communication policy design
 
-- Status: foundation partially implemented
-- Reviewed against source: 2026-08-19 at `c389bd6`
+- Status: enforcement foundation implemented
+- Reviewed against source: 2026-08-19
 
 ## Implementation progress
 
@@ -16,15 +16,19 @@ Implemented on `codex/agent-policy-design`:
 - managed-Agent identity validation and propagation from the CLI, through the
   Controller, to Proxy HTTP and terminal WebSocket requests for discovery and
   Agent control operations as well as the existing mail/service paths.
+- Proxy-side workload credential hashing, validation, and machine/workspace
+  binding;
+- machine-only same-machine guards and Agent-token requirements for
+  cross-machine control;
+- action-indexed JSONB policy compilation and five-second per-workspace caches;
+- enforcement for Agent discovery, metadata, prompt, input, output, terminal,
+  lifecycle, creation, and machine mutation routes.
 
 Not implemented in this slice:
 
-- Proxy policy enforcement, target filtering, check/explain APIs, or a compiled
-  policy evaluator;
-- the in-memory compiled-policy cache and PostgreSQL notification listener;
-- a distinct local operator credential; header-free local operator requests
-  retain their current machine path until that credential can be introduced
-  without breaking the human CLI workflow;
+- check/explain and policy-management APIs;
+- PostgreSQL notification-driven cache invalidation (the current cache uses a
+  five-second freshness bound);
 - policy administration UI, delegation, or durable decision audit.
 
 ## Goal
@@ -48,25 +52,17 @@ Treer already has the correct basic authorization shape in
 - policy calls around mail, inbox, human-directory, service, virtual-host,
   network, and workload-identity operations.
 
-Production constructs this engine with `PolicyEngine::allow_all()`. There is no
-durable rule evaluator, policy-management API, cache invalidation, or decision
-explanation.
+Production constructs the engine with a durable evaluator. It lazily loads and
+compiles each workspace document, indexes rules by action, and reuses the
+immutable result for five seconds. Agent control routes now provide distinct
+actions for discovery, metadata, prompt, raw input, output, terminal, stop,
+create, update, and delete. Browser calls retain membership authorization and
+do not become machine or Agent policy subjects.
 
-The Agent control routes are also not ready for restrictive policy:
-
-- Agent list, get, prompt, raw input, output read, terminal attach, stop,
-  create, rename, and delete do not call the policy engine.
-- The Controller validates the Agent workload credential for mail, inbox,
-  human listing, and identity tokens, but Agent control handlers discard the
-  source Agent headers and forward only machine authority.
-- A mail send authorizes each resolved mailbox, but recipient resolution first
-  reads the complete workspace Agent snapshot and human directory.
-- Browser and Agent routes share several handlers even though their principals
-  and future defaults differ.
-
-The identity propagation gap must be fixed before an Agent-to-Agent rule can be
-treated as enforcement. Adding database rules only to `mail.send` would leave
-prompt and raw terminal input as bypasses.
+Remaining gaps are policy management/check/explain APIs, notification-driven
+cache invalidation, pinned revisions across a whole batch, and durable decision
+audit. A mail send still resolves the complete workspace directory before
+authorizing each recipient, so denial behavior must avoid leaking hidden names.
 
 ## Security boundary
 
@@ -80,10 +76,10 @@ Proxy then verifies that an Agent belongs to the authenticated machine and
 workspace; operator requests use the separate machine principal.
 
 The current local runtime is not strong isolation. Agents and the Controller
-can share an OS account, the local API trusts loopback for broad operations,
-and coding Agents run with permission-bypass flags. A hostile local process may
-omit Agent headers, steal host-readable credentials, or call another local
-surface. Strong enforcement against that attacker requires filesystem/process
+can share an OS account and coding Agents run with permission-bypass flags. A
+hostile same-account process may steal the owner-only operator or machine
+configuration even though simply omitting Agent headers is now rejected by the
+Controller. Strong enforcement against that attacker requires filesystem/process
 isolation around the distinct local operator credential, ideally a container
 or microVM. Until then the product claim is governed coordination for trusted
 hosts, not a sandbox boundary.
@@ -372,23 +368,19 @@ tokens are later features.
 
 1. **Pending:** Add `Human` to Proxy `PolicySubject` and introduce
    `RequestPrincipal` middleware.
-2. **Partial:** Managed-Agent workload credentials are validated and propagated
-   through Controller HTTP and WebSocket routes. The distinct local operator
-   credential remains pending.
-3. **Model complete, enforcement pending:** Prompt, raw input, attach, output,
-   and lifecycle actions are distinct policy vocabulary but are not authorized
-   by the Proxy yet.
-4. **Partial:** Header-pair validation and policy wire-shape tests exist.
-   End-to-end spoofing and operator-credential tests remain pending.
-
-This phase may ship with allow-all behavior. It is a prerequisite for policy,
-not a user-visible restriction.
+2. **Complete for machine/Agent principals:** Managed-Agent workload
+   credentials are validated by both Controller and Proxy; local operator
+   credentials prevent header omission from becoming machine authority.
+3. **Complete:** Prompt, raw input, attach, output, lifecycle, discovery, and
+   machine mutation actions are authorized by the Proxy.
+4. **Partial:** Credential, binding, precedence, and operator tests exist. Full
+   two-machine HTTP and terminal denial tests remain pending.
 
 ### Phase 1: durable policy in monitor mode
 
-1. **Partial:** The JSONB row, typed store, validator, revision handling, and
-   transactional invalidation notification are implemented. Compiler, cache,
-   and notification listener remain pending.
+1. **Partial:** The JSONB row, typed store, validator, revision handling,
+   compiler, TTL cache, and transactional invalidation notification are
+   implemented. The notification listener remains pending.
 2. Add owner/admin policy `get`, `put`, `check`, and `explain` APIs.
 3. Instrument every governed route and batch-filter copies of Agent/human
    directories, while preserving results in monitor mode.
@@ -431,7 +423,41 @@ Performance tests should run with at least 1,000 Agents, 1,000 rules, and 100
 concurrent list/control clients. Record p50/p95/p99 decision latency, batch-list
 latency, compile time, cache size, notification-to-swap latency, and database
 queries per request. The acceptance criterion for a cache hit is zero database
-queries and no asynchronous boundary inside the compiled evaluator.
+queries and no network I/O inside the compiled evaluator.
+
+## Current performance assessment
+
+The added hot-path work is one SHA-256 digest and constant-time comparison for
+Agent authentication, one in-memory credential-cache lookup, one workspace
+policy-cache lookup, and action-indexed selector matching. Machine-only and
+browser requests do not hash an Agent credential. Policy cache hits perform no
+PostgreSQL query; a workspace produces at most one refresh query per five-second
+window per Proxy under steady load.
+
+The pre-existing machine authentication remains more expensive than the new
+checks because each HTTP or WebSocket handshake performs a PostgreSQL lookup
+and Argon2 verification. A short-lived Proxy-signed machine session or a
+revocation-aware machine-auth cache should be benchmarked before optimizing the
+SHA-256 Agent check.
+
+Agent credential entries currently use the same five-second freshness bound so
+cross-replica deletion becomes effective without relying on a notification
+listener. That is deliberately conservative but is the main scaling cost: `N`
+continuously active Agents can produce up to `N / 5` credential lookup queries
+per second on each Proxy. Before operating thousands of simultaneously active
+Agents, add PostgreSQL `LISTEN/NOTIFY` invalidation for credential revocation and
+policy changes, retain a longer fallback TTL for missed notifications, and use
+single-flight refreshes so concurrent expiry causes one query. The next
+optimizations, in order, are:
+
+1. Pin one compiled policy revision for batch discovery and multi-recipient
+   operations instead of reacquiring the cache for every target.
+2. Replace cloned per-action rules with shared compiled rule indices and
+   precomputed principal-group membership sets.
+3. Issue short-lived Proxy-verifiable Agent session tokens after workload
+   credential exchange if database refresh traffic remains material.
+4. Benchmark 1,000 rules and 1,000 visible Agents before adding more selector
+   types.
 
 ## Recommendation
 
