@@ -70,6 +70,12 @@ policy implementation currently permits all evaluated actions. Local
 Controller access trusts the loopback boundary, and authorized workspace
 members share a broad operational surface.
 
+The Controller preserves a validated managed-Agent identity when proxying Agent
+control HTTP and terminal WebSocket requests. This is attribution plumbing, not
+authorization: the Proxy does not yet apply the stored workspace policy
+document to those routes, and header-free local operator requests still use the
+loopback/machine trust path.
+
 ## Credential and identity boundaries
 
 | Credential or identity | Scope | Important limitation |
@@ -80,7 +86,7 @@ members share a broad operational surface.
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
 | Machine Bearer credential | One machine record and workspace | Controller operations are attributed primarily to the machine |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
-| Agent workload credential | One managed Agent process; human discovery, inbox, mail, and workload-token requests | Same-account host processes may be able to inspect another process environment or Host metadata |
+| Agent workload credential | One managed Agent process; Controller validation and identity propagation for managed-Agent discovery, control, terminal, mail, service, inbox, and workload-token requests | The Proxy does not yet enforce Agent policy on control routes; same-account host processes may inspect another process environment or Host metadata |
 | Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
 

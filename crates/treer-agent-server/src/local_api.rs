@@ -103,21 +103,12 @@ impl LocalApiState {
         decode(response).await
     }
 
-    async fn get(&self, suffix: &str) -> Result<Value, LocalApiError> {
-        self.request(reqwest::Method::GET, suffix, None, None).await
-    }
-
     async fn get_as(
         &self,
         suffix: &str,
         source_agent_id: Option<&str>,
     ) -> Result<Value, LocalApiError> {
         self.request(reqwest::Method::GET, suffix, None, source_agent_id)
-            .await
-    }
-
-    async fn post(&self, suffix: &str, body: &Value) -> Result<Value, LocalApiError> {
-        self.request(reqwest::Method::POST, suffix, Some(body), None)
             .await
     }
 
@@ -131,11 +122,6 @@ impl LocalApiState {
             .await
     }
 
-    async fn patch(&self, suffix: &str, body: &Value) -> Result<Value, LocalApiError> {
-        self.request(reqwest::Method::PATCH, suffix, Some(body), None)
-            .await
-    }
-
     async fn patch_as(
         &self,
         suffix: &str,
@@ -143,11 +129,6 @@ impl LocalApiState {
         source_agent_id: Option<&str>,
     ) -> Result<Value, LocalApiError> {
         self.request(reqwest::Method::PATCH, suffix, Some(body), source_agent_id)
-            .await
-    }
-
-    async fn delete(&self, suffix: &str) -> Result<Value, LocalApiError> {
-        self.request(reqwest::Method::DELETE, suffix, None, None)
             .await
     }
 
@@ -216,8 +197,14 @@ async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     }))
 }
 
-async fn discovery(State(state): State<LocalApiState>) -> Result<Json<Value>, LocalApiError> {
-    Ok(Json(state.get("snapshot").await?))
+async fn discovery(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state.get_as("snapshot", source_agent_id.as_deref()).await?,
+    ))
 }
 
 async fn issue_identity_token(
@@ -225,16 +212,12 @@ async fn issue_identity_token(
     headers: HeaderMap,
     Json(request): Json<WorkloadIdentityTokenRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let (agent_id, workload_credential) = workload_identity(&headers)?;
-    state
-        .runtime
-        .authenticate_agent(agent_id, workload_credential)
-        .map_err(LocalApiError::unauthorized)?;
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     let body = serde_json::to_value(request)
         .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
     Ok(Json(
         state
-            .post_as("identity/token", &body, Some(agent_id))
+            .post_as("identity/token", &body, Some(&agent_id))
             .await?,
     ))
 }
@@ -244,14 +227,10 @@ async fn send_mail(
     headers: HeaderMap,
     Json(request): Json<SendAgentMailRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let (agent_id, workload_credential) = workload_identity(&headers)?;
-    state
-        .runtime
-        .authenticate_agent(agent_id, workload_credential)
-        .map_err(LocalApiError::unauthorized)?;
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     let body = serde_json::to_value(request)
         .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
-    Ok(Json(state.post_as("mail", &body, Some(agent_id)).await?))
+    Ok(Json(state.post_as("mail", &body, Some(&agent_id)).await?))
 }
 
 async fn read_inbox(
@@ -259,41 +238,36 @@ async fn read_inbox(
     headers: HeaderMap,
     Json(request): Json<AgentInboxRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let (agent_id, workload_credential) = workload_identity(&headers)?;
-    state
-        .runtime
-        .authenticate_agent(agent_id, workload_credential)
-        .map_err(LocalApiError::unauthorized)?;
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     let body = serde_json::to_value(request)
         .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
-    Ok(Json(state.post_as("inbox", &body, Some(agent_id)).await?))
+    Ok(Json(state.post_as("inbox", &body, Some(&agent_id)).await?))
 }
 
 async fn list_humans(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, LocalApiError> {
-    let (agent_id, workload_credential) = workload_identity(&headers)?;
-    state
-        .runtime
-        .authenticate_agent(agent_id, workload_credential)
-        .map_err(LocalApiError::unauthorized)?;
-    Ok(Json(state.get_as("humans", Some(agent_id)).await?))
+    let agent_id = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("humans", Some(&agent_id)).await?))
 }
 
-async fn list_agents(State(state): State<LocalApiState>) -> Result<Json<Value>, LocalApiError> {
-    Ok(Json(state.get("agents").await?))
+async fn list_agents(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state.get_as("agents", source_agent_id.as_deref()).await?,
+    ))
 }
 
 async fn list_machine_services(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, LocalApiError> {
-    Ok(Json(
-        state
-            .get_as("services", Some(source_agent_id(&headers)?))
-            .await?,
-    ))
+    let agent_id = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("services", Some(&agent_id)).await?))
 }
 
 async fn create_machine_service(
@@ -301,13 +275,14 @@ async fn create_machine_service(
     headers: HeaderMap,
     Json(request): Json<CreateMachineServiceRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .post_as(
                 "services",
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
-                Some(source_agent_id(&headers)?),
+                Some(&agent_id),
             )
             .await?,
     ))
@@ -319,13 +294,14 @@ async fn update_machine_service(
     Path(service_id): Path<String>,
     Json(request): Json<UpdateMachineServiceRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .patch_as(
                 &format!("services/{service_id}"),
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
-                Some(source_agent_id(&headers)?),
+                Some(&agent_id),
             )
             .await?,
     ))
@@ -336,12 +312,10 @@ async fn delete_machine_service(
     headers: HeaderMap,
     Path(service_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .delete_as(
-                &format!("services/{service_id}"),
-                Some(source_agent_id(&headers)?),
-            )
+            .delete_as(&format!("services/{service_id}"), Some(&agent_id))
             .await?,
     ))
 }
@@ -351,12 +325,13 @@ async fn probe_machine_service(
     headers: HeaderMap,
     Path(service_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .post_as(
                 &format!("services/{service_id}/probe"),
                 &json!({}),
-                Some(source_agent_id(&headers)?),
+                Some(&agent_id),
             )
             .await?,
     ))
@@ -366,11 +341,8 @@ async fn list_virtual_network_hosts(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, LocalApiError> {
-    Ok(Json(
-        state
-            .get_as("virtual-hosts", Some(source_agent_id(&headers)?))
-            .await?,
-    ))
+    let agent_id = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("virtual-hosts", Some(&agent_id)).await?))
 }
 
 async fn create_virtual_network_host(
@@ -378,13 +350,14 @@ async fn create_virtual_network_host(
     headers: HeaderMap,
     Json(request): Json<CreateVirtualNetworkHostRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .post_as(
                 "virtual-hosts",
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
-                Some(source_agent_id(&headers)?),
+                Some(&agent_id),
             )
             .await?,
     ))
@@ -395,12 +368,10 @@ async fn delete_virtual_network_host(
     headers: HeaderMap,
     Path(hostname): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let agent_id = required_validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .delete_as(
-                &format!("virtual-hosts/{hostname}"),
-                Some(source_agent_id(&headers)?),
-            )
+            .delete_as(&format!("virtual-hosts/{hostname}"), Some(&agent_id))
             .await?,
     ))
 }
@@ -436,23 +407,75 @@ fn workload_identity(headers: &HeaderMap) -> Result<(&str, &str), LocalApiError>
     Ok((agent_id, credential))
 }
 
+fn optional_workload_identity(headers: &HeaderMap) -> Result<Option<(&str, &str)>, LocalApiError> {
+    let has_agent_id = headers.contains_key(AGENT_ID_HEADER);
+    let has_credential = headers.contains_key(WORKLOAD_CREDENTIAL_HEADER);
+    match (has_agent_id, has_credential) {
+        (false, false) => Ok(None),
+        (true, true) => workload_identity(headers).map(Some),
+        (true, false) => Err(LocalApiError::unauthorized(ProtocolError::new(
+            "workload_credential_required",
+            "managed agent workload credential is required",
+        ))),
+        (false, true) => Err(LocalApiError::unauthorized(ProtocolError::new(
+            "agent_identity_required",
+            "managed agent identity is required with a workload credential",
+        ))),
+    }
+}
+
+fn validated_source_agent(
+    state: &LocalApiState,
+    headers: &HeaderMap,
+) -> Result<Option<String>, LocalApiError> {
+    let Some((agent_id, workload_credential)) = optional_workload_identity(headers)? else {
+        return Ok(None);
+    };
+    state
+        .runtime
+        .authenticate_agent(agent_id, workload_credential)
+        .map_err(LocalApiError::unauthorized)?;
+    Ok(Some(agent_id.to_string()))
+}
+
+fn required_validated_source_agent(
+    state: &LocalApiState,
+    headers: &HeaderMap,
+) -> Result<String, LocalApiError> {
+    validated_source_agent(state, headers)?.ok_or_else(|| {
+        LocalApiError::unauthorized(ProtocolError::new(
+            "workload_identity_required",
+            "managed agent identity and workload credential are required",
+        ))
+    })
+}
+
 async fn get_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
-    Ok(Json(state.get(&format!("agents/{agent_id}")).await?))
+    let source_agent_id = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(&format!("agents/{agent_id}"), source_agent_id.as_deref())
+            .await?,
+    ))
 }
 
 async fn create_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .post(
+            .post_as(
                 "agents",
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+                source_agent_id.as_deref(),
             )
             .await?,
     ))
@@ -460,15 +483,18 @@ async fn create_agent(
 
 async fn rename_machine(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(server_id): Path<String>,
     Json(request): Json<RenameRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .patch(
+            .patch_as(
                 &format!("servers/{server_id}"),
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+                source_agent_id.as_deref(),
             )
             .await?,
     ))
@@ -476,22 +502,31 @@ async fn rename_machine(
 
 async fn delete_machine(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(server_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
-    Ok(Json(state.delete(&format!("servers/{server_id}")).await?))
+    let source_agent_id = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(&format!("servers/{server_id}"), source_agent_id.as_deref())
+            .await?,
+    ))
 }
 
 async fn rename_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
     Json(request): Json<RenameRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .patch(
+            .patch_as(
                 &format!("agents/{agent_id}"),
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+                source_agent_id.as_deref(),
             )
             .await?,
     ))
@@ -499,9 +534,15 @@ async fn rename_agent(
 
 async fn delete_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
-    Ok(Json(state.delete(&format!("agents/{agent_id}")).await?))
+    let source_agent_id = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(&format!("agents/{agent_id}"), source_agent_id.as_deref())
+            .await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -522,20 +563,27 @@ const fn default_terminal_rows() -> u16 {
 
 async fn agent_terminal(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
     Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     let mut upstream = state.proxy_websocket_url(&format!("agents/{agent_id}/terminal"))?;
     upstream
         .query_pairs_mut()
         .append_pair("cols", &query.cols.max(1).to_string())
         .append_pair("rows", &query.rows.max(1).to_string());
-    Ok(ws.on_upgrade(move |socket| relay_terminal(socket, state, upstream)))
+    Ok(ws.on_upgrade(move |socket| relay_terminal(socket, state, upstream, source_agent_id)))
 }
 
-async fn relay_terminal(socket: WebSocket, state: LocalApiState, upstream: Url) {
-    if let Err(error) = relay_terminal_inner(socket, state, upstream).await {
+async fn relay_terminal(
+    socket: WebSocket,
+    state: LocalApiState,
+    upstream: Url,
+    source_agent_id: Option<String>,
+) {
+    if let Err(error) = relay_terminal_inner(socket, state, upstream, source_agent_id).await {
         tracing::warn!(error = %error.message, "local terminal relay closed");
     }
 }
@@ -544,6 +592,7 @@ async fn relay_terminal_inner(
     mut socket: WebSocket,
     state: LocalApiState,
     upstream: Url,
+    source_agent_id: Option<String>,
 ) -> Result<(), ProtocolError> {
     let mut request = upstream
         .as_str()
@@ -554,6 +603,13 @@ async fn relay_terminal_inner(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}"))
                 .map_err(|error| ProtocolError::new("invalid_machine_token", error.to_string()))?,
+        );
+    }
+    if let Some(agent_id) = source_agent_id {
+        request.headers_mut().insert(
+            AGENT_ID_HEADER,
+            HeaderValue::from_str(&agent_id)
+                .map_err(|error| ProtocolError::new("invalid_agent_identity", error.to_string()))?,
         );
     }
     let upstream = match tokio_tungstenite::connect_async(request).await {
@@ -611,15 +667,18 @@ async fn send_terminal_error(socket: &mut WebSocket, code: &str, message: String
 
 async fn prompt_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
     Json(request): Json<PromptAgentRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .post(
+            .post_as(
                 &format!("agents/{agent_id}/prompt"),
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+                source_agent_id.as_deref(),
             )
             .await?,
     ))
@@ -627,15 +686,18 @@ async fn prompt_agent(
 
 async fn input_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
     Json(request): Json<InputAgentRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .post(
+            .post_as(
                 &format!("agents/{agent_id}/input"),
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+                source_agent_id.as_deref(),
             )
             .await?,
     ))
@@ -643,23 +705,33 @@ async fn input_agent(
 
 async fn read_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     let suffix = query.get("lines").map_or_else(
         || format!("agents/{agent_id}/output"),
         |lines| format!("agents/{agent_id}/output?lines={lines}"),
     );
-    Ok(Json(state.get(&suffix).await?))
+    Ok(Json(
+        state.get_as(&suffix, source_agent_id.as_deref()).await?,
+    ))
 }
 
 async fn stop_agent(
     State(state): State<LocalApiState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
+    let source_agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .post(&format!("agents/{agent_id}/stop"), &json!({}))
+            .post_as(
+                &format!("agents/{agent_id}/stop"),
+                &json!({}),
+                source_agent_id.as_deref(),
+            )
             .await?,
     ))
 }
@@ -682,6 +754,7 @@ async fn decode(response: reqwest::Response) -> Result<Value, LocalApiError> {
     }
 }
 
+#[derive(Debug)]
 pub struct LocalApiError {
     status: StatusCode,
     error: ProtocolError,
@@ -744,5 +817,36 @@ mod tests {
             workload_identity(&headers).unwrap_or_else(|_| panic!("workload identity")),
             ("agent-a", "wlc_secret")
         );
+    }
+
+    #[test]
+    fn optional_workload_identity_distinguishes_operator_and_agent_requests() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            optional_workload_identity(&headers).expect("operator request"),
+            None
+        );
+
+        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+        let missing_credential =
+            optional_workload_identity(&headers).expect_err("partial Agent identity");
+        assert_eq!(
+            missing_credential.error.code,
+            "workload_credential_required"
+        );
+
+        headers.insert(
+            WORKLOAD_CREDENTIAL_HEADER,
+            "wlc_secret".parse().expect("credential header"),
+        );
+        assert_eq!(
+            optional_workload_identity(&headers).expect("managed Agent request"),
+            Some(("agent-a", "wlc_secret"))
+        );
+
+        headers.remove(AGENT_ID_HEADER);
+        let missing_agent =
+            optional_workload_identity(&headers).expect_err("credential without Agent ID");
+        assert_eq!(missing_agent.error.code, "agent_identity_required");
     }
 }

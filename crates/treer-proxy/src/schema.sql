@@ -40,6 +40,19 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 CREATE INDEX IF NOT EXISTS workspaces_organization_id ON workspaces(organization_id);
 
+CREATE TABLE IF NOT EXISTS workspace_policies (
+    workspace_id TEXT PRIMARY KEY,
+    revision BIGINT NOT NULL CHECK(revision > 0),
+    schema_version BIGINT NOT NULL CHECK(schema_version > 0),
+    mode TEXT NOT NULL CHECK(mode IN ('monitor', 'enforce')),
+    document JSONB NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by_kind TEXT NOT NULL
+        CHECK(updated_by_kind IN ('human', 'agent', 'machine', 'service')),
+    updated_by_id TEXT NOT NULL,
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS invitations (
     token TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,

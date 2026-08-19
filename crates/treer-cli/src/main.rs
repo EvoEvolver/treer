@@ -11,6 +11,8 @@ use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
@@ -810,7 +812,7 @@ async fn attach_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value>
         .base
         .join(&format!("api/agents/{}/terminal", path_segment(&target)))
         .context("failed to build terminal URL")?;
-    let outcome = relay_terminal(url, &target, true).await?;
+    let outcome = relay_terminal(client, url, &target, true).await?;
     Ok(json!({ "agent": target, "status": "detached", "reason": outcome.reason }))
 }
 
@@ -842,6 +844,7 @@ struct TerminalOutcome {
 }
 
 async fn relay_terminal(
+    client: &ApiClient,
     mut url: Url,
     target: &str,
     interactive_required: bool,
@@ -866,7 +869,23 @@ async fn relay_terminal(
         .append_pair("cols", &cols.max(1).to_string())
         .append_pair("rows", &rows.max(1).to_string());
 
-    let (socket, _) = tokio_tungstenite::connect_async(url.as_str())
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .context("failed to build terminal WebSocket request")?;
+    if let Some(agent_id) = &client.source_agent_id {
+        request.headers_mut().insert(
+            AGENT_ID_HEADER,
+            HeaderValue::from_str(agent_id).context("invalid managed Agent identity")?,
+        );
+    }
+    if let Some(credential) = &client.workload_credential {
+        request.headers_mut().insert(
+            WORKLOAD_CREDENTIAL_HEADER,
+            HeaderValue::from_str(credential).context("invalid Agent workload credential")?,
+        );
+    }
+    let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("failed to connect to {target}"))?;
     if interactive {

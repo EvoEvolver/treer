@@ -17,6 +17,9 @@ matching the question; follow its source links for implementation detail.
 
 ## Historical material
 
+- The proposed [Agent communication policy design](research/2026-08-19-agent-policy-design.md)
+  defines the identity propagation, policy document, cache, and rollout needed
+  to govern Agent discovery, mail, prompt injection, and terminal control.
 - The completed [machine services execution plan](research/2026-08-18-machine-services-plan.md)
   records the service-registry migration and verification scope.
 - The [source-level project review](research/2026-08-18-project-review.md) is a

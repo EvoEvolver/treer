@@ -94,7 +94,7 @@ flowchart TB
 | Browser to App | HTTPS static files and runtime JSON configuration | None |
 | Browser to Proxy | Cross-origin HTTP/JSON and WebSocket frames | Host-only user or admin session cookie; exact App origin allowlist |
 | Controller to Proxy | Persistent WebSocket, JSON and binary frames | Workspace-bound machine Bearer credential |
-| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; mail, inbox, and workload-token requests require the Agent credential |
+| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Managed-Agent requests with identity headers require the matching Agent workload credential; header-free local operator requests retain the current loopback trust path |
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
 | Host to child process | PTY raw bytes | Host process ownership |
 | Proxy replica to Proxy replica | Core NATS MessagePack request/reply and broadcast; JetStream KV for leases, snapshots, and durable projections | Private NATS boundary |
@@ -121,6 +121,18 @@ batch read. Its trace view links context messages already present in that
 delivery history; an inaccessible context remains an unresolved ID. This path
 is shared PostgreSQL state and neither requires NATS nor interrupts a live
 Agent or human.
+
+The managed-Agent CLI also carries its Agent ID and workload credential on
+discovery, Agent control, and terminal WebSocket requests. The Controller
+validates that credential and forwards the verified Agent ID under its machine
+credential. The Proxy currently receives but does not authorize those control
+requests by Agent identity; production policy remains allow-all. Header-free
+local operator requests continue to use the existing loopback/machine path.
+
+Workspace policy documents have a versioned shared wire model and one JSONB row
+per workspace in PostgreSQL. The typed store validates bounded documents, uses
+optimistic revision updates, and emits a transactional PostgreSQL notification.
+No API or authorization path consumes these documents yet.
 
 Each Controller connection,
 pending command, browser session, terminal leg, and network route is
