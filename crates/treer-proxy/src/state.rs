@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
@@ -17,6 +17,10 @@ use treer_protocol::{
 };
 use uuid::Uuid;
 
+use crate::cluster::{
+    ClusterBus, ClusterProjectionUpdate, ClusterServerSnapshot, ClusterSessionDelivery,
+    ClusterSessionKind,
+};
 use crate::event_bus::EventBus;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
@@ -24,10 +28,10 @@ const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const NETWORK_INITIAL_WINDOW: usize = 256 * 1024;
 const NETWORK_MAX_CHUNK: usize = 16 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SocketFrame {
     Text(String),
-    Binary(Vec<u8>),
+    Binary(#[serde(with = "serde_bytes")] Vec<u8>),
     Close,
 }
 
@@ -58,6 +62,8 @@ pub struct AppState {
 struct Inner {
     workspaces: RwLock<HashMap<String, WorkspaceState>>,
     connections: RwLock<HashMap<ServerKey, ServerConnection>>,
+    cluster_snapshot_revisions: Mutex<HashMap<ServerKey, u64>>,
+    cluster_leases: Mutex<HashMap<ServerKey, (u64, Option<Instant>)>>,
     pending: Mutex<HashMap<String, PendingCommand>>,
     terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
     transfer_sessions: Mutex<HashMap<String, TransferSession>>,
@@ -65,6 +71,7 @@ struct Inner {
     browser_network_streams: Mutex<HashMap<NetworkStreamKey, mpsc::Sender<NetworkBinaryFrame>>>,
     events: broadcast::Sender<WorkspaceEvent>,
     event_bus: EventBus,
+    cluster: ClusterBus,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -125,6 +132,8 @@ struct WorkspaceState {
     revision: u64,
     servers: HashMap<String, ServerInfo>,
     agents: HashMap<String, AgentInfo>,
+    server_names: HashMap<String, String>,
+    agent_names: HashMap<String, String>,
     deleted_servers: HashSet<String>,
     deleted_agents: HashSet<String>,
 }
@@ -150,11 +159,20 @@ impl AppState {
     }
 
     pub fn with_event_bus(event_bus: EventBus) -> Self {
+        Self::with_backplanes(
+            event_bus,
+            ClusterBus::standalone(format!("proxy_{}", Uuid::new_v4().simple())),
+        )
+    }
+
+    pub fn with_backplanes(event_bus: EventBus, cluster: ClusterBus) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
             inner: std::sync::Arc::new(Inner {
                 workspaces: RwLock::new(HashMap::new()),
                 connections: RwLock::new(HashMap::new()),
+                cluster_snapshot_revisions: Mutex::new(HashMap::new()),
+                cluster_leases: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 terminal_sessions: Mutex::new(HashMap::new()),
                 transfer_sessions: Mutex::new(HashMap::new()),
@@ -162,6 +180,7 @@ impl AppState {
                 browser_network_streams: Mutex::new(HashMap::new()),
                 events,
                 event_bus,
+                cluster,
             }),
         }
     }
@@ -180,6 +199,24 @@ impl AppState {
         let Ok(encoded) = serde_json::to_string(message) else {
             return;
         };
+        let frame = SocketFrame::Text(encoded);
+        self.handle_cluster_workspace_broadcast(workspace_id, frame.clone())
+            .await;
+        if let Err(error) = self
+            .inner
+            .cluster
+            .broadcast_workspace(workspace_id, frame)
+            .await
+        {
+            warn!(?error, %workspace_id, "failed to broadcast workspace message across proxies");
+        }
+    }
+
+    pub(crate) async fn handle_cluster_workspace_broadcast(
+        &self,
+        workspace_id: &str,
+        frame: SocketFrame,
+    ) {
         let outgoing = self
             .inner
             .connections
@@ -190,7 +227,7 @@ impl AppState {
             .map(|(_, connection)| connection.outgoing.clone())
             .collect::<Vec<_>>();
         for connection in outgoing {
-            let _ = connection.send(SocketFrame::Text(encoded.clone()));
+            let _ = connection.send(frame.clone());
         }
     }
 
@@ -212,6 +249,8 @@ impl AppState {
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
+                server_names: HashMap::new(),
+                agent_names: HashMap::new(),
                 deleted_servers: HashSet::new(),
                 deleted_agents: HashSet::new(),
             })
@@ -223,24 +262,32 @@ impl AppState {
         &self,
         info: WorkspaceInfo,
     ) -> Result<WorkspaceInfo, ProtocolError> {
-        let mut workspaces = self.inner.workspaces.write().await;
-        if workspaces.contains_key(&info.workspace_id) {
-            return Err(ProtocolError::new(
-                "workspace_exists",
-                format!("workspace {} already exists", info.workspace_id),
-            ));
+        {
+            let mut workspaces = self.inner.workspaces.write().await;
+            if workspaces.contains_key(&info.workspace_id) {
+                return Err(ProtocolError::new(
+                    "workspace_exists",
+                    format!("workspace {} already exists", info.workspace_id),
+                ));
+            }
+            workspaces.insert(
+                info.workspace_id.clone(),
+                WorkspaceState {
+                    info: info.clone(),
+                    revision: 0,
+                    servers: HashMap::new(),
+                    agents: HashMap::new(),
+                    server_names: HashMap::new(),
+                    agent_names: HashMap::new(),
+                    deleted_servers: HashSet::new(),
+                    deleted_agents: HashSet::new(),
+                },
+            );
         }
-        workspaces.insert(
-            info.workspace_id.clone(),
-            WorkspaceState {
-                info: info.clone(),
-                revision: 0,
-                servers: HashMap::new(),
-                agents: HashMap::new(),
-                deleted_servers: HashSet::new(),
-                deleted_agents: HashSet::new(),
-            },
-        );
+        self.broadcast_projection(ClusterProjectionUpdate::WorkspaceUpsert {
+            workspace: info.clone(),
+        })
+        .await?;
         Ok(info)
     }
 
@@ -317,6 +364,26 @@ impl AppState {
                 },
             )
             .await?;
+        let snapshot = self
+            .server_snapshot(&server.workspace_id, &server.server_id)
+            .await?;
+        if let Err(error) = self
+            .inner
+            .cluster
+            .claim(
+                &server.workspace_id,
+                &server.server_id,
+                connection_id,
+                snapshot,
+            )
+            .await
+        {
+            self.inner.connections.write().await.remove(&ServerKey {
+                workspace_id: server.workspace_id.clone(),
+                server_id: server.server_id.clone(),
+            });
+            return Err(error);
+        }
         Ok(event.revision)
     }
 
@@ -381,6 +448,11 @@ impl AppState {
             }
         };
         self.publish_workspace_event(event);
+        let snapshot = self.server_snapshot(&workspace_id, &server_id).await?;
+        self.inner
+            .cluster
+            .publish_snapshot(&workspace_id, &server_id, connection_id, snapshot)
+            .await?;
         self.resend_pending(&workspace_id, &server_id).await;
         Ok(())
     }
@@ -393,17 +465,31 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        let mut workspaces = self.inner.workspaces.write().await;
-        let workspace = workspaces
-            .get_mut(workspace_id)
-            .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
-        let server = workspace
-            .servers
-            .get_mut(server_id)
-            .ok_or_else(|| ProtocolError::new("server_not_found", server_id))?;
-        server.last_seen_at = Utc::now();
-        server.status = ServerStatus::Online;
-        Ok(())
+        {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+            let server = workspace
+                .servers
+                .get_mut(server_id)
+                .ok_or_else(|| ProtocolError::new("server_not_found", server_id))?;
+            server.last_seen_at = Utc::now();
+            server.status = ServerStatus::Online;
+        }
+        if self
+            .inner
+            .cluster
+            .renew(workspace_id, server_id, connection_id)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(ProtocolError::new(
+                "stale_connection",
+                format!("connection for {server_id} is no longer current"),
+            ))
+        }
     }
 
     pub async fn apply_agent_event(
@@ -442,6 +528,18 @@ impl AppState {
             }
         };
         self.publish_workspace_event(event);
+        let snapshot = self
+            .server_snapshot(&agent.workspace_id, &agent.server_id)
+            .await?;
+        self.inner
+            .cluster
+            .publish_snapshot(
+                &agent.workspace_id,
+                &agent.server_id,
+                connection_id,
+                snapshot,
+            )
+            .await?;
         Ok(())
     }
 
@@ -456,6 +554,7 @@ impl AppState {
             .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
         for agent_id in agent_ids {
             workspace.agents.remove(&agent_id);
+            workspace.agent_names.remove(&agent_id);
             workspace.deleted_agents.insert(agent_id);
         }
         Ok(())
@@ -475,6 +574,7 @@ impl AppState {
                 .agents
                 .remove(agent_id)
                 .ok_or_else(|| ProtocolError::new("agent_not_found", agent_id))?;
+            workspace.agent_names.remove(agent_id);
             workspace.deleted_agents.insert(agent_id.to_string());
             workspace.revision = workspace.revision.saturating_add(1);
             let event = WorkspaceEvent {
@@ -488,6 +588,11 @@ impl AppState {
             (agent, event)
         };
         self.publish_workspace_event(event);
+        self.broadcast_projection(ClusterProjectionUpdate::AgentDeleted {
+            workspace_id: workspace_id.to_string(),
+            agent_id: agent_id.to_string(),
+        })
+        .await?;
         self.close_agent_terminals(workspace_id, agent_id).await;
         Ok(agent)
     }
@@ -537,6 +642,9 @@ impl AppState {
                 .ok_or_else(|| ProtocolError::new("server_not_found", server_id))?;
             server.name = name;
             let server = server.clone();
+            workspace
+                .server_names
+                .insert(server_id.to_string(), server.name.clone());
             workspace.revision = workspace.revision.saturating_add(1);
             let event = WorkspaceEvent {
                 revision: workspace.revision,
@@ -549,6 +657,12 @@ impl AppState {
             (server, event)
         };
         self.publish_workspace_event(event);
+        self.broadcast_projection(ClusterProjectionUpdate::ServerRenamed {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            name: server.name.clone(),
+        })
+        .await?;
         Ok(server)
     }
 
@@ -566,6 +680,7 @@ impl AppState {
                 .servers
                 .remove(server_id)
                 .ok_or_else(|| ProtocolError::new("server_not_found", server_id))?;
+            workspace.server_names.remove(server_id);
             workspace.deleted_servers.insert(server_id.to_string());
             let agent_ids = workspace
                 .agents
@@ -577,6 +692,9 @@ impl AppState {
                 .iter()
                 .filter_map(|agent_id| workspace.agents.remove(agent_id))
                 .collect::<Vec<_>>();
+            for agent_id in &agent_ids {
+                workspace.agent_names.remove(agent_id);
+            }
             workspace.deleted_agents.extend(agent_ids.iter().cloned());
             workspace.revision = workspace.revision.saturating_add(1);
             let event = WorkspaceEvent {
@@ -596,7 +714,12 @@ impl AppState {
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
         };
-        if let Some(connection) = self.inner.connections.write().await.remove(&key) {
+        let connection = self.inner.connections.write().await.remove(&key);
+        if let Some(connection) = connection {
+            self.inner
+                .cluster
+                .release(workspace_id, server_id, connection.connection_id)
+                .await;
             let _ = connection.outgoing.send(SocketFrame::Close);
         }
 
@@ -650,6 +773,11 @@ impl AppState {
             .await;
         self.close_server_network_streams(workspace_id, server_id)
             .await;
+        self.broadcast_projection(ClusterProjectionUpdate::ServerDeleted {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        })
+        .await?;
 
         Ok((server, agents))
     }
@@ -672,6 +800,9 @@ impl AppState {
             agent.name = name;
             agent.updated_at = Utc::now();
             let agent = agent.clone();
+            workspace
+                .agent_names
+                .insert(agent_id.to_string(), agent.name.clone());
             workspace.revision = workspace.revision.saturating_add(1);
             let event = WorkspaceEvent {
                 revision: workspace.revision,
@@ -684,6 +815,12 @@ impl AppState {
             (agent, event)
         };
         self.publish_workspace_event(event);
+        self.broadcast_projection(ClusterProjectionUpdate::AgentRenamed {
+            workspace_id: workspace_id.to_string(),
+            agent_id: agent_id.to_string(),
+            name: agent.name.clone(),
+        })
+        .await?;
         Ok(agent)
     }
 
@@ -763,6 +900,43 @@ impl AppState {
         server_id: &str,
         command: AgentCommand,
     ) -> Result<Value, ProtocolError> {
+        let command_id = format!("cmd_{}", Uuid::new_v4().simple());
+        if !self.inner.cluster.is_distributed() {
+            return self
+                .send_local_command(workspace_id, server_id, None, command_id, command)
+                .await;
+        }
+        let owner = self
+            .inner
+            .cluster
+            .owner(workspace_id, server_id)
+            .await?
+            .ok_or_else(|| ProtocolError::new("server_offline", server_id))?;
+        if owner.proxy_id == self.inner.cluster.instance_id() {
+            self.send_local_command(
+                workspace_id,
+                server_id,
+                Some(owner.connection_id),
+                command_id,
+                command,
+            )
+            .await
+        } else {
+            self.inner
+                .cluster
+                .request_command(&owner, workspace_id, server_id, command_id, command)
+                .await
+        }
+    }
+
+    async fn send_local_command(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        expected_connection_id: Option<Uuid>,
+        command_id: String,
+        command: AgentCommand,
+    ) -> Result<Value, ProtocolError> {
         let key = ServerKey {
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
@@ -773,10 +947,12 @@ impl AppState {
             .read()
             .await
             .get(&key)
+            .filter(|connection| {
+                expected_connection_id.is_none_or(|expected| expected == connection.connection_id)
+            })
             .map(|connection| connection.outgoing.clone())
             .ok_or_else(|| ProtocolError::new("server_offline", server_id))?;
 
-        let command_id = format!("cmd_{}", Uuid::new_v4().simple());
         let envelope = CommandEnvelope {
             command_id: command_id.clone(),
             workspace_id: workspace_id.to_string(),
@@ -824,6 +1000,24 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn handle_cluster_command(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        command_id: String,
+        command: AgentCommand,
+    ) -> Result<Value, ProtocolError> {
+        self.send_local_command(
+            workspace_id,
+            server_id,
+            Some(connection_id),
+            command_id,
+            command,
+        )
+        .await
+    }
+
     pub async fn complete_command(&self, result: CommandResult) {
         if let Some(pending) = self.inner.pending.lock().await.remove(&result.command_id) {
             let _ = pending.result.send(result);
@@ -869,16 +1063,12 @@ impl AppState {
     ) -> Result<String, ProtocolError> {
         let agent = self.resolve_agent(workspace_id, agent_id).await?;
         let server_id = agent.server_id;
-        let server_outgoing = self
-            .server_outgoing(workspace_id, &server_id)
-            .await
-            .ok_or_else(|| ProtocolError::new("server_offline", &server_id))?;
-        let session_id = format!("term_{}", Uuid::new_v4().simple());
+        let session_id = self.inner.cluster.routed_id("term");
         self.inner.terminal_sessions.lock().await.insert(
             session_id.clone(),
             TerminalSession {
                 workspace_id: workspace_id.to_string(),
-                server_id,
+                server_id: server_id.clone(),
                 process_id: agent.agent_id.clone(),
                 transient: false,
                 outgoing,
@@ -891,7 +1081,10 @@ impl AppState {
             cols: cols.max(1),
             rows: rows.max(1),
         };
-        if let Err(error) = send_proxy_message(&server_outgoing, &message) {
+        if let Err(error) = self
+            .send_server_frame(workspace_id, &server_id, proxy_message_frame(&message)?)
+            .await
+        {
             self.inner
                 .terminal_sessions
                 .lock()
@@ -919,16 +1112,13 @@ impl AppState {
                 "target machine must update treer-agent-server before it can accept remote shells",
             ));
         }
-        let server_outgoing = self
-            .server_outgoing(workspace_id, &server.server_id)
-            .await
-            .ok_or_else(|| ProtocolError::new("server_offline", &server.server_id))?;
-        let session_id = format!("ssh_{}", Uuid::new_v4().simple());
+        let session_id = self.inner.cluster.routed_id("ssh");
+        let server_id = server.server_id.clone();
         self.inner.terminal_sessions.lock().await.insert(
             session_id.clone(),
             TerminalSession {
                 workspace_id: workspace_id.to_string(),
-                server_id: server.server_id,
+                server_id: server_id.clone(),
                 process_id: session_id.clone(),
                 transient: true,
                 outgoing,
@@ -942,7 +1132,10 @@ impl AppState {
             cwd: options.cwd,
             command: options.command,
         };
-        if let Err(error) = send_proxy_message(&server_outgoing, &message) {
+        if let Err(error) = self
+            .send_server_frame(workspace_id, &server_id, proxy_message_frame(&message)?)
+            .await
+        {
             self.inner
                 .terminal_sessions
                 .lock()
@@ -970,16 +1163,13 @@ impl AppState {
                 "target machine must update treer-agent-server before it can transfer files",
             ));
         }
-        let server_outgoing = self
-            .server_outgoing(workspace_id, &server.server_id)
-            .await
-            .ok_or_else(|| ProtocolError::new("server_offline", &server.server_id))?;
-        let session_id = format!("copy_{}", Uuid::new_v4().simple());
+        let session_id = self.inner.cluster.routed_id("copy");
+        let server_id = server.server_id.clone();
         self.inner.transfer_sessions.lock().await.insert(
             session_id.clone(),
             TransferSession {
                 workspace_id: workspace_id.to_string(),
-                server_id: server.server_id,
+                server_id: server_id.clone(),
                 direction: options.direction,
                 outgoing,
             },
@@ -996,7 +1186,10 @@ impl AppState {
                 recursive: options.recursive,
             },
         };
-        if let Err(error) = send_proxy_message(&server_outgoing, &message) {
+        if let Err(error) = self
+            .send_server_frame(workspace_id, &server_id, proxy_message_frame(&message)?)
+            .await
+        {
             self.inner
                 .transfer_sessions
                 .lock()
@@ -1039,26 +1232,20 @@ impl AppState {
                 "download sessions do not accept client data",
             ));
         }
-        self.server_outgoing(&workspace_id, &server_id)
+        self.send_server_frame(&workspace_id, &server_id, SocketFrame::Binary(encoded))
             .await
-            .ok_or_else(|| ProtocolError::new("server_offline", server_id))?
-            .send(SocketFrame::Binary(encoded))
-            .map_err(|_| ProtocolError::new("server_offline", "agent server disconnected"))
     }
 
     pub async fn detach_transfer(&self, session_id: &str) {
         let session = self.inner.transfer_sessions.lock().await.remove(session_id);
         let Some(session) = session else { return };
-        if let Some(outgoing) = self
-            .server_outgoing(&session.workspace_id, &session.server_id)
-            .await
-        {
-            let _ = send_proxy_message(
-                &outgoing,
-                &ProxyMessage::TransferCancel {
-                    session_id: session_id.to_string(),
-                },
-            );
+        let message = ProxyMessage::TransferCancel {
+            session_id: session_id.to_string(),
+        };
+        if let Ok(frame) = proxy_message_frame(&message) {
+            let _ = self
+                .send_server_frame(&session.workspace_id, &session.server_id, frame)
+                .await;
         }
     }
 
@@ -1114,29 +1301,30 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        let outgoing = {
-            let sessions = self.inner.transfer_sessions.lock().await;
-            let Some(session) = sessions.get(&frame.session_id) else {
-                return Ok(());
-            };
-            if session.workspace_id != workspace_id || session.server_id != server_id {
-                return Err(ProtocolError::new(
-                    "transfer_identity_mismatch",
-                    &frame.session_id,
-                ));
-            }
+        if let Some(session) = self
+            .inner
+            .transfer_sessions
+            .lock()
+            .await
+            .get(&frame.session_id)
+        {
             if session.direction != TransferDirection::Download {
                 return Err(ProtocolError::new(
                     "invalid_transfer_direction",
                     "upload sessions do not accept server data",
                 ));
             }
-            session.outgoing.clone()
-        };
-        outgoing
-            .send(SocketFrame::Binary(encoded))
-            .await
-            .map_err(|_| ProtocolError::new("transfer_cancelled", "transfer client disconnected"))
+        }
+        self.deliver_session_frame(ClusterSessionDelivery {
+            kind: ClusterSessionKind::Transfer,
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            session_id: frame.session_id,
+            revision: None,
+            close: false,
+            frame: SocketFrame::Binary(encoded),
+        })
+        .await
     }
 
     pub async fn transfer_complete(
@@ -1190,21 +1378,18 @@ impl AppState {
         message: TransferServerMessage,
         close: bool,
     ) -> Result<(), ProtocolError> {
-        let outgoing = {
-            let mut sessions = self.inner.transfer_sessions.lock().await;
-            let Some(session) = sessions.get(session_id) else {
-                return Ok(());
-            };
-            if session.workspace_id != workspace_id || session.server_id != server_id {
-                return Err(ProtocolError::new("transfer_identity_mismatch", session_id));
-            }
-            let outgoing = session.outgoing.clone();
-            if close {
-                sessions.remove(session_id);
-            }
-            outgoing
-        };
-        send_transfer_to_client(&outgoing, &message).await
+        let encoded = serde_json::to_string(&message)
+            .map_err(|error| ProtocolError::new("encode_error", error.to_string()))?;
+        self.deliver_session_frame(ClusterSessionDelivery {
+            kind: ClusterSessionKind::Transfer,
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            session_id: session_id.to_string(),
+            revision: None,
+            close,
+            frame: SocketFrame::Text(encoded),
+        })
+        .await
     }
 
     async fn close_agent_terminals(&self, workspace_id: &str, agent_id: &str) {
@@ -1236,7 +1421,7 @@ impl AppState {
         session_id: &str,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let session = self.terminal_session_route(session_id).await?;
+        let (workspace_id, server_id) = self.terminal_session_route(session_id).await?;
         let encoded = TerminalBinaryFrame {
             kind: TerminalBinaryKind::Input,
             session_id: session_id.to_string(),
@@ -1244,9 +1429,8 @@ impl AppState {
             payload: data,
         }
         .encode()?;
-        session
-            .send(SocketFrame::Binary(encoded))
-            .map_err(|_| ProtocolError::new("server_offline", "agent server disconnected"))
+        self.send_server_frame(&workspace_id, &server_id, SocketFrame::Binary(encoded))
+            .await
     }
 
     pub async fn terminal_resize(
@@ -1255,15 +1439,14 @@ impl AppState {
         cols: u16,
         rows: u16,
     ) -> Result<(), ProtocolError> {
-        let session = self.terminal_session_route(session_id).await?;
-        send_proxy_message(
-            &session,
-            &ProxyMessage::TerminalResize {
-                session_id: session_id.to_string(),
-                cols: cols.max(1),
-                rows: rows.max(1),
-            },
-        )
+        let (workspace_id, server_id) = self.terminal_session_route(session_id).await?;
+        let message = ProxyMessage::TerminalResize {
+            session_id: session_id.to_string(),
+            cols: cols.max(1),
+            rows: rows.max(1),
+        };
+        self.send_server_frame(&workspace_id, &server_id, proxy_message_frame(&message)?)
+            .await
     }
 
     pub async fn detach_terminal(&self, session_id: &str) {
@@ -1271,20 +1454,19 @@ impl AppState {
         let Some(session) = session else {
             return;
         };
-        if let Some(outgoing) = self
-            .server_outgoing(&session.workspace_id, &session.server_id)
-            .await
-        {
-            let message = if session.transient {
-                ProxyMessage::ShellDetach {
-                    session_id: session_id.to_string(),
-                }
-            } else {
-                ProxyMessage::TerminalDetach {
-                    session_id: session_id.to_string(),
-                }
-            };
-            let _ = send_proxy_message(&outgoing, &message);
+        let message = if session.transient {
+            ProxyMessage::ShellDetach {
+                session_id: session_id.to_string(),
+            }
+        } else {
+            ProxyMessage::TerminalDetach {
+                session_id: session_id.to_string(),
+            }
+        };
+        if let Ok(frame) = proxy_message_frame(&message) {
+            let _ = self
+                .send_server_frame(&session.workspace_id, &session.server_id, frame)
+                .await;
         }
     }
 
@@ -1299,25 +1481,32 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        let outgoing = {
-            let mut sessions = self.inner.terminal_sessions.lock().await;
-            let Some(session) = sessions.get_mut(session_id) else {
-                return Ok(());
-            };
-            if session.workspace_id != workspace_id || session.server_id != server_id {
-                return Err(ProtocolError::new("terminal_identity_mismatch", session_id));
-            }
-            session.last_revision = Some(revision);
-            session.outgoing.clone()
+        let ready = TerminalServerMessage::Ready {
+            session_id: session_id.to_string(),
         };
-        send_terminal_to_browser(
-            &outgoing,
-            &TerminalServerMessage::Ready {
-                session_id: session_id.to_string(),
-            },
-        );
-        let _ = outgoing.send(SocketFrame::Binary(replay));
-        Ok(())
+        self.deliver_session_frame(ClusterSessionDelivery {
+            kind: ClusterSessionKind::Terminal,
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            session_id: session_id.to_string(),
+            revision: None,
+            close: false,
+            frame: SocketFrame::Text(
+                serde_json::to_string(&ready)
+                    .map_err(|error| ProtocolError::new("encode_error", error.to_string()))?,
+            ),
+        })
+        .await?;
+        self.deliver_session_frame(ClusterSessionDelivery {
+            kind: ClusterSessionKind::Terminal,
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            session_id: session_id.to_string(),
+            revision: Some(revision),
+            close: false,
+            frame: SocketFrame::Binary(replay),
+        })
+        .await
     }
 
     pub async fn terminal_output(
@@ -1331,25 +1520,16 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        let outgoing = {
-            let mut sessions = self.inner.terminal_sessions.lock().await;
-            let Some(session) = sessions.get_mut(session_id) else {
-                return Ok(());
-            };
-            if session.workspace_id != workspace_id || session.server_id != server_id {
-                return Err(ProtocolError::new("terminal_identity_mismatch", session_id));
-            }
-            if session
-                .last_revision
-                .is_some_and(|last_revision| revision <= last_revision)
-            {
-                return Ok(());
-            }
-            session.last_revision = Some(revision);
-            session.outgoing.clone()
-        };
-        let _ = outgoing.send(SocketFrame::Binary(data));
-        Ok(())
+        self.deliver_session_frame(ClusterSessionDelivery {
+            kind: ClusterSessionKind::Terminal,
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            session_id: session_id.to_string(),
+            revision: Some(revision),
+            close: false,
+            frame: SocketFrame::Binary(data),
+        })
+        .await
     }
 
     pub async fn terminal_closed(
@@ -1396,6 +1576,10 @@ impl AppState {
         if !removed {
             return;
         }
+        self.inner
+            .cluster
+            .release(workspace_id, server_id, connection_id)
+            .await;
         let payload = serde_json::json!({ "server_id": server_id, "status": "offline" });
         let _ = self
             .mutate_workspace(workspace_id, "server.offline", &payload, |workspace| {
@@ -1406,32 +1590,7 @@ impl AppState {
             })
             .await;
 
-        let disconnected = {
-            let mut sessions = self.inner.terminal_sessions.lock().await;
-            let session_ids: Vec<_> = sessions
-                .iter()
-                .filter_map(|(session_id, session)| {
-                    (session.workspace_id == workspace_id && session.server_id == server_id)
-                        .then_some(session_id.clone())
-                })
-                .collect();
-            session_ids
-                .into_iter()
-                .filter_map(|session_id| sessions.remove(&session_id))
-                .collect::<Vec<_>>()
-        };
-        for session in disconnected {
-            send_terminal_to_browser(
-                &session.outgoing,
-                &TerminalServerMessage::Closed {
-                    reason: Some("agent server disconnected".to_string()),
-                    exit_code: None,
-                },
-            );
-        }
-        self.close_server_transfers(workspace_id, server_id, "agent server disconnected")
-            .await;
-        self.close_server_network_streams(workspace_id, server_id)
+        self.close_server_sessions(workspace_id, server_id, "agent server disconnected")
             .await;
     }
 
@@ -1442,14 +1601,10 @@ impl AppState {
         host: &str,
         port: u16,
     ) -> Result<DuplexStream, ProtocolError> {
-        let outgoing = self
-            .server_outgoing(workspace_id, destination_server_id)
-            .await
-            .ok_or_else(|| ProtocolError::new("server_offline", destination_server_id))?;
         let key = NetworkStreamKey {
             workspace_id: workspace_id.to_string(),
             server_id: destination_server_id.to_string(),
-            stream_id: format!("browser_{}", Uuid::new_v4().simple()),
+            stream_id: self.inner.cluster.routed_id("browser"),
         };
         let (incoming_tx, mut incoming_rx) = mpsc::channel(32);
         self.inner
@@ -1474,7 +1629,15 @@ impl AppState {
                 )
             })?,
         };
-        if outgoing.send(SocketFrame::Binary(frame.encode()?)).is_err() {
+        if self
+            .send_server_frame(
+                workspace_id,
+                destination_server_id,
+                SocketFrame::Binary(frame.encode()?),
+            )
+            .await
+            .is_err()
+        {
             self.inner.browser_network_streams.lock().await.remove(&key);
             return Err(ProtocolError::new("server_offline", destination_server_id));
         }
@@ -1593,18 +1756,17 @@ impl AppState {
         kind: NetworkBinaryKind,
         payload: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let outgoing = self
-            .server_outgoing(&key.workspace_id, &key.server_id)
-            .await
-            .ok_or_else(|| ProtocolError::new("server_offline", &key.server_id))?;
         let frame = NetworkBinaryFrame {
             kind,
             stream_id: key.stream_id.clone(),
             payload,
         };
-        outgoing
-            .send(SocketFrame::Binary(frame.encode()?))
-            .map_err(|_| ProtocolError::new("server_offline", &key.server_id))
+        self.send_server_frame(
+            &key.workspace_id,
+            &key.server_id,
+            SocketFrame::Binary(frame.encode()?),
+        )
+        .await
     }
 
     async fn reset_browser_network_stream(&self, key: &NetworkStreamKey, error: ProtocolError) {
@@ -1631,10 +1793,6 @@ impl AppState {
                 "new network stream must begin with an open frame",
             ));
         }
-        let outgoing = self
-            .server_outgoing(workspace_id, destination_server_id)
-            .await
-            .ok_or_else(|| ProtocolError::new("server_offline", destination_server_id))?;
         let source = NetworkStreamKey {
             workspace_id: workspace_id.to_string(),
             server_id: source_server_id.to_string(),
@@ -1643,7 +1801,7 @@ impl AppState {
         let destination = NetworkStreamKey {
             workspace_id: workspace_id.to_string(),
             server_id: destination_server_id.to_string(),
-            stream_id: format!("net_{}", Uuid::new_v4().simple()),
+            stream_id: self.inner.cluster.routed_id("net"),
         };
         {
             let mut streams = self.inner.network_streams.lock().await;
@@ -1672,7 +1830,15 @@ impl AppState {
         }
         frame.stream_id.clone_from(&destination.stream_id);
         let encoded = frame.encode()?;
-        if outgoing.send(SocketFrame::Binary(encoded)).is_err() {
+        if self
+            .send_server_frame(
+                workspace_id,
+                destination_server_id,
+                SocketFrame::Binary(encoded),
+            )
+            .await
+            .is_err()
+        {
             let mut streams = self.inner.network_streams.lock().await;
             remove_network_stream(&mut streams, &source);
             return Err(ProtocolError::new("server_offline", destination_server_id));
@@ -1726,10 +1892,20 @@ impl AppState {
         workspace_id: &str,
         server_id: &str,
         connection_id: Uuid,
-        mut frame: NetworkBinaryFrame,
+        frame: NetworkBinaryFrame,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
+        self.relay_network_frame_inner(workspace_id, server_id, frame)
+            .await
+    }
+
+    async fn relay_network_frame_inner(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        mut frame: NetworkBinaryFrame,
+    ) -> Result<(), ProtocolError> {
         if matches!(
             frame.kind,
             NetworkBinaryKind::Open | NetworkBinaryKind::Direct
@@ -1761,11 +1937,25 @@ impl AppState {
             }
             return Ok(());
         }
-        let (peer, remove) = {
+        let route = {
             let mut streams = self.inner.network_streams.lock().await;
-            let stream = streams
-                .get_mut(&key)
-                .ok_or_else(|| ProtocolError::new("network_stream_not_found", &frame.stream_id))?;
+            let Some(stream) = streams.get_mut(&key) else {
+                drop(streams);
+                let target = ClusterBus::route_target(&frame.stream_id).ok_or_else(|| {
+                    ProtocolError::new("network_stream_not_found", &frame.stream_id)
+                })?;
+                if target == self.inner.cluster.instance_id() {
+                    return Err(ProtocolError::new(
+                        "network_stream_not_found",
+                        &frame.stream_id,
+                    ));
+                }
+                return self
+                    .inner
+                    .cluster
+                    .deliver_network(&target, workspace_id, server_id, frame.encode()?)
+                    .await;
+            };
             if frame.kind == NetworkBinaryKind::Opened
                 && stream.role != NetworkStreamRole::Destination
             {
@@ -1785,17 +1975,34 @@ impl AppState {
             }
             (peer, remove)
         };
+        let (peer, remove) = route;
         frame.stream_id.clone_from(&peer.stream_id);
-        let outgoing = self
-            .server_outgoing(workspace_id, &peer.server_id)
+        if self
+            .send_server_frame(
+                workspace_id,
+                &peer.server_id,
+                SocketFrame::Binary(frame.encode()?),
+            )
             .await
-            .ok_or_else(|| ProtocolError::new("server_offline", &peer.server_id))?;
-        if outgoing.send(SocketFrame::Binary(frame.encode()?)).is_err() && !remove {
+            .is_err()
+            && !remove
+        {
             let mut streams = self.inner.network_streams.lock().await;
             remove_network_stream(&mut streams, &key);
             return Err(ProtocolError::new("server_offline", peer.server_id));
         }
         Ok(())
+    }
+
+    pub(crate) async fn handle_cluster_network_delivery(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        encoded: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        let frame = NetworkBinaryFrame::decode(&encoded)?;
+        self.relay_network_frame_inner(workspace_id, server_id, frame)
+            .await
     }
 
     async fn close_server_network_streams(&self, workspace_id: &str, server_id: &str) {
@@ -1849,16 +2056,15 @@ impl AppState {
         ))
         .unwrap_or_default();
         for peer in routes {
-            let Some(outgoing) = self.server_outgoing(workspace_id, &peer.server_id).await else {
-                continue;
-            };
             let frame = NetworkBinaryFrame {
                 kind: NetworkBinaryKind::Reset,
                 stream_id: peer.stream_id,
                 payload: payload.clone(),
             };
             if let Ok(encoded) = frame.encode() {
-                let _ = outgoing.send(SocketFrame::Binary(encoded));
+                let _ = self
+                    .send_server_frame(workspace_id, &peer.server_id, SocketFrame::Binary(encoded))
+                    .await;
             }
         }
     }
@@ -1889,6 +2095,36 @@ impl AppState {
         }
     }
 
+    async fn close_server_sessions(&self, workspace_id: &str, server_id: &str, reason: &str) {
+        let disconnected = {
+            let mut sessions = self.inner.terminal_sessions.lock().await;
+            let session_ids = sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.workspace_id == workspace_id && session.server_id == server_id
+                })
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<Vec<_>>();
+            session_ids
+                .into_iter()
+                .filter_map(|session_id| sessions.remove(&session_id))
+                .collect::<Vec<_>>()
+        };
+        for session in disconnected {
+            send_terminal_to_browser(
+                &session.outgoing,
+                &TerminalServerMessage::Closed {
+                    reason: Some(reason.to_string()),
+                    exit_code: None,
+                },
+            );
+        }
+        self.close_server_transfers(workspace_id, server_id, reason)
+            .await;
+        self.close_server_network_streams(workspace_id, server_id)
+            .await;
+    }
+
     async fn server_outgoing(
         &self,
         workspace_id: &str,
@@ -1906,21 +2142,530 @@ impl AppState {
             .map(|connection| connection.outgoing.clone())
     }
 
+    async fn send_server_frame(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        frame: SocketFrame,
+    ) -> Result<(), ProtocolError> {
+        if !self.inner.cluster.is_distributed() {
+            return self
+                .local_server_frame(workspace_id, server_id, None, frame)
+                .await;
+        }
+        let owner = self
+            .inner
+            .cluster
+            .owner(workspace_id, server_id)
+            .await?
+            .ok_or_else(|| ProtocolError::new("server_offline", server_id))?;
+        if owner.proxy_id == self.inner.cluster.instance_id() {
+            self.local_server_frame(workspace_id, server_id, Some(owner.connection_id), frame)
+                .await
+        } else {
+            self.inner
+                .cluster
+                .send_socket(&owner, workspace_id, server_id, frame)
+                .await
+        }
+    }
+
+    async fn local_server_frame(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        expected_connection_id: Option<Uuid>,
+        frame: SocketFrame,
+    ) -> Result<(), ProtocolError> {
+        let key = ServerKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        };
+        let outgoing = self
+            .inner
+            .connections
+            .read()
+            .await
+            .get(&key)
+            .filter(|connection| {
+                expected_connection_id.is_none_or(|expected| expected == connection.connection_id)
+            })
+            .map(|connection| connection.outgoing.clone())
+            .ok_or_else(|| ProtocolError::new("server_offline", server_id))?;
+        outgoing
+            .send(frame)
+            .map_err(|_| ProtocolError::new("server_offline", server_id))
+    }
+
+    pub(crate) async fn handle_cluster_socket(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        frame: SocketFrame,
+    ) -> Result<(), ProtocolError> {
+        self.local_server_frame(workspace_id, server_id, Some(connection_id), frame)
+            .await
+    }
+
+    async fn server_snapshot(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+    ) -> Result<AgentServerSnapshot, ProtocolError> {
+        let workspaces = self.inner.workspaces.read().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| ProtocolError::new("workspace_not_found", workspace_id))?;
+        let server = workspace
+            .servers
+            .get(server_id)
+            .cloned()
+            .ok_or_else(|| ProtocolError::new("server_not_found", server_id))?;
+        let agents = workspace
+            .agents
+            .values()
+            .filter(|agent| agent.server_id == server_id)
+            .cloned()
+            .collect();
+        Ok(AgentServerSnapshot { server, agents })
+    }
+
+    pub(crate) async fn apply_cluster_snapshot(&self, update: ClusterServerSnapshot) {
+        let key = ServerKey {
+            workspace_id: update.snapshot.server.workspace_id.clone(),
+            server_id: update.snapshot.server.server_id.clone(),
+        };
+        {
+            let mut revisions = self.inner.cluster_snapshot_revisions.lock().await;
+            if revisions
+                .get(&key)
+                .is_some_and(|revision| *revision >= update.revision)
+            {
+                return;
+            }
+            revisions.insert(key, update.revision);
+        }
+        let snapshot = update.snapshot;
+        let workspace_id = snapshot.server.workspace_id.clone();
+        let server_id = snapshot.server.server_id.clone();
+        self.ensure_workspace(&workspace_id, &workspace_id).await;
+        let event = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                return;
+            };
+            workspace.deleted_servers.remove(&server_id);
+            let mut server = snapshot.server;
+            if let Some(name) = workspace.server_names.get(&server_id) {
+                server.name.clone_from(name);
+            } else if let Some(current) = workspace.servers.get(&server_id) {
+                server.name.clone_from(&current.name);
+            }
+            workspace.servers.insert(server_id.clone(), server);
+            let names = workspace
+                .agents
+                .values()
+                .filter(|agent| agent.server_id == server_id)
+                .map(|agent| (agent.agent_id.clone(), agent.name.clone()))
+                .collect::<HashMap<_, _>>();
+            workspace
+                .agents
+                .retain(|_, agent| agent.server_id != server_id);
+            for mut agent in snapshot.agents {
+                if !workspace.deleted_agents.contains(&agent.agent_id) {
+                    if let Some(name) = workspace.agent_names.get(&agent.agent_id) {
+                        agent.name.clone_from(name);
+                    } else if let Some(name) = names.get(&agent.agent_id) {
+                        agent.name.clone_from(name);
+                    }
+                    workspace.agents.insert(agent.agent_id.clone(), agent);
+                }
+            }
+            workspace.revision = workspace.revision.saturating_add(1);
+            WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: workspace_id.clone(),
+                event: "server.snapshot".to_string(),
+                data: serde_json::json!({ "server_id": server_id }),
+            }
+        };
+        let _ = self.inner.events.send(event);
+    }
+
+    pub(crate) async fn apply_cluster_disconnect(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        revision: u64,
+    ) {
+        if self
+            .server_outgoing(workspace_id, server_id)
+            .await
+            .is_some()
+        {
+            return;
+        }
+        let key = ServerKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        };
+        {
+            let mut leases = self.inner.cluster_leases.lock().await;
+            if leases
+                .get(&key)
+                .is_some_and(|(current, _)| *current > revision)
+            {
+                return;
+            }
+            leases.insert(key.clone(), (revision, None));
+        }
+        let event = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            let Some(server) = workspace.servers.get_mut(server_id) else {
+                return;
+            };
+            if server.status == ServerStatus::Offline {
+                None
+            } else {
+                server.status = ServerStatus::Offline;
+                server.last_seen_at = Utc::now();
+                workspace.revision = workspace.revision.saturating_add(1);
+                Some(WorkspaceEvent {
+                    revision: workspace.revision,
+                    workspace_id: workspace_id.to_string(),
+                    event: "server.offline".to_string(),
+                    data: serde_json::json!({ "server_id": server_id, "status": "offline" }),
+                })
+            }
+        };
+        if let Some(event) = event {
+            let _ = self.inner.events.send(event);
+        }
+        self.close_server_sessions(workspace_id, server_id, "agent server disconnected")
+            .await;
+    }
+
+    pub(crate) async fn note_cluster_lease(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        revision: u64,
+    ) {
+        let key = ServerKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        };
+        let accepted = {
+            let mut leases = self.inner.cluster_leases.lock().await;
+            if leases
+                .get(&key)
+                .is_some_and(|(current, _)| revision < *current)
+            {
+                false
+            } else {
+                leases.insert(key, (revision, Some(Instant::now())));
+                true
+            }
+        };
+        if !accepted {
+            return;
+        }
+        let event = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            let Some(server) = workspace.servers.get_mut(server_id) else {
+                return;
+            };
+            if server.status == ServerStatus::Online {
+                return;
+            }
+            server.status = ServerStatus::Online;
+            server.last_seen_at = Utc::now();
+            workspace.revision = workspace.revision.saturating_add(1);
+            WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: workspace_id.to_string(),
+                event: "server.online".to_string(),
+                data: serde_json::json!({ "server_id": server_id, "status": "online" }),
+            }
+        };
+        let _ = self.inner.events.send(event);
+    }
+
+    async fn expire_cluster_lease_entries(&self, max_age: Duration) -> Vec<(ServerKey, u64)> {
+        let mut leases = self.inner.cluster_leases.lock().await;
+        let expired = leases
+            .iter()
+            .filter(|(_, (_, seen_at))| seen_at.is_some_and(|seen_at| seen_at.elapsed() >= max_age))
+            .map(|(key, (revision, _))| (key.clone(), *revision))
+            .collect::<Vec<_>>();
+        for (key, revision) in &expired {
+            leases.insert(key.clone(), (*revision, None));
+        }
+        expired
+    }
+
+    pub(crate) async fn expire_cluster_leases(&self, max_age: Duration) {
+        let expired = self.expire_cluster_lease_entries(max_age).await;
+        for (key, revision) in expired {
+            self.apply_cluster_disconnect(&key.workspace_id, &key.server_id, revision)
+                .await;
+        }
+    }
+
+    async fn broadcast_projection(
+        &self,
+        update: ClusterProjectionUpdate,
+    ) -> Result<(), ProtocolError> {
+        self.inner.cluster.broadcast_projection(update).await
+    }
+
+    pub(crate) async fn apply_cluster_projection(&self, update: ClusterProjectionUpdate) {
+        match update {
+            ClusterProjectionUpdate::WorkspaceUpsert { workspace } => {
+                self.ensure_workspace_info(workspace).await;
+            }
+            ClusterProjectionUpdate::ServerRenamed {
+                workspace_id,
+                server_id,
+                name,
+            } => {
+                let event = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                        return;
+                    };
+                    workspace.deleted_servers.remove(&server_id);
+                    workspace
+                        .server_names
+                        .insert(server_id.clone(), name.clone());
+                    let Some(server) = workspace.servers.get_mut(&server_id) else {
+                        return;
+                    };
+                    if server.name == name {
+                        return;
+                    }
+                    server.name = name;
+                    workspace.revision = workspace.revision.saturating_add(1);
+                    WorkspaceEvent {
+                        revision: workspace.revision,
+                        workspace_id: workspace_id.clone(),
+                        event: "server.renamed".to_string(),
+                        data: serde_json::json!({ "server_id": server_id }),
+                    }
+                };
+                let _ = self.inner.events.send(event);
+            }
+            ClusterProjectionUpdate::AgentRenamed {
+                workspace_id,
+                agent_id,
+                name,
+            } => {
+                let event = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                        return;
+                    };
+                    workspace.deleted_agents.remove(&agent_id);
+                    workspace.agent_names.insert(agent_id.clone(), name.clone());
+                    let Some(agent) = workspace.agents.get_mut(&agent_id) else {
+                        return;
+                    };
+                    if agent.name == name {
+                        return;
+                    }
+                    agent.name = name;
+                    agent.updated_at = Utc::now();
+                    workspace.revision = workspace.revision.saturating_add(1);
+                    WorkspaceEvent {
+                        revision: workspace.revision,
+                        workspace_id: workspace_id.clone(),
+                        event: "agent.renamed".to_string(),
+                        data: serde_json::json!({ "agent_id": agent_id }),
+                    }
+                };
+                let _ = self.inner.events.send(event);
+            }
+            ClusterProjectionUpdate::AgentDeleted {
+                workspace_id,
+                agent_id,
+            } => {
+                let event = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                        return;
+                    };
+                    let removed = workspace.agents.remove(&agent_id).is_some();
+                    workspace.agent_names.remove(&agent_id);
+                    let inserted = workspace.deleted_agents.insert(agent_id.clone());
+                    if !removed && !inserted {
+                        return;
+                    }
+                    workspace.revision = workspace.revision.saturating_add(1);
+                    WorkspaceEvent {
+                        revision: workspace.revision,
+                        workspace_id: workspace_id.clone(),
+                        event: "agent.deleted".to_string(),
+                        data: serde_json::json!({ "agent_id": agent_id }),
+                    }
+                };
+                let _ = self.inner.events.send(event);
+                self.close_agent_terminals(&workspace_id, &agent_id).await;
+            }
+            ClusterProjectionUpdate::ServerDeleted {
+                workspace_id,
+                server_id,
+            } => {
+                let event = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                        return;
+                    };
+                    let removed = workspace.servers.remove(&server_id).is_some();
+                    workspace.server_names.remove(&server_id);
+                    let inserted = workspace.deleted_servers.insert(server_id.clone());
+                    if !removed && !inserted {
+                        return;
+                    }
+                    workspace
+                        .agents
+                        .retain(|_, agent| agent.server_id != server_id);
+                    workspace.revision = workspace.revision.saturating_add(1);
+                    WorkspaceEvent {
+                        revision: workspace.revision,
+                        workspace_id: workspace_id.clone(),
+                        event: "server.deleted".to_string(),
+                        data: serde_json::json!({ "server_id": server_id }),
+                    }
+                };
+                let _ = self.inner.events.send(event);
+                let key = ServerKey {
+                    workspace_id: workspace_id.clone(),
+                    server_id: server_id.clone(),
+                };
+                let connection = self.inner.connections.write().await.remove(&key);
+                if let Some(connection) = connection {
+                    self.inner
+                        .cluster
+                        .release(&workspace_id, &server_id, connection.connection_id)
+                        .await;
+                    let _ = connection.outgoing.send(SocketFrame::Close);
+                }
+                let terminals = {
+                    let mut sessions = self.inner.terminal_sessions.lock().await;
+                    let session_ids = sessions
+                        .iter()
+                        .filter(|(_, session)| {
+                            session.workspace_id == workspace_id && session.server_id == server_id
+                        })
+                        .map(|(session_id, _)| session_id.clone())
+                        .collect::<Vec<_>>();
+                    session_ids
+                        .into_iter()
+                        .filter_map(|session_id| sessions.remove(&session_id))
+                        .collect::<Vec<_>>()
+                };
+                for terminal in terminals {
+                    send_terminal_to_browser(
+                        &terminal.outgoing,
+                        &TerminalServerMessage::Closed {
+                            reason: Some("machine deleted".to_string()),
+                            exit_code: None,
+                        },
+                    );
+                }
+                self.close_server_transfers(&workspace_id, &server_id, "machine deleted")
+                    .await;
+                self.close_server_network_streams(&workspace_id, &server_id)
+                    .await;
+            }
+        }
+    }
+
+    pub(crate) async fn handle_cluster_session_delivery(
+        &self,
+        delivery: ClusterSessionDelivery,
+    ) -> Result<(), ProtocolError> {
+        match delivery.kind {
+            ClusterSessionKind::Terminal => {
+                let outgoing = {
+                    let mut sessions = self.inner.terminal_sessions.lock().await;
+                    let session = sessions.get_mut(&delivery.session_id).ok_or_else(|| {
+                        ProtocolError::new("terminal_not_found", &delivery.session_id)
+                    })?;
+                    if session.workspace_id != delivery.workspace_id
+                        || session.server_id != delivery.server_id
+                    {
+                        return Err(ProtocolError::new(
+                            "terminal_identity_mismatch",
+                            &delivery.session_id,
+                        ));
+                    }
+                    if delivery.revision.is_some_and(|revision| {
+                        session
+                            .last_revision
+                            .is_some_and(|last_revision| revision <= last_revision)
+                    }) {
+                        return Ok(());
+                    }
+                    if let Some(revision) = delivery.revision {
+                        session.last_revision = Some(revision);
+                    }
+                    let outgoing = session.outgoing.clone();
+                    if delivery.close {
+                        sessions.remove(&delivery.session_id);
+                    }
+                    outgoing
+                };
+                outgoing
+                    .send(delivery.frame)
+                    .map_err(|_| ProtocolError::new("terminal_closed", delivery.session_id))
+            }
+            ClusterSessionKind::Transfer => {
+                let outgoing = {
+                    let mut sessions = self.inner.transfer_sessions.lock().await;
+                    let session = sessions.get(&delivery.session_id).ok_or_else(|| {
+                        ProtocolError::new("transfer_not_found", &delivery.session_id)
+                    })?;
+                    if session.workspace_id != delivery.workspace_id
+                        || session.server_id != delivery.server_id
+                    {
+                        return Err(ProtocolError::new(
+                            "transfer_identity_mismatch",
+                            &delivery.session_id,
+                        ));
+                    }
+                    let outgoing = session.outgoing.clone();
+                    if delivery.close {
+                        sessions.remove(&delivery.session_id);
+                    }
+                    outgoing
+                };
+                outgoing
+                    .send(delivery.frame)
+                    .await
+                    .map_err(|_| ProtocolError::new("transfer_cancelled", delivery.session_id))
+            }
+        }
+    }
+
     async fn terminal_session_route(
         &self,
         session_id: &str,
-    ) -> Result<mpsc::UnboundedSender<SocketFrame>, ProtocolError> {
-        let route = self
-            .inner
+    ) -> Result<(String, String), ProtocolError> {
+        self.inner
             .terminal_sessions
             .lock()
             .await
             .get(session_id)
             .map(|session| (session.workspace_id.clone(), session.server_id.clone()))
-            .ok_or_else(|| ProtocolError::new("terminal_not_found", session_id))?;
-        self.server_outgoing(&route.0, &route.1)
-            .await
-            .ok_or_else(|| ProtocolError::new("server_offline", route.1))
+            .ok_or_else(|| ProtocolError::new("terminal_not_found", session_id))
     }
 
     async fn relay_terminal(
@@ -1931,22 +2676,47 @@ impl AppState {
         message: TerminalServerMessage,
         close: bool,
     ) -> Result<(), ProtocolError> {
-        let outgoing = {
-            let mut sessions = self.inner.terminal_sessions.lock().await;
-            let Some(session) = sessions.get(session_id) else {
-                return Ok(());
-            };
-            if session.workspace_id != workspace_id || session.server_id != server_id {
-                return Err(ProtocolError::new("terminal_identity_mismatch", session_id));
-            }
-            let outgoing = session.outgoing.clone();
-            if close {
-                sessions.remove(session_id);
-            }
-            outgoing
+        let encoded = serde_json::to_string(&message)
+            .map_err(|error| ProtocolError::new("encode_error", error.to_string()))?;
+        self.deliver_session_frame(ClusterSessionDelivery {
+            kind: ClusterSessionKind::Terminal,
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            session_id: session_id.to_string(),
+            revision: None,
+            close,
+            frame: SocketFrame::Text(encoded),
+        })
+        .await
+    }
+
+    async fn deliver_session_frame(
+        &self,
+        delivery: ClusterSessionDelivery,
+    ) -> Result<(), ProtocolError> {
+        let local = match delivery.kind {
+            ClusterSessionKind::Terminal => self
+                .inner
+                .terminal_sessions
+                .lock()
+                .await
+                .contains_key(&delivery.session_id),
+            ClusterSessionKind::Transfer => self
+                .inner
+                .transfer_sessions
+                .lock()
+                .await
+                .contains_key(&delivery.session_id),
         };
-        send_terminal_to_browser(&outgoing, &message);
-        Ok(())
+        if local {
+            return self.handle_cluster_session_delivery(delivery).await;
+        }
+        let target = ClusterBus::route_target(&delivery.session_id)
+            .ok_or_else(|| ProtocolError::new("session_not_found", &delivery.session_id))?;
+        if target == self.inner.cluster.instance_id() {
+            return Err(ProtocolError::new("session_not_found", delivery.session_id));
+        }
+        self.inner.cluster.deliver_session(&target, delivery).await
     }
 
     async fn require_current_connection(
@@ -2039,19 +2809,14 @@ fn decode_network_reset(frame: &NetworkBinaryFrame) -> ProtocolError {
         .unwrap_or_else(|_| ProtocolError::new("network_stream_reset", "network stream was reset"))
 }
 
-fn send_proxy_message(
-    outgoing: &mpsc::UnboundedSender<SocketFrame>,
-    message: &ProxyMessage,
-) -> Result<(), ProtocolError> {
+fn proxy_message_frame(message: &ProxyMessage) -> Result<SocketFrame, ProtocolError> {
     let encoded = serde_json::to_string(message).map_err(|error| {
         ProtocolError::new(
             "encode_error",
             format!("failed to encode terminal message: {error}"),
         )
     })?;
-    outgoing
-        .send(SocketFrame::Text(encoded))
-        .map_err(|_| ProtocolError::new("server_offline", "agent server disconnected"))
+    Ok(SocketFrame::Text(encoded))
 }
 
 fn send_terminal_to_browser(
@@ -3150,5 +3915,367 @@ mod tests {
         assert_eq!(input.kind, TerminalBinaryKind::Input);
         assert_eq!(input.session_id, session_id);
         assert_eq!(input.payload, vec![0, 0xff, b'\r']);
+    }
+
+    #[tokio::test]
+    async fn cluster_name_projections_survive_snapshot_replay_ordering() {
+        let state = AppState::new();
+        state.ensure_workspace("alpha", "Alpha").await;
+        state
+            .apply_cluster_projection(ClusterProjectionUpdate::ServerRenamed {
+                workspace_id: "alpha".to_string(),
+                server_id: "server".to_string(),
+                name: "persisted-server-name".to_string(),
+            })
+            .await;
+        state
+            .apply_cluster_projection(ClusterProjectionUpdate::AgentRenamed {
+                workspace_id: "alpha".to_string(),
+                agent_id: "agent".to_string(),
+                name: "persisted-agent-name".to_string(),
+            })
+            .await;
+
+        let now = Utc::now();
+        state
+            .apply_cluster_snapshot(ClusterServerSnapshot {
+                owner: crate::cluster::ConnectionOwner {
+                    proxy_id: "remote-proxy".to_string(),
+                    connection_id: Uuid::new_v4(),
+                },
+                revision: 1,
+                snapshot: AgentServerSnapshot {
+                    server: test_server(),
+                    agents: vec![AgentInfo {
+                        agent_id: "agent".to_string(),
+                        workspace_id: "alpha".to_string(),
+                        server_id: "server".to_string(),
+                        kind: "command".to_string(),
+                        name: "stale-agent-name".to_string(),
+                        cwd: ".".to_string(),
+                        status: AgentStatus::Idle,
+                        pid: None,
+                        started_at: now,
+                        updated_at: now,
+                        exited_at: None,
+                        exit_code: None,
+                        output_revision: 0,
+                    }],
+                },
+            })
+            .await;
+
+        assert_eq!(
+            state
+                .resolve_server("alpha", "server")
+                .await
+                .expect("replayed server")
+                .name,
+            "persisted-server-name"
+        );
+        assert_eq!(
+            state
+                .resolve_agent("alpha", "agent")
+                .await
+                .expect("replayed agent")
+                .name,
+            "persisted-agent-name"
+        );
+    }
+
+    #[tokio::test]
+    async fn nats_cluster_routes_projection_commands_terminal_and_network() {
+        let Ok(nats_url) = std::env::var("TREER_TEST_NATS_URL") else {
+            return;
+        };
+        let suffix = Uuid::new_v4().simple().to_string();
+        let workspace_id = format!("workspace-{suffix}");
+        let source_id = format!("source-{suffix}");
+        let destination_id = format!("destination-{suffix}");
+        let subject_prefix = format!("treer.test.cluster.{suffix}");
+        let bus_a = ClusterBus::connect(
+            &nats_url,
+            format!("proxy-a-{suffix}"),
+            subject_prefix.clone(),
+        )
+        .await
+        .expect("connect proxy A cluster bus");
+        let bus_b = ClusterBus::connect(&nats_url, format!("proxy-b-{suffix}"), subject_prefix)
+            .await
+            .expect("connect proxy B cluster bus");
+        let state_a = AppState::with_backplanes(EventBus::in_process(), bus_a.clone());
+        let state_b = AppState::with_backplanes(EventBus::in_process(), bus_b.clone());
+        let workspace = state_a
+            .ensure_workspace(&workspace_id, "Cluster test")
+            .await;
+        bus_a
+            .start(state_a.clone())
+            .await
+            .expect("start proxy A bus");
+        bus_a
+            .broadcast_projection(ClusterProjectionUpdate::WorkspaceUpsert { workspace })
+            .await
+            .expect("persist workspace projection before proxy B starts");
+        bus_b
+            .start(state_b.clone())
+            .await
+            .expect("start proxy B bus");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state_b.snapshot(&workspace_id).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("late proxy replays durable workspace projection");
+
+        let now = Utc::now();
+        let source_connection = Uuid::new_v4();
+        let destination_connection = Uuid::new_v4();
+        let (source_tx, mut source_rx) = mpsc::unbounded_channel();
+        let source = ServerInfo {
+            server_id: source_id.clone(),
+            workspace_id: workspace_id.clone(),
+            name: "source".to_string(),
+            hostname: "source".to_string(),
+            root: "/tmp".to_string(),
+            labels: Default::default(),
+            status: ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+        state_a
+            .register_server(source, source_connection, source_tx)
+            .await
+            .expect("register source on proxy A");
+
+        let (destination_tx, mut destination_rx) = mpsc::unbounded_channel();
+        let destination = ServerInfo {
+            server_id: destination_id.clone(),
+            workspace_id: workspace_id.clone(),
+            name: "destination".to_string(),
+            hostname: "destination".to_string(),
+            root: "/tmp".to_string(),
+            labels: Default::default(),
+            status: ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+        state_b
+            .register_server(destination.clone(), destination_connection, destination_tx)
+            .await
+            .expect("register destination on proxy B");
+        let agent_id = format!("agent-{suffix}");
+        state_b
+            .apply_snapshot(
+                destination_connection,
+                AgentServerSnapshot {
+                    server: destination,
+                    agents: vec![AgentInfo {
+                        agent_id: agent_id.clone(),
+                        workspace_id: workspace_id.clone(),
+                        server_id: destination_id.clone(),
+                        kind: "command".to_string(),
+                        name: "remote-agent".to_string(),
+                        cwd: ".".to_string(),
+                        status: AgentStatus::Idle,
+                        pid: None,
+                        started_at: now,
+                        updated_at: now,
+                        exited_at: None,
+                        exit_code: None,
+                        output_revision: 0,
+                    }],
+                },
+            )
+            .await
+            .expect("publish destination snapshot");
+
+        let replicated = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state_a
+                    .resolve_agent(&workspace_id, &agent_id)
+                    .await
+                    .is_ok()
+                    && state_b
+                        .resolve_server(&workspace_id, &source_id)
+                        .await
+                        .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if replicated.is_err() {
+            panic!(
+                "replicate live projections: proxy_a={:?}, proxy_b={:?}",
+                state_a.snapshot(&workspace_id).await,
+                state_b.snapshot(&workspace_id).await
+            );
+        }
+
+        state_a
+            .rename_agent(&workspace_id, &agent_id, "renamed-remote-agent".to_string())
+            .await
+            .expect("rename agent through proxy A");
+        state_a
+            .rename_server(
+                &workspace_id,
+                &destination_id,
+                "renamed-destination".to_string(),
+            )
+            .await
+            .expect("rename server through proxy A");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let agent_name = state_b
+                    .resolve_agent(&workspace_id, &agent_id)
+                    .await
+                    .map(|agent| agent.name);
+                let server_name = state_b
+                    .resolve_server(&workspace_id, &destination_id)
+                    .await
+                    .map(|server| server.name);
+                if agent_name.as_deref() == Ok("renamed-remote-agent")
+                    && server_name.as_deref() == Ok("renamed-destination")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("replicate rename projection updates");
+
+        let command_state = state_a.clone();
+        let command_workspace = workspace_id.clone();
+        let command_server = destination_id.clone();
+        let command = tokio::spawn(async move {
+            command_state
+                .send_command(
+                    &command_workspace,
+                    &command_server,
+                    AgentCommand::ShutdownMachine,
+                )
+                .await
+        });
+        let command_message: ProxyMessage = serde_json::from_str(&expect_text(
+            destination_rx.recv().await.expect("cross-proxy command"),
+        ))
+        .expect("decode cross-proxy command");
+        let ProxyMessage::Command { envelope } = command_message else {
+            panic!("expected command envelope");
+        };
+        state_b
+            .complete_command(CommandResult::success(
+                envelope.command_id,
+                serde_json::json!({"accepted": true}),
+            ))
+            .await;
+        assert_eq!(
+            command
+                .await
+                .expect("join command")
+                .expect("command result"),
+            serde_json::json!({"accepted": true})
+        );
+
+        let (browser_tx, mut browser_rx) = mpsc::unbounded_channel();
+        let session_id = state_a
+            .attach_terminal(&workspace_id, &agent_id, 100, 30, browser_tx)
+            .await
+            .expect("attach across proxies");
+        let attach: ProxyMessage = serde_json::from_str(&expect_text(
+            destination_rx.recv().await.expect("remote terminal attach"),
+        ))
+        .expect("decode terminal attach");
+        assert!(
+            matches!(attach, ProxyMessage::TerminalAttach { session_id: attached, .. } if attached == session_id)
+        );
+        state_b
+            .terminal_ready(
+                &workspace_id,
+                &destination_id,
+                destination_connection,
+                &session_id,
+                4,
+                b"replay".to_vec(),
+            )
+            .await
+            .expect("return terminal replay across proxies");
+        assert!(matches!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Text(_))
+        ));
+        assert_eq!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Binary(b"replay".to_vec()))
+        );
+        state_a
+            .terminal_input(&session_id, b"hello".to_vec())
+            .await
+            .expect("route terminal input across proxies");
+        assert!(matches!(
+            destination_rx.recv().await,
+            Some(SocketFrame::Binary(_))
+        ));
+
+        let source_stream_id = format!("source-stream-{suffix}");
+        state_a
+            .open_network_stream(
+                &workspace_id,
+                &source_id,
+                source_connection,
+                &destination_id,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Open,
+                    stream_id: source_stream_id.clone(),
+                    payload: b"connect".to_vec(),
+                },
+            )
+            .await
+            .expect("open cross-proxy network stream");
+        let destination_open =
+            expect_network(destination_rx.recv().await.expect("destination open"));
+        assert_eq!(destination_open.kind, NetworkBinaryKind::Open);
+        state_b
+            .relay_network_frame(
+                &workspace_id,
+                &destination_id,
+                destination_connection,
+                NetworkBinaryFrame {
+                    kind: NetworkBinaryKind::Opened,
+                    stream_id: destination_open.stream_id,
+                    payload: Vec::new(),
+                },
+            )
+            .await
+            .expect("return opened frame to coordinating proxy");
+        let opened = expect_network(source_rx.recv().await.expect("source opened"));
+        assert_eq!(opened.kind, NetworkBinaryKind::Opened);
+        assert_eq!(opened.stream_id, source_stream_id);
+
+        state_b
+            .disconnect_server(&workspace_id, &destination_id, destination_connection)
+            .await;
+        let terminal_closed = tokio::time::timeout(Duration::from_secs(5), browser_rx.recv())
+            .await
+            .expect("remote disconnect closes coordinating terminal")
+            .expect("terminal close frame");
+        let closed: TerminalServerMessage =
+            serde_json::from_str(&expect_text(terminal_closed)).expect("decode terminal close");
+        assert!(matches!(closed, TerminalServerMessage::Closed { .. }));
+        let network_reset = tokio::time::timeout(Duration::from_secs(5), source_rx.recv())
+            .await
+            .expect("remote disconnect resets coordinating network stream")
+            .expect("network reset frame");
+        assert_eq!(expect_network(network_reset).kind, NetworkBinaryKind::Reset);
+        state_a
+            .disconnect_server(&workspace_id, &source_id, source_connection)
+            .await;
     }
 }

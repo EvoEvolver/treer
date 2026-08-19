@@ -179,11 +179,33 @@ and workload signing keys are stored in PostgreSQL. The Proxy requires
 test suite. Changing `ADMIN_PASSWORD` changes the administrator's next login
 password without rewriting user accounts.
 
-## NATS event bus
+## NATS event bus and multi-Proxy routing
 
 The Proxy can publish revisioned workspace changes as versioned domain events
 to NATS JetStream. NATS is optional: without `TREER_NATS_URL`, the same event
-contract runs in process and the browser event stream continues to work.
+contract runs in process and the browser event stream continues to work, but
+that Proxy is a standalone routing instance. Configure NATS before running more
+than one Proxy replica.
+
+With NATS configured, Treer uses four broker paths:
+
+- short-lived JetStream KV leases track the Proxy that owns each Controller;
+  heartbeats renew only this small ownership record, while a separate KV bucket
+  updates the full machine snapshot only when machine or Agent state changes;
+- file-backed JetStream KV retains the latest workspace, rename, and deletion
+  projections so replicas that reconnect do not miss control-plane changes;
+- Core NATS request/reply routes commands, terminal and transfer sessions, and
+  virtual-network frames to the owning or initiating Proxy;
+- JetStream stores versioned domain events. PTY, transfer, and TCP bytes are
+  never retained in JetStream.
+
+Replica IDs come from `TREER_PROXY_INSTANCE_ID`, then
+`RAILWAY_REPLICA_ID`, or a generated process ID. Each live replica must have a
+unique ID. Load balancers do not need sticky sessions: browser sessions and
+Controller connections may land on different replicas.
+
+Each Controller heartbeat also rechecks its machine against PostgreSQL, so a
+revoked machine is disconnected even if NATS delivery is interrupted.
 
 For a single-host deployment with separate PostgreSQL, Proxy, and NATS
 processes, use the checked-in Compose stack:
@@ -208,6 +230,8 @@ For a Proxy started outside Compose, configure:
 export TREER_NATS_URL='nats://127.0.0.1:4222'
 export TREER_NATS_STREAM='TREER_EVENTS'
 export TREER_NATS_SUBJECT_PREFIX='treer.v1.events'
+export TREER_NATS_CLUSTER_SUBJECT_PREFIX='treer.v1.cluster'
+export TREER_PROXY_INSTANCE_ID='proxy-a' # optional outside an orchestrator
 ```
 
 Subjects use
@@ -232,8 +256,11 @@ deployable as a Railway service. Railway's injected `PORT` and
 
 1. Create a Railway service from this GitHub repository.
 2. Add a Railway PostgreSQL service and expose its `DATABASE_URL` to Treer.
-3. Set the required `ADMIN_PASSWORD` service variable.
-4. Generate a public domain for the service.
+3. For more than one Treer replica, add a NATS service with JetStream enabled
+   and expose its private URL as `TREER_NATS_URL`.
+4. Set the required `ADMIN_PASSWORD` service variable.
+5. Generate a public domain for the service, then increase the Treer service's
+   replica count. Railway supplies a distinct `RAILWAY_REPLICA_ID` to each.
 
 The image builds and serves Linux agent binaries for its own CPU architecture.
 Set `TREER_PROXY_PUBLIC_URL` only when overriding the Railway-generated domain.

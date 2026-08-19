@@ -16,9 +16,9 @@ flowchart TB
     Agent[Managed agent] -->|loopback HTTP and WS| Controller
 
     subgraph Central[Central control plane]
-        Proxy["treer-proxy<br/>auth, metadata, routing"]
+        Proxy["treer-proxy replicas<br/>auth, metadata, routing"]
         DB[(PostgreSQL)]
-        NATS[(NATS JetStream<br/>optional event distribution)]
+        NATS[(NATS Core + JetStream KV<br/>routing and events)]
         Web[Embedded React application]
         Proxy <--> DB
         Proxy --> NATS
@@ -64,13 +64,18 @@ flowchart TB
 - Enrolled machines establish outbound connections to the Proxy.
 - Remote working directories and file paths are resolved beneath the machine's
   configured workspace root. This path rule is not filesystem sandboxing.
-- Durable identity metadata lives in PostgreSQL; live routing and streams are
-  currently single-Proxy in-memory state.
+- Durable identity metadata lives in PostgreSQL. With NATS configured, live
+  Controller ownership and machine snapshots are shared across Proxy replicas;
+  session and stream coordination remains in the initiating Proxy and is
+  reached through routed IDs.
 - Workspace mutations emit a shared, versioned domain-event envelope. The
   broker-neutral event bus stays in process by default and can publish the same
   envelope to an optional NATS JetStream.
-- JetStream carries durable domain events, not PTY output, terminal input, file
-  transfer payloads, or virtual-network TCP bytes.
+- JetStream carries durable domain events, durable control projections,
+  expiring ownership leases, and change-driven live snapshots. Heartbeats do
+  not republish full snapshots. PTY output, terminal input, file transfer
+  payloads, and virtual-network TCP bytes are not retained in JetStream; live
+  bytes use Core NATS only when their endpoints use different Proxy replicas.
 - The web build is embedded into `treer-proxy`; frontend API changes and Proxy
   routes must be changed and verified together.
 - `skills/treer/SKILL.md` is embedded into the CLI at build time and is the
@@ -85,6 +90,7 @@ flowchart TB
 | CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Local context; workload-token requests require the Agent credential |
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
 | Host to child process | PTY raw bytes | Host process ownership |
+| Proxy replica to Proxy replica | Core NATS MessagePack request/reply and broadcast; JetStream KV for leases, snapshots, and durable projections | Private NATS boundary |
 
 PostgreSQL persists users, organizations, memberships, sessions, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
@@ -93,9 +99,16 @@ create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
 
-Connected Controllers, pending commands, workspace projections, terminal legs,
-transfers, and network tunnels are held in Proxy memory and do not yet support
-horizontal routing across Proxy replicas.
+Each Controller connection,
+pending command, browser session, terminal leg, transfer, and network route is
+owned by one Proxy process. A small expiring NATS KV lease maps a Controller to
+that process; a separate KV entry changes only when its machine snapshot
+changes. File-backed projection entries retain the latest workspace,
+rename/delete, and restoration state across replica disconnects. Routed
+terminal, transfer, and network IDs encode the initiating Proxy so return
+traffic reaches its in-memory state. Connection IDs and JetStream revisions
+fence stale owners and out-of-order snapshot delivery. Heartbeats revalidate
+machine revocation against PostgreSQL before renewing ownership.
 
 Workspace state changes also produce `DomainEventEnvelope` values containing a
 unique event ID, schema version, actor, action, resource, occurrence time,
@@ -104,6 +117,13 @@ workspace revision, optional trace/correlation lineage, and JSON payload. When
 stream and publishes these envelopes under a workspace-scoped subject. Publish
 retries use the event ID as `Nats-Msg-Id`; the database remains authoritative
 because the publisher queue is not yet a transactional outbox.
+
+Without `TREER_NATS_URL`, the same code runs as one standalone Proxy and keeps
+all live routing in process. Horizontal replicas require a shared PostgreSQL
+database and a shared NATS server with JetStream enabled. Sticky load-balancer
+sessions are not required. NATS loss interrupts cross-replica routing; the
+Controller reconnect loop and Host-owned terminal revisions recover live state
+after the backplane returns.
 
 ## Primary information flow
 

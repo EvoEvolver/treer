@@ -41,6 +41,7 @@ services:
       TREER_NATS_URL: "nats://nats:4222"
       TREER_NATS_STREAM: "TREER_EVENTS"
       TREER_NATS_SUBJECT_PREFIX: "treer.v1.events"
+      TREER_NATS_CLUSTER_SUBJECT_PREFIX: "treer.v1.cluster"
     ports:
       - "8787:8787"
 

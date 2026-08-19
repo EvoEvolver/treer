@@ -280,11 +280,32 @@ async fn handle(
             }
             AgentServerMessage::Heartbeat { .. } => {
                 if let Some((workspace_id, server_id)) = identity.as_ref() {
+                    match auth.machine_is_active(workspace_id, server_id).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            send_error(
+                                &outgoing_tx,
+                                ProtocolError::new(
+                                    "machine_revoked",
+                                    "machine credentials have been revoked",
+                                ),
+                            );
+                            break;
+                        }
+                        Err(error) => {
+                            send_error(&outgoing_tx, error.into_parts().1);
+                            continue;
+                        }
+                    }
                     if let Err(error) = state
                         .heartbeat(workspace_id, server_id, connection_id)
                         .await
                     {
+                        let stale = error.code == "stale_connection";
                         send_error(&outgoing_tx, error);
+                        if stale {
+                            break;
+                        }
                     }
                 } else {
                     send_error(&outgoing_tx, identity_error());

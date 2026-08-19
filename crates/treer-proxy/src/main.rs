@@ -1,6 +1,7 @@
 mod agent_socket;
 mod api;
 mod auth;
+mod cluster;
 mod event_bus;
 mod identity;
 pub mod policy;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use cluster::ClusterBus;
 use event_bus::{EventBus, EventBusConfig};
 use state::AppState;
 use tower_http::trace::TraceLayer;
@@ -58,7 +60,7 @@ struct Args {
     #[arg(
         long,
         env = "TREER_NATS_URL",
-        help = "NATS server URL; when absent, domain events stay in process"
+        help = "NATS server URL for domain events and multi-Proxy live routing"
     )]
     nats_url: Option<String>,
     #[arg(long, env = "TREER_NATS_STREAM", default_value = "TREER_EVENTS")]
@@ -69,8 +71,18 @@ struct Args {
         default_value = "treer.v1.events"
     )]
     nats_subject_prefix: String,
+    #[arg(
+        long,
+        env = "TREER_NATS_CLUSTER_SUBJECT_PREFIX",
+        default_value = "treer.v1.cluster"
+    )]
+    nats_cluster_subject_prefix: String,
+    #[arg(long, env = "TREER_PROXY_INSTANCE_ID")]
+    proxy_instance_id: Option<String>,
     #[arg(long, env = "RAILWAY_PUBLIC_DOMAIN", hide = true)]
     railway_public_domain: Option<String>,
+    #[arg(long, env = "RAILWAY_REPLICA_ID", hide = true)]
+    railway_replica_id: Option<String>,
 }
 
 #[tokio::main]
@@ -105,6 +117,20 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("failed to connect to PostgreSQL")?;
+    let instance_id = args
+        .proxy_instance_id
+        .or(args.railway_replica_id)
+        .unwrap_or_else(|| format!("proxy_{}", uuid::Uuid::new_v4().simple()));
+    let cluster = match args.nats_url.as_deref() {
+        Some(nats_url) => ClusterBus::connect(
+            nats_url,
+            instance_id.clone(),
+            args.nats_cluster_subject_prefix,
+        )
+        .await
+        .context("failed to initialize NATS cluster backplane")?,
+        None => ClusterBus::standalone(instance_id.clone()),
+    };
     let event_bus = match args.nats_url {
         Some(nats_url) => EventBus::connect_nats(EventBusConfig::new(
             nats_url,
@@ -118,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
             EventBus::in_process()
         }
     };
-    let state = AppState::with_event_bus(event_bus);
+    let state = AppState::with_backplanes(event_bus, cluster.clone());
     for workspace in auth
         .all_workspaces()
         .await
@@ -126,6 +152,10 @@ async fn main() -> anyhow::Result<()> {
     {
         state.ensure_workspace_info(workspace).await;
     }
+    cluster
+        .start(state.clone())
+        .await
+        .context("failed to start NATS cluster consumers")?;
     let policy = policy::PolicyEngine::allow_all();
     let identity = identity::IdentityIssuer::load(&auth, &public_url)
         .await
@@ -136,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
-    info!(address = %listen, %public_url, database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
+    info!(address = %listen, %public_url, %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, "treer proxy listening");
     axum::serve(listener, app)
         .await
         .context("proxy server failed")

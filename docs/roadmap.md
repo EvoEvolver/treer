@@ -131,6 +131,14 @@ publisher for existing workspace mutations. It deliberately stops short of a
 database outbox: runtime retries are bounded in memory, so the database remains
 the recovery source after a Proxy crash.
 
+The first horizontal-routing slice now separates small expiring Controller
+leases from change-driven live snapshots, retains current control projections
+in file-backed JetStream KV, and uses Core NATS request/reply for commands and
+stream delivery. Machine heartbeats revalidate PostgreSQL revocation before
+renewing a lease. It supports multiple stateless Proxy replicas against one
+PostgreSQL/NATS pair; multi-region broker topology, transactional domain-event
+outboxes, traffic accounting, and load testing remain later work.
+
 ### Identity, policy, and delegation
 
 Authentication establishes a principal. Policy decides what that principal may

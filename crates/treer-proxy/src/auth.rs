@@ -1372,6 +1372,26 @@ impl AuthStore {
         })
     }
 
+    pub async fn machine_is_active(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+    ) -> Result<bool, AuthFailure> {
+        if self.disabled {
+            return Ok(true);
+        }
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM machines \
+             WHERE workspace_id = $1 AND server_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(workspace_id)
+        .bind(server_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(count == 1)
+    }
+
     async fn login(&self, email: &str, password: &str) -> Result<CurrentSession, AuthFailure> {
         let identifier = email.trim().to_ascii_lowercase();
         if identifier.is_empty()
@@ -3071,6 +3091,10 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {}", claim.machine_token))
                 .expect("authorization header"),
         );
+        assert!(store
+            .machine_is_active("workspace-a", &claim.server_id)
+            .await
+            .expect("check active machine"));
         assert_eq!(
             store.active_machine_count().await.expect("machine count"),
             1
@@ -3082,6 +3106,10 @@ mod tests {
             .expect("delete machine");
 
         assert!(store.authenticate_machine(&headers).await.is_err());
+        assert!(!store
+            .machine_is_active("workspace-a", &claim.server_id)
+            .await
+            .expect("check revoked machine"));
         assert_eq!(
             store.active_machine_count().await.expect("machine count"),
             0
