@@ -201,7 +201,7 @@ PostgreSQL persists users, OAuth identities and short-lived OAuth states,
 organizations, memberships, sessions, password reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, workspace-scoped Agent launch profiles, machine services,
-virtual hosts, service ingresses, App OAuth authorization codes, ingress
+Agent UI declarations, virtual hosts, service ingresses, App OAuth authorization codes, ingress
 authorization sessions, append-only organization audit events, hourly
 directional machine traffic counters, immutable Core Messages, recipient
 deliveries, ordered context edges, sender-scoped send idempotency records,
@@ -229,6 +229,19 @@ deletable profiles for Codex, Claude, Pi, and OpenCode. Existing workspaces are
 not backfilled. The web application's built-in Terminal launch is not a profile:
 it sends a command-kind request with an empty argv, which the Controller maps to
 an interactive shell without initial PTY writes.
+
+An Agent UI declaration maps one Agent to an HTTP machine service on that
+Agent's machine plus an absolute service path. The declaration is durable in
+PostgreSQL and is carried in the workspace snapshot; NATS control projections
+make updates visible across Proxy replicas. When present, the web application
+embeds `/api/workspaces/{workspace}/agents/{agent}/ui/proxy/` instead of mounting
+the PTY terminal. The UI tunnel and virtual-host tunnel share the same HTTP/1.1
+bridge. WebSocket Upgrade requests become bidirectional byte streams over the
+existing Controller WebSocket and network binary frames; the custom page never
+connects directly to a machine. Relative URLs are required so assets, fetches,
+and WebSocket endpoints remain beneath the Agent UI tunnel prefix. Deleting the
+service, changing it to TCP, or moving it away from the Agent's machine clears
+the declaration and restores the terminal view.
 
 Covered organization and membership mutations write their audit event in the
 same PostgreSQL transaction. Successful Agent create, rename, stop, and delete

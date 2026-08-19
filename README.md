@@ -630,6 +630,9 @@ Server without receiving Proxy credentials:
 ```bash
 treer network service create api --port 8080 --protocol http
 treer network service probe api
+treer ui set api --path /
+treer ui show
+treer ui clear
 treer network host list
 treer network host create api.internal api
 treer network host delete api.internal

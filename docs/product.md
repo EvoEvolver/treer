@@ -33,10 +33,13 @@ In concrete terms:
 5. Agents can register and maintain long-running machine services, expose
    stable workspace aliases, and publish HTTP services through an optional
    wildcard HTTPS ingress for humans and other Agents.
-6. Machines connect outward to the Proxy; local Agent Server and service ports
+6. An Agent can select one HTTP machine service as its custom interface. The
+   control plane embeds that page in place of the Agent terminal, and relative
+   HTTP and WebSocket traffic uses the existing browser network tunnel.
+7. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed.
-7. The central Proxy is open source and can be privately deployed.
-8. Organization owners and administrators can review management activity and
+8. The central Proxy is open source and can be privately deployed.
+9. Organization owners and administrators can review management activity and
    the current workspace's recent relayed machine traffic in the web app.
 
 This is a convenience-first promise with a comprehensible security reason. It

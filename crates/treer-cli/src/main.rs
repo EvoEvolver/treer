@@ -34,11 +34,11 @@ use treer_protocol::{
     LaunchAgentProfileRequest, LegacyMailMessage, MachineServiceProtocol, MessageExternalSource,
     PluginManifest, PluginOAuthExchangeRequest, PluginOAuthStartRequest, ReceiveMessagesRequest,
     RenameRequest, RevokePluginSessionRequest, RevokePluginSessionsRequest, SendMessageRequest,
-    ServerInfo, ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
-    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, PLUGIN_ID_HEADER, PLUGIN_SESSION_HEADER,
-    WORKLOAD_CREDENTIAL_HEADER,
+    ServerInfo, ServiceIngressAccess, SetAgentUiRequest, TerminalClientMessage,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
+    WorkspaceSnapshot, AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, PLUGIN_ID_HEADER,
+    PLUGIN_SESSION_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -102,6 +102,11 @@ enum Command {
     Network {
         #[command(subcommand)]
         command: NetworkCommand,
+    },
+    #[command(about = "Show this Agent's custom web interface instead of its terminal")]
+    Ui {
+        #[command(subcommand)]
+        command: UiCommand,
     },
     #[command(about = "Obtain a short-lived identity token for a workspace service")]
     Token {
@@ -435,6 +440,20 @@ enum TokenCommand {
         #[arg(long, help = "Print the complete JSON token response")]
         json: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum UiCommand {
+    #[command(about = "Show the current custom interface declaration")]
+    Show,
+    #[command(about = "Use an HTTP machine service as this Agent's interface")]
+    Set {
+        service: String,
+        #[arg(long, default_value = "/")]
+        path: String,
+    },
+    #[command(about = "Return this Agent to the terminal interface")]
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]
@@ -816,6 +835,7 @@ async fn run_cli() -> anyhow::Result<()> {
         },
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::Network { command } => run_network_command(&client, command).await?,
+        Command::Ui { command } => run_ui_command(&client, command).await?,
         Command::Token { command } => {
             let TokenCommand::Create { audience, json } = command;
             let response: WorkloadIdentityTokenResponse = client
@@ -2517,32 +2537,23 @@ fn plugin_command_capabilities(argv: &[String]) -> anyhow::Result<Vec<&'static s
         },
         Command::Agent { command } => match command {
             AgentCommand::List => vec!["agent.discover"],
-            AgentCommand::Get { .. } => vec!["agent.metadata.read"],
+            AgentCommand::Show { .. } => vec!["agent.metadata.read"],
             AgentCommand::Prompt { .. } => vec!["agent.prompt"],
             _ => bail!("this Agent command is unavailable through the plugin broker"),
         },
-        Command::Human {
-            command: HumanCommand::List,
+        Command::Member {
+            command: MemberCommand::List,
         } => vec!["human.list"],
         Command::Whoami => vec!["identity.self.read"],
-        Command::Discover | Command::List => vec!["agent.discover"],
-        Command::Prompt { .. } => vec!["agent.prompt"],
+        Command::Status => vec!["agent.discover"],
         Command::Plugin {
             command: PluginCommand::Auth { .. },
         } => vec!["plugin.oauth"],
         Command::Plugin { .. }
-        | Command::Identity { .. }
-        | Command::Profile { .. }
         | Command::Machine { .. }
-        | Command::VirtualHost { .. }
-        | Command::Service { .. }
-        | Command::Publish { .. }
-        | Command::Create { .. }
-        | Command::Read { .. }
-        | Command::Rename { .. }
-        | Command::Delete { .. }
-        | Command::Attach { .. }
-        | Command::Stop { .. } => {
+        | Command::Network { .. }
+        | Command::Ui { .. }
+        | Command::Token { .. } => {
             bail!("this Treer command is unavailable through the plugin broker")
         }
     };
@@ -2564,10 +2575,10 @@ fn plugin_command_accepts_human_session(argv: &[String]) -> anyhow::Result<bool>
                 | MessageCommand::List { .. }
                 | MessageCommand::Receive { .. }
                 | MessageCommand::Ack { .. },
-        } | Command::Human {
-            command: HumanCommand::List,
+        } | Command::Member {
+            command: MemberCommand::List,
         } | Command::Agent {
-            command: AgentCommand::List | AgentCommand::Get { .. },
+            command: AgentCommand::List | AgentCommand::Show { .. },
         }
     ))
 }
@@ -2760,6 +2771,25 @@ async fn run_network_command(client: &ApiClient, command: NetworkCommand) -> any
         NetworkCommand::Service { command } => run_service_command(client, command).await,
         NetworkCommand::Host { command } => run_virtual_host_command(client, command).await,
         NetworkCommand::Publish { command } => run_publish_command(client, command).await,
+    }
+}
+
+async fn run_ui_command(client: &ApiClient, command: UiCommand) -> anyhow::Result<Value> {
+    match command {
+        UiCommand::Show => client.value(Method::GET, "api/ui", None).await,
+        UiCommand::Set { service, path } => {
+            client
+                .value(
+                    Method::PUT,
+                    "api/ui",
+                    Some(serde_json::to_value(SetAgentUiRequest {
+                        service_id: service,
+                        path,
+                    })?),
+                )
+                .await
+        }
+        UiCommand::Clear => client.value(Method::DELETE, "api/ui", None).await,
     }
 }
 
@@ -3753,6 +3783,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_ui_commands_parse() {
+        let set = Args::try_parse_from(["treer", "ui", "set", "dashboard", "--path", "/treer/"])
+            .expect("Agent UI set should parse");
+        assert!(matches!(
+            set.command,
+            Some(Command::Ui {
+                command: UiCommand::Set { service, path }
+            }) if service == "dashboard" && path == "/treer/"
+        ));
+
+        let clear =
+            Args::try_parse_from(["treer", "ui", "clear"]).expect("Agent UI clear should parse");
+        assert!(matches!(
+            clear.command,
+            Some(Command::Ui {
+                command: UiCommand::Clear
+            })
+        ));
+    }
+
+    #[test]
     fn identity_token_command_parses() {
         let args = Args::try_parse_from(["treer", "token", "create", "api"])
             .expect("token create should parse");
@@ -3940,7 +3991,7 @@ mod tests {
         );
         assert!(plugin_command_accepts_human_session(&[
             "agent".into(),
-            "get".into(),
+            "show".into(),
             "reviewer".into(),
         ])
         .expect("parse metadata read"));
@@ -4092,7 +4143,8 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         fs::create_dir(&root).expect("create broker test directory");
-        let socket_path = root.join("broker.sock");
+        let socket_path =
+            PathBuf::from(format!("/tmp/treer-{}.sock", uuid::Uuid::new_v4().simple()));
         let listener = UnixListener::bind(&socket_path).expect("bind broker test socket");
         let context = PluginBrokerContext {
             plugin_id: "telegram".to_string(),
@@ -4202,7 +4254,8 @@ mod tests {
         .expect_err("concurrency limit");
         assert!(concurrency.to_string().contains("concurrency limit"));
 
-        let socket_path = root.join("oversized.sock");
+        let socket_path =
+            PathBuf::from(format!("/tmp/treer-{}.sock", uuid::Uuid::new_v4().simple()));
         let listener = UnixListener::bind(&socket_path).expect("bind oversized request socket");
         let oversized_context = context(std::env::current_exe().expect("test executable"), 1);
         let server = tokio::spawn(async move {

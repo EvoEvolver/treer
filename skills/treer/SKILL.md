@@ -38,6 +38,7 @@ treer machine --help
 treer message --help
 treer plugin --help
 treer network --help
+treer ui --help
 treer member --help
 treer token --help
 ```
@@ -144,6 +145,37 @@ treer network host delete api.internal
 These commands operate only in `TREER_WORKSPACE_ID`. Service and virtual-host
 operations have separate policy actions. Changes take effect immediately for
 online Controllers; reconnect and periodic full snapshots provide recovery.
+
+## Publish a custom Agent interface
+
+A managed Agent can replace its terminal in the Treer web application with an
+HTTP service registered on its own machine:
+
+```bash
+treer network service create agent-dashboard --port 4173 --protocol http
+treer ui set agent-dashboard
+treer ui show
+```
+
+Use `--path` when the application is mounted below its service root:
+
+```bash
+treer ui set agent-dashboard --path /treer/
+```
+
+The page must use relative asset, fetch, and WebSocket URLs. Treer embeds the
+page through the Proxy and carries both ordinary HTTP and WebSocket Upgrade
+traffic over the existing Controller WebSocket; do not publish or connect to a
+machine port directly. The selected service must use HTTP and belong to the
+current Agent's machine. Return to the normal terminal view with:
+
+```bash
+treer ui clear
+```
+
+Deleting the service, changing it to TCP, or moving it to another machine also
+clears the custom interface. The declaration changes only the web presentation;
+it does not start, stop, or supervise the service process.
 
 ## Publish an HTTP service
 

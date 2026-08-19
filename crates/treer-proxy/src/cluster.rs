@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
-use treer_protocol::{AgentCommand, AgentServerSnapshot, ProtocolError, WorkspaceInfo};
+use treer_protocol::{AgentCommand, AgentServerSnapshot, AgentUi, ProtocolError, WorkspaceInfo};
 use uuid::Uuid;
 
 use crate::state::{AppState, SocketFrame};
@@ -69,6 +69,13 @@ pub(crate) enum ClusterProjectionUpdate {
         server_id: String,
     },
     AgentDeleted {
+        workspace_id: String,
+        agent_id: String,
+    },
+    AgentUiSet {
+        ui: AgentUi,
+    },
+    AgentUiCleared {
         workspace_id: String,
         agent_id: String,
     },
@@ -865,6 +872,19 @@ fn projection_key(update: &ClusterProjectionUpdate) -> String {
             agent_id,
         } => format!(
             "agent.{}.{}",
+            URL_SAFE_NO_PAD.encode(workspace_id.as_bytes()),
+            URL_SAFE_NO_PAD.encode(agent_id.as_bytes())
+        ),
+        ClusterProjectionUpdate::AgentUiSet { ui } => format!(
+            "agent-ui.{}.{}",
+            URL_SAFE_NO_PAD.encode(ui.workspace_id.as_bytes()),
+            URL_SAFE_NO_PAD.encode(ui.agent_id.as_bytes())
+        ),
+        ClusterProjectionUpdate::AgentUiCleared {
+            workspace_id,
+            agent_id,
+        } => format!(
+            "agent-ui.{}.{}",
             URL_SAFE_NO_PAD.encode(workspace_id.as_bytes()),
             URL_SAFE_NO_PAD.encode(agent_id.as_bytes())
         ),

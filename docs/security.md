@@ -219,6 +219,15 @@ Browser-to-service tunneling strips cookies, authorization headers, proxy
 authorization, and response `Set-Cookie` before forwarding, but this is not
 end-to-end confidentiality from the Proxy.
 
+Custom Agent interfaces are active content supplied by a workspace Agent and
+are currently served from the Proxy origin inside a sandboxed iframe. The
+iframe blocks top-level navigation and direct parent access, and gateway
+credentials are not forwarded to its machine service. This is not a hostile
+content boundary: code in that page shares the Proxy origin and may attempt
+same-origin control API requests using the viewer's session. Enable custom
+interfaces only for trusted Agents and workspaces until Treer gives tunnel
+content a separate cookie-free origin and capability-scoped browser session.
+
 Wildcard service ingress has different semantics from the authenticated
 browser-to-virtual-host tunnel. It preserves application cookies,
 `Authorization`, and response `Set-Cookie`. The Proxy consumes its host-only

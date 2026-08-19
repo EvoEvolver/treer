@@ -113,6 +113,8 @@ pub struct WorkspaceSnapshot {
     pub workspace: WorkspaceInfo,
     pub servers: Vec<ServerInfo>,
     pub agents: Vec<AgentInfo>,
+    #[serde(default)]
+    pub agent_uis: Vec<AgentUi>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1125,6 +1127,27 @@ pub struct MachineService {
     pub created_by: String,
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUi {
+    pub workspace_id: String,
+    pub agent_id: String,
+    pub service_id: String,
+    pub path: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetAgentUiRequest {
+    pub service_id: String,
+    #[serde(default = "default_agent_ui_path")]
+    pub path: String,
+}
+
+fn default_agent_ui_path() -> String {
+    "/".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

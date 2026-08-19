@@ -21,9 +21,9 @@ use treer_protocol::{
     LaunchAgentProfileRequest, ListMessagesQuery, PluginOAuthExchangeRequest,
     PluginOAuthStartRequest, PromptAgentRequest, ProtocolError, ReceiveMessagesRequest,
     RenameRequest, RevokePluginSessionRequest, RevokePluginSessionsRequest, SendMessageRequest,
-    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
-    OPERATOR_CREDENTIAL_HEADER, PLUGIN_ID_HEADER, PLUGIN_SESSION_HEADER,
+    SetAgentUiRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, WorkloadIdentityTokenRequest,
+    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, PLUGIN_ID_HEADER, PLUGIN_SESSION_HEADER,
     WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
@@ -153,6 +153,16 @@ impl LocalApiState {
             .await
     }
 
+    async fn put_as(
+        &self,
+        suffix: &str,
+        body: &Value,
+        source_agent: Option<&ValidatedAgent>,
+    ) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::PUT, suffix, Some(body), source_agent)
+            .await
+    }
+
     async fn delete_as(
         &self,
         suffix: &str,
@@ -200,6 +210,10 @@ pub fn router(state: LocalApiState) -> Router {
         .route(
             "/api/services/{service_id}/probe",
             post(probe_machine_service),
+        )
+        .route(
+            "/api/ui",
+            get(get_agent_ui).put(set_agent_ui).delete(clear_agent_ui),
         )
         .route(
             "/api/virtual-hosts",
@@ -556,6 +570,33 @@ async fn probe_machine_service(
             )
             .await?,
     ))
+}
+
+async fn get_agent_ui(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("ui", Some(&agent)).await?))
+}
+
+async fn set_agent_ui(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<SetAgentUiRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(state.put_as("ui", &body, Some(&agent)).await?))
+}
+
+async fn clear_agent_ui(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(state.delete_as("ui", Some(&agent)).await?))
 }
 
 async fn list_virtual_network_hosts(
