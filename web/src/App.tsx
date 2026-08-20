@@ -25,6 +25,8 @@ import {
   Pencil,
   Plus,
   RotateCw,
+  Rocket,
+  Play,
   ScrollText,
   Search,
   Server,
@@ -36,7 +38,7 @@ import {
   Users,
   X,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type Machine, type MachineService, type MachineTrafficRecord, type MailDelivery, type MailMessage, type MailboxResponse, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type AgentLaunchProfile, type Machine, type MachineService, type MachineTrafficRecord, type MailDelivery, type MailMessage, type MailboxResponse, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -51,7 +53,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
-type MainView = "terminal" | "inbox" | "network" | "audit"
+type MainView = "terminal" | "inbox" | "profiles" | "network" | "audit"
 type AuthMode = "login" | "register" | "forgot" | "reset"
 type AuthConfig = { github: boolean; google: boolean; invitation_required: boolean }
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
@@ -357,6 +359,9 @@ const auditActionLabels: Record<string, string> = {
   "agent.renamed": "renamed an agent",
   "agent.stopped": "stopped an agent",
   "agent.deleted": "deleted an agent",
+  "launch_profile.created": "created a launch profile",
+  "launch_profile.updated": "updated a launch profile",
+  "launch_profile.deleted": "deleted a launch profile",
 }
 
 function AuditView({ events, traffic, machines, loading }: { events: OrganizationAuditEvent[]; traffic: MachineTrafficRecord[]; machines: Machine[]; loading: boolean }) {
@@ -383,6 +388,22 @@ function AuditView({ events, traffic, machines, loading }: { events: Organizatio
   </div></div>
 }
 
+function LaunchProfilesView({ profiles, loading, onEdit, onLaunch, onDelete }: { profiles: AgentLaunchProfile[]; loading: boolean; onEdit: (profile: AgentLaunchProfile) => void; onLaunch: (profile: AgentLaunchProfile) => void; onDelete: (profile: AgentLaunchProfile) => void }) {
+  return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
+    <div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#dcead8] text-[#476345]"><Rocket className="size-4" /></div><h1 className="text-2xl font-semibold">Launch profiles</h1></div><span className="text-xs text-muted-foreground">{profiles.length} saved</span></div>
+    <div className="border-y">
+      <div className="hidden h-9 grid-cols-[minmax(140px,.8fr)_minmax(240px,1.6fr)_minmax(120px,.7fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Profile</span><span>Command</span><span>Working directory</span><span className="w-28" /></div>
+      {profiles.map((profile) => <div key={profile.profile_id} className="grid min-h-20 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(140px,.8fr)_minmax(240px,1.6fr)_minmax(120px,.7fr)_auto] sm:gap-4">
+        <span className="col-start-1 row-start-1 min-w-0 sm:col-start-auto sm:row-start-auto"><span className="block truncate text-xs font-medium">{profile.name}</span>{profile.description && <span className="mt-1 block truncate text-[10px] text-muted-foreground">{profile.description}</span>}</span>
+        <code className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto" title={[profile.command, ...profile.args].join(" ")}>{[profile.command, ...profile.args].join(" ")}</code>
+        <code className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{profile.cwd || "."}</code>
+        <span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Run ${profile.name}`} onClick={() => onLaunch(profile)}><Play /></IconButton><IconButton label={`Edit ${profile.name}`} onClick={() => onEdit(profile)}><Pencil /></IconButton><IconButton label={`Delete ${profile.name}`} className="text-destructive hover:text-destructive" onClick={() => onDelete(profile)}><Trash2 /></IconButton></span>
+      </div>)}
+      {!profiles.length && <EmptyState icon={<Rocket />} label={loading ? "Loading launch profiles" : "No launch profiles yet"} />}
+    </div>
+  </div></div>
+}
+
 function WorkspaceApp() {
   const [user, setUser] = useState<User | null | undefined>(undefined)
   const [organizations, setOrganizations] = useState<Organization[]>([])
@@ -402,6 +423,10 @@ function WorkspaceApp() {
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
+  const [profileEditorOpen, setProfileEditorOpen] = useState(false)
+  const [editingLaunchProfile, setEditingLaunchProfile] = useState<AgentLaunchProfile | null>(null)
+  const [launchingProfile, setLaunchingProfile] = useState<AgentLaunchProfile | null>(null)
+  const [deletingProfile, setDeletingProfile] = useState<AgentLaunchProfile | null>(null)
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
   const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
@@ -423,6 +448,15 @@ function WorkspaceApp() {
   const [agentServerId, setAgentServerId] = useState("")
   const [agentCwd, setAgentCwd] = useState(".")
   const [agentArgs, setAgentArgs] = useState("")
+  const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>([])
+  const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
+  const [launchProfileName, setLaunchProfileName] = useState("")
+  const [launchProfileDescription, setLaunchProfileDescription] = useState("")
+  const [launchProfileCwd, setLaunchProfileCwd] = useState(".")
+  const [launchProfileCommand, setLaunchProfileCommand] = useState("")
+  const [launchProfileArgs, setLaunchProfileArgs] = useState("")
+  const [launchMachineId, setLaunchMachineId] = useState("")
+  const [launchAgentName, setLaunchAgentName] = useState("")
   const [renameName, setRenameName] = useState("")
   const [installCommand, setInstallCommand] = useState("")
   const [connectCommand, setConnectCommand] = useState("")
@@ -642,6 +676,101 @@ function WorkspaceApp() {
   function changeAgentKind(kind: string) {
     setAgentKind(kind)
     if (!agentNameCustomized) setAgentName(defaultAgentName(kind))
+  }
+
+  const loadLaunchProfiles = useCallback(async () => {
+    if (!workspaceId) {
+      setLaunchProfiles([])
+      return
+    }
+    setLaunchProfilesLoading(true)
+    try {
+      const data = await api<{ profiles: AgentLaunchProfile[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles`)
+      setLaunchProfiles(data.profiles)
+    } finally {
+      setLaunchProfilesLoading(false)
+    }
+  }, [workspaceId])
+
+  useEffect(() => {
+    if (mainView === "profiles") loadLaunchProfiles().catch(showError)
+  }, [mainView, loadLaunchProfiles, showError])
+
+  function openLaunchProfiles() {
+    setMainView("profiles")
+  }
+
+  function openNewLaunchProfile() {
+    setEditingLaunchProfile(null)
+    setLaunchProfileName("")
+    setLaunchProfileDescription("")
+    setLaunchProfileCwd(".")
+    setLaunchProfileCommand("")
+    setLaunchProfileArgs("")
+    setProfileEditorOpen(true)
+  }
+
+  function openEditLaunchProfile(profile: AgentLaunchProfile) {
+    setEditingLaunchProfile(profile)
+    setLaunchProfileName(profile.name)
+    setLaunchProfileDescription(profile.description)
+    setLaunchProfileCwd(profile.cwd)
+    setLaunchProfileCommand(profile.command)
+    setLaunchProfileArgs(profile.args.join("\n"))
+    setProfileEditorOpen(true)
+  }
+
+  async function saveLaunchProfile(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId) return
+    try {
+      const path = editingLaunchProfile
+        ? `/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(editingLaunchProfile.profile_id)}`
+        : `/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles`
+      await api(path, {
+        method: editingLaunchProfile ? "PATCH" : "POST",
+        body: JSON.stringify({
+          name: launchProfileName,
+          description: launchProfileDescription,
+          cwd: launchProfileCwd,
+          command: launchProfileCommand,
+          args: launchProfileArgs.split("\n").map((value) => value.replace(/\r$/, "")).filter((value) => value.length > 0),
+        }),
+      })
+      setProfileEditorOpen(false)
+      setEditingLaunchProfile(null)
+      await loadLaunchProfiles()
+    } catch (reason) { showError(reason) }
+  }
+
+  function openLaunchProfile(profile: AgentLaunchProfile) {
+    setLaunchingProfile(profile)
+    setLaunchMachineId((current) => onlineMachines.some((machine) => machine.server_id === current) ? current : onlineMachines[0]?.server_id ?? "")
+    setLaunchAgentName(profile.name)
+  }
+
+  async function launchFromProfile(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId || !launchingProfile) return
+    try {
+      const agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(launchingProfile.profile_id)}/launch`, {
+        method: "POST",
+        body: JSON.stringify({ server_id: launchMachineId, agent_name: launchAgentName, cols: 120, rows: 36 }),
+      })
+      setLaunchingProfile(null)
+      await refreshSnapshot()
+      setSelectedAgentId(agent.agent_id)
+      setMainView("terminal")
+    } catch (reason) { showError(reason) }
+  }
+
+  async function deleteLaunchProfile() {
+    if (!workspaceId || !deletingProfile) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(deletingProfile.profile_id)}`, { method: "DELETE" })
+      setDeletingProfile(null)
+      await loadLaunchProfiles()
+    } catch (reason) { showError(reason) }
   }
 
   async function openInstall() {
@@ -931,7 +1060,7 @@ function WorkspaceApp() {
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
   return <TooltipProvider delayDuration={350}>
-    <main className="grid h-dvh min-h-0 grid-rows-[310px_minmax(620px,1fr)] overflow-auto bg-background md:grid-cols-[272px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden">
+    <main className="grid h-dvh min-h-0 grid-rows-[374px_minmax(620px,1fr)] overflow-auto bg-background md:grid-cols-[272px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden">
       <aside className="flex min-h-0 flex-col border-b bg-[#f7f7f5] md:border-b-0 md:border-r">
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
@@ -945,6 +1074,7 @@ function WorkspaceApp() {
         </div>
         <div className="px-2 pb-2">
           <Button variant={mainView === "inbox" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openInbox} disabled={!workspaceId}><Mail className="size-3.5" />Inbox</Button>
+          <Button variant={mainView === "profiles" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openLaunchProfiles} disabled={!workspaceId}><Rocket className="size-3.5" />Profiles</Button>
           <Button variant={mainView === "network" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openNetwork} disabled={!workspaceId}><Network className="size-3.5" />Network</Button>
           {canManageMembers && <Button variant={mainView === "audit" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openAudit} disabled={!workspaceId}><ScrollText className="size-3.5" />Audit</Button>}
         </div>
@@ -985,14 +1115,14 @@ function WorkspaceApp() {
 
       <section className="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]">
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
-          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "inbox" ? "Inbox" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "inbox" ? "Inbox" : mainView === "profiles" ? "Profiles" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label="Open full-screen terminal" className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
             <IconButton label="Reconnect terminal" disabled={!selectedAgent} onClick={() => { setSelectedAgentId(null); requestAnimationFrame(() => setSelectedAgentId(selectedAgent?.agent_id ?? null)) }}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={stopAgent}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
-          </div> : mainView === "inbox" ? <div className="flex shrink-0 items-center gap-2"><span className="hidden text-[10px] text-muted-foreground sm:inline">{mailDeliveries.length} messages</span><IconButton label="Refresh inbox" onClick={loadInbox} disabled={inboxLoading}><RotateCw /></IconButton></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={loadAudit} disabled={auditLoading}><RotateCw /></IconButton> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div>}
+          </div> : mainView === "inbox" ? <div className="flex shrink-0 items-center gap-2"><span className="hidden text-[10px] text-muted-foreground sm:inline">{mailDeliveries.length} messages</span><IconButton label="Refresh inbox" onClick={loadInbox} disabled={inboxLoading}><RotateCw /></IconButton></div> : mainView === "profiles" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh profiles" onClick={loadLaunchProfiles} disabled={launchProfilesLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openNewLaunchProfile}><Plus />New profile</Button></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={loadAudit} disabled={auditLoading}><RotateCw /></IconButton> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div>}
         </header>
         {mainView === "terminal" ? <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobileTerminalOpen && "fixed inset-0 z-[100] h-[100dvh] max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
@@ -1019,7 +1149,7 @@ function WorkspaceApp() {
               </div>
             </div>}
           </div>
-        </div> : mainView === "inbox" ? <InboxView deliveries={mailDeliveries} selectedMessageId={selectedMessageId} query={inboxQuery} loading={inboxLoading} remainingUnread={remainingUnread} onQueryChange={setInboxQuery} onSelect={setSelectedMessageId} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} machines={snapshot?.servers ?? []} loading={auditLoading} /> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
+        </div> : mainView === "inbox" ? <InboxView deliveries={mailDeliveries} selectedMessageId={selectedMessageId} query={inboxQuery} loading={inboxLoading} remainingUnread={remainingUnread} onQueryChange={setInboxQuery} onSelect={setSelectedMessageId} onCopy={copy} /> : mainView === "profiles" ? <LaunchProfilesView profiles={launchProfiles} loading={launchProfilesLoading} onEdit={openEditLaunchProfile} onLaunch={openLaunchProfile} onDelete={setDeletingProfile} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} machines={snapshot?.servers ?? []} loading={auditLoading} /> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
       </section>
     </main>
 
@@ -1031,6 +1161,12 @@ function WorkspaceApp() {
     <Dialog open={renameOrganizationOpen} onOpenChange={setRenameOrganizationOpen}><DialogContent><form onSubmit={renameOrganization}><DialogHeader><DialogTitle>Rename organization</DialogTitle><DialogDescription>Update the organization name shown to its members.</DialogDescription></DialogHeader><div className="my-5"><Field label="Organization name"><Input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameOrganizationOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={profileOpen} onOpenChange={setProfileOpen}><DialogContent><form onSubmit={updateProfile}><DialogHeader><DialogTitle>Edit profile</DialogTitle><DialogDescription>Your preferred name is visible to other organization members.</DialogDescription></DialogHeader><div className="my-5 space-y-4"><Field label="Preferred name"><Input value={preferredName} onChange={(event) => setPreferredName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Email"><Input type="email" value={profileEmail} onChange={(event) => setProfileEmail(event.target.value)} required maxLength={254} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
+
+    <Dialog open={profileEditorOpen} onOpenChange={(open) => { setProfileEditorOpen(open); if (!open) setEditingLaunchProfile(null) }}><DialogContent className="max-w-xl"><form onSubmit={saveLaunchProfile} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>{editingLaunchProfile ? "Edit launch profile" : "New launch profile"}</DialogTitle><DialogDescription>Reusable Agent process settings for this workspace.</DialogDescription></DialogHeader><Field label="Profile name"><Input value={launchProfileName} onChange={(event) => setLaunchProfileName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Working directory"><Input className="font-mono" value={launchProfileCwd} onChange={(event) => setLaunchProfileCwd(event.target.value)} required /></Field><div className="sm:col-span-2"><Field label="Description"><Input value={launchProfileDescription} onChange={(event) => setLaunchProfileDescription(event.target.value)} maxLength={1000} /></Field></div><div className="sm:col-span-2"><Field label="Command"><Input className="font-mono" value={launchProfileCommand} onChange={(event) => setLaunchProfileCommand(event.target.value)} placeholder="codex" required /></Field></div><div className="sm:col-span-2"><Field label="Arguments, one per line"><Textarea className="min-h-28 font-mono text-xs" value={launchProfileArgs} onChange={(event) => setLaunchProfileArgs(event.target.value)} /></Field></div><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setProfileEditorOpen(false)}>Cancel</Button><Button type="submit"><Rocket />{editingLaunchProfile ? "Save profile" : "Create profile"}</Button></DialogFooter></form></DialogContent></Dialog>
+
+    <Dialog open={Boolean(launchingProfile)} onOpenChange={(open) => !open && setLaunchingProfile(null)}><DialogContent><form onSubmit={launchFromProfile} className="space-y-4"><DialogHeader><DialogTitle>Run {launchingProfile?.name}</DialogTitle><DialogDescription>Choose where to start this Agent.</DialogDescription></DialogHeader><Field label="Machine"><Select value={launchMachineId} onValueChange={setLaunchMachineId} required><SelectTrigger><SelectValue placeholder="Select an online machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Agent name"><Input value={launchAgentName} onChange={(event) => setLaunchAgentName(event.target.value)} required maxLength={80} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setLaunchingProfile(null)}>Cancel</Button><Button type="submit" disabled={!launchMachineId}><Play />Run Agent</Button></DialogFooter></form></DialogContent></Dialog>
+
+    <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start an agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Kind"><Select value={agentKind} onValueChange={changeAgentKind}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="codex">codex</SelectItem><SelectItem value="claude">claude</SelectItem><SelectItem value="command">command</SelectItem></SelectContent></Select></Field><Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field><Field label="Arguments, one per line"><Textarea rows={3} value={agentArgs} onChange={(event) => setAgentArgs(event.target.value)} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId}>Create agent</Button></DialogFooter></form></DialogContent></Dialog>
 

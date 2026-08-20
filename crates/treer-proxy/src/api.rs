@@ -18,32 +18,36 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
-    AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentInfo, ApiError, CreateAgentRequest,
-    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
-    InputAgentRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
+    AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentInfo, AgentLaunchProfile, ApiError,
+    CreateAgentLaunchProfileRequest, CreateAgentRequest, CreateMachineServiceRequest,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
+    LaunchAgentProfileRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
     MailAddress, MailAddressKind, MailboxResponse, PromptAgentRequest, ProtocolError,
     RenameRequest, SendAgentMailRequest, SendAgentMailResponse, ServiceIngress,
     ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
-    UpdateMachineServiceRequest, UpdateServiceIngressRequest, VirtualNetworkHostsSnapshot,
-    WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceHuman,
-    AGENT_ID_HEADER,
+    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
+    WorkspaceEvent, WorkspaceHuman, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
 
 use crate::agent_socket;
 use crate::audit::NewWorkspaceAuditEvent;
-use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
+use crate::auth::{self, AuthStore, CurrentSession, MachineSession, ProfileMutationActor};
 use crate::identity::IdentityIssuer;
 use crate::policy::{
     PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_CREATE,
     ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT, ACTION_AGENT_METADATA_READ,
     ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP, ACTION_AGENT_UPDATE,
     ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_CREATE, ACTION_INGRESS_DELETE,
-    ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE, ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE,
-    ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE,
-    ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
-    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT, RESOURCE_AGENT_MAILBOX,
+    ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE, ACTION_LAUNCH_PROFILE_CREATE,
+    ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST, ACTION_LAUNCH_PROFILE_READ,
+    ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE, ACTION_MACHINE_DELETE,
+    ACTION_MACHINE_UPDATE, ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE,
+    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
+    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
+    RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_AGENT_MAILBOX,
     RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX, RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE,
     RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
@@ -308,6 +312,20 @@ pub fn router(
             get(list_agents).post(create_agent),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/launch-profiles",
+            get(list_agent_launch_profiles).post(create_agent_launch_profile),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/launch-profiles/{profile_id}",
+            get(get_agent_launch_profile)
+                .patch(update_agent_launch_profile)
+                .delete(delete_agent_launch_profile),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/launch-profiles/{profile_id}/launch",
+            post(launch_agent_profile),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}",
             get(get_agent).patch(rename_agent).delete(delete_agent),
         )
@@ -461,6 +479,20 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/agents",
             get(list_agents).post(create_agent),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/launch-profiles",
+            get(list_agent_launch_profiles).post(create_agent_launch_profile),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/launch-profiles/{profile_id}",
+            get(get_agent_launch_profile)
+                .patch(update_agent_launch_profile)
+                .delete(delete_agent_launch_profile),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/launch-profiles/{profile_id}/launch",
+            post(launch_agent_profile),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}",
@@ -2461,6 +2493,24 @@ fn policy_actor_name(subject: &PolicySubject) -> String {
     }
 }
 
+fn launch_profile_policy_resource(profile_id: &str, name: &str) -> PolicyResource {
+    PolicyResource::new(RESOURCE_AGENT_LAUNCH_PROFILE, profile_id).with_attribute("name", name)
+}
+
+fn profile_actor_label(
+    session: Option<&CurrentSession>,
+    subject: Option<&PolicySubject>,
+) -> String {
+    session.map_or_else(
+        || {
+            subject
+                .map(policy_actor_name)
+                .unwrap_or_else(|| "system".to_string())
+        },
+        |session| session.user_id.clone(),
+    )
+}
+
 fn virtual_host_policy_resource(hostname: &str, service: &MachineService) -> PolicyResource {
     PolicyResource::new(RESOURCE_VIRTUAL_HOST, hostname)
         .with_attribute("service_id", &service.service_id)
@@ -2516,6 +2566,263 @@ fn machine_service_policy_resource(
         .with_attribute("server_id", server_id)
         .with_attribute("target_host", target_host)
         .with_attribute("target_port", target_port.to_string())
+}
+
+async fn list_agent_launch_profiles(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_LAUNCH_PROFILE_LIST,
+        PolicyResource::new(RESOURCE_AGENT_LAUNCH_PROFILE, "*"),
+    )
+    .await?;
+    Ok(Json(json!({
+        "profiles": auth.list_agent_launch_profiles(&workspace_id).await?
+    })))
+}
+
+async fn get_agent_launch_profile(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_LAUNCH_PROFILE_READ,
+        launch_profile_policy_resource(&profile.profile_id, &profile.name),
+    )
+    .await?;
+    Ok(Json(serde_json::to_value(profile)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_agent_launch_profile(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<CreateAgentLaunchProfileRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_LAUNCH_PROFILE_CREATE,
+        launch_profile_policy_resource("new", request.name.trim()),
+    )
+    .await?;
+    let actor_label = profile_actor_label(session.as_deref(), subject.as_ref());
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    let profile = auth
+        .create_agent_launch_profile(
+            &workspace_id,
+            ProfileMutationActor {
+                kind: actor_kind,
+                id: actor_id,
+                label: &actor_label,
+            },
+            request,
+        )
+        .await?;
+    Ok(Json(serde_json::to_value(profile)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_agent_launch_profile(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+    Json(request): Json<UpdateAgentLaunchProfileRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_LAUNCH_PROFILE_UPDATE,
+        launch_profile_policy_resource(&profile.profile_id, &profile.name),
+    )
+    .await?;
+    let actor_label = profile_actor_label(session.as_deref(), subject.as_ref());
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    let profile = auth
+        .update_agent_launch_profile(
+            &workspace_id,
+            &profile.profile_id,
+            ProfileMutationActor {
+                kind: actor_kind,
+                id: actor_id,
+                label: &actor_label,
+            },
+            request,
+        )
+        .await?;
+    Ok(Json(serde_json::to_value(profile)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn delete_agent_launch_profile(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_LAUNCH_PROFILE_DELETE,
+        launch_profile_policy_resource(&profile.profile_id, &profile.name),
+    )
+    .await?;
+    let actor_label = profile_actor_label(session.as_deref(), subject.as_ref());
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    let profile = auth
+        .delete_agent_launch_profile(
+            &workspace_id,
+            &profile.profile_id,
+            ProfileMutationActor {
+                kind: actor_kind,
+                id: actor_id,
+                label: &actor_label,
+            },
+        )
+        .await?;
+    Ok(Json(serde_json::to_value(profile)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn launch_agent_profile(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+    Json(request): Json<LaunchAgentProfileRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_LAUNCH_PROFILE_USE,
+        launch_profile_policy_resource(&profile.profile_id, &profile.name),
+    )
+    .await?;
+    let profile_id = profile.profile_id.clone();
+    let agent_request = agent_request_from_launch_profile(&profile, request)?;
+    let data = execute_agent_create(
+        &state,
+        &auth,
+        &policy,
+        session.as_deref(),
+        subject.as_ref(),
+        &workspace_id,
+        agent_request,
+        Some(&profile_id),
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+fn agent_request_from_launch_profile(
+    profile: &AgentLaunchProfile,
+    request: LaunchAgentProfileRequest,
+) -> Result<CreateAgentRequest, ProtocolError> {
+    let agent_name = request
+        .agent_name
+        .map(normalize_display_name)
+        .transpose()?
+        .unwrap_or_else(|| profile.name.clone());
+    let mut args = Vec::with_capacity(profile.args.len() + 1);
+    args.push(profile.command.clone());
+    args.extend(profile.args.clone());
+    Ok(CreateAgentRequest {
+        server_id: request.server_id,
+        kind: "command".to_string(),
+        name: agent_name,
+        cwd: profile.cwd.clone(),
+        args,
+        cols: request.cols,
+        rows: request.rows,
+    })
 }
 
 async fn list_agents(
@@ -2863,9 +3170,6 @@ async fn create_agent(
     Path(workspace_id): Path<String>,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let server_id = state
-        .select_server(&workspace_id, request.server_id.as_deref())
-        .await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -2873,11 +3177,39 @@ async fn create_agent(
         &workspace_id,
     )
     .await?;
-    require_machine_target(subject.as_ref(), &server_id)?;
-    authorize_control(
+    let data = execute_agent_create(
+        &state,
+        &auth,
         &policy,
-        &workspace_id,
+        session.as_deref(),
         subject.as_ref(),
+        &workspace_id,
+        request,
+        None,
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_agent_create(
+    state: &AppState,
+    auth: &AuthStore,
+    policy: &PolicyEngine,
+    session: Option<&CurrentSession>,
+    subject: Option<&PolicySubject>,
+    workspace_id: &str,
+    request: CreateAgentRequest,
+    launch_profile_id: Option<&str>,
+) -> Result<Value, ApiFailure> {
+    let server_id = state
+        .select_server(workspace_id, request.server_id.as_deref())
+        .await?;
+    require_machine_target(subject, &server_id)?;
+    authorize_control(
+        policy,
+        workspace_id,
+        subject,
         ACTION_AGENT_CREATE,
         PolicyResource::new(RESOURCE_MACHINE, &server_id),
     )
@@ -2885,11 +3217,11 @@ async fn create_agent(
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
     let agent_name = request.name.clone();
     let workload_credential = auth
-        .create_agent_credential(&workspace_id, &server_id, &agent_id)
+        .create_agent_credential(workspace_id, &server_id, &agent_id)
         .await?;
     let data = state
         .send_command(
-            &workspace_id,
+            workspace_id,
             &server_id,
             AgentCommand::Create {
                 agent_id: agent_id.clone(),
@@ -2898,23 +3230,27 @@ async fn create_agent(
             },
         )
         .await?;
-    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    let (actor_kind, actor_id) = control_audit_actor(session, subject);
+    let payload = launch_profile_id.map_or_else(
+        || json!({ "server_id": &server_id }),
+        |profile_id| json!({ "server_id": &server_id, "launch_profile_id": profile_id }),
+    );
     if let Err(error) = auth
         .record_workspace_audit(NewWorkspaceAuditEvent {
-            workspace_id: &workspace_id,
+            workspace_id,
             actor_kind,
             actor_id,
             action: "agent.created",
             resource_kind: "agent",
             resource_id: &agent_id,
             resource_name: Some(&agent_name),
-            payload: json!({ "server_id": &server_id }),
+            payload,
         })
         .await
     {
         tracing::warn!(?error, %workspace_id, %agent_id, "failed to record runtime audit event");
     }
-    Ok(Json(data))
+    Ok(data)
 }
 
 async fn prompt_agent(
@@ -3812,6 +4148,44 @@ mod tests {
         assert!(normalize_display_name("  ".to_string()).is_err());
         assert!(normalize_display_name("bad\nname".to_string()).is_err());
         assert!(normalize_display_name("x".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn launch_profiles_become_direct_command_requests() {
+        let timestamp = "2026-08-20T00:00:00Z".parse().expect("valid timestamp");
+        let profile = AgentLaunchProfile {
+            profile_id: "alp_review".to_string(),
+            workspace_id: "default".to_string(),
+            name: "Reviewer".to_string(),
+            description: String::new(),
+            cwd: "packages/api".to_string(),
+            command: "codex".to_string(),
+            args: vec![
+                "review".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
+            ],
+            created_at: timestamp,
+            created_by: "user".to_string(),
+            updated_at: timestamp,
+            updated_by: "user".to_string(),
+        };
+        let request = agent_request_from_launch_profile(
+            &profile,
+            LaunchAgentProfileRequest {
+                server_id: Some("machine-a".to_string()),
+                agent_name: None,
+                cols: 100,
+                rows: 30,
+            },
+        )
+        .expect("build create request");
+        assert_eq!(request.server_id.as_deref(), Some("machine-a"));
+        assert_eq!(request.kind, "command");
+        assert_eq!(request.name, "Reviewer");
+        assert_eq!(request.cwd, "packages/api");
+        assert_eq!(request.args, ["codex", "review", "--base", "main"]);
+        assert_eq!((request.cols, request.rows), (100, 30));
     }
 
     #[test]

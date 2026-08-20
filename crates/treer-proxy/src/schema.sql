@@ -63,6 +63,25 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 CREATE INDEX IF NOT EXISTS workspaces_organization_id ON workspaces(organization_id);
 
+CREATE TABLE IF NOT EXISTS agent_launch_profiles (
+    profile_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    cwd TEXT NOT NULL DEFAULT '',
+    command TEXT NOT NULL,
+    args JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_launch_profiles_workspace_name
+    ON agent_launch_profiles(workspace_id, lower(name));
+CREATE INDEX IF NOT EXISTS agent_launch_profiles_workspace_updated
+    ON agent_launch_profiles(workspace_id, updated_at DESC, profile_id);
+
 CREATE TABLE IF NOT EXISTS organization_audit_events (
     sequence BIGSERIAL PRIMARY KEY,
     event_id TEXT UNIQUE NOT NULL,

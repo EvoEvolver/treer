@@ -65,9 +65,10 @@ The following statements are grounded in current behavior:
   whose audience is the target service.
 - Organization owners and administrators can read an append-only PostgreSQL
   audit of organization creation and rename, workspace creation, invitations,
-  member role changes, member removal, and successful Agent and machine
-  lifecycle changes. The invitation secret and message, prompt, terminal, and
-  network payloads are excluded.
+  member role changes, member removal, launch-profile configuration changes,
+  and successful Agent and machine lifecycle changes. The invitation secret,
+  launch command and arguments, and message, prompt, terminal, and network
+  payloads are excluded from audit event payloads.
 
 These properties support the product phrase: **local custody, scoped
 coordination, open control plane**.
@@ -124,6 +125,11 @@ scoping alone does not isolate those credentials.
 The Proxy can observe control messages, durable Agent mail bodies and metadata,
 every requested network destination, and relayed terminal and workspace
 virtual-host data. Agent mail is stored as plaintext in PostgreSQL;
+Agent launch profiles, including their executable and argument arrays, are also
+stored as plaintext and readable by workspace members and authorized managed
+Agents. Launch profiles are configuration, not a secret store; credentials and
+tokens must not be placed in their command, arguments, description, or working
+directory.
 context IDs may reference only same-workspace messages the sender previously
 sent or received. Managed Agents may list the stable user ID, preferred name,
 and organization role of humans in their workspace organization, but the Agent

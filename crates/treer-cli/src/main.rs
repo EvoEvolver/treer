@@ -16,10 +16,11 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
-    AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentRequest, CreateMachineServiceRequest,
-    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
-    MachineServiceProtocol, RenameRequest, SendAgentMailRequest, ServerInfo, ServiceIngressAccess,
-    TerminalClientMessage, TerminalServerMessage, UpdateMachineServiceRequest,
+    AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentLaunchProfileRequest, CreateAgentRequest,
+    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
+    InputAgentRequest, LaunchAgentProfileRequest, MachineServiceProtocol, RenameRequest,
+    SendAgentMailRequest, ServerInfo, ServiceIngressAccess, TerminalClientMessage,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
     UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
     WorkspaceSnapshot, AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
@@ -56,6 +57,11 @@ enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+    #[command(about = "Manage reusable Agent launch profiles")]
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
     },
     #[command(about = "Discover human members of the workspace organization")]
     Human {
@@ -189,6 +195,52 @@ enum AgentCommand {
     },
     #[command(about = "Stop an agent")]
     Stop { target: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCommand {
+    #[command(about = "List launch profiles in the current workspace")]
+    List,
+    #[command(about = "Show a launch profile by unique name or id")]
+    Get { target: String },
+    #[command(about = "Create a reusable command-based launch profile")]
+    Create {
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        #[arg(value_name = "COMMAND")]
+        executable: String,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    #[command(about = "Update a launch profile")]
+    Update {
+        target: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long = "command")]
+        executable: Option<String>,
+        #[arg(long = "arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, conflicts_with = "args")]
+        clear_args: bool,
+    },
+    #[command(about = "Delete a launch profile")]
+    Delete { target: String },
+    #[command(about = "Create an Agent from a launch profile")]
+    Launch {
+        target: String,
+        #[arg(long)]
+        machine: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -496,6 +548,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let value = match command {
         Command::Agent { command } => run_agent_command(&client, command).await?,
+        Command::Profile { command } => run_profile_command(&client, command).await?,
         Command::Human { command } => match command {
             HumanCommand::List => client.value(Method::GET, "api/humans", None).await?,
         },
@@ -692,6 +745,112 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
             )?)
         }
         AgentCommand::Stop { target } => stop_agent(client, &target).await,
+    }
+}
+
+async fn run_profile_command(client: &ApiClient, command: ProfileCommand) -> anyhow::Result<Value> {
+    match command {
+        ProfileCommand::List => client.value(Method::GET, "api/launch-profiles", None).await,
+        ProfileCommand::Get { target } => {
+            let target = normalize_target(&target)?;
+            client
+                .value(
+                    Method::GET,
+                    &format!("api/launch-profiles/{}", path_segment(&target)),
+                    None,
+                )
+                .await
+        }
+        ProfileCommand::Create {
+            name,
+            description,
+            cwd,
+            executable,
+            args,
+        } => {
+            let request = CreateAgentLaunchProfileRequest {
+                name,
+                description,
+                cwd,
+                command: executable,
+                args,
+            };
+            client
+                .value(
+                    Method::POST,
+                    "api/launch-profiles",
+                    Some(serde_json::to_value(request)?),
+                )
+                .await
+        }
+        ProfileCommand::Update {
+            target,
+            name,
+            description,
+            cwd,
+            executable,
+            args,
+            clear_args,
+        } => {
+            let args = if clear_args {
+                Some(Vec::new())
+            } else if args.is_empty() {
+                None
+            } else {
+                Some(args)
+            };
+            if name.is_none()
+                && description.is_none()
+                && cwd.is_none()
+                && executable.is_none()
+                && args.is_none()
+            {
+                bail!("profile update requires at least one changed field");
+            }
+            let target = normalize_target(&target)?;
+            client
+                .value(
+                    Method::PATCH,
+                    &format!("api/launch-profiles/{}", path_segment(&target)),
+                    Some(serde_json::to_value(UpdateAgentLaunchProfileRequest {
+                        name,
+                        description,
+                        cwd,
+                        command: executable,
+                        args,
+                    })?),
+                )
+                .await
+        }
+        ProfileCommand::Delete { target } => {
+            let target = normalize_target(&target)?;
+            client
+                .value(
+                    Method::DELETE,
+                    &format!("api/launch-profiles/{}", path_segment(&target)),
+                    None,
+                )
+                .await
+        }
+        ProfileCommand::Launch {
+            target,
+            machine,
+            name,
+        } => {
+            let target = normalize_target(&target)?;
+            client
+                .value(
+                    Method::POST,
+                    &format!("api/launch-profiles/{}/launch", path_segment(&target)),
+                    Some(serde_json::to_value(LaunchAgentProfileRequest {
+                        server_id: machine,
+                        agent_name: name,
+                        cols: 120,
+                        rows: 36,
+                    })?),
+                )
+                .await
+        }
     }
 }
 
@@ -1429,6 +1588,72 @@ mod tests {
             Some(Command::Machine {
                 command: MachineCommand::Delete { target }
             }) if target == "srv_test"
+        ));
+    }
+
+    #[test]
+    fn launch_profile_commands_parse_structured_arguments() {
+        let create = Args::try_parse_from([
+            "treer",
+            "profile",
+            "create",
+            "reviewer",
+            "--description",
+            "Review changes",
+            "--cwd",
+            "/workspace",
+            "codex",
+            "--",
+            "review",
+            "--base",
+            "main",
+        ])
+        .expect("profile create should parse");
+        assert!(matches!(
+            create.command,
+            Some(Command::Profile {
+                command: ProfileCommand::Create {
+                    name,
+                    executable,
+                    args,
+                    ..
+                }
+            }) if name == "reviewer" && executable == "codex" && args == ["review", "--base", "main"]
+        ));
+
+        let update = Args::try_parse_from([
+            "treer",
+            "profile",
+            "update",
+            "reviewer",
+            "--arg",
+            "--quiet",
+            "--arg=check",
+        ])
+        .expect("profile update should parse flags as argument values");
+        assert!(matches!(
+            update.command,
+            Some(Command::Profile {
+                command: ProfileCommand::Update { args, .. }
+            }) if args == ["--quiet", "check"]
+        ));
+
+        let launch = Args::try_parse_from([
+            "treer",
+            "profile",
+            "launch",
+            "reviewer",
+            "--machine",
+            "builder",
+            "--name",
+            "review-42",
+        ])
+        .expect("profile launch should parse");
+        assert!(matches!(
+            launch.command,
+            Some(Command::Profile {
+                command: ProfileCommand::Launch { target, machine, name }
+            }) if target == "reviewer" && machine.as_deref() == Some("builder") && name.as_deref() == Some("review-42")
         ));
     }
 

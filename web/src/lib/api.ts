@@ -31,6 +31,20 @@ export interface Agent {
   status: string
 }
 
+export interface AgentLaunchProfile {
+  profile_id: string
+  workspace_id: string
+  name: string
+  description: string
+  cwd: string
+  command: string
+  args: string[]
+  created_at: string
+  created_by: string
+  updated_at: string
+  updated_by: string
+}
+
 export interface Snapshot {
   revision: number
   servers: Machine[]

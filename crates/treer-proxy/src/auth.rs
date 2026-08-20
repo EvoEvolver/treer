@@ -19,10 +19,11 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use subtle::ConstantTimeEq;
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentInboxResponse,
-    AgentMailMessage, AgentServerSnapshot, ApiError, CreateMachineServiceRequest,
-    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, MachineService,
-    MachineServiceProtocol, MailAddress, MailAddressKind, MailDelivery, MailboxResponse,
-    OrganizationAuditEvent, ProtocolError, ServerInfo, ServiceIngress, ServiceIngressAccess,
+    AgentLaunchProfile, AgentMailMessage, AgentServerSnapshot, ApiError,
+    CreateAgentLaunchProfileRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
+    CreateVirtualNetworkHostRequest, MachineService, MachineServiceProtocol, MailAddress,
+    MailAddressKind, MailDelivery, MailboxResponse, OrganizationAuditEvent, ProtocolError,
+    ServerInfo, ServiceIngress, ServiceIngressAccess, UpdateAgentLaunchProfileRequest,
     UpdateMachineServiceRequest, UpdateServiceIngressRequest, VirtualNetworkHost, WorkspaceHuman,
     WorkspaceInfo, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
@@ -47,6 +48,18 @@ const MAX_MAIL_CONTEXTS: usize = 32;
 const MAX_INBOX_LIMIT: u16 = 100;
 const INGRESS_AUTH_CODE_TTL_MINUTES: i64 = 5;
 const INGRESS_SESSION_TTL_HOURS: i64 = 12;
+const MAX_LAUNCH_PROFILE_DESCRIPTION_CHARS: usize = 1_000;
+const MAX_LAUNCH_PROFILE_COMMAND_BYTES: usize = 4_096;
+const MAX_LAUNCH_PROFILE_CWD_BYTES: usize = 4_096;
+const MAX_LAUNCH_PROFILE_ARGS: usize = 128;
+const MAX_LAUNCH_PROFILE_ARG_BYTES: usize = 4_096;
+const MAX_LAUNCH_PROFILE_ARGS_BYTES: usize = 64 * 1024;
+
+pub(crate) struct ProfileMutationActor<'a> {
+    pub kind: &'a str,
+    pub id: Option<&'a str>,
+    pub label: &'a str,
+}
 
 #[derive(Clone)]
 pub struct AuthStore {
@@ -1000,6 +1013,211 @@ impl AuthStore {
             name,
             created_at: now,
         })
+    }
+
+    pub async fn list_agent_launch_profiles(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<AgentLaunchProfile>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT profile_id, workspace_id, name, description, cwd, command, args, \
+             created_at, created_by, updated_at, updated_by FROM agent_launch_profiles \
+             WHERE workspace_id = $1 ORDER BY lower(name), profile_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter()
+            .map(agent_launch_profile_from_row)
+            .collect()
+    }
+
+    pub async fn resolve_agent_launch_profile(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<AgentLaunchProfile, AuthFailure> {
+        let row = sqlx::query(
+            "SELECT profile_id, workspace_id, name, description, cwd, command, args, \
+             created_at, created_by, updated_at, updated_by FROM agent_launch_profiles \
+             WHERE workspace_id = $1 AND profile_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(target)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let row = match row {
+            Some(row) => row,
+            None => sqlx::query(
+                "SELECT profile_id, workspace_id, name, description, cwd, command, args, \
+                 created_at, created_by, updated_at, updated_by FROM agent_launch_profiles \
+                 WHERE workspace_id = $1 AND lower(name) = lower($2)",
+            )
+            .bind(workspace_id)
+            .bind(target.trim())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?
+            .ok_or_else(|| {
+                AuthFailure::not_found(
+                    "launch_profile_not_found",
+                    "agent launch profile does not exist",
+                )
+            })?,
+        };
+        agent_launch_profile_from_row(row)
+    }
+
+    pub async fn create_agent_launch_profile(
+        &self,
+        workspace_id: &str,
+        actor: ProfileMutationActor<'_>,
+        request: CreateAgentLaunchProfileRequest,
+    ) -> Result<AgentLaunchProfile, AuthFailure> {
+        let now = Utc::now();
+        let profile = AgentLaunchProfile {
+            profile_id: format!("alp_{}", Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            name: validate_resource_name(&request.name, "launch profile")?,
+            description: validate_launch_profile_description(&request.description)?,
+            cwd: validate_launch_profile_cwd(&request.cwd)?,
+            command: validate_launch_profile_command(&request.command)?,
+            args: validate_launch_profile_args(request.args)?,
+            created_at: now,
+            created_by: actor.label.to_string(),
+            updated_at: now,
+            updated_by: actor.label.to_string(),
+        };
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO agent_launch_profiles(\
+             profile_id, workspace_id, name, description, cwd, command, args, created_at, \
+             created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(&profile.profile_id)
+        .bind(&profile.workspace_id)
+        .bind(&profile.name)
+        .bind(&profile.description)
+        .bind(&profile.cwd)
+        .bind(&profile.command)
+        .bind(json!(&profile.args))
+        .bind(profile.created_at.to_rfc3339())
+        .bind(&profile.created_by)
+        .bind(profile.updated_at.to_rfc3339())
+        .bind(&profile.updated_by)
+        .execute(&mut *transaction)
+        .await
+        .map_err(launch_profile_write_error)?;
+        insert_launch_profile_audit(&mut transaction, &profile, actor, "launch_profile.created")
+            .await?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(profile)
+    }
+
+    pub async fn update_agent_launch_profile(
+        &self,
+        workspace_id: &str,
+        target: &str,
+        actor: ProfileMutationActor<'_>,
+        request: UpdateAgentLaunchProfileRequest,
+    ) -> Result<AgentLaunchProfile, AuthFailure> {
+        let current = self
+            .resolve_agent_launch_profile(workspace_id, target)
+            .await?;
+        let profile = AgentLaunchProfile {
+            name: request
+                .name
+                .as_deref()
+                .map(|name| validate_resource_name(name, "launch profile"))
+                .transpose()?
+                .unwrap_or(current.name),
+            description: request
+                .description
+                .as_deref()
+                .map(validate_launch_profile_description)
+                .transpose()?
+                .unwrap_or(current.description),
+            cwd: request
+                .cwd
+                .as_deref()
+                .map(validate_launch_profile_cwd)
+                .transpose()?
+                .unwrap_or(current.cwd),
+            command: request
+                .command
+                .as_deref()
+                .map(validate_launch_profile_command)
+                .transpose()?
+                .unwrap_or(current.command),
+            args: request
+                .args
+                .map(validate_launch_profile_args)
+                .transpose()?
+                .unwrap_or(current.args),
+            updated_at: Utc::now(),
+            updated_by: actor.label.to_string(),
+            ..current
+        };
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let result = sqlx::query(
+            "UPDATE agent_launch_profiles SET name = $1, description = $2, cwd = $3, \
+             command = $4, args = $5, updated_at = $6, updated_by = $7 \
+             WHERE workspace_id = $8 AND profile_id = $9",
+        )
+        .bind(&profile.name)
+        .bind(&profile.description)
+        .bind(&profile.cwd)
+        .bind(&profile.command)
+        .bind(json!(&profile.args))
+        .bind(profile.updated_at.to_rfc3339())
+        .bind(&profile.updated_by)
+        .bind(workspace_id)
+        .bind(&profile.profile_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(launch_profile_write_error)?;
+        if result.rows_affected() != 1 {
+            return Err(AuthFailure::not_found(
+                "launch_profile_not_found",
+                "agent launch profile does not exist",
+            ));
+        }
+        insert_launch_profile_audit(&mut transaction, &profile, actor, "launch_profile.updated")
+            .await?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(profile)
+    }
+
+    pub async fn delete_agent_launch_profile(
+        &self,
+        workspace_id: &str,
+        target: &str,
+        actor: ProfileMutationActor<'_>,
+    ) -> Result<AgentLaunchProfile, AuthFailure> {
+        let profile = self
+            .resolve_agent_launch_profile(workspace_id, target)
+            .await?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let result = sqlx::query(
+            "DELETE FROM agent_launch_profiles WHERE workspace_id = $1 AND profile_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(&profile.profile_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if result.rows_affected() != 1 {
+            return Err(AuthFailure::not_found(
+                "launch_profile_not_found",
+                "agent launch profile does not exist",
+            ));
+        }
+        insert_launch_profile_audit(&mut transaction, &profile, actor, "launch_profile.deleted")
+            .await?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(profile)
     }
 
     pub async fn list_machine_services(
@@ -4613,6 +4831,131 @@ fn workspace_from_row(row: sqlx::postgres::PgRow) -> Result<WorkspaceInfo, AuthF
     })
 }
 
+fn agent_launch_profile_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<AgentLaunchProfile, AuthFailure> {
+    let args = serde_json::from_value::<Vec<String>>(row.get("args")).map_err(|error| {
+        AuthFailure::internal(
+            "database_error",
+            format!("agent launch profile has invalid args: {error}"),
+        )
+    })?;
+    Ok(AgentLaunchProfile {
+        profile_id: row.get("profile_id"),
+        workspace_id: row.get("workspace_id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        cwd: row.get("cwd"),
+        command: row.get("command"),
+        args,
+        created_at: parse_database_timestamp(&row, "created_at", "agent launch profile")?,
+        created_by: row.get("created_by"),
+        updated_at: parse_database_timestamp(&row, "updated_at", "agent launch profile")?,
+        updated_by: row.get("updated_by"),
+    })
+}
+
+fn validate_launch_profile_description(value: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    if value.chars().count() > MAX_LAUNCH_PROFILE_DESCRIPTION_CHARS
+        || value.chars().any(|character| character == '\0')
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_launch_profile",
+            "launch profile description must be at most 1000 characters and contain no NUL bytes",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_launch_profile_cwd(value: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    let value = if value.is_empty() { "." } else { value };
+    if value.len() > MAX_LAUNCH_PROFILE_CWD_BYTES || value.contains('\0') {
+        return Err(AuthFailure::bad_request(
+            "invalid_launch_profile",
+            "launch profile working directory is too long or contains a NUL byte",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_launch_profile_command(value: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_LAUNCH_PROFILE_COMMAND_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_launch_profile",
+            "launch profile command must be 1-4096 printable characters",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_launch_profile_args(args: Vec<String>) -> Result<Vec<String>, AuthFailure> {
+    let total_bytes = args.iter().map(String::len).sum::<usize>();
+    if args.len() > MAX_LAUNCH_PROFILE_ARGS
+        || total_bytes > MAX_LAUNCH_PROFILE_ARGS_BYTES
+        || args
+            .iter()
+            .any(|arg| arg.len() > MAX_LAUNCH_PROFILE_ARG_BYTES || arg.contains('\0'))
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_launch_profile",
+            "launch profile args exceed the count or size limit or contain a NUL byte",
+        ));
+    }
+    Ok(args)
+}
+
+fn launch_profile_write_error(error: sqlx::Error) -> AuthFailure {
+    if error
+        .as_database_error()
+        .is_some_and(|error| error.is_unique_violation())
+    {
+        AuthFailure::conflict(
+            "launch_profile_exists",
+            "a launch profile with this name already exists",
+        )
+    } else {
+        AuthFailure::database(error)
+    }
+}
+
+async fn insert_launch_profile_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    profile: &AgentLaunchProfile,
+    actor: ProfileMutationActor<'_>,
+    action: &str,
+) -> Result<(), AuthFailure> {
+    let organization_id = sqlx::query_scalar::<_, String>(
+        "SELECT organization_id FROM workspaces WHERE workspace_id = $1",
+    )
+    .bind(&profile.workspace_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(AuthFailure::database)?;
+    audit::insert(
+        transaction,
+        NewAuditEvent {
+            organization_id: &organization_id,
+            workspace_id: Some(&profile.workspace_id),
+            actor_kind: actor.kind,
+            actor_id: actor.id,
+            source: "api",
+            action,
+            resource_kind: "agent_launch_profile",
+            resource_id: &profile.profile_id,
+            resource_name: Some(&profile.name),
+            payload: json!({}),
+        },
+    )
+    .await
+    .map_err(AuthFailure::database)
+}
+
 fn machine_service_from_row(row: sqlx::postgres::PgRow) -> Result<MachineService, AuthFailure> {
     let target_port = u16::try_from(row.get::<i64, _>("target_port")).map_err(|error| {
         AuthFailure::internal(
@@ -5319,6 +5662,143 @@ mod tests {
             .await
             .expect("resolve deleted alias")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_launch_profiles_support_crud_validation_and_audit() {
+        let store = AuthStore::for_test("owner-password").await;
+        store.seed_test_workspace("profiles").await;
+
+        let created = store
+            .create_agent_launch_profile(
+                "profiles",
+                ProfileMutationActor {
+                    kind: "agent",
+                    id: Some("agent-owner"),
+                    label: "agent:agent-owner",
+                },
+                CreateAgentLaunchProfileRequest {
+                    name: "Reviewer".to_string(),
+                    description: "Review the current change".to_string(),
+                    cwd: ".".to_string(),
+                    command: "codex".to_string(),
+                    args: vec!["--dangerously-bypass-approvals-and-sandbox".to_string()],
+                },
+            )
+            .await
+            .expect("create launch profile");
+        assert!(created.profile_id.starts_with("alp_"));
+        assert_eq!(created.created_by, "agent:agent-owner");
+        assert_eq!(
+            store
+                .resolve_agent_launch_profile("profiles", "reviewer")
+                .await
+                .expect("resolve launch profile by name"),
+            created
+        );
+        store.seed_test_workspace("other-workspace").await;
+        let cross_workspace = store
+            .resolve_agent_launch_profile("other-workspace", &created.profile_id)
+            .await
+            .expect_err("profiles cannot be resolved across workspaces");
+        assert_eq!(cross_workspace.error.code, "launch_profile_not_found");
+
+        let duplicate = store
+            .create_agent_launch_profile(
+                "profiles",
+                ProfileMutationActor {
+                    kind: "agent",
+                    id: Some("agent-owner"),
+                    label: "agent:agent-owner",
+                },
+                CreateAgentLaunchProfileRequest {
+                    name: "REVIEWER".to_string(),
+                    description: String::new(),
+                    cwd: String::new(),
+                    command: "claude".to_string(),
+                    args: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("profile names are unique within a workspace");
+        assert_eq!(duplicate.error.code, "launch_profile_exists");
+
+        let updated = store
+            .update_agent_launch_profile(
+                "profiles",
+                &created.profile_id,
+                ProfileMutationActor {
+                    kind: "user",
+                    id: Some("user-owner"),
+                    label: "user-owner",
+                },
+                UpdateAgentLaunchProfileRequest {
+                    name: Some("Code reviewer".to_string()),
+                    args: Some(vec![
+                        "review".to_string(),
+                        "--base".to_string(),
+                        "main".to_string(),
+                    ]),
+                    ..UpdateAgentLaunchProfileRequest::default()
+                },
+            )
+            .await
+            .expect("update launch profile");
+        assert_eq!(updated.name, "Code reviewer");
+        assert_eq!(updated.args, ["review", "--base", "main"]);
+        assert_eq!(updated.updated_by, "user-owner");
+
+        let invalid = store
+            .update_agent_launch_profile(
+                "profiles",
+                &created.profile_id,
+                ProfileMutationActor {
+                    kind: "user",
+                    id: Some("user-owner"),
+                    label: "user-owner",
+                },
+                UpdateAgentLaunchProfileRequest {
+                    args: Some(vec!["bad\0argument".to_string()]),
+                    ..UpdateAgentLaunchProfileRequest::default()
+                },
+            )
+            .await
+            .expect_err("NUL bytes are rejected");
+        assert_eq!(invalid.error.code, "invalid_launch_profile");
+
+        store
+            .delete_agent_launch_profile(
+                "profiles",
+                &created.profile_id,
+                ProfileMutationActor {
+                    kind: "user",
+                    id: Some("user-owner"),
+                    label: "user-owner",
+                },
+            )
+            .await
+            .expect("delete launch profile");
+        assert!(store
+            .list_agent_launch_profiles("profiles")
+            .await
+            .expect("list launch profiles")
+            .is_empty());
+
+        let actions = sqlx::query_scalar::<_, String>(
+            "SELECT action FROM organization_audit_events WHERE workspace_id = $1 ORDER BY sequence",
+        )
+        .bind("profiles")
+        .fetch_all(&store.pool)
+        .await
+        .expect("list audit actions");
+        assert_eq!(
+            actions,
+            [
+                "launch_profile.created",
+                "launch_profile.updated",
+                "launch_profile.deleted"
+            ]
+        );
     }
 
     #[tokio::test]

@@ -103,13 +103,24 @@ flowchart TB
 PostgreSQL persists users, OAuth identities and short-lived OAuth states,
 organizations, memberships, sessions, password reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
-display names, Agent messages, per-Agent and per-human read state, message
+display names, workspace-scoped Agent launch profiles, Agent messages,
+per-Agent and per-human read state, message
 context edges, machine services, virtual hosts, service ingresses, ingress
 authorization sessions, append-only organization audit events, and hourly
 directional machine traffic counters. Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
+
+An Agent launch profile stores a display name, optional description, working
+directory, executable, and ordered argument array. It does not bind to a
+machine: the caller chooses an online machine and optional Agent name for each
+launch. The Proxy translates the profile into the existing command-kind
+`CreateAgentRequest`, so machine selection, `agent.create` authorization,
+workload credential creation, Controller routing, and Host process ownership
+remain the same as a direct create. The executable and arguments are passed as
+an argv vector; shell parsing occurs only when the profile explicitly launches
+a shell such as `sh` with `-lc`.
 
 Covered organization and membership mutations write their audit event in the
 same PostgreSQL transaction. Successful Agent create, rename, stop, and delete
@@ -153,8 +164,8 @@ per workspace in PostgreSQL. The typed store validates bounded documents, uses
 optimistic revision updates, and emits a transactional PostgreSQL notification.
 The Proxy compiles documents into action-indexed immutable rules and applies them
 to Agent discovery, inspection, creation, prompt, input, output, terminal,
-lifecycle, machine mutation, mail, service, virtual-host, network, and workload
-identity checks. A per-workspace five-second cache keeps JSONB reads off the hot
+lifecycle, launch-profile CRUD/use, machine mutation, mail, service,
+virtual-host, network, and workload identity checks. A per-workspace five-second cache keeps JSONB reads off the hot
 path while bounding cross-replica update and revocation staleness.
 
 Each Controller connection,

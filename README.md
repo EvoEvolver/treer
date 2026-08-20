@@ -350,6 +350,19 @@ workload credential; they can use the local agent server API to discover or
 control other agents in the same workspace. The credential is consumed by the
 CLI and should not be printed or forwarded directly.
 
+Workspace members and managed Agents can also save reusable launch profiles:
+
+```bash
+treer profile create reviewer --cwd . codex -- review --base main
+treer profile list
+treer profile launch reviewer --machine build-machine --name review-42
+```
+
+Profiles store an executable and ordered arguments rather than a shell command
+string. Use an explicit shell executable such as `sh -lc` only when shell
+expansion is required. Profiles are plaintext workspace configuration and must
+not contain secrets.
+
 ## Host and Controller
 
 `treer-agent-host` is the stable process boundary. It understands only raw

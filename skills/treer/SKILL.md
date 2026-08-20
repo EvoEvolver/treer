@@ -32,6 +32,7 @@ The installed binary is the authority for syntax:
 ```bash
 treer --help
 treer agent --help
+treer profile --help
 treer machine --help
 treer service --help
 treer virtual-host --help
@@ -253,6 +254,39 @@ deliveries in the returned batch read. Sending still does not notify or
 interrupt the human or any Agent.
 
 ## Create and coordinate a peer
+
+Use a launch profile when the same executable, working directory, and arguments
+will be reused. Profiles are workspace-scoped and are addressable by stable ID
+or unique name:
+
+```bash
+treer profile create reviewer --description "Review current changes" --cwd . \
+  codex -- review --base main
+treer profile list
+treer profile get reviewer
+treer profile launch reviewer --machine <server-id> --name review-42
+```
+
+Edit individual fields without replacing the profile. Repeat `--arg` to replace
+the complete argument array, or use `--clear-args` to empty it:
+
+```bash
+treer profile update reviewer --cwd packages/api
+treer profile update reviewer --arg review --arg=--base --arg main
+treer profile delete reviewer
+```
+
+The command and arguments are passed directly as an argv vector. Shell syntax
+is not interpreted unless the executable is an explicit shell such as `sh` and
+its arguments request evaluation. Profile fields are stored as plaintext and
+may be read by workspace members and policy-authorized Agents; never put API
+keys, tokens, passwords, or other secrets in a profile.
+
+Profile operations have separate `launch_profile.list`,
+`launch_profile.read`, `launch_profile.create`, `launch_profile.update`,
+`launch_profile.delete`, and `launch_profile.use` policy actions. A launch must
+also pass `agent.create` for its selected machine. Inspect a profile before
+launching it, especially when another principal last updated it.
 
 Select an online `server_id` from `treer discover`, then create the requested
 agent kind. Preserve the current working directory unless the task requires a

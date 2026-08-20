@@ -15,9 +15,10 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
-    AgentInboxRequest, ApiError, CreateAgentRequest, CreateMachineServiceRequest,
-    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
-    PromptAgentRequest, ProtocolError, RenameRequest, SendAgentMailRequest, TerminalServerMessage,
+    AgentInboxRequest, ApiError, CreateAgentLaunchProfileRequest, CreateAgentRequest,
+    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
+    InputAgentRequest, LaunchAgentProfileRequest, PromptAgentRequest, ProtocolError, RenameRequest,
+    SendAgentMailRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
     UpdateMachineServiceRequest, UpdateServiceIngressRequest, WorkloadIdentityTokenRequest,
     AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
@@ -162,6 +163,20 @@ pub fn router(state: LocalApiState) -> Router {
             axum::routing::patch(rename_machine).delete(delete_machine),
         )
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route(
+            "/api/launch-profiles",
+            get(list_agent_launch_profiles).post(create_agent_launch_profile),
+        )
+        .route(
+            "/api/launch-profiles/{profile_id}",
+            get(get_agent_launch_profile)
+                .patch(update_agent_launch_profile)
+                .delete(delete_agent_launch_profile),
+        )
+        .route(
+            "/api/launch-profiles/{profile_id}/launch",
+            post(launch_agent_profile),
+        )
         .route(
             "/api/services",
             get(list_machine_services).post(create_machine_service),
@@ -583,6 +598,106 @@ async fn create_agent(
                 "agents",
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn list_agent_launch_profiles(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as("launch-profiles", source_agent.as_ref())
+            .await?,
+    ))
+}
+
+async fn get_agent_launch_profile(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(
+                &format!("launch-profiles/{profile_id}"),
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn create_agent_launch_profile(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateAgentLaunchProfileRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                "launch-profiles",
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn update_agent_launch_profile(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    Json(request): Json<UpdateAgentLaunchProfileRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .patch_as(
+                &format!("launch-profiles/{profile_id}"),
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn delete_agent_launch_profile(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(
+                &format!("launch-profiles/{profile_id}"),
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn launch_agent_profile(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    Json(request): Json<LaunchAgentProfileRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("launch-profiles/{profile_id}/launch"),
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
                 source_agent.as_ref(),
             )
             .await?,
