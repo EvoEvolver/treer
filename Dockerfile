@@ -1,4 +1,6 @@
 FROM rust:1-bookworm AS builder
+ARG TREER_BUILD_COMMIT=unknown
+ENV TREER_BUILD_COMMIT=$TREER_BUILD_COMMIT
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

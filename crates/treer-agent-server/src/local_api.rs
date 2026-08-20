@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
-    AgentInboxRequest, ApiError, CreateAgentLaunchProfileRequest, CreateAgentRequest,
+    AgentInboxRequest, ApiError, BuildInfo, CreateAgentLaunchProfileRequest, CreateAgentRequest,
     CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
     InputAgentRequest, LaunchAgentProfileRequest, PromptAgentRequest, ProtocolError, RenameRequest,
     SendAgentMailRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
@@ -34,6 +34,7 @@ pub struct LocalApiState {
     workspace_id: String,
     server_id: String,
     controller_epoch: String,
+    host_build: BuildInfo,
     machine_token: Option<String>,
     operator_credential: Option<String>,
     runtime: ControllerRuntime,
@@ -46,6 +47,7 @@ impl LocalApiState {
         server_id: String,
         machine_token: Option<String>,
         operator_credential: Option<String>,
+        host_build: BuildInfo,
         runtime: ControllerRuntime,
     ) -> Self {
         Self {
@@ -54,6 +56,7 @@ impl LocalApiState {
             workspace_id,
             server_id,
             controller_epoch: Uuid::new_v4().to_string(),
+            host_build,
             machine_token,
             operator_credential,
             runtime,
@@ -225,6 +228,11 @@ async fn health(State(state): State<LocalApiState>) -> Json<Value> {
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
         "controller_epoch": state.controller_epoch,
+        "controller_build": BuildInfo {
+            version: treer_build_info::VERSION.to_string(),
+            git_commit: treer_build_info::GIT_COMMIT.to_string(),
+        },
+        "host_build": state.host_build,
     }))
 }
 

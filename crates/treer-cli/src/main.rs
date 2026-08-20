@@ -34,6 +34,7 @@ const SKILL: &str = include_str!("../../../skills/treer/SKILL.md");
 #[command(
     name = "treer",
     about = "Discover and coordinate Treer agents",
+    version = treer_build_info::DISPLAY,
     arg_required_else_help = true
 )]
 struct Args {
@@ -1513,6 +1514,14 @@ mod tests {
                 "name": "builder",
                 "hostname": "build-host",
                 "root": "/workspace",
+                "controller_build": {
+                    "version": "0.1.2",
+                    "git_commit": "controller-test"
+                },
+                "host_build": {
+                    "version": "0.1.2",
+                    "git_commit": "host-test"
+                },
                 "labels": {},
                 "status": "online",
                 "connected_at": "2026-08-17T00:00:00Z",

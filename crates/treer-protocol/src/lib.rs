@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
@@ -52,6 +52,12 @@ pub struct WorkspaceInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildInfo {
+    pub version: String,
+    pub git_commit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub server_id: String,
     pub workspace_id: String,
@@ -59,6 +65,8 @@ pub struct ServerInfo {
     pub name: String,
     pub hostname: String,
     pub root: String,
+    pub controller_build: BuildInfo,
+    pub host_build: BuildInfo,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     pub status: ServerStatus,

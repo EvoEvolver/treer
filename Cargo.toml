@@ -3,6 +3,7 @@ members = [
   "crates/treer-agent-runtime",
   "crates/treer-agent-server",
   "crates/treer-agent-host",
+  "crates/treer-build-info",
   "crates/treer-cli",
   "crates/treer-host-protocol",
   "crates/treer-protocol",
@@ -48,6 +49,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+treer-build-info = { path = "crates/treer-build-info" }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 

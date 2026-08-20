@@ -15,11 +15,18 @@ export interface Workspace {
   name: string
 }
 
+export interface BuildInfo {
+  version: string
+  git_commit: string
+}
+
 export interface Machine {
   server_id: string
   name?: string
   hostname?: string
   root: string
+  controller_build: BuildInfo
+  host_build: BuildInfo
   status: string
 }
 

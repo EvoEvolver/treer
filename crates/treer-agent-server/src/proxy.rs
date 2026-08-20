@@ -491,6 +491,7 @@ pub fn server_info(
     workspace_id: String,
     hostname: String,
     root: String,
+    host_build: treer_protocol::BuildInfo,
 ) -> ServerInfo {
     let now = Utc::now();
     ServerInfo {
@@ -499,6 +500,11 @@ pub fn server_info(
         name: hostname.clone(),
         hostname,
         root,
+        controller_build: treer_protocol::BuildInfo {
+            version: treer_build_info::VERSION.to_string(),
+            git_commit: treer_build_info::GIT_COMMIT.to_string(),
+        },
+        host_build,
         labels: std::collections::BTreeMap::from([
             ("os".to_string(), std::env::consts::OS.to_string()),
             ("arch".to_string(), std::env::consts::ARCH.to_string()),
@@ -564,11 +570,22 @@ mod tests {
             "default".to_string(),
             "machine-a".to_string(),
             "/workspace".to_string(),
+            treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "0123456789abcdef".to_string(),
+            },
         );
         assert_eq!(
             server.labels.get("treer.shutdown").map(String::as_str),
             Some("1")
         );
+        assert_eq!(server.controller_build.version, treer_build_info::VERSION);
+        assert_eq!(
+            server.controller_build.git_commit,
+            treer_build_info::GIT_COMMIT
+        );
+        assert_eq!(server.host_build.version, "0.1.2");
+        assert_eq!(server.host_build.git_commit, "0123456789abcdef");
     }
 
     #[tokio::test]

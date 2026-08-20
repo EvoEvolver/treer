@@ -44,6 +44,11 @@ The manifest records the commit, frontend checksum, Railway deployment ID,
 Cloudflare Worker version ID, endpoints, and test timestamp. Failure never
 creates an eligible manifest.
 
+The deployment scripts also set `TREER_BUILD_COMMIT` on the Railway Proxy
+service before each build. The Docker builder embeds that candidate commit in
+the Proxy-bundled Host, Controller, and CLI artifacts; it is release metadata,
+not a mutable runtime version override.
+
 ## Production promotion
 
 Check out the same clean commit and retain its `.treer/releases` directory,

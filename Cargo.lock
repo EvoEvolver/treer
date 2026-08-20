@@ -4067,6 +4067,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "treer-agent-runtime",
+ "treer-build-info",
  "treer-host-protocol",
  "uuid",
 ]
@@ -4107,12 +4108,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "treer-agent-runtime",
+ "treer-build-info",
  "treer-host-protocol",
  "treer-protocol",
  "tun2proxy",
  "url",
  "uuid",
 ]
+
+[[package]]
+name = "treer-build-info"
+version = "0.1.2"
 
 [[package]]
 name = "treer-cli"
@@ -4128,6 +4134,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.28.0",
+ "treer-build-info",
  "treer-protocol",
  "url",
 ]

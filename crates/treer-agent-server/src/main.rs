@@ -25,7 +25,11 @@ use controller::ControllerRuntime;
 use host_client::HostClient;
 
 #[derive(Debug, Parser)]
-#[command(name = "treer-agent-server", about = "Treer machine agent runtime")]
+#[command(
+    name = "treer-agent-server",
+    about = "Treer machine agent runtime",
+    version = treer_build_info::DISPLAY
+)]
 struct Args {
     /// Open the interactive local Controller dashboard.
     #[arg(long)]
@@ -212,6 +216,13 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     let agent_server_url = agent_server_url(listen_address, sandbox_executable.is_some());
     let (host, host_events) = HostClient::connect(&args.host_socket).await?;
     let sync = host.sync(std::collections::BTreeMap::new()).await?;
+    let host_build = match &sync {
+        treer_host_protocol::HostResponse::Synced { host_build, .. } => treer_protocol::BuildInfo {
+            version: host_build.version.clone(),
+            git_commit: host_build.git_commit.clone(),
+        },
+        _ => anyhow::bail!("Host sync returned an unexpected response"),
+    };
     let (runtime, mut host_disconnected) = ControllerRuntime::from_sync(
         host,
         sync,
@@ -233,6 +244,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         args.workspace.clone(),
         hostname,
         root.display().to_string(),
+        host_build.clone(),
     );
 
     let proxy_client = proxy::ProxyClient::new(
@@ -250,6 +262,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         server_id.clone(),
         args.machine_token,
         args.operator_credential,
+        host_build,
         runtime,
     );
     let app = local_api::router(local_state);

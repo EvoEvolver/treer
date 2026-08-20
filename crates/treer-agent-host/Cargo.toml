@@ -14,6 +14,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 treer-agent-runtime = { path = "../treer-agent-runtime" }
+treer-build-info.workspace = true
 treer-host-protocol = { path = "../treer-host-protocol" }
 uuid.workspace = true
 

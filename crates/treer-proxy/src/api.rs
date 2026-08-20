@@ -3730,6 +3730,14 @@ mod tests {
             name: "machine-a".to_string(),
             hostname: "machine-a".to_string(),
             root: "/tmp".to_string(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "controller-test".to_string(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "host-test".to_string(),
+            },
             labels: Default::default(),
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
@@ -4543,6 +4551,14 @@ mod tests {
             name: "machine-a".to_string(),
             hostname: "machine-a".to_string(),
             root: "/tmp".to_string(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "controller-test".to_string(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "host-test".to_string(),
+            },
             labels: Default::default(),
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
@@ -4684,6 +4700,14 @@ mod tests {
             name: "machine-a".to_string(),
             hostname: "machine-a".to_string(),
             root: "/tmp".to_string(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "controller-test".to_string(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "host-test".to_string(),
+            },
             labels: Default::default(),
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,

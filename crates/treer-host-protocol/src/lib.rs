@@ -4,8 +4,14 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const HOST_PROTOCOL_VERSION: u32 = 1;
+pub const HOST_PROTOCOL_VERSION: u32 = 2;
 pub const MAX_HOST_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostBuildInfo {
+    pub version: String,
+    pub git_commit: String,
+}
 
 pub fn encode_message<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     bincode::serde::encode_to_vec(value, bincode::config::standard())
@@ -152,6 +158,7 @@ pub struct HostRequest {
 pub enum HostResponse {
     Synced {
         host_epoch: String,
+        host_build: HostBuildInfo,
         processes: Vec<HostProcessInfo>,
         replay: Vec<HostOutputReplay>,
     },
@@ -256,6 +263,18 @@ mod tests {
         };
         let encoded = encode_message(&message).expect("encode host response");
         assert_eq!(decode_message::<HostMessage>(&encoded), Ok(message));
+
+        let synced = HostResponse::Synced {
+            host_epoch: "host-epoch".to_string(),
+            host_build: HostBuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "0123456789abcdef".to_string(),
+            },
+            processes: Vec::new(),
+            replay: Vec::new(),
+        };
+        let encoded = encode_message(&synced).expect("encode sync response");
+        assert_eq!(decode_message::<HostResponse>(&encoded), Ok(synced));
     }
 
     #[test]

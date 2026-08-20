@@ -2524,6 +2524,14 @@ mod tests {
             name: "test-host".to_string(),
             hostname: "test-host".to_string(),
             root: "/tmp".to_string(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "controller-test".to_string(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "host-test".to_string(),
+            },
             labels: Default::default(),
             status: ServerStatus::Online,
             connected_at: now,
@@ -3642,6 +3650,14 @@ mod tests {
             name: "source".to_string(),
             hostname: "source".to_string(),
             root: "/tmp".to_string(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "controller-test".to_string(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "host-test".to_string(),
+            },
             labels: Default::default(),
             status: ServerStatus::Online,
             connected_at: now,
@@ -3659,6 +3675,14 @@ mod tests {
             name: "destination".to_string(),
             hostname: "destination".to_string(),
             root: "/tmp".to_string(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "controller-test".to_string(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "0.1.2".to_string(),
+                git_commit: "host-test".to_string(),
+            },
             labels: Default::default(),
             status: ServerStatus::Online,
             connected_at: now,

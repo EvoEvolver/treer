@@ -15,15 +15,20 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use treer_agent_runtime::{HostRuntime, RuntimeError};
 use treer_host_protocol::{
-    decode_message, encode_message, HostCommand, HostDaemonConfig, HostError, HostMessage,
-    HostRequest, HostResponse, OutputCursor, HOST_PROTOCOL_VERSION, MAX_HOST_FRAME_BYTES,
+    decode_message, encode_message, HostBuildInfo, HostCommand, HostDaemonConfig, HostError,
+    HostMessage, HostRequest, HostResponse, OutputCursor, HOST_PROTOCOL_VERSION,
+    MAX_HOST_FRAME_BYTES,
 };
 use uuid::Uuid;
 
 const RESULT_CACHE_LIMIT: usize = 1024;
 
 #[derive(Debug, Parser)]
-#[command(name = "treer-agent-host", about = "Stable Treer PTY and process host")]
+#[command(
+    name = "treer-agent-host",
+    about = "Stable Treer PTY and process host",
+    version = treer_build_info::DISPLAY
+)]
 struct Args {
     #[command(subcommand)]
     command: CommandArgs,
@@ -315,6 +320,10 @@ fn sync_runtime(
         .map_err(anyhow::Error::from)?;
     Ok(HostResponse::Synced {
         host_epoch: runtime.host_epoch().to_string(),
+        host_build: HostBuildInfo {
+            version: treer_build_info::VERSION.to_string(),
+            git_commit: treer_build_info::GIT_COMMIT.to_string(),
+        },
         processes,
         replay,
     })

@@ -6809,6 +6809,14 @@ mod tests {
                 name: String::new(),
                 hostname: "original-host".to_string(),
                 root: "/workspace".to_string(),
+                controller_build: treer_protocol::BuildInfo {
+                    version: "0.1.2".to_string(),
+                    git_commit: "controller-test".to_string(),
+                },
+                host_build: treer_protocol::BuildInfo {
+                    version: "0.1.2".to_string(),
+                    git_commit: "host-test".to_string(),
+                },
                 labels: Default::default(),
                 status: ServerStatus::Online,
                 connected_at: now,

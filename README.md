@@ -221,6 +221,20 @@ treer-agent-server service restart
 treer-agent-server service uninstall
 ```
 
+Each installed binary reports the package version and exact source commit:
+
+```bash
+treer --version
+treer-agent-server --version
+treer-agent-host --version
+```
+
+The Controller's loopback `/api/health` response and each machine in the web
+application show separate Controller and Host build identities. They can differ
+after a hot Controller update because `update` deliberately leaves the stable
+Host running. A full reinstall and service restart is required to activate a
+new Host binary.
+
 `restart-controller` activates a Controller binary installed manually and
 preserves running agents. `restart` restarts the long-lived Host itself and
 therefore terminates the agents and PTYs owned by that Host.
@@ -431,7 +445,9 @@ treer profile launch reviewer --machine build-machine --name review-42
 ```
 
 Profiles store an executable and ordered arguments rather than a shell command
-string. Use an explicit shell executable such as `sh -lc` only when shell
+string. The web editor presents them as one quoted command line and the Create
+Agent dialog can launch any saved workspace profile. Shell operators are not
+interpreted; use an explicit shell executable such as `sh -lc` only when shell
 expansion is required. Profiles are plaintext workspace configuration and must
 not contain secrets.
 

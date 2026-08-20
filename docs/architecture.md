@@ -55,6 +55,10 @@ flowchart TB
 
 - The Host owns local process lifetime so a Controller update does not terminate
   active PTYs.
+- The three machine-facing binaries embed their package version and source
+  commit. Host sync reports the Host build to the Controller; Controller health
+  and Proxy machine snapshots carry separate Host and Controller identities so
+  a hot update cannot hide a stale Host.
 - Machine-local dashboards read Agent and PTY state from the Controller and
   Host. Proxy projections provide workspace-wide discovery and metadata but do
   not replace local runtime state when the Proxy is unavailable.
@@ -117,6 +121,12 @@ executability before activation. A future remote rollout must verify the
 embedded release public key, signed channel, signed manifest, artifact digest,
 platform, and Host/Controller protocol compatibility before asking the Host to
 restart the Controller.
+
+Local and GitHub builds resolve the source commit from the checked-out Git
+repository. Railway release scripts set `TREER_BUILD_COMMIT` to the exact
+candidate revision and the Docker builder accepts it as a build argument, so a
+CLI source upload without `.git` still produces attributable binaries. A source
+archive built without either input reports `unknown` rather than guessing.
 
 ## Protocols and state
 
