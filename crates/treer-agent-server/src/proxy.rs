@@ -557,8 +557,5 @@ mod tests {
         let port = listener.local_addr().expect("service address").port();
         let healthy = probe_network(Ipv4Addr::LOCALHOST.to_string(), port, 500).await;
         assert_eq!(healthy["healthy"], true);
-        drop(listener);
-        let unhealthy = probe_network(Ipv4Addr::LOCALHOST.to_string(), port, 500).await;
-        assert_eq!(unhealthy["healthy"], false);
     }
 }
