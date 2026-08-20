@@ -59,8 +59,10 @@ installation or App links.
 
 1. Log in with Canary's Railway-managed admin password and reuse the dedicated
    `canary-tester@treer.invalid` account and `canary-e2e` workspace.
-2. Mint two one-use enrollment keys and create two isolated Railway services.
-3. Each service downloads the deployed Host, Controller, and CLI artifacts,
+2. Mint two one-use enrollment keys and refresh two dedicated, long-lived
+   Railway machine services. Their stable service IDs avoid Railway's daily
+   service-creation quota while each run still rotates machine credentials.
+3. Each machine downloads the deployed Host, Controller, and CLI artifacts,
    enrolls through the public Proxy URL, and serves a machine-specific HTTP
    response on its loopback interface.
 4. Register the second machine's HTTP server as a machine service and virtual
@@ -68,14 +70,20 @@ installation or App links.
 5. Publish the same service through wildcard HTTPS and fetch the returned URL
    directly from the tester.
 6. Confirm the A-to-B payload appears in directional traffic accounting.
-7. Delete the Treer machine records and Railway services by exact ID.
+7. Delete only the agents, machine service, virtual host, and ingress created by
+   the run. The dedicated Railway services and Treer machine identities remain
+   available for the next release.
 
-The test intentionally fails when wildcard DNS or certificate issuance is not
-ready. Set `TREER_CANARY_TEST_TIMEOUT` for slow Railway builds. Set
-`TREER_CANARY_DEPLOY_TIMEOUT` separately for control-plane deployment waits.
+The default fixtures are the two maintained Canary machine services. Override
+`TREER_CANARY_MACHINE_A_SERVICE`, `TREER_CANARY_MACHINE_B_SERVICE`,
+`TREER_CANARY_MACHINE_A_NAME`, and `TREER_CANARY_MACHINE_B_NAME` together when
+moving the test fleet. The test intentionally fails when wildcard DNS or
+certificate issuance is not ready. Set `TREER_CANARY_TEST_TIMEOUT` for slow
+Railway builds. Set `TREER_CANARY_DEPLOY_TIMEOUT` separately for control-plane
+deployment waits.
 For failure investigation, `TREER_CANARY_KEEP_RESOURCES=1 just test-canary`
-leaves the two Railway services in place and prints their exact IDs;
-delete them after inspecting their logs.
+leaves the run's logical Treer resources in place. The two Railway fixtures are
+never removed by this test.
 `TREER_CANARY_SKIP_PUBLIC=1` is available only to isolate internal networking
 and accounting failures while DNS is unavailable. A skipped public-ingress test
 is never eligible for Production promotion.

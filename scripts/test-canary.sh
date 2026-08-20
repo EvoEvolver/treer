@@ -10,8 +10,10 @@ timeout=${TREER_CANARY_TEST_TIMEOUT:-900}
 keep_resources=${TREER_CANARY_KEEP_RESOURCES:-0}
 skip_public=${TREER_CANARY_SKIP_PUBLIC:-0}
 run_id=$(date -u +%Y%m%d%H%M%S)-$$
-machine_a="canary-a-$run_id"
-machine_b="canary-b-$run_id"
+machine_a_service=${TREER_CANARY_MACHINE_A_SERVICE:-461c12b4-0333-46e3-b757-b0221db80470}
+machine_b_service=${TREER_CANARY_MACHINE_B_SERVICE:-1a3d759e-02db-45a8-b68c-a2d2c45e1800}
+machine_a=${TREER_CANARY_MACHINE_A_NAME:-canary-a-20260820022530-70983}
+machine_b=${TREER_CANARY_MACHINE_B_NAME:-canary-b-20260820022530-70983}
 hostname="service-$run_id.internal"
 slug="canary-$run_id"
 workspace_id=canary-e2e
@@ -19,8 +21,10 @@ test_email=canary-tester@treer.invalid
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/treer-canary.XXXXXX")
 admin_cookies="$tmp_dir/admin.cookies"
 user_cookies="$tmp_dir/user.cookies"
-service_ids=
-server_ids=
+agent_ids=
+treer_service_id=
+ingress_id=
+virtual_host_created=0
 
 command -v railway >/dev/null 2>&1 || { echo "railway CLI is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
@@ -58,24 +62,23 @@ cleanup() {
     trap - EXIT HUP INT TERM
     set +e
     if [ "$keep_resources" = 1 ]; then
-        echo "Keeping Canary resources for inspection: $service_ids"
+        echo "Keeping Canary logical resources for inspection"
         return
     fi
     if [ -s "$user_cookies" ]; then
-        cleanup_snapshot=$(api GET "/api/workspaces/$workspace_id/snapshot" 2>/dev/null)
-        discovered_server_ids=$(printf '%s' "$cleanup_snapshot" | jq -r \
-            --arg machine_a "$machine_a" --arg machine_b "$machine_b" \
-            '.servers[]? | select(.name == $machine_a or .name == $machine_b) | .server_id' \
-            2>/dev/null)
-        server_ids="$server_ids $discovered_server_ids"
+        for agent_id in $agent_ids; do
+            api DELETE "/api/workspaces/$workspace_id/agents/$agent_id" >/dev/null 2>&1
+        done
+        if [ -n "$ingress_id" ]; then
+            api DELETE "/api/workspaces/$workspace_id/ingresses/$ingress_id" >/dev/null 2>&1
+        fi
+        if [ "$virtual_host_created" = 1 ]; then
+            api DELETE "/api/workspaces/$workspace_id/virtual-hosts/$hostname" >/dev/null 2>&1
+        fi
+        if [ -n "$treer_service_id" ]; then
+            api DELETE "/api/workspaces/$workspace_id/services/$treer_service_id" >/dev/null 2>&1
+        fi
     fi
-    for server_id in $server_ids; do
-        api DELETE "/api/workspaces/$workspace_id/servers/$server_id" >/dev/null 2>&1
-    done
-    for service_id in $service_ids; do
-        railway service delete --service "$service_id" --environment "$environment" \
-            --project "$project_id" --yes --json >/dev/null 2>&1
-    done
     rm -rf "$tmp_dir"
 }
 trap cleanup EXIT HUP INT TERM
@@ -126,14 +129,7 @@ wait_for_machine() {
 create_machine() {
     machine_name=$1
     enrollment_key=$2
-    railway_link="$tmp_dir/railway-link"
-    mkdir -p "$railway_link"
-    created=$(cd "$railway_link" && \
-        railway link --project "$project_id" --environment "$environment" \
-            --service "$proxy_service" --json </dev/null >/dev/null && \
-        railway add --service "$machine_name" --json </dev/null)
-    service_id=$(printf '%s' "$created" | jq -er '.id')
-    service_ids="$service_ids $service_id"
+    service_id=$3
     railway variable set \
         "TREER_PROXY_URL=$proxy_url/" \
         "TREER_MACHINE_NAME=$machine_name" \
@@ -185,24 +181,24 @@ fi
 enrollment_a=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
 enrollment_b=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
 
-echo "Deploying two Canary Railway machines"
-create_machine "$machine_a" "$enrollment_a"
-create_machine "$machine_b" "$enrollment_b"
+echo "Refreshing two dedicated Canary Railway machines"
+create_machine "$machine_a" "$enrollment_a" "$machine_a_service"
+create_machine "$machine_b" "$enrollment_b" "$machine_b_service"
 echo "Waiting for $machine_a to connect"
 server_a=$(wait_for_machine "$machine_a")
-server_ids="$server_ids $server_a"
 echo "Waiting for $machine_b to connect"
 server_b=$(wait_for_machine "$machine_b")
-server_ids="$server_ids $server_b"
 echo "Both Canary machines are online"
 
 service_payload=$(jq -n --arg name "http-$run_id" --arg server_id "$server_b" \
     '{name: $name, server_id: $server_id, target_host: "127.0.0.1", target_port: 8081, protocol: "http"}')
 service_id=$(api POST "/api/workspaces/$workspace_id/services" "$service_payload" \
     | jq -er '.service.service_id')
+treer_service_id=$service_id
 host_payload=$(jq -n --arg hostname "$hostname" --arg service_id "$service_id" \
     '{hostname: $hostname, service_id: $service_id}')
 api POST "/api/workspaces/$workspace_id/virtual-hosts" "$host_payload" >/dev/null
+virtual_host_created=1
 
 probe=$(api POST "/api/workspaces/$workspace_id/services/$service_id/probe")
 printf '%s' "$probe" | jq -e '.health.healthy == true' >/dev/null
@@ -215,6 +211,7 @@ for attempt in 1 2 3; do
         --arg url "http://$hostname/" \
         '{server_id: $server_id, kind: "command", name: $name, cwd: "", args: ["curl", "-fsS", "--max-time", "30", $url]}')
     agent_id=$(api POST "/api/workspaces/$workspace_id/agents" "$agent_payload" | jq -er '.agent_id')
+    agent_ids="$agent_ids $agent_id"
     deadline=$(( $(date +%s) + 45 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         virtual_output=$(api GET "/api/workspaces/$workspace_id/agents/$agent_id/output?lines=100" \
@@ -250,6 +247,7 @@ fi
 ingress_payload=$(jq -n --arg service_id "$service_id" --arg slug "$slug" \
     '{service_id: $service_id, slug: $slug, access: "public"}')
 ingress=$(api POST "/api/workspaces/$workspace_id/ingresses" "$ingress_payload")
+ingress_id=$(printf '%s' "$ingress" | jq -er '.ingress.ingress_id')
 ingress_url=$(printf '%s' "$ingress" | jq -er '.ingress.url')
 public_output=$(curl -fsS --retry 20 --retry-delay 3 --retry-all-errors "$ingress_url")
 printf '%s' "$public_output" | jq -e --arg machine "$machine_b" \
