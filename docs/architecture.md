@@ -55,6 +55,9 @@ flowchart TB
 
 - The Host owns local process lifetime so a Controller update does not terminate
   active PTYs.
+- Machine-local dashboards read Agent and PTY state from the Controller and
+  Host. Proxy projections provide workspace-wide discovery and metadata but do
+  not replace local runtime state when the Proxy is unavailable.
 - The Host remains product-agnostic; Agent-specific interpretation belongs in
   the Controller.
 - Shared wire models live in protocol crates. A client and server must not grow

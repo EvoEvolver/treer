@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::Frame;
 use reqwest::Client;
 use serde::Deserialize;
-use treer_protocol::{AgentInfo, AgentStatus};
+use treer_protocol::{AgentInfo, AgentStatus, OPERATOR_CREDENTIAL_HEADER};
 
 use crate::service;
 
@@ -152,8 +152,14 @@ impl App {
         }
 
         if self.health.is_some() {
-            let agents_url = format!("http://{address}/api/agents");
-            match self.client.get(agents_url).send().await {
+            let local_agents_url = format!("http://{address}/api/local/agents");
+            let local_agents_available = match self
+                .client
+                .get(local_agents_url)
+                .header(OPERATOR_CREDENTIAL_HEADER, &config.operator_credential)
+                .send()
+                .await
+            {
                 Ok(response) => match response.error_for_status() {
                     Ok(response) => match response.json::<AgentList>().await {
                         Ok(mut list) => {
@@ -165,31 +171,78 @@ impl App {
                                     .cmp(&right.name.to_ascii_lowercase())
                             });
                             self.agents = list.agents;
-                            self.proxy_reachable = true;
-                            self.message = "Controller and Proxy are reachable.".to_string();
+                            true
                         }
                         Err(error) => {
-                            self.proxy_reachable = false;
                             self.agents.clear();
-                            self.message = format!("Invalid Agent response: {error}");
+                            self.message = format!("Invalid local Agent response: {error}");
+                            false
                         }
                     },
                     Err(error) => {
-                        self.proxy_reachable = false;
                         self.agents.clear();
-                        self.message = format!("Proxy request failed: {error}");
+                        self.message = format!("Local Agent request failed: {error}");
+                        false
                     }
                 },
                 Err(error) => {
-                    self.proxy_reachable = false;
                     self.agents.clear();
-                    self.message = format!("Proxy is not reachable through Controller: {error}");
+                    self.message = format!("Local Agent state is unavailable: {error}");
+                    false
                 }
-            }
+            };
+
+            let proxy_agents_url = format!("http://{address}/api/agents");
+            let proxy_result = self
+                .client
+                .get(proxy_agents_url)
+                .header(OPERATOR_CREDENTIAL_HEADER, &config.operator_credential)
+                .send()
+                .await;
+            self.apply_proxy_probe(proxy_result, local_agents_available)
+                .await;
         }
 
         self.clamp_selection();
         self.last_refresh = Some(Instant::now());
+    }
+
+    async fn apply_proxy_probe(
+        &mut self,
+        result: Result<reqwest::Response, reqwest::Error>,
+        local_agents_available: bool,
+    ) {
+        match result {
+            Ok(response) => match response.error_for_status() {
+                Ok(_) => {
+                    self.proxy_reachable = true;
+                    if local_agents_available {
+                        self.message =
+                            "Controller and Proxy are reachable; showing local Host state."
+                                .to_string();
+                    }
+                }
+                Err(error) => {
+                    self.proxy_reachable = false;
+                    if local_agents_available {
+                        self.mark_proxy_unreachable(format!("Proxy request failed: {error}"));
+                    }
+                }
+            },
+            Err(error) => {
+                self.proxy_reachable = false;
+                if local_agents_available {
+                    self.mark_proxy_unreachable(format!(
+                        "Proxy is not reachable through Controller: {error}"
+                    ));
+                }
+            }
+        }
+    }
+
+    fn mark_proxy_unreachable(&mut self, detail: String) {
+        self.proxy_reachable = false;
+        self.message = format!("{detail}. Showing local Host state.");
     }
 
     fn clamp_selection(&mut self) {
@@ -440,7 +493,7 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
         columns[2],
         "Agents",
         &app.agents.len().to_string(),
-        app.proxy_reachable,
+        app.health.is_some(),
     );
 }
 
@@ -484,7 +537,7 @@ fn draw_agents(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.agents.is_empty() {
         frame.render_widget(
-            Paragraph::new("No Agents are currently visible.")
+            Paragraph::new("No Agents are currently running on this machine.")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Center),
             centered_rect(50, 3, area),
@@ -608,5 +661,31 @@ mod tests {
                 });
         assert!(rendered.contains("Treer Agent Server"));
         assert!(rendered.contains("Controller is not reachable"));
+    }
+
+    #[test]
+    fn proxy_failure_preserves_local_agents() {
+        let mut app = App::new("default").expect("app");
+        app.agents.push(AgentInfo {
+            agent_id: "agent-a".to_string(),
+            workspace_id: "default".to_string(),
+            server_id: "machine-a".to_string(),
+            kind: "shell".to_string(),
+            name: "Local agent".to_string(),
+            cwd: "/workspace".to_string(),
+            status: AgentStatus::Working,
+            pid: Some(42),
+            started_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            exited_at: None,
+            exit_code: None,
+            output_revision: 0,
+        });
+
+        app.mark_proxy_unreachable("Proxy request failed".to_string());
+
+        assert_eq!(app.agents.len(), 1);
+        assert!(!app.proxy_reachable);
+        assert!(app.message.contains("Showing local Host state"));
     }
 }

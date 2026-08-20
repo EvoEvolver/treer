@@ -217,8 +217,10 @@ preserves running agents. `restart` restarts the long-lived Host itself and
 therefore terminates the agents and PTYs owned by that Host.
 
 `--tui` opens an interactive dashboard for the installed workspace. It shows
-the local Controller health, Proxy reachability, and Agents on this machine,
-and provides start, stop, full restart, and Controller-only restart actions.
+the local Controller health, Proxy reachability, and Host-owned Agents on this
+machine. The Agent list remains available from local state while the Proxy is
+unreachable, and the dashboard provides start, stop, full restart, and
+Controller-only restart actions.
 Stop and full restart require confirmation because they terminate Host-owned
 Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 

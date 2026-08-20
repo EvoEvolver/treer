@@ -162,6 +162,7 @@ pub fn router(state: LocalApiState) -> Router {
             "/api/machines/{server_id}",
             axum::routing::patch(rename_machine).delete(delete_machine),
         )
+        .route("/api/local/agents", get(list_local_agents))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
             "/api/launch-profiles",
@@ -286,6 +287,14 @@ async fn list_agents(
 ) -> Result<Json<Value>, LocalApiError> {
     let source_agent = validated_source_agent(&state, &headers)?;
     Ok(Json(state.get_as("agents", source_agent.as_ref()).await?))
+}
+
+async fn list_local_agents(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    authenticate_operator(&state, &headers)?;
+    Ok(Json(json!({ "agents": state.runtime.list() })))
 }
 
 async fn list_machine_services(
