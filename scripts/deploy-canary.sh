@@ -75,8 +75,21 @@ curl -fsS --retry 12 --retry-all-errors "$app_url/health" \
 curl -fsS --retry 12 --retry-all-errors "$app_url/config.json" \
     | jq -e --arg proxy "$proxy_url/" '.proxy_url == $proxy' >/dev/null
 
-worker_version_id=$(cd web && pnpm exec wrangler versions list \
-    --env "$worker_environment" --json | jq -er '.[0].id // .items[0].id')
+worker_message="canary $commit"
+worker_version_id=
+attempt=0
+while [ "$attempt" -lt 12 ]; do
+    worker_version_id=$(cd web && pnpm exec wrangler versions list \
+        --env "$worker_environment" --json | jq -er --arg message "$worker_message" \
+        'map(select(.annotations["workers/message"] == $message))
+         | sort_by(.number) | last | .id' 2>/dev/null) && break
+    attempt=$(( attempt + 1 ))
+    sleep 2
+done
+[ -n "$worker_version_id" ] || {
+    echo "could not resolve the Canary Worker version for $commit" >&2
+    exit 1
+}
 
 domain=$(railway domain status "$domain_id" --project "$project_id" \
     --environment "$environment" --service "$proxy_service" --json)

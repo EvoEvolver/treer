@@ -130,8 +130,21 @@ wildcard_status=$(curl -sS -o /dev/null -w '%{http_code}:%{ssl_verify_result}' \
     exit 1
 }
 
-worker_version_id=$(cd web && pnpm exec wrangler versions list \
-    --env "$worker_environment" --json | jq -er '.[0].id // .items[0].id')
+worker_message="production $commit"
+worker_version_id=
+attempt=0
+while [ "$attempt" -lt 12 ]; do
+    worker_version_id=$(cd web && pnpm exec wrangler versions list \
+        --env "$worker_environment" --json | jq -er --arg message "$worker_message" \
+        'map(select(.annotations["workers/message"] == $message))
+         | sort_by(.number) | last | .id' 2>/dev/null) && break
+    attempt=$(( attempt + 1 ))
+    sleep 2
+done
+[ -n "$worker_version_id" ] || {
+    echo "could not resolve the Production Worker version for $commit" >&2
+    exit 1
+}
 promoted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 updated="$manifest.tmp.$$"
 jq \
