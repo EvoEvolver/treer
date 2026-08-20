@@ -55,6 +55,7 @@ workspace_id=$(jq -er '.workspace_id' "$identity_path")
 server_id=$(jq -er '.server_id' "$identity_path")
 machine_token=$(jq -er '.machine_token' "$identity_path")
 host_socket="$state_dir/host.sock"
+install_hostname=$(hostname)
 
 jq -n \
     --arg proxy "$proxy_url/" \
@@ -63,6 +64,7 @@ jq -n \
     --arg machine_token "$machine_token" \
     --arg root "$root_dir" \
     --arg host_socket "$host_socket" \
+    --arg install_hostname "$install_hostname" \
     '{
         proxy: $proxy,
         workspace: $workspace,
@@ -70,7 +72,8 @@ jq -n \
         machine_token: $machine_token,
         root: $root,
         listen: "127.0.0.1:8790",
-        host_socket: $host_socket
+        host_socket: $host_socket,
+        install_hostname: $install_hostname
     }' > "$state_dir/controller.json.tmp"
 mv "$state_dir/controller.json.tmp" "$state_dir/controller.json"
 
