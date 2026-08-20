@@ -55,6 +55,7 @@ api() {
 }
 
 cleanup() {
+    trap - EXIT HUP INT TERM
     set +e
     if [ "$keep_resources" = 1 ]; then
         echo "Keeping Canary resources for inspection: $service_ids"
@@ -128,8 +129,9 @@ create_machine() {
     railway_link="$tmp_dir/railway-link"
     mkdir -p "$railway_link"
     created=$(cd "$railway_link" && \
-        railway link --project "$project_id" --environment "$environment" --json >/dev/null && \
-        railway add --service "$machine_name" --json)
+        railway link --project "$project_id" --environment "$environment" \
+            --service "$proxy_service" --json </dev/null >/dev/null && \
+        railway add --service "$machine_name" --json </dev/null)
     service_id=$(printf '%s' "$created" | jq -er '.id')
     service_ids="$service_ids $service_id"
     railway variable set \
