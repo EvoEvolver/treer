@@ -68,8 +68,11 @@ branch.
 - Add Proxy API fields before the App begins using them. Stop App use before a
   later release removes an API.
 - Use expand-first PostgreSQL changes so old and new Proxy replicas can overlap.
-- Keep the current and previous Controller protocols usable during machine
-  rollout.
+- Before the first stable release, a Controller protocol bump may deliberately
+  require a coordinated Proxy rollout and machine re-enrollment. Record that
+  boundary in the release notes and reset Canary as one unit. Once stable
+  releases begin, keep the current and previous Controller protocols usable
+  during machine rollout.
 - Roll back the App with `wrangler rollback --env production <version-id>`.
 - Roll back the Proxy to its prior Railway deployment. Database contraction is
   a separate release and is never part of an automatic code rollback.

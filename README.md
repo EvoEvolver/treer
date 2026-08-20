@@ -148,20 +148,29 @@ TREER_ENROLLMENT_KEY='enr_v1_...' \
 
 `connect` decodes the workspace ID from the key, exchanges it for a long-lived
 machine credential, uses the current directory as the workspace root, registers
-the Host service, and starts it. Linux uses a systemd user service with restart
-and linger enabled; macOS uses a per-user LaunchAgent with `KeepAlive`. Override
-`TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`, or `TREER_AGENT_SERVER_LISTEN` when
-needed. The first available loopback port starting at `8790` is saved per
-workspace.
+the Host service, and starts it. Linux uses a host-pinned systemd user service
+with restart; macOS uses a per-user LaunchAgent with `KeepAlive`. Linux setup
+checks systemd linger and prints an actionable warning when the service will
+stop after the last login session exits. It does not attempt a privileged
+linger change. Override `TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`,
+`TREER_RUNTIME_DIR`, or `TREER_AGENT_SERVER_LISTEN` when needed. The first
+available loopback port starting at `8790` is saved per installed machine.
 
 Setup is interactive by default. Before enrollment it explains that the Agent
 Server is a persistent proxy and agent host running with the current user's
 system permissions, and recommends a dedicated account, VM, container, or
 other sandbox. On the first setup it asks for a machine name. Treer stores a
-random installation identity and that name in the machine-level state directory;
-later setup runs reuse both, so claiming another enrollment link does not create
-a duplicate machine. The identity is random and does not contain or derive from
-a MAC address.
+random installation identity and that name under a hostname-scoped machine
+state directory; later setup runs on that host reuse both, so claiming another
+enrollment link does not create a duplicate machine. Shared home directories
+therefore give each host a separate installation identity. The identity is
+random and does not contain or derive from a MAC address.
+
+Controller and Host configuration and service-manager entries are named by the
+Proxy-issued server ID, not by workspace. The Linux unit is pinned to the
+installation hostname with `ConditionHost`, and the Host Unix socket lives in
+the node-local runtime directory (`$XDG_RUNTIME_DIR/treer`, normally
+`/run/user/$UID/treer`) rather than persistent or network-mounted state.
 
 Automation must opt in explicitly and provide a name on first setup:
 
@@ -225,10 +234,11 @@ Stop and full restart require confirmation because they terminate Host-owned
 Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 
 Add `--workspace WORKSPACE_ID` after `service` when managing a workspace other
-than `default`. On Linux, installation prints an actionable warning if systemd
-linger cannot be enabled automatically. On macOS, a LaunchAgent starts at user
-login; an always-on pre-login LaunchDaemon would require a separate privileged
-installation flow.
+than `default`. On Linux, an administrator can run `loginctl enable-linger
+USER` when the service must survive the final logout; otherwise keep a
+foreground Controller on a fixed host, for example in tmux. On macOS, a
+LaunchAgent starts at user login; an always-on pre-login LaunchDaemon would
+require a separate privileged installation flow.
 
 ## Users, administrators, and invitations
 

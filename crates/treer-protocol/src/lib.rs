@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
@@ -944,6 +944,7 @@ impl CommandResult {
 pub enum AgentServerMessage {
     Register {
         protocol: u32,
+        controller_instance_id: String,
         server: ServerInfo,
     },
     Snapshot {

@@ -64,6 +64,7 @@ struct ServerKey {
 #[derive(Clone)]
 struct ServerConnection {
     connection_id: Uuid,
+    controller_instance_id: String,
     outgoing: mpsc::UnboundedSender<SocketFrame>,
 }
 
@@ -304,10 +305,22 @@ impl AppState {
             .sum()
     }
 
+    #[cfg(test)]
     pub async fn register_server(
+        &self,
+        server: ServerInfo,
+        connection_id: Uuid,
+        outgoing: mpsc::UnboundedSender<SocketFrame>,
+    ) -> Result<u64, ProtocolError> {
+        self.register_server_instance(server, connection_id, "unknown".to_string(), outgoing)
+            .await
+    }
+
+    pub async fn register_server_instance(
         &self,
         mut server: ServerInfo,
         connection_id: Uuid,
+        controller_instance_id: String,
         outgoing: mpsc::UnboundedSender<SocketFrame>,
     ) -> Result<u64, ProtocolError> {
         self.ensure_workspace(&server.workspace_id, &server.workspace_id)
@@ -334,13 +347,28 @@ impl AppState {
             workspace_id: server.workspace_id.clone(),
             server_id: server.server_id.clone(),
         };
-        self.inner.connections.write().await.insert(
+        let replaced = self.inner.connections.write().await.insert(
             key,
             ServerConnection {
                 connection_id,
+                controller_instance_id: controller_instance_id.clone(),
                 outgoing,
             },
         );
+        if let Some(replaced) = replaced {
+            if let Ok(frame) = proxy_message_frame(&ProxyMessage::Error {
+                error: ProtocolError::new(
+                    "duplicate_machine_connection",
+                    format!(
+                        "Controller {controller_instance_id} replaced this connection for {}",
+                        server.server_id
+                    ),
+                ),
+            }) {
+                let _ = replaced.outgoing.send(frame);
+            }
+            let _ = replaced.outgoing.send(SocketFrame::Close);
+        }
 
         let event = self
             .mutate_workspace(
@@ -476,8 +504,10 @@ impl AppState {
             Ok(())
         } else {
             Err(ProtocolError::new(
-                "stale_connection",
-                format!("connection for {server_id} is no longer current"),
+                "duplicate_machine_connection",
+                format!(
+                    "another Controller currently owns machine {server_id}; stopping this duplicate connection"
+                ),
             ))
         }
     }
@@ -2354,7 +2384,14 @@ impl AppState {
         let connections = self.inner.connections.read().await;
         match connections.get(&key) {
             Some(connection) if connection.connection_id == connection_id => Ok(()),
-            _ => Err(ProtocolError::new(
+            Some(connection) => Err(ProtocolError::new(
+                "duplicate_machine_connection",
+                format!(
+                    "Controller {} currently owns machine {server_id}",
+                    connection.controller_instance_id
+                ),
+            )),
+            None => Err(ProtocolError::new(
                 "stale_connection",
                 format!("connection for {server_id} is no longer current"),
             )),
@@ -2967,6 +3004,58 @@ mod tests {
                 .expect("command result"),
             serde_json::json!({"replayed": true})
         );
+    }
+
+    #[tokio::test]
+    async fn replacement_controller_fences_the_old_local_connection() {
+        let state = AppState::new();
+        let server = test_server();
+        let first_connection = Uuid::new_v4();
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        state
+            .register_server_instance(
+                server.clone(),
+                first_connection,
+                "ctl_11111111111111111111111111111111".to_string(),
+                first_tx,
+            )
+            .await
+            .expect("register first controller");
+
+        let second_connection = Uuid::new_v4();
+        let (second_tx, _second_rx) = mpsc::unbounded_channel();
+        state
+            .register_server_instance(
+                server,
+                second_connection,
+                "ctl_22222222222222222222222222222222".to_string(),
+                second_tx,
+            )
+            .await
+            .expect("register replacement controller");
+
+        let error: ProxyMessage = serde_json::from_str(&expect_text(
+            first_rx.recv().await.expect("replacement error"),
+        ))
+        .expect("decode replacement error");
+        assert!(matches!(
+            error,
+            ProxyMessage::Error { error }
+                if error.code == "duplicate_machine_connection"
+        ));
+        assert_eq!(first_rx.recv().await, Some(SocketFrame::Close));
+        assert_eq!(
+            state
+                .heartbeat("alpha", "server", first_connection)
+                .await
+                .expect_err("old connection must be fenced")
+                .code,
+            "duplicate_machine_connection"
+        );
+        state
+            .heartbeat("alpha", "server", second_connection)
+            .await
+            .expect("replacement owns the machine");
     }
 
     #[tokio::test]

@@ -161,6 +161,7 @@ async fn handle(
         match parsed {
             AgentServerMessage::Register {
                 protocol,
+                controller_instance_id,
                 mut server,
             } => {
                 if protocol != PROTOCOL_VERSION {
@@ -192,6 +193,16 @@ async fn handle(
                     );
                     continue;
                 }
+                if !valid_controller_instance_id(&controller_instance_id) {
+                    send_error(
+                        &outgoing_tx,
+                        ProtocolError::new(
+                            "invalid_controller_instance",
+                            "Controller instance ID is invalid",
+                        ),
+                    );
+                    break;
+                }
                 let workspace_id = server.workspace_id.clone();
                 let server_id = server.server_id.clone();
                 if let Err(error) = auth.apply_server_name(&mut server).await {
@@ -199,10 +210,21 @@ async fn handle(
                     continue;
                 }
                 match state
-                    .register_server(server, connection_id, outgoing_tx.clone())
+                    .register_server_instance(
+                        server,
+                        connection_id,
+                        controller_instance_id.clone(),
+                        outgoing_tx.clone(),
+                    )
                     .await
                 {
                     Ok(workspace_revision) => {
+                        debug!(
+                            %workspace_id,
+                            %server_id,
+                            %controller_instance_id,
+                            "agent server registered"
+                        );
                         identity = Some((workspace_id.clone(), server_id));
                         let response = ProxyMessage::Registered {
                             protocol: PROTOCOL_VERSION,
@@ -350,6 +372,12 @@ fn identity_error() -> ProtocolError {
         "identity_mismatch",
         "message identity does not match the registered connection",
     )
+}
+
+fn valid_controller_instance_id(value: &str) -> bool {
+    value.len() == 36
+        && value.starts_with("ctl_")
+        && value[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 async fn route_network_open(

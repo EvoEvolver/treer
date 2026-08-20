@@ -43,10 +43,13 @@ black-box Canary gate:
 just release-canary HEAD
 ```
 
-The Canary workflow creates two isolated Railway machine services and verifies
-the Cloudflare App, cross-machine virtual networking, wildcard public ingress,
-and directional traffic accounting. It produces the only manifest accepted by
-`just promote-production`. See [Release process](releases.md).
+The Canary workflow restarts two persistent Railway development-machine
+deployments without replacing their image and
+verifies the Cloudflare App, cross-machine virtual networking, wildcard public
+ingress, and directional traffic accounting. Machine-image replacement is an
+explicit `just test-canary-provision` operation, not part of a routine release.
+The workflow produces the only manifest accepted by `just promote-production`.
+See [Release process](releases.md).
 
 ## Documentation contract
 
@@ -98,6 +101,7 @@ repeated bottleneck or blocks the current product tier.
 | Shared protocol or frames | Round-trip/unit tests plus all affected endpoints |
 | Proxy auth, membership, or routing | Authorization and cross-workspace isolation tests |
 | Host mutation or Controller restart | Idempotency and process-survival tests |
+| Service identity, runtime path, or connection ownership | Hostname/server-scoping tests, generated service-manager assertions, and duplicate-Controller fencing tests |
 | Runtime path logic | Working-directory containment and escape tests |
 | Network namespace, DNS, SOCKS, virtual host, or public ingress | Unit/integration coverage plus the two-machine Railway Canary workflow; add focused checks for changed authentication/header, streaming, WebSocket, or containment behavior |
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |

@@ -43,6 +43,7 @@ pub struct ProxyClient {
     pub server: ServerInfo,
     pub runtime: ControllerRuntime,
     pub network: NetworkRuntime,
+    controller_instance_id: String,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
 }
 
@@ -60,6 +61,7 @@ impl ProxyClient {
             server,
             runtime,
             network,
+            controller_instance_id: format!("ctl_{}", uuid::Uuid::new_v4().simple()),
             command_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -68,7 +70,15 @@ impl ProxyClient {
         let mut delay = Duration::from_millis(300);
         loop {
             match self.run_connection().await {
-                Ok(()) => warn!("proxy connection closed"),
+                Ok(ConnectionDisposition::Reconnect) => warn!("proxy connection closed"),
+                Ok(ConnectionDisposition::StopDuplicate) => {
+                    self.network.reset_all().await;
+                    warn!(
+                        controller_instance_id = %self.controller_instance_id,
+                        "another Controller claimed this machine identity; stopping Proxy reconnects"
+                    );
+                    break;
+                }
                 Err(err) => warn!(error = %format_args!("{err:#}"), "proxy connection failed"),
             }
             self.network.reset_all().await;
@@ -77,7 +87,7 @@ impl ProxyClient {
         }
     }
 
-    async fn run_connection(&self) -> anyhow::Result<()> {
+    async fn run_connection(&self) -> anyhow::Result<ConnectionDisposition> {
         let mut request = self
             .proxy_ws
             .as_str()
@@ -98,6 +108,7 @@ impl ProxyClient {
             &mut outgoing,
             &AgentServerMessage::Register {
                 protocol: PROTOCOL_VERSION,
+                controller_instance_id: self.controller_instance_id.clone(),
                 server: self.server.clone(),
             },
         )
@@ -265,7 +276,7 @@ impl ProxyClient {
                                     }).await?;
                                 }
                             }
-                            Message::Close(_) => return Ok(()),
+                            Message::Close(_) => return Ok(ConnectionDisposition::Reconnect),
                             _ => {}
                         }
                         continue;
@@ -287,7 +298,12 @@ impl ProxyClient {
                                 Err(error) => warn!(code = %error.code, message = %error.message, "rejected virtual-host snapshot"),
                             }
                         }
-                        ProxyMessage::Error { error } => warn!(code = %error.code, message = %error.message, "proxy rejected a message"),
+                        ProxyMessage::Error { error } => {
+                            warn!(code = %error.code, message = %error.message, "proxy rejected a message");
+                            if matches!(error.code.as_str(), "duplicate_machine_connection" | "stale_connection") {
+                                return Ok(ConnectionDisposition::StopDuplicate);
+                            }
+                        }
                         ProxyMessage::Command { envelope } => {
                             let result = self.execute(envelope).await;
                             send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
@@ -427,6 +443,12 @@ impl ProxyClient {
         }
         result
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionDisposition {
+    Reconnect,
+    StopDuplicate,
 }
 
 async fn probe_network(host: String, port: u16, timeout_ms: u64) -> serde_json::Value {

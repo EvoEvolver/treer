@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
         Some(Command::Update(update)) => service::update(&update.workspace).await,
         Some(Command::Run { config }) => {
             let config = service::ServiceConfig::load(&config)?;
+            service::require_install_hostname(&config)?;
             run_server(ServerArgs {
                 proxy: Url::parse(&config.proxy).context("invalid proxy URL in service config")?,
                 workspace: config.workspace,
@@ -199,9 +200,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         Some(server_id) => server_id,
         None => load_or_create_server_id(&root)?,
     };
-    let hostname = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| server_id.clone());
+    let hostname = service::current_hostname().unwrap_or_else(|_| server_id.clone());
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("failed to bind local API at {}", args.listen))?;
@@ -373,7 +372,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
     }
     let listen = service::resolve_listen(&response.workspace_id, args.listen).await?;
-    let host_socket = service::host_socket_path(&response.workspace_id)?;
+    let host_socket = service::host_socket_path(&response.server_id)?;
     service::register(service::ServiceConfig {
         proxy: proxy.to_string(),
         workspace: response.workspace_id.clone(),
@@ -383,6 +382,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         root,
         listen: listen.to_string(),
         host_socket,
+        install_hostname: service::current_hostname()?,
     })?;
     service::start(&response.workspace_id)?;
     println!(

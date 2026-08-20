@@ -9,6 +9,8 @@ proxy_url=${proxy_url%/}
 timeout=${TREER_CANARY_TEST_TIMEOUT:-900}
 keep_resources=${TREER_CANARY_KEEP_RESOURCES:-0}
 skip_public=${TREER_CANARY_SKIP_PUBLIC:-0}
+provision_machines=${TREER_CANARY_PROVISION_MACHINES:-0}
+enroll_machines=${TREER_CANARY_ENROLL_MACHINES:-0}
 run_id=$(date -u +%Y%m%d%H%M%S)-$$
 machine_a_service=${TREER_CANARY_MACHINE_A_SERVICE:-461c12b4-0333-46e3-b757-b0221db80470}
 machine_b_service=${TREER_CANARY_MACHINE_B_SERVICE:-1a3d759e-02db-45a8-b68c-a2d2c45e1800}
@@ -126,7 +128,7 @@ wait_for_machine() {
     return 1
 }
 
-create_machine() {
+provision_machine() {
     machine_name=$1
     enrollment_key=$2
     service_id=$3
@@ -135,13 +137,44 @@ create_machine() {
         "TREER_MACHINE_NAME=$machine_name" \
         --project "$project_id" --environment "$environment" \
         --service "$service_id" --skip-deploys --json >/dev/null
-    printf '%s' "$enrollment_key" | railway variable set TREER_ENROLLMENT_KEY --stdin \
-        --project "$project_id" --environment "$environment" \
-        --service "$service_id" --skip-deploys --json >/dev/null
+    if [ -n "$enrollment_key" ]; then
+        printf '%s' "$enrollment_key" | railway variable set TREER_ENROLLMENT_KEY --stdin \
+            --project "$project_id" --environment "$environment" \
+            --service "$service_id" --skip-deploys --json >/dev/null
+    fi
     railway up canary/machine --path-as-root --detach --json \
         --project "$project_id" --environment "$environment" \
         --service "$service_id" --message "canary machine $run_id" >/dev/null
     wait_for_deployment "$service_id"
+}
+
+refresh_machine() {
+    machine_name=$1
+    service_id=$2
+    old_connection=$(api GET "/api/workspaces/$workspace_id/snapshot" \
+        | jq -r --arg name "$machine_name" \
+            '.servers[]? | select(.name == $name) | .connected_at' \
+        | head -n 1)
+    railway service restart --yes --json \
+        --project "$project_id" --environment "$environment" \
+        --service "$service_id" >/dev/null
+    deadline=$(( $(date +%s) + timeout ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if snapshot=$(api GET "/api/workspaces/$workspace_id/snapshot"); then
+            connection=$(printf '%s' "$snapshot" | jq -r --arg name "$machine_name" \
+                '.servers[]? |
+                 select(.name == $name and .status == "online") |
+                 .connected_at' | head -n 1)
+            if [ -n "$connection" ] && [ "$connection" != "$old_connection" ]; then
+                return 0
+            fi
+        fi
+        sleep 3
+    done
+    echo "timed out waiting for machine reconnect $machine_name" >&2
+    railway logs --project "$project_id" --environment "$environment" \
+        --service "$service_id" --lines 100 >&2 || true
+    return 1
 }
 
 echo "Checking Canary control plane"
@@ -178,12 +211,25 @@ if ! printf '%s' "$workspaces" | jq -e --arg id "$workspace_id" \
     api POST /api/workspaces "$workspace_payload" >/dev/null
 fi
 
-enrollment_a=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
-enrollment_b=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
-
-echo "Refreshing two dedicated Canary Railway machines"
-create_machine "$machine_a" "$enrollment_a" "$machine_a_service"
-create_machine "$machine_b" "$enrollment_b" "$machine_b_service"
+if [ "$provision_machines" = 1 ]; then
+    enrollment_a=
+    enrollment_b=
+    if [ "$enroll_machines" = 1 ]; then
+        enrollment_a=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
+        enrollment_b=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
+    fi
+    echo "Provisioning two dedicated Canary Railway machines"
+    provision_machine "$machine_a" "$enrollment_a" "$machine_a_service"
+    provision_machine "$machine_b" "$enrollment_b" "$machine_b_service"
+else
+    [ "$enroll_machines" = 0 ] || {
+        echo "TREER_CANARY_ENROLL_MACHINES requires TREER_CANARY_PROVISION_MACHINES=1" >&2
+        exit 1
+    }
+    echo "Restarting the persistent Canary Railway machines"
+    refresh_machine "$machine_a" "$machine_a_service"
+    refresh_machine "$machine_b" "$machine_b_service"
+fi
 echo "Waiting for $machine_a to connect"
 server_a=$(wait_for_machine "$machine_a")
 echo "Waiting for $machine_b to connect"

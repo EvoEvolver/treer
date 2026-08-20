@@ -42,6 +42,12 @@ stage-artifacts:
 test-canary:
     sh scripts/test-canary.sh
 
+test-canary-provision:
+    TREER_CANARY_PROVISION_MACHINES=1 sh scripts/test-canary.sh
+
+test-canary-enroll:
+    TREER_CANARY_PROVISION_MACHINES=1 TREER_CANARY_ENROLL_MACHINES=1 sh scripts/test-canary.sh
+
 release-canary revision="HEAD":
     sh scripts/release-canary.sh {{revision}}
 

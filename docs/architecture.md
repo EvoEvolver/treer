@@ -71,6 +71,11 @@ flowchart TB
   unique display names resolve within the combined workspace directory. Member
   emails are not exposed to managed Agents.
 - Enrolled machines establish outbound connections to the Proxy.
+- Persistent machine identity is scoped by installation hostname. Controller
+  and Host configurations and service-manager entries are keyed by server ID;
+  the Host socket is node-local runtime state. Linux systemd units are pinned to
+  their installation hostname so a network-mounted home directory cannot start
+  one machine identity on multiple nodes.
 - Durable identity metadata lives in PostgreSQL. With NATS configured, live
   Controller ownership and machine snapshots are shared across Proxy replicas;
   session and stream coordination remains in the initiating Proxy and is
@@ -200,9 +205,14 @@ that process; a separate KV entry changes only when its machine snapshot
 changes. File-backed projection entries retain the latest workspace,
 rename/delete, and restoration state across replica disconnects. Routed
 terminal and network IDs encode the initiating Proxy so return
-traffic reaches its in-memory state. Connection IDs and JetStream revisions
-fence stale owners and out-of-order snapshot delivery. Heartbeats revalidate
-machine revocation against PostgreSQL before renewing ownership.
+traffic reaches its in-memory state. Connection IDs, per-process Controller
+instance IDs, and JetStream revisions fence stale owners and out-of-order
+snapshot delivery. A replacement connection closes the previous local
+connection; a remotely displaced Controller stops its automatic reconnect loop
+after the Proxy reports duplicate ownership. This prevents two processes with
+one machine credential from indefinitely stealing the lease from each other.
+Heartbeats revalidate machine revocation against PostgreSQL before renewing
+ownership.
 
 Workspace state changes also produce `DomainEventEnvelope` values containing a
 unique event ID, schema version, actor, action, resource, occurrence time,

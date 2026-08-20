@@ -29,6 +29,7 @@ pub struct ServiceConfig {
     pub root: PathBuf,
     pub listen: String,
     pub host_socket: PathBuf,
+    pub install_hostname: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +75,36 @@ pub fn save_machine_identity(identity: &MachineIdentity) -> Result<()> {
 }
 
 fn machine_identity_path() -> Result<PathBuf> {
-    Ok(state_dir()?.join("machine-identity.json"))
+    Ok(state_dir()?
+        .join("machines")
+        .join(node_key()?)
+        .join("machine-identity.json"))
+}
+
+pub fn current_hostname() -> Result<String> {
+    let output = Command::new("hostname")
+        .output()
+        .context("failed to determine the local hostname")?;
+    require_success(output.status, "hostname")?;
+    let hostname =
+        String::from_utf8(output.stdout).context("hostname returned non-UTF-8 output")?;
+    validate_hostname(hostname.trim())
+}
+
+fn validate_hostname(hostname: &str) -> Result<String> {
+    if hostname.is_empty()
+        || hostname.len() > 253
+        || !hostname
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        bail!("local hostname contains unsupported characters");
+    }
+    Ok(hostname.to_string())
+}
+
+fn node_key() -> Result<String> {
+    Ok(component_key(&current_hostname()?))
 }
 
 fn validate_machine_identity(identity: &MachineIdentity) -> Result<()> {
@@ -122,9 +152,7 @@ pub async fn resolve_listen(workspace: &str, requested: Option<SocketAddr>) -> R
         return Ok(requested);
     }
 
-    let paths = ServicePaths::new(workspace)?;
-    if paths.config.is_file() {
-        let installed = ServiceConfig::load(&paths.config)?;
+    if let Some(installed) = registered_config(workspace)? {
         let address = installed
             .listen
             .parse::<SocketAddr>()
@@ -182,7 +210,8 @@ async fn local_api_matches(address: &SocketAddr, workspace: &str, server_id: &st
 
 pub fn register(config: ServiceConfig) -> Result<()> {
     validate_workspace(&config.workspace)?;
-    let paths = ServicePaths::new(&config.workspace)?;
+    require_install_hostname(&config)?;
+    let paths = ServicePaths::new(&config.server_id)?;
     require_host_binary(&paths)?;
     fs::create_dir_all(&paths.state_dir)
         .with_context(|| format!("failed to create {}", paths.state_dir.display()))?;
@@ -194,7 +223,7 @@ pub fn register(config: ServiceConfig) -> Result<()> {
         root: config.root.clone(),
     };
     save_json(&host_config, &paths.host_config)?;
-    platform::register(&paths, &config.workspace)?;
+    platform::register(&paths, &config)?;
     println!("treer: agent Host service registered");
     println!("treer: configured local API address: {}", config.listen);
     Ok(())
@@ -214,17 +243,12 @@ pub fn refresh_registration(config: ServiceConfig) -> Result<()> {
 
 pub fn registered_config(workspace: &str) -> Result<Option<ServiceConfig>> {
     validate_workspace(workspace)?;
-    let path = ServicePaths::new(workspace)?.config;
-    if path.is_file() {
-        ServiceConfig::load(&path).map(Some)
-    } else {
-        Ok(None)
-    }
+    Ok(find_installed_service(workspace)?.map(|(_, config)| config))
 }
 
 pub fn preflight_registration(workspace: &str) -> Result<()> {
     validate_workspace(workspace)?;
-    require_host_binary(&ServicePaths::new(workspace)?)
+    require_host_binary(&ServicePaths::new("preflight")?)
 }
 
 fn require_host_binary(paths: &ServicePaths) -> Result<()> {
@@ -238,44 +262,38 @@ fn require_host_binary(paths: &ServicePaths) -> Result<()> {
     }
 }
 
-pub fn host_socket_path(workspace: &str) -> Result<PathBuf> {
-    validate_workspace(workspace)?;
-    Ok(ServicePaths::new(workspace)?
-        .state_dir
-        .join(format!("host-{}.sock", workspace_key(workspace))))
+pub fn host_socket_path(server_id: &str) -> Result<PathBuf> {
+    validate_server_id(server_id)?;
+    Ok(runtime_dir()?.join(format!("host-{}.sock", component_key(server_id))))
 }
 
 pub fn start(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    platform::start(&ServicePaths::new(workspace)?, workspace)
+    let (paths, config) = installed_service(workspace)?;
+    platform::start(&paths, &config)
 }
 
 pub fn stop(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    platform::stop(&ServicePaths::new(workspace)?, workspace)
+    let (paths, config) = installed_service(workspace)?;
+    platform::stop(&paths, &config)
 }
 
 pub fn stop_remotely(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    platform::stop_remotely(&ServicePaths::new(workspace)?, workspace)
+    let (paths, config) = installed_service(workspace)?;
+    platform::stop_remotely(&paths, &config)
 }
 
 pub fn restart(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    platform::restart(&ServicePaths::new(workspace)?, workspace)
+    let (paths, config) = installed_service(workspace)?;
+    platform::restart(&paths, &config)
 }
 
 pub fn restart_controller(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    let paths = ServicePaths::new(workspace)?;
-    let config = ServiceConfig::load(&paths.config)?;
+    let (paths, config) = installed_service(workspace)?;
     restart_controller_at(&paths, &config.host_socket)
 }
 
 pub async fn update(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    let paths = ServicePaths::new(workspace)?;
-    let config = ServiceConfig::load(&paths.config)?;
+    let (paths, config) = installed_service(workspace)?;
     let treer_executable = installed_treer_binary(&paths.executable).with_context(|| {
         format!(
             "could not find the installed treer CLI for {}",
@@ -601,19 +619,18 @@ async fn wait_for_controller(config: &ServiceConfig, previous_epoch: Option<&str
 }
 
 pub fn status(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    platform::status(&ServicePaths::new(workspace)?, workspace)
+    let (paths, config) = installed_service(workspace)?;
+    platform::status(&paths, &config)
 }
 
 pub fn logs(workspace: &str, lines: usize, follow: bool) -> Result<()> {
-    validate_workspace(workspace)?;
-    platform::logs(&ServicePaths::new(workspace)?, workspace, lines, follow)
+    let (paths, config) = installed_service(workspace)?;
+    platform::logs(&paths, &config, lines, follow)
 }
 
 pub fn uninstall(workspace: &str) -> Result<()> {
-    validate_workspace(workspace)?;
-    let paths = ServicePaths::new(workspace)?;
-    platform::uninstall(&paths, workspace)?;
+    let (paths, config) = installed_service(workspace)?;
+    platform::uninstall(&paths, &config)?;
     remove_if_exists(&paths.config)?;
     remove_if_exists(&paths.host_config)?;
     println!("treer: agent server service uninstalled");
@@ -630,13 +647,13 @@ struct ServicePaths {
 }
 
 impl ServicePaths {
-    fn new(workspace: &str) -> Result<Self> {
+    fn new(server_id: &str) -> Result<Self> {
         let home = home_dir()?;
         let config_home = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
         let state_dir = state_dir()?;
-        let key = workspace_key(workspace);
+        let key = component_key(server_id);
         let executable = env::current_exe()
             .context("failed to find the treer-agent-server executable")?
             .canonicalize()
@@ -654,12 +671,101 @@ impl ServicePaths {
     }
 }
 
+fn installed_service(workspace: &str) -> Result<(ServicePaths, ServiceConfig)> {
+    validate_workspace(workspace)?;
+    find_installed_service(workspace)?.with_context(|| {
+        format!(
+            "no agent-server service for workspace {workspace} is installed on {}",
+            current_hostname().unwrap_or_else(|_| "this host".to_string())
+        )
+    })
+}
+
+fn find_installed_service(workspace: &str) -> Result<Option<(ServicePaths, ServiceConfig)>> {
+    let hostname = current_hostname()?;
+    let directory = config_dir()?;
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", directory.display()))
+        }
+    };
+    let mut matched = None;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with("-controller.json") {
+            continue;
+        }
+        let config = ServiceConfig::load(&path)?;
+        if config.workspace != workspace || config.install_hostname != hostname {
+            continue;
+        }
+        if matched.is_some() {
+            bail!(
+                "multiple agent-server services for workspace {workspace} are installed on {hostname}"
+            );
+        }
+        let paths = ServicePaths::new(&config.server_id)?;
+        matched = Some((paths, config));
+    }
+    Ok(matched)
+}
+
+pub fn require_install_hostname(config: &ServiceConfig) -> Result<()> {
+    let current = current_hostname()?;
+    if config.install_hostname != current {
+        bail!(
+            "service for machine {} is pinned to host {}, not {current}",
+            config.server_id,
+            config.install_hostname
+        );
+    }
+    Ok(())
+}
+
+fn config_dir() -> Result<PathBuf> {
+    let home = home_dir()?;
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    Ok(config_home.join("treer/agent-servers"))
+}
+
 fn state_dir() -> Result<PathBuf> {
     let home = home_dir()?;
     Ok(env::var_os("TREER_STATE_DIR")
         .map(PathBuf::from)
         .or_else(|| env::var_os("XDG_STATE_HOME").map(|path| PathBuf::from(path).join("treer")))
         .unwrap_or_else(|| home.join(".local/state/treer")))
+}
+
+fn runtime_dir() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("TREER_RUNTIME_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("XDG_RUNTIME_DIR") {
+        return Ok(PathBuf::from(path).join("treer"));
+    }
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .context("failed to determine the current user id")?;
+    require_success(output.status, "id -u")?;
+    let uid = String::from_utf8(output.stdout)
+        .context("id -u returned non-UTF-8 output")?
+        .trim()
+        .to_string();
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(PathBuf::from("/run/user").join(uid).join("treer"));
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(env::temp_dir().join(format!("treer-{uid}")))
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -675,8 +781,25 @@ fn validate_workspace(workspace: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_server_id(server_id: &str) -> Result<()> {
+    if server_id.trim().is_empty()
+        || server_id.len() > 128
+        || !server_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("server ID contains unsupported characters");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn workspace_key(workspace: &str) -> String {
-    workspace
+    component_key(workspace)
+}
+
+fn component_key(value: &str) -> String {
+    value
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
@@ -751,9 +874,14 @@ fn require_success(status: ExitStatus, description: &str) -> Result<()> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn systemd_unit(executable: &Path, config: &Path, workspace: &str) -> String {
+fn systemd_unit(
+    executable: &Path,
+    config: &Path,
+    workspace: &str,
+    install_hostname: &str,
+) -> String {
     format!(
-        "[Unit]\nDescription=Treer agent server ({workspace})\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} run --config {}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Treer agent server ({workspace})\nConditionHost={install_hostname}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} run --config {}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote(executable),
         systemd_quote(config)
     )
@@ -826,20 +954,20 @@ fn xml_escape(value: &str) -> String {
 mod platform {
     use super::*;
 
-    fn unit_name(workspace: &str) -> String {
-        format!("treer-agent-server-{}.service", workspace_key(workspace))
+    fn unit_name(server_id: &str) -> String {
+        format!("treer-agent-server-{}.service", component_key(server_id))
     }
 
-    fn unit_path(workspace: &str) -> Result<PathBuf> {
+    fn unit_path(server_id: &str) -> Result<PathBuf> {
         let home = home_dir()?;
         let config_home = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
-        Ok(config_home.join("systemd/user").join(unit_name(workspace)))
+        Ok(config_home.join("systemd/user").join(unit_name(server_id)))
     }
 
-    pub fn register(paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let unit_path = unit_path(workspace)?;
+    pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let unit_path = unit_path(&config.server_id)?;
         let parent = unit_path
             .parent()
             .context("systemd user unit path has no parent")?;
@@ -847,63 +975,74 @@ mod platform {
             .with_context(|| format!("failed to create {}", parent.display()))?;
         write_atomic(
             &unit_path,
-            systemd_unit(&paths.host_executable, &paths.host_config, workspace).as_bytes(),
+            systemd_unit(
+                &paths.host_executable,
+                &paths.host_config,
+                &config.workspace,
+                &config.install_hostname,
+            )
+            .as_bytes(),
         )?;
         run_checked(
             Command::new("systemctl").args(["--user", "daemon-reload"]),
             "systemctl --user daemon-reload",
         )?;
-        let unit = unit_name(workspace);
+        let unit = unit_name(&config.server_id);
         run_checked(
             Command::new("systemctl").args(["--user", "enable", unit.as_str()]),
             "systemctl --user enable",
         )?;
-        enable_linger();
+        warn_if_linger_disabled();
         Ok(())
     }
 
-    pub fn start(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let unit = unit_name(workspace);
+    pub fn start(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let unit = unit_name(&config.server_id);
         run_checked(
             Command::new("systemctl").args(["--user", "start", unit.as_str()]),
             "systemctl --user start",
         )
     }
 
-    pub fn stop(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let unit = unit_name(workspace);
+    pub fn stop(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let unit = unit_name(&config.server_id);
         run_checked(
             Command::new("systemctl").args(["--user", "stop", unit.as_str()]),
             "systemctl --user stop",
         )
     }
 
-    pub fn stop_remotely(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let unit = unit_name(workspace);
+    pub fn stop_remotely(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let unit = unit_name(&config.server_id);
         run_checked(
             Command::new("systemctl").args(["--user", "--no-block", "stop", unit.as_str()]),
             "systemctl --user --no-block stop",
         )
     }
 
-    pub fn restart(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let unit = unit_name(workspace);
+    pub fn restart(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let unit = unit_name(&config.server_id);
         run_checked(
             Command::new("systemctl").args(["--user", "restart", unit.as_str()]),
             "systemctl --user restart",
         )
     }
 
-    pub fn status(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let unit = unit_name(workspace);
+    pub fn status(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let unit = unit_name(&config.server_id);
         run_checked(
             Command::new("systemctl").args(["--user", "status", "--no-pager", unit.as_str()]),
             "systemctl --user status",
         )
     }
 
-    pub fn logs(_paths: &ServicePaths, workspace: &str, lines: usize, follow: bool) -> Result<()> {
-        let unit = unit_name(workspace);
+    pub fn logs(
+        _paths: &ServicePaths,
+        config: &ServiceConfig,
+        lines: usize,
+        follow: bool,
+    ) -> Result<()> {
+        let unit = unit_name(&config.server_id);
         let mut command = Command::new("journalctl");
         command.args([
             "--user",
@@ -919,34 +1058,38 @@ mod platform {
         run_checked(&mut command, "journalctl")
     }
 
-    pub fn uninstall(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let unit = unit_name(workspace);
+    pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let unit = unit_name(&config.server_id);
         let _ = Command::new("systemctl")
             .args(["--user", "disable", "--now", unit.as_str()])
             .status();
-        remove_if_exists(&unit_path(workspace)?)?;
+        remove_if_exists(&unit_path(&config.server_id)?)?;
         run_checked(
             Command::new("systemctl").args(["--user", "daemon-reload"]),
             "systemctl --user daemon-reload",
         )
     }
 
-    fn enable_linger() {
+    fn warn_if_linger_disabled() {
         let Some(user) = env::var_os("USER") else {
-            eprintln!("treer: warning: USER is unset; could not enable systemd linger");
+            eprintln!("treer: warning: USER is unset; could not check systemd linger");
             return;
         };
-        match Command::new("loginctl")
-            .arg("--no-ask-password")
-            .arg("enable-linger")
-            .arg(&user)
-            .status()
+        let output = Command::new("loginctl")
+            .args([
+                "show-user",
+                user.to_string_lossy().as_ref(),
+                "-p",
+                "Linger",
+                "--value",
+            ])
+            .output();
+        if !matches!(output, Ok(output) if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "yes")
         {
-            Ok(status) if status.success() => {}
-            _ => eprintln!(
-                "treer: warning: could not enable linger; run `loginctl enable-linger {}` to keep the service running without a login session",
+            eprintln!(
+                "treer: warning: systemd linger is disabled; an administrator can run `loginctl enable-linger {}` to keep this service running after the last login session exits, or run the Controller in a fixed-host tmux session",
                 user.to_string_lossy()
-            ),
+            );
         }
     }
 }
@@ -955,14 +1098,14 @@ mod platform {
 mod platform {
     use super::*;
 
-    fn label(workspace: &str) -> String {
-        format!("dev.treer.agent-server.{}", workspace_key(workspace))
+    fn label(server_id: &str) -> String {
+        format!("dev.treer.agent-server.{}", component_key(server_id))
     }
 
-    fn plist_path(workspace: &str) -> Result<PathBuf> {
+    fn plist_path(server_id: &str) -> Result<PathBuf> {
         Ok(home_dir()?
             .join("Library/LaunchAgents")
-            .join(format!("{}.plist", label(workspace))))
+            .join(format!("{}.plist", label(server_id))))
     }
 
     fn domain() -> Result<String> {
@@ -978,26 +1121,27 @@ mod platform {
         Ok(format!("gui/{uid}"))
     }
 
-    fn service_target(workspace: &str) -> Result<String> {
-        Ok(format!("{}/{}", domain()?, label(workspace)))
+    fn service_target(server_id: &str) -> Result<String> {
+        Ok(format!("{}/{}", domain()?, label(server_id)))
     }
 
-    pub fn register(paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let plist_path = plist_path(workspace)?;
+    pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let plist_path = plist_path(&config.server_id)?;
         let parent = plist_path
             .parent()
             .context("LaunchAgent path has no parent")?;
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
-        let log_path = paths
-            .state_dir
-            .join(format!("agent-server-{}.log", workspace_key(workspace)));
+        let log_path = paths.state_dir.join(format!(
+            "agent-server-{}.log",
+            component_key(&config.server_id)
+        ));
         write_atomic(
             &plist_path,
             launchd_plist(
                 &paths.host_executable,
                 &paths.host_config,
-                &label(workspace),
+                &label(&config.server_id),
                 &log_path,
                 &log_path,
             )
@@ -1006,8 +1150,8 @@ mod platform {
         Ok(())
     }
 
-    pub fn start(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let target = service_target(workspace)?;
+    pub fn start(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let target = service_target(&config.server_id)?;
         let loaded = Command::new("launchctl")
             .args(["print", target.as_str()])
             .status()
@@ -1020,7 +1164,7 @@ mod platform {
             )
         } else {
             let domain = domain()?;
-            let plist = plist_path(workspace)?;
+            let plist = plist_path(&config.server_id)?;
             run_checked(
                 Command::new("launchctl").args([
                     "bootstrap",
@@ -1032,38 +1176,44 @@ mod platform {
         }
     }
 
-    pub fn stop(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let target = service_target(workspace)?;
+    pub fn stop(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let target = service_target(&config.server_id)?;
         run_checked(
             Command::new("launchctl").args(["bootout", target.as_str()]),
             "launchctl bootout",
         )
     }
 
-    pub fn stop_remotely(paths: &ServicePaths, workspace: &str) -> Result<()> {
-        stop(paths, workspace)
+    pub fn stop_remotely(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        stop(paths, config)
     }
 
-    pub fn restart(paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let target = service_target(workspace)?;
+    pub fn restart(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let target = service_target(&config.server_id)?;
         let _ = Command::new("launchctl")
             .args(["bootout", target.as_str()])
             .status();
-        start(paths, workspace)
+        start(paths, config)
     }
 
-    pub fn status(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let target = service_target(workspace)?;
+    pub fn status(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let target = service_target(&config.server_id)?;
         run_checked(
             Command::new("launchctl").args(["print", target.as_str()]),
             "launchctl print",
         )
     }
 
-    pub fn logs(paths: &ServicePaths, workspace: &str, lines: usize, follow: bool) -> Result<()> {
-        let log_path = paths
-            .state_dir
-            .join(format!("agent-server-{}.log", workspace_key(workspace)));
+    pub fn logs(
+        paths: &ServicePaths,
+        config: &ServiceConfig,
+        lines: usize,
+        follow: bool,
+    ) -> Result<()> {
+        let log_path = paths.state_dir.join(format!(
+            "agent-server-{}.log",
+            component_key(&config.server_id)
+        ));
         let mut command = Command::new("tail");
         command.args(["-n", &lines.to_string()]);
         if follow {
@@ -1073,12 +1223,12 @@ mod platform {
         run_checked(&mut command, "tail")
     }
 
-    pub fn uninstall(_paths: &ServicePaths, workspace: &str) -> Result<()> {
-        let target = service_target(workspace)?;
+    pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        let target = service_target(&config.server_id)?;
         let _ = Command::new("launchctl")
             .args(["bootout", target.as_str()])
             .status();
-        remove_if_exists(&plist_path(workspace)?)
+        remove_if_exists(&plist_path(&config.server_id)?)
     }
 }
 
@@ -1090,40 +1240,40 @@ mod platform {
         bail!("service management is currently supported on Linux and macOS")
     }
 
-    pub fn register(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn register(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
         unsupported()
     }
 
-    pub fn start(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn start(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
         unsupported()
     }
 
-    pub fn stop(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn stop(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
         unsupported()
     }
 
-    pub fn stop_remotely(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn stop_remotely(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
         unsupported()
     }
 
-    pub fn restart(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn restart(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
         unsupported()
     }
 
-    pub fn status(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn status(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
         unsupported()
     }
 
     pub fn logs(
         _paths: &ServicePaths,
-        _workspace: &str,
+        _config: &ServiceConfig,
         _lines: usize,
         _follow: bool,
     ) -> Result<()> {
         unsupported()
     }
 
-    pub fn uninstall(_paths: &ServicePaths, _workspace: &str) -> Result<()> {
+    pub fn uninstall(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
         unsupported()
     }
 }
@@ -1139,6 +1289,26 @@ mod tests {
     fn workspace_keys_are_safe_for_service_names() {
         assert_eq!(workspace_key("team one/alpha"), "team_one_alpha");
         assert_eq!(workspace_key("default"), "default");
+    }
+
+    #[test]
+    fn identity_and_socket_paths_are_scoped_to_node_and_server() {
+        let identity = machine_identity_path().expect("machine identity path");
+        assert!(identity.ends_with("machine-identity.json"));
+        assert!(identity
+            .components()
+            .any(|component| component.as_os_str() == "machines"));
+        let hostname_key = node_key().unwrap();
+        assert!(identity
+            .components()
+            .any(|component| component.as_os_str() == std::ffi::OsStr::new(&hostname_key)));
+
+        let socket = host_socket_path("srv_0123456789abcdef").expect("host socket path");
+        assert_eq!(
+            socket.file_name().and_then(|name| name.to_str()),
+            Some("host-srv_0123456789abcdef.sock")
+        );
+        assert!(!socket.starts_with(state_dir().expect("state directory")));
     }
 
     #[test]
@@ -1180,6 +1350,7 @@ mod tests {
             root: PathBuf::from("/tmp"),
             listen: address.to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
+            install_hostname: current_hostname().expect("local hostname"),
         };
         assert_eq!(
             controller_epoch(&config).await.as_deref(),
@@ -1256,8 +1427,10 @@ mod tests {
             Path::new("/home/test user/bin/treer-agent-server"),
             Path::new("/home/test%user/config.json"),
             "team one",
+            "build-node-1",
         );
         assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("ConditionHost=build-node-1"));
         assert!(unit.contains("\"/home/test user/bin/treer-agent-server\" run"));
         assert!(unit.contains("test%%user"));
     }

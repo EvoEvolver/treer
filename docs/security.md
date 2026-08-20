@@ -109,6 +109,7 @@ authenticated Agent credential is mandatory for cross-machine control.
 | Release signing key | All official binary manifests and channel pointers signed by one trusted publisher | The private key is an offline operator credential and must never enter the repository, Proxy, R2, or managed Agent environment |
 | Release public key | Verification of objects attributed to the release signing key | Distribution is trustworthy only after installed updaters embed and enforce this key; that verification is not implemented yet |
 | Machine Bearer credential | One machine record and workspace | Machine-only control is limited to resources on that machine; the credential remains long-lived |
+| Controller instance ID | One Controller process lifetime | Fences and diagnoses duplicate connections; it is carried inside an already authenticated machine connection and is not an authentication credential |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
 | Agent workload credential | One managed Agent process; independently validated by Controller and Proxy for managed-Agent discovery, control, terminal, mail, service, inbox, and workload-token requests | Same-account host processes may inspect another process environment or Host metadata |
 | Local operator credential | One installed Controller; used by the human CLI and never injected into managed-Agent environments | Stored under the same OS account, so it is not a sandbox boundary against a hostile same-account process |
