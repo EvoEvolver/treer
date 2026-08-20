@@ -125,7 +125,11 @@ wait_for_machine() {
 create_machine() {
     machine_name=$1
     enrollment_key=$2
-    created=$(railway add --service "$machine_name" --json)
+    railway_link="$tmp_dir/railway-link"
+    mkdir -p "$railway_link"
+    created=$(cd "$railway_link" && \
+        railway link --project "$project_id" --environment "$environment" --json >/dev/null && \
+        railway add --service "$machine_name" --json)
     service_id=$(printf '%s' "$created" | jq -er '.id')
     service_ids="$service_ids $service_id"
     railway variable set \
