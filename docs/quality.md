@@ -35,18 +35,17 @@ handoff. The docs-only GitHub Actions workflow checks documentation structure
 and links on relevant pull requests and pushes to `main`; it does not replace
 the full local gate.
 
-Before a Railway Production promotion, deploy the exact candidate revision and
-run the black-box Canary gate:
+Before Production promotion, deploy the exact candidate revision and run the
+black-box Canary gate:
 
 ```bash
-just deploy-canary
-just test-canary
+just release-canary HEAD
 ```
 
-The Canary workflow creates two temporary Railway machine services and verifies
-cross-machine virtual networking, wildcard public ingress, and directional
-traffic accounting. See [Canary environment](canary.md) for its resource and
-cleanup contract.
+The Canary workflow creates two isolated Railway machine services and verifies
+the Cloudflare App, cross-machine virtual networking, wildcard public ingress,
+and directional traffic accounting. It produces the only manifest accepted by
+`just promote-production`. See [Release process](releases.md).
 
 ## Documentation contract
 
@@ -98,7 +97,7 @@ repeated bottleneck or blocks the current product tier.
 | Proxy auth, membership, or routing | Authorization and cross-workspace isolation tests |
 | Host mutation or Controller restart | Idempotency and process-survival tests |
 | Runtime path logic | Working-directory containment and escape tests |
-| Network namespace, DNS, SOCKS, virtual host, or public ingress | Unit/integration coverage plus the disposable two-machine Railway Canary workflow; add focused checks for changed authentication/header, streaming, WebSocket, or containment behavior |
+| Network namespace, DNS, SOCKS, virtual host, or public ingress | Unit/integration coverage plus the two-machine Railway Canary workflow; add focused checks for changed authentication/header, streaming, WebSocket, or containment behavior |
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |
 | Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, and affected-flow validation |
 | Documentation/index change | `node scripts/check-docs.mjs` |

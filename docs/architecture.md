@@ -20,7 +20,7 @@ flowchart TB
         Proxy["treer-proxy replicas<br/>auth, metadata, routing"]
         DB[(PostgreSQL)]
         NATS[(NATS Core + JetStream KV<br/>routing and events)]
-        Web[treer-app<br/>static React application]
+        Web[treer-app<br/>Cloudflare Worker + static assets]
         Proxy <--> DB
         Proxy --> NATS
     end
@@ -80,10 +80,11 @@ flowchart TB
   not republish full snapshots. PTY output, terminal input, and virtual-network
   TCP bytes are not retained in JetStream; live
   bytes use Core NATS only when their endpoints use different Proxy replicas.
-- The browser application is deployed independently from `treer-proxy`. It
-  reads the Proxy origin from `/config.json` at startup; the Proxy allows
-  credentialed requests and browser WebSockets only from its configured App
-  origin.
+- The browser application is deployed independently to Cloudflare Workers
+  Static Assets. Its small Worker serves `/config.json` and `/health`; all other
+  requests use the static asset binding. The App reads the Proxy origin from
+  `/config.json` at startup, and the Proxy allows credentialed requests and
+  browser WebSockets only from its configured App origin.
 - `skills/treer/SKILL.md` is embedded into the CLI at build time and is the
   managed-Agent operations contract.
 

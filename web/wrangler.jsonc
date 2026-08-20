@@ -1,0 +1,53 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "treer-app",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-08-19",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/config.json", "/health"]
+  },
+  "version_metadata": {
+    "binding": "VERSION_METADATA"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "env": {
+    "canary": {
+      "name": "treer-app-canary",
+      "version_metadata": {
+        "binding": "VERSION_METADATA"
+      },
+      "routes": [
+        {
+          "pattern": "app.canary.treer.ai",
+          "custom_domain": true
+        }
+      ],
+      "vars": {
+        "TREER_ENVIRONMENT": "canary",
+        "TREER_PROXY_PUBLIC_URL": "https://proxy.canary.treer.ai/"
+      }
+    },
+    "production": {
+      "name": "treer-app",
+      "version_metadata": {
+        "binding": "VERSION_METADATA"
+      },
+      "routes": [
+        {
+          "pattern": "app.treer.ai",
+          "custom_domain": true
+        }
+      ],
+      "vars": {
+        "TREER_ENVIRONMENT": "production",
+        "TREER_PROXY_PUBLIC_URL": "https://proxy.treer.ai/"
+      }
+    }
+  }
+}

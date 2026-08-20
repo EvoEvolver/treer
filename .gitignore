@@ -4,5 +4,8 @@
 /.vscode/
 .DS_Store
 web/node_modules/
+web/dist/
+web/.wrangler*/
+web/worker-configuration.d.ts
 web/*.tsbuildinfo
 /.references/

@@ -299,12 +299,12 @@ the originating workspace mutation. This is not yet a transactional outbox: a
 Proxy crash or a full queue can lose unpublished events. Durable database state
 therefore remains authoritative until the outbox is implemented.
 
-## Railway
+## Managed deployment
 
-The root `Dockerfile` and `railway.json` deploy `treer-proxy`. The independent
-`web/Dockerfile` and `web/railway.json` deploy the static `treer-app` service.
-Railway's injected `PORT` and `RAILWAY_PUBLIC_DOMAIN` are detected
-automatically by the Proxy.
+The root `Dockerfile` and `railway.json` deploy `treer-proxy` to Railway.
+`web/wrangler.jsonc` deploys the independent React App to Cloudflare Workers
+Static Assets. Railway's injected `PORT` and `RAILWAY_PUBLIC_DOMAIN` are
+detected automatically by the Proxy.
 
 1. Create a Proxy Railway service from the repository root.
 2. Add a Railway PostgreSQL service and expose its `DATABASE_URL` to Treer.
@@ -316,28 +316,27 @@ automatically by the Proxy.
    Agent-maintained HTTP services, also set
    `TREER_INGRESS_PUBLIC_URL=https://apps.example.com/` and attach
    `*.apps.example.com` to the same Proxy service.
-5. Create an App service from the `web` directory and set its
-   `TREER_PROXY_PUBLIC_URL` variable.
-6. Add the Proxy and App public domains, then increase the Proxy replica count.
-   Railway supplies a distinct `RAILWAY_REPLICA_ID` to each Proxy replica.
+5. Authenticate Wrangler and deploy the `canary` or `production` environment
+   defined in `web/wrangler.jsonc`.
+6. Add the Proxy public domain, then increase the Proxy replica count. Railway
+   supplies a distinct `RAILWAY_REPLICA_ID` to each Proxy replica. Wrangler
+   owns the App custom domains.
 
 The Proxy image builds and serves Linux agent binaries for its own CPU
-architecture. The App image contains no Proxy or machine binaries.
+architecture. The App Worker contains only the frontend and runtime config.
 
 Changes intended for the managed Railway deployment go to Canary before
 Production. From an authenticated operator checkout, run:
 
 ```bash
-just deploy-canary
-just test-canary
+just release-canary HEAD
 ```
 
-The first command uploads the current worktree to the separate Canary Proxy and
-App. The second creates two disposable Railway machine services and verifies
-cross-machine virtual networking, public wildcard ingress, and traffic
-accounting before cleaning them up. Production promotion must use the same
-committed revision that passed both this gate and `just check`. See
-[the Canary runbook](docs/canary.md) for DNS and override variables.
+The command verifies a clean commit, runs the complete local gate, deploys the
+Canary Proxy and Cloudflare App, then verifies cross-machine virtual networking,
+public wildcard ingress, and traffic accounting. It writes a release manifest;
+Production accepts only that manifest through `just promote-production`. See
+[the release process](docs/releases.md) and [Canary runbook](docs/canary.md).
 
 Open the App URL to discover servers, create agents, and attach to
 their live terminals. The browser terminal supports ANSI colors, alternate

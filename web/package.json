@@ -7,8 +7,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build && node scripts/clean-dist.mjs",
-    "typecheck": "tsc -b --pretty false",
-    "preview": "vite preview"
+    "typecheck": "tsc -b --pretty false && wrangler types --env canary ./worker-configuration.d.ts && tsc -p tsconfig.worker.json --pretty false",
+    "preview": "vite preview",
+    "worker:dev": "wrangler dev --env canary",
+    "worker:deploy:canary": "wrangler deploy --env canary",
+    "worker:deploy:production": "wrangler deploy --env production"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -39,7 +42,8 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.2",
     "vite": "^6.0.7",
-    "vite-plugin-singlefile": "^2.2.0"
+    "vite-plugin-singlefile": "^2.2.0",
+    "wrangler": "^4.124.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

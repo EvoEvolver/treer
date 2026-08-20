@@ -38,8 +38,14 @@ agent-server *args:
 stage-artifacts:
     sh scripts/stage-local-artifacts.sh
 
-deploy-canary:
-    sh scripts/deploy-canary.sh
-
 test-canary:
     sh scripts/test-canary.sh
+
+release-canary revision="HEAD":
+    sh scripts/release-canary.sh {{revision}}
+
+promote-production manifest:
+    sh scripts/promote-production.sh {{manifest}}
+
+web-worker-dev:
+    cd web && pnpm worker:dev

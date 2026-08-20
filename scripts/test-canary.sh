@@ -4,7 +4,7 @@ set -eu
 project_id=${TREER_RAILWAY_PROJECT_ID:-09d4eeeb-cc5a-49e5-bcfe-f43c1c1b112b}
 environment=${TREER_CANARY_ENVIRONMENT:-canary}
 proxy_service=${TREER_CANARY_PROXY_SERVICE:-c7f70740-49fa-4ab9-bb41-97b82f99dcce}
-proxy_url=${TREER_CANARY_PROXY_URL:-https://treer-proxy-canary.up.railway.app/}
+proxy_url=${TREER_CANARY_PROXY_URL:-https://proxy.canary.treer.ai/}
 proxy_url=${proxy_url%/}
 timeout=${TREER_CANARY_TEST_TIMEOUT:-900}
 keep_resources=${TREER_CANARY_KEEP_RESOURCES:-0}
@@ -179,7 +179,7 @@ fi
 enrollment_a=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
 enrollment_b=$(api POST "/api/workspaces/$workspace_id/bootstrap" | jq -er '.enrollment_key')
 
-echo "Deploying two disposable Railway machines"
+echo "Deploying two Canary Railway machines"
 create_machine "$machine_a" "$enrollment_a"
 create_machine "$machine_b" "$enrollment_b"
 echo "Waiting for $machine_a to connect"

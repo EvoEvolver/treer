@@ -12,7 +12,8 @@ matching the question; follow its source links for implementation detail.
 | [Architecture](architecture.md) | Components, ownership rules, protocols, state, and information flows |
 | [Security model](security.md) | Trust tier, supported claims, credentials, isolation, and known gaps |
 | [Quality and maintenance](quality.md) | Verification, documentation rules, current gaps, and review triggers |
-| [Canary environment](canary.md) | Railway Canary deployment, disposable two-machine tests, and promotion rules |
+| [Canary environment](canary.md) | Canary deployment, two-machine tests, and environment operations |
+| [Release process](releases.md) | Immutable release manifests, Cloudflare App deployment, and Production promotion |
 | [Root README](../README.md) | Installation, deployment, and operator command examples |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 
