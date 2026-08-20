@@ -104,11 +104,18 @@ PostgreSQL persists users, OAuth identities and short-lived OAuth states,
 organizations, memberships, sessions, password reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
 display names, Agent messages, per-Agent and per-human read state, message
-context edges, machine services, virtual hosts, service ingresses, and ingress
-authorization sessions. Administrator invitations
+context edges, machine services, virtual hosts, service ingresses, ingress
+authorization sessions, append-only organization audit events, and hourly
+directional machine traffic counters. Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
+
+Covered organization and membership mutations write their audit event in the
+same PostgreSQL transaction. Successful Agent create, rename, stop, and delete
+operations and machine rename and delete operations append runtime audit events
+after the Controller result; an audit write failure is logged without turning a
+completed runtime mutation into a retryable API failure.
 
 OAuth authorization-code callbacks terminate at the Proxy. PostgreSQL-backed,
 single-use state makes callbacks valid across Proxy replicas. The Proxy uses the

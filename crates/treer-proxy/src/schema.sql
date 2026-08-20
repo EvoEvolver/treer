@@ -63,6 +63,34 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 CREATE INDEX IF NOT EXISTS workspaces_organization_id ON workspaces(organization_id);
 
+CREATE TABLE IF NOT EXISTS organization_audit_events (
+    sequence BIGSERIAL PRIMARY KEY,
+    event_id TEXT UNIQUE NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    organization_id TEXT NOT NULL,
+    workspace_id TEXT,
+    occurred_at TEXT NOT NULL,
+    actor_kind TEXT NOT NULL CHECK(actor_kind IN ('user', 'agent', 'machine', 'service', 'system')),
+    actor_id TEXT,
+    actor_name TEXT,
+    source TEXT NOT NULL,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('succeeded', 'failed')),
+    resource_kind TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    resource_name TEXT,
+    correlation_id TEXT,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS organization_audit_events_org_sequence
+    ON organization_audit_events(organization_id, sequence DESC);
+CREATE INDEX IF NOT EXISTS organization_audit_events_workspace_sequence
+    ON organization_audit_events(organization_id, workspace_id, sequence DESC);
+CREATE INDEX IF NOT EXISTS organization_audit_events_correlation
+    ON organization_audit_events(correlation_id) WHERE correlation_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS workspace_policies (
     workspace_id TEXT PRIMARY KEY,
     revision BIGINT NOT NULL CHECK(revision > 0),

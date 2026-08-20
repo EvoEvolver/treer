@@ -63,6 +63,11 @@ The following statements are grounded in current behavior:
   Public endpoints deliberately admit anonymous internet traffic; workspace
   endpoints require a current organization member session or a workload token
   whose audience is the target service.
+- Organization owners and administrators can read an append-only PostgreSQL
+  audit of organization creation and rename, workspace creation, invitations,
+  member role changes, member removal, and successful Agent and machine
+  lifecycle changes. The invitation secret and message, prompt, terminal, and
+  network payloads are excluded.
 
 These properties support the product phrase: **local custody, scoped
 coordination, open control plane**.
@@ -147,6 +152,14 @@ The Proxy retains hourly machine-to-machine traffic metadata: workspace, source
 machine, destination machine, payload byte count, and data-frame count. It does
 not retain network payloads. The traffic query uses the same workspace
 membership middleware as other workspace APIs.
+
+The workspace Audit page combines that traffic summary with the organization's
+management-event ledger. Audit writes for covered organization mutations share
+the same PostgreSQL transaction as the mutation. Runtime audit events are
+written after a successful Controller result and are best effort so an audit
+storage outage does not cause a client to retry an already-completed runtime
+mutation. This is bounded management attribution, not end-to-end human
+attribution for every Agent action.
 
 The workload signing private key is stored in the Proxy PostgreSQL database. Its
 Ed25519 public key is intentionally exposed through `/.well-known/jwks.json`;

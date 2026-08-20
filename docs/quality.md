@@ -83,7 +83,7 @@ forbids unsafe Rust workspace-wide, and treats Clippy warnings as errors.
 | Operations | Structured tracing plus buffered directional machine traffic counters | No local metrics/traces harness or end-to-end performance assertions |
 | Event and cluster distribution | Event-envelope, lease/snapshot separation, durable projection replay, and two-Proxy command/terminal/network integration tests | No crash-safe domain-event outbox or automated NATS failure CI |
 | Security | Explicit trust tier and source-level tests | Allow-all policy and no production isolation backend |
-| Accounting | IDs exist across control paths | No durable per-user attribution, usage, quota, or ledger |
+| Accounting | Transactional organization-management audit, best-effort lifecycle events, and hourly directional machine traffic | Runtime audit has no transactional outbox; no quota or billing ledger |
 
 This is a backlog of evidence gaps, not a promise that all items belong in the
 next release. Promote an item into an implementation plan when it becomes a

@@ -1,5 +1,6 @@
 mod agent_socket;
 mod api;
+mod audit;
 mod auth;
 mod cluster;
 mod event_bus;

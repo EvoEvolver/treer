@@ -114,6 +114,25 @@ export interface MachineTrafficRecord {
   payload_frames: number
 }
 
+export interface OrganizationAuditEvent {
+  sequence: number
+  event_id: string
+  organization_id: string
+  workspace_id?: string
+  occurred_at: string
+  actor_kind: string
+  actor_id?: string
+  actor_name?: string
+  source: string
+  action: string
+  outcome: "succeeded" | "failed"
+  resource_kind: string
+  resource_id: string
+  resource_name?: string
+  correlation_id?: string
+  payload: Record<string, unknown>
+}
+
 export interface ApiErrorBody {
   error?: { message?: string }
 }

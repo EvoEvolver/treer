@@ -22,13 +22,14 @@ use treer_protocol::{
     AgentMailMessage, AgentServerSnapshot, ApiError, CreateMachineServiceRequest,
     CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, MachineService,
     MachineServiceProtocol, MailAddress, MailAddressKind, MailDelivery, MailboxResponse,
-    ProtocolError, ServerInfo, ServiceIngress, ServiceIngressAccess, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
-    AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    OrganizationAuditEvent, ProtocolError, ServerInfo, ServiceIngress, ServiceIngressAccess,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, VirtualNetworkHost, WorkspaceHuman,
+    WorkspaceInfo, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
 
+use crate::audit::{self, NewAuditEvent, NewWorkspaceAuditEvent};
 use crate::state::AppState;
 
 const SESSION_COOKIE: &str = "treer_session";
@@ -372,6 +373,18 @@ pub struct UpdateMemberRoleRequest {
     role: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AuditEventsQuery {
+    workspace_id: Option<String>,
+    before: Option<i64>,
+    #[serde(default = "default_audit_limit")]
+    limit: u16,
+}
+
+const fn default_audit_limit() -> u16 {
+    50
+}
+
 impl CloudflareEmailSender {
     fn new(config: CloudflareEmailConfig) -> anyhow::Result<Self> {
         if config.account_id.trim().is_empty() {
@@ -486,6 +499,15 @@ struct CloudflareEmailError {
 impl AuthStore {
     pub fn pool(&self) -> PgPool {
         self.pool.clone()
+    }
+
+    pub(crate) async fn record_workspace_audit(
+        &self,
+        event: NewWorkspaceAuditEvent<'_>,
+    ) -> Result<(), AuthFailure> {
+        audit::record_workspace(&self.pool, event)
+            .await
+            .map_err(AuthFailure::database)
     }
 
     pub async fn open(
@@ -719,6 +741,23 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id: &organization_id,
+                workspace_id: None,
+                actor_kind: "user",
+                actor_id: Some(user_id),
+                source: "api",
+                action: "organization.created",
+                resource_kind: "organization",
+                resource_id: &organization_id,
+                resource_name: Some(&name),
+                payload: json!({}),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(OrganizationInfo {
             organization_id,
@@ -736,10 +775,21 @@ impl AuthStore {
     ) -> Result<OrganizationInfo, AuthFailure> {
         let role = self.require_manager(organization_id, user_id).await?;
         let name = validate_resource_name(name, "organization")?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let old_name = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM organizations WHERE organization_id = $1 FOR UPDATE",
+        )
+        .bind(organization_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| {
+            AuthFailure::not_found("organization_not_found", "organization does not exist")
+        })?;
         let result = sqlx::query("UPDATE organizations SET name = $1 WHERE organization_id = $2")
             .bind(&name)
             .bind(organization_id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
         if result.rows_affected() != 1 {
@@ -750,9 +800,27 @@ impl AuthStore {
         }
         let row = sqlx::query("SELECT created_at FROM organizations WHERE organization_id = $1")
             .bind(organization_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id,
+                workspace_id: None,
+                actor_kind: "user",
+                actor_id: Some(user_id),
+                source: "api",
+                action: "organization.renamed",
+                resource_kind: "organization",
+                resource_id: organization_id,
+                resource_name: Some(&name),
+                payload: json!({ "old_name": old_name, "new_name": name }),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(OrganizationInfo {
             organization_id: organization_id.to_string(),
             name,
@@ -887,6 +955,7 @@ impl AuthStore {
             .await?;
         let name = validate_resource_name(name, "workspace")?;
         let now = Utc::now();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query(
             "INSERT INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
              VALUES($1, $2, $3, $4, $5)",
@@ -896,7 +965,7 @@ impl AuthStore {
         .bind(&name)
         .bind(now.to_rfc3339())
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|error| {
             if error
@@ -908,6 +977,24 @@ impl AuthStore {
                 AuthFailure::database(error)
             }
         })?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id,
+                workspace_id: Some(workspace_id),
+                actor_kind: "user",
+                actor_id: Some(user_id),
+                source: "api",
+                action: "workspace.created",
+                resource_kind: "workspace",
+                resource_id: workspace_id,
+                resource_name: Some(&name),
+                payload: json!({}),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(WorkspaceInfo {
             workspace_id: workspace_id.to_string(),
             name,
@@ -3018,6 +3105,7 @@ impl AuthStore {
     ) -> Result<(String, Url), AuthFailure> {
         self.require_manager(organization_id, created_by).await?;
         let token = format!("inv_{}", Uuid::new_v4().simple());
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query(
             "INSERT INTO invitations(\
              token, created_at, created_by, kind, organization_id, role) \
@@ -3027,9 +3115,27 @@ impl AuthStore {
         .bind(Utc::now().to_rfc3339())
         .bind(created_by)
         .bind(organization_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id,
+                workspace_id: None,
+                actor_kind: "user",
+                actor_id: Some(created_by),
+                source: "api",
+                action: "invitation.created",
+                resource_kind: "invitation",
+                resource_id: organization_id,
+                resource_name: None,
+                payload: json!({ "role": "member" }),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         let mut url = self.app_public_url.clone();
         url.set_path("/");
         url.query_pairs_mut().clear().append_pair("invite", &token);
@@ -3075,6 +3181,21 @@ impl AuthStore {
                 "member role must be admin or member",
             ));
         }
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let target = sqlx::query(
+            "SELECT m.role, u.preferred_name FROM organization_members m \
+             JOIN users u ON u.id = m.user_id \
+             WHERE m.organization_id = $1 AND m.user_id = $2 FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        let old_role = target.as_ref().map(|row| row.get::<String, _>("role"));
+        let target_name = target
+            .as_ref()
+            .map(|row| row.get::<String, _>("preferred_name"));
         let result = sqlx::query(
             "UPDATE organization_members SET role = $1 \
              WHERE organization_id = $2 AND user_id = $3 AND role != 'owner'",
@@ -3082,7 +3203,7 @@ impl AuthStore {
         .bind(role)
         .bind(organization_id)
         .bind(target_user_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
         if result.rows_affected() != 1 {
@@ -3091,6 +3212,24 @@ impl AuthStore {
                 "member does not exist or is the organization owner",
             ));
         }
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id,
+                workspace_id: None,
+                actor_kind: "user",
+                actor_id: Some(actor),
+                source: "api",
+                action: "member.role_updated",
+                resource_kind: "organization_member",
+                resource_id: target_user_id,
+                resource_name: target_name.as_deref(),
+                payload: json!({ "old_role": old_role, "new_role": role }),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(())
     }
 
@@ -3101,10 +3240,20 @@ impl AuthStore {
         target_user_id: &str,
     ) -> Result<(), AuthFailure> {
         self.require_manager(organization_id, actor).await?;
-        let target_role = self
-            .membership_role(organization_id, target_user_id)
-            .await?
-            .ok_or_else(|| AuthFailure::not_found("member_not_found", "member does not exist"))?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let target = sqlx::query(
+            "SELECT m.role, u.preferred_name FROM organization_members m \
+             JOIN users u ON u.id = m.user_id \
+             WHERE m.organization_id = $1 AND m.user_id = $2 FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| AuthFailure::not_found("member_not_found", "member does not exist"))?;
+        let target_role: String = target.get("role");
+        let target_name: String = target.get("preferred_name");
         if target_role == "owner" {
             return Err(AuthFailure::conflict(
                 "owner_cannot_be_removed",
@@ -3117,10 +3266,48 @@ impl AuthStore {
         )
         .bind(organization_id)
         .bind(target_user_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id,
+                workspace_id: None,
+                actor_kind: "user",
+                actor_id: Some(actor),
+                source: "api",
+                action: "member.removed",
+                resource_kind: "organization_member",
+                resource_id: target_user_id,
+                resource_name: Some(&target_name),
+                payload: json!({ "role": target_role }),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(())
+    }
+
+    pub async fn list_audit_events(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+        workspace_id: Option<&str>,
+        before: Option<i64>,
+        limit: u16,
+    ) -> Result<Vec<OrganizationAuditEvent>, AuthFailure> {
+        self.require_manager(organization_id, user_id).await?;
+        audit::list(
+            &self.pool,
+            organization_id,
+            workspace_id,
+            before,
+            i64::from(limit.clamp(1, 100)),
+        )
+        .await
+        .map_err(AuthFailure::database)
     }
 
     fn oauth_public_config(&self) -> Value {
@@ -3963,6 +4150,27 @@ pub async fn members(
         "members": auth.list_members(&organization_id, &session.user_id).await?,
         "current_role": role
     })))
+}
+
+pub async fn audit_events(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+    Query(query): Query<AuditEventsQuery>,
+) -> Result<Json<Value>, AuthFailure> {
+    let events = auth
+        .list_audit_events(
+            &organization_id,
+            &session.user_id,
+            query.workspace_id.as_deref(),
+            query.before,
+            query.limit,
+        )
+        .await?;
+    let next_cursor = events.last().map(|event| event.sequence);
+    Ok(Json(
+        json!({ "events": events, "next_cursor": next_cursor }),
+    ))
 }
 
 pub async fn logout(
@@ -5606,6 +5814,16 @@ mod tests {
             .create_invitation(&organization.organization_id, &alice.user_id)
             .await
             .is_err());
+        assert!(store
+            .list_audit_events(
+                &organization.organization_id,
+                &alice.user_id,
+                Some("ws_engineering"),
+                None,
+                100,
+            )
+            .await
+            .is_err());
 
         store
             .update_member_role(
@@ -5636,6 +5854,28 @@ mod tests {
             )
             .await
             .is_err());
+        let audit_events = store
+            .list_audit_events(
+                &organization.organization_id,
+                &owner.user_id,
+                Some("ws_engineering"),
+                None,
+                100,
+            )
+            .await
+            .expect("owner audit events");
+        assert!(audit_events
+            .iter()
+            .any(|event| event.action == "organization.renamed"));
+        assert!(audit_events
+            .iter()
+            .any(|event| event.action == "workspace.created"));
+        assert!(audit_events
+            .iter()
+            .any(|event| event.action == "member.role_updated"));
+        assert!(!serde_json::to_string(&audit_events)
+            .expect("serialize audit events")
+            .contains(&alice_invite));
     }
 
     #[tokio::test]

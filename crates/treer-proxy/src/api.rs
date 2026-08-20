@@ -32,6 +32,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::agent_socket;
+use crate::audit::NewWorkspaceAuditEvent;
 use crate::auth::{self, AuthStore, CurrentSession, MachineSession};
 use crate::identity::IdentityIssuer;
 use crate::policy::{
@@ -47,6 +48,20 @@ use crate::policy::{
     RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
+
+fn control_audit_actor<'a>(
+    session: Option<&'a CurrentSession>,
+    subject: Option<&'a PolicySubject>,
+) -> (&'static str, Option<&'a str>) {
+    if let Some(session) = session {
+        return ("user", Some(session.user_id.as_str()));
+    }
+    match subject {
+        Some(PolicySubject::Agent { agent_id, .. }) => ("agent", Some(agent_id.as_str())),
+        Some(PolicySubject::Machine { server_id }) => ("machine", Some(server_id.as_str())),
+        None => ("system", None),
+    }
+}
 
 #[derive(Clone)]
 pub struct BootstrapConfig {
@@ -364,6 +379,10 @@ pub fn router(
         .route(
             "/api/organizations/{organization_id}/members",
             get(auth::members),
+        )
+        .route(
+            "/api/organizations/{organization_id}/audit-events",
+            get(auth::audit_events),
         )
         .route(
             "/api/organizations/{organization_id}/members/{user_id}",
@@ -2564,10 +2583,12 @@ async fn get_agent(
     Ok(Json(serde_json::to_value(agent)?))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn rename_server(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, server_id)): Path<(String, String)>,
@@ -2593,15 +2614,33 @@ async fn rename_server(
     let name = normalize_display_name(request.name)?;
     auth.set_machine_name(&workspace_id, &server_id, &name)
         .await?;
-    Ok(Json(serde_json::to_value(
-        state.rename_server(&workspace_id, &server_id, name).await?,
-    )?))
+    let renamed = state
+        .rename_server(&workspace_id, &server_id, name.clone())
+        .await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "machine.renamed",
+            resource_kind: "machine",
+            resource_id: &server_id,
+            resource_name: Some(&name),
+            payload: json!({}),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, %server_id, "failed to record runtime audit event");
+    }
+    Ok(Json(serde_json::to_value(renamed)?))
 }
 
 async fn delete_server(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, server_id)): Path<(String, String)>,
@@ -2668,6 +2707,22 @@ async fn delete_server(
         .await?;
     let (server, deleted_agents) = state.delete_server(&workspace_id, &server_id).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "machine.deleted",
+            resource_kind: "machine",
+            resource_id: &server_id,
+            resource_name: Some(&server.name),
+            payload: json!({ "deleted_agent_count": deleted_agents.len(), "shutdown_requested": shutdown_requested }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, %server_id, "failed to record runtime audit event");
+    }
     Ok(Json(json!({
         "server": server,
         "deleted_agents": deleted_agents,
@@ -2675,10 +2730,12 @@ async fn delete_server(
     })))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn rename_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
@@ -2704,17 +2761,33 @@ async fn rename_agent(
     let name = normalize_display_name(request.name)?;
     auth.set_agent_name(&workspace_id, &agent.agent_id, &name)
         .await?;
-    Ok(Json(serde_json::to_value(
-        state
-            .rename_agent(&workspace_id, &agent.agent_id, name)
-            .await?,
-    )?))
+    let renamed = state
+        .rename_agent(&workspace_id, &agent.agent_id, name.clone())
+        .await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "agent.renamed",
+            resource_kind: "agent",
+            resource_id: &agent.agent_id,
+            resource_name: Some(&name),
+            payload: json!({ "server_id": &agent.server_id }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, agent_id = %agent.agent_id, "failed to record runtime audit event");
+    }
+    Ok(Json(serde_json::to_value(renamed)?))
 }
 
 async fn delete_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
@@ -2748,9 +2821,24 @@ async fn delete_agent(
             .await?;
     }
     auth.delete_agent(&workspace_id, &agent.agent_id).await?;
-    Ok(Json(serde_json::to_value(
-        state.delete_agent(&workspace_id, &agent.agent_id).await?,
-    )?))
+    let deleted = state.delete_agent(&workspace_id, &agent.agent_id).await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "agent.deleted",
+            resource_kind: "agent",
+            resource_id: &agent.agent_id,
+            resource_name: Some(&agent.name),
+            payload: json!({ "server_id": &agent.server_id }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, agent_id = %agent.agent_id, "failed to record runtime audit event");
+    }
+    Ok(Json(serde_json::to_value(deleted)?))
 }
 
 fn normalize_display_name(name: String) -> Result<String, ProtocolError> {
@@ -2764,10 +2852,12 @@ fn normalize_display_name(name: String) -> Result<String, ProtocolError> {
     Ok(name.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
@@ -2793,6 +2883,7 @@ async fn create_agent(
     )
     .await?;
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
+    let agent_name = request.name.clone();
     let workload_credential = auth
         .create_agent_credential(&workspace_id, &server_id, &agent_id)
         .await?;
@@ -2807,6 +2898,22 @@ async fn create_agent(
             },
         )
         .await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "agent.created",
+            resource_kind: "agent",
+            resource_id: &agent_id,
+            resource_name: Some(&agent_name),
+            payload: json!({ "server_id": &server_id }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, %agent_id, "failed to record runtime audit event");
+    }
     Ok(Json(data))
 }
 
@@ -2927,7 +3034,9 @@ async fn read_agent(
 
 async fn stop_agent(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
@@ -2954,10 +3063,26 @@ async fn stop_agent(
             &workspace_id,
             &agent.server_id,
             AgentCommand::Stop {
-                agent_id: agent.agent_id,
+                agent_id: agent.agent_id.clone(),
             },
         )
         .await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "agent.stopped",
+            resource_kind: "agent",
+            resource_id: &agent.agent_id,
+            resource_name: Some(&agent.name),
+            payload: json!({ "server_id": &agent.server_id }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, agent_id = %agent.agent_id, "failed to record runtime audit event");
+    }
     Ok(Json(data))
 }
 

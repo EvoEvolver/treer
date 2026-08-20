@@ -35,6 +35,8 @@ In concrete terms:
 6. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed.
 7. The central Proxy is open source and can be privately deployed.
+8. Organization owners and administrators can review management activity and
+   the current workspace's recent relayed machine traffic in the web app.
 
 This is a convenience-first promise with a comprehensible security reason. It
 is not a claim that the current runtime safely hosts mutually untrusted users.
