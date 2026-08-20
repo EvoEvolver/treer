@@ -449,7 +449,8 @@ string. The web editor presents them as one quoted command line and the Create
 Agent dialog can launch any saved workspace profile. Shell operators are not
 interpreted; use an explicit shell executable such as `sh -lc` only when shell
 expansion is required. Profiles are plaintext workspace configuration and must
-not contain secrets.
+not contain secrets. New workspaces include editable and deletable Codex,
+Claude, Pi, and OpenCode profiles; existing workspaces are left unchanged.
 
 ## Host and Controller
 

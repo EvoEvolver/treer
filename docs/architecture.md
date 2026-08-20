@@ -160,7 +160,9 @@ launch. The Proxy translates the profile into the existing command-kind
 workload credential creation, Controller routing, and Host process ownership
 remain the same as a direct create. The executable and arguments are passed as
 an argv vector; shell parsing occurs only when the profile explicitly launches
-a shell such as `sh` with `-lc`.
+a shell such as `sh` with `-lc`. New workspaces start with ordinary, editable
+and deletable profiles for Codex, Claude, Pi, and OpenCode. Existing workspaces
+are not backfilled.
 
 Covered organization and membership mutations write their audit event in the
 same PostgreSQL transaction. Successful Agent create, rename, stop, and delete

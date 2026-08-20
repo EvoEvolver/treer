@@ -54,6 +54,12 @@ const MAX_LAUNCH_PROFILE_CWD_BYTES: usize = 4_096;
 const MAX_LAUNCH_PROFILE_ARGS: usize = 128;
 const MAX_LAUNCH_PROFILE_ARG_BYTES: usize = 4_096;
 const MAX_LAUNCH_PROFILE_ARGS_BYTES: usize = 64 * 1024;
+const DEFAULT_AGENT_LAUNCH_PROFILES: [(&str, &str, &str); 4] = [
+    ("Codex", "OpenAI Codex", "codex"),
+    ("Claude", "Anthropic Claude Code", "claude"),
+    ("Pi", "Pi coding agent", "pi"),
+    ("OpenCode", "OpenCode", "opencode"),
+];
 
 pub(crate) struct ProfileMutationActor<'a> {
     pub kind: &'a str,
@@ -990,6 +996,7 @@ impl AuthStore {
                 AuthFailure::database(error)
             }
         })?;
+        insert_default_agent_launch_profiles(&mut transaction, workspace_id, user_id, &now).await?;
         audit::insert(
             &mut transaction,
             NewAuditEvent {
@@ -4924,6 +4931,34 @@ fn launch_profile_write_error(error: sqlx::Error) -> AuthFailure {
     }
 }
 
+async fn insert_default_agent_launch_profiles(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: &str,
+    user_id: &str,
+    now: &chrono::DateTime<Utc>,
+) -> Result<(), AuthFailure> {
+    let timestamp = now.to_rfc3339();
+    for (name, description, command) in DEFAULT_AGENT_LAUNCH_PROFILES {
+        sqlx::query(
+            "INSERT INTO agent_launch_profiles(\
+             profile_id, workspace_id, name, description, cwd, command, args, created_at, \
+             created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, '.', $5, $6, $7, $8, $7, $8)",
+        )
+        .bind(format!("alp_{}", Uuid::new_v4().simple()))
+        .bind(workspace_id)
+        .bind(name)
+        .bind(description)
+        .bind(command)
+        .bind(json!([]))
+        .bind(&timestamp)
+        .bind(user_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+    }
+    Ok(())
+}
+
 async fn insert_launch_profile_audit(
     transaction: &mut Transaction<'_, Postgres>,
     profile: &AgentLaunchProfile,
@@ -6228,6 +6263,67 @@ mod tests {
             .expect("HTML body")
             .contains("&amp;source=test"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn new_workspaces_include_deletable_default_launch_profiles() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let organization = store
+            .list_organizations(&owner.user_id)
+            .await
+            .expect("list organizations")
+            .remove(0);
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "defaults",
+                "Defaults",
+                &owner.user_id,
+            )
+            .await
+            .expect("create workspace");
+
+        let profiles = store
+            .list_agent_launch_profiles("defaults")
+            .await
+            .expect("list default profiles");
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|profile| (profile.name.as_str(), profile.command.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("Claude", "claude"),
+                ("Codex", "codex"),
+                ("OpenCode", "opencode"),
+                ("Pi", "pi"),
+            ]
+        );
+        assert!(profiles.iter().all(|profile| {
+            profile.cwd == "." && profile.args.is_empty() && profile.created_by == owner.user_id
+        }));
+
+        store
+            .delete_agent_launch_profile(
+                "defaults",
+                "Codex",
+                ProfileMutationActor {
+                    kind: "user",
+                    id: Some(&owner.user_id),
+                    label: &owner.preferred_name,
+                },
+            )
+            .await
+            .expect("default profile remains deletable");
+        assert_eq!(
+            store
+                .list_agent_launch_profiles("defaults")
+                .await
+                .expect("list profiles after delete")
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]

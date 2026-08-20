@@ -39,6 +39,7 @@ import {
   X,
 } from "lucide-react"
 import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type AgentLaunchProfile, type Machine, type MachineService, type MachineTrafficRecord, type MailDelivery, type MailMessage, type MailboxResponse, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { cn } from "@/lib/utils"
 import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pane"
 import { Button } from "@/components/ui/button"
@@ -400,7 +401,7 @@ function LaunchProfilesView({ profiles, loading, onEdit, onLaunch, onDelete }: {
       <div className="hidden h-9 grid-cols-[minmax(140px,.8fr)_minmax(240px,1.6fr)_minmax(120px,.7fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Profile</span><span>Command</span><span>Working directory</span><span className="w-28" /></div>
       {profiles.map((profile) => <div key={profile.profile_id} className="grid min-h-20 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(140px,.8fr)_minmax(240px,1.6fr)_minmax(120px,.7fr)_auto] sm:gap-4">
         <span className="col-start-1 row-start-1 min-w-0 sm:col-start-auto sm:row-start-auto"><span className="block truncate text-xs font-medium">{profile.name}</span>{profile.description && <span className="mt-1 block truncate text-[10px] text-muted-foreground">{profile.description}</span>}</span>
-        <code className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto" title={[profile.command, ...profile.args].join(" ")}>{[profile.command, ...profile.args].join(" ")}</code>
+        <code className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto" title={formatCommandLine(profile.command, profile.args)}>{formatCommandLine(profile.command, profile.args)}</code>
         <code className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{profile.cwd || "."}</code>
         <span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Run ${profile.name}`} onClick={() => onLaunch(profile)}><Play /></IconButton><IconButton label={`Edit ${profile.name}`} onClick={() => onEdit(profile)}><Pencil /></IconButton><IconButton label={`Delete ${profile.name}`} className="text-destructive hover:text-destructive" onClick={() => onDelete(profile)}><Trash2 /></IconButton></span>
       </div>)}
@@ -449,17 +450,16 @@ function WorkspaceApp() {
   const [workspaceName, setWorkspaceName] = useState("")
   const [agentName, setAgentName] = useState(defaultAgentName("codex"))
   const [agentNameCustomized, setAgentNameCustomized] = useState(false)
-  const [agentKind, setAgentKind] = useState("codex")
+  const [agentProfileId, setAgentProfileId] = useState("manual")
   const [agentServerId, setAgentServerId] = useState("")
   const [agentCwd, setAgentCwd] = useState(".")
-  const [agentArgs, setAgentArgs] = useState("")
+  const [agentCommandLine, setAgentCommandLine] = useState("codex")
   const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>([])
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
   const [launchProfileName, setLaunchProfileName] = useState("")
   const [launchProfileDescription, setLaunchProfileDescription] = useState("")
   const [launchProfileCwd, setLaunchProfileCwd] = useState(".")
-  const [launchProfileCommand, setLaunchProfileCommand] = useState("")
-  const [launchProfileArgs, setLaunchProfileArgs] = useState("")
+  const [launchProfileCommandLine, setLaunchProfileCommandLine] = useState("")
   const [launchMachineId, setLaunchMachineId] = useState("")
   const [launchAgentName, setLaunchAgentName] = useState("")
   const [renameName, setRenameName] = useState("")
@@ -584,6 +584,7 @@ function WorkspaceApp() {
 
   const selectedAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId)
   const onlineMachines = snapshot?.servers.filter((machine) => machine.status === "online") ?? []
+  const selectedCreateProfile = launchProfiles.find((profile) => profile.profile_id === agentProfileId)
   const organization = organizations.find((item) => item.organization_id === organizationId)
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
@@ -667,20 +668,52 @@ function WorkspaceApp() {
     event.preventDefault()
     if (!workspaceId) return
     try {
-      const agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: agentKind, name: agentName, cwd: agentCwd, args: agentArgs.split("\n").map((value) => value.trim()).filter(Boolean), cols: 120, rows: 36 }) })
+      let agent
+      if (agentProfileId === "manual") {
+        const parsed = parseCommandLine(agentCommandLine)
+        const kind = parsed.command === "codex" || parsed.command === "claude" ? parsed.command : "command"
+        const args = kind === "command" ? [parsed.command, ...parsed.args] : parsed.args
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind, name: agentName, cwd: agentCwd, args, cols: 120, rows: 36 }) })
+      } else {
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(agentProfileId)}/launch`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, agent_name: agentName, cols: 120, rows: 36 }) })
+      }
       setCreateAgentOpen(false); setSelectedAgentId(agent.agent_id); await refreshSnapshot()
     } catch (reason) { showError(reason) }
   }
 
   function openCreateAgent() {
-    setAgentName(defaultAgentName(agentKind))
+    setAgentProfileId("manual")
+    setAgentName(defaultAgentName("codex"))
     setAgentNameCustomized(false)
+    setAgentCommandLine("codex")
     setCreateAgentOpen(true)
+    void loadLaunchProfiles().catch(showError)
   }
 
-  function changeAgentKind(kind: string) {
-    setAgentKind(kind)
-    if (!agentNameCustomized) setAgentName(defaultAgentName(kind))
+  function changeAgentCommandLine(commandLine: string) {
+    setAgentCommandLine(commandLine)
+    if (agentNameCustomized) return
+    try {
+      const { command } = parseCommandLine(commandLine)
+      const kind = command === "codex" || command === "claude" ? command : "command"
+      setAgentName(defaultAgentName(kind))
+    } catch {
+      // Keep the last generated name until the command line is valid again.
+    }
+  }
+
+  function changeAgentProfile(profileId: string) {
+    setAgentProfileId(profileId)
+    if (profileId === "manual") {
+      setAgentName(defaultAgentName("codex"))
+      setAgentNameCustomized(false)
+      setAgentCommandLine("codex")
+      return
+    }
+    const profile = launchProfiles.find((item) => item.profile_id === profileId)
+    if (!profile) return
+    setAgentName(profile.name)
+    setAgentNameCustomized(false)
   }
 
   const loadLaunchProfiles = useCallback(async () => {
@@ -710,8 +743,7 @@ function WorkspaceApp() {
     setLaunchProfileName("")
     setLaunchProfileDescription("")
     setLaunchProfileCwd(".")
-    setLaunchProfileCommand("")
-    setLaunchProfileArgs("")
+    setLaunchProfileCommandLine("")
     setProfileEditorOpen(true)
   }
 
@@ -720,8 +752,7 @@ function WorkspaceApp() {
     setLaunchProfileName(profile.name)
     setLaunchProfileDescription(profile.description)
     setLaunchProfileCwd(profile.cwd)
-    setLaunchProfileCommand(profile.command)
-    setLaunchProfileArgs(profile.args.join("\n"))
+    setLaunchProfileCommandLine(formatCommandLine(profile.command, profile.args))
     setProfileEditorOpen(true)
   }
 
@@ -729,6 +760,7 @@ function WorkspaceApp() {
     event.preventDefault()
     if (!workspaceId) return
     try {
+      const parsed = parseCommandLine(launchProfileCommandLine)
       const path = editingLaunchProfile
         ? `/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(editingLaunchProfile.profile_id)}`
         : `/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles`
@@ -738,8 +770,8 @@ function WorkspaceApp() {
           name: launchProfileName,
           description: launchProfileDescription,
           cwd: launchProfileCwd,
-          command: launchProfileCommand,
-          args: launchProfileArgs.split("\n").map((value) => value.replace(/\r$/, "")).filter((value) => value.length > 0),
+          command: parsed.command,
+          args: parsed.args,
         }),
       })
       setProfileEditorOpen(false)
@@ -1167,13 +1199,13 @@ function WorkspaceApp() {
 
     <Dialog open={profileOpen} onOpenChange={setProfileOpen}><DialogContent><form onSubmit={updateProfile}><DialogHeader><DialogTitle>Edit profile</DialogTitle><DialogDescription>Your preferred name is visible to other organization members.</DialogDescription></DialogHeader><div className="my-5 space-y-4"><Field label="Preferred name"><Input value={preferredName} onChange={(event) => setPreferredName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Email"><Input type="email" value={profileEmail} onChange={(event) => setProfileEmail(event.target.value)} required maxLength={254} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setProfileOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
 
-    <Dialog open={profileEditorOpen} onOpenChange={(open) => { setProfileEditorOpen(open); if (!open) setEditingLaunchProfile(null) }}><DialogContent className="max-w-xl"><form onSubmit={saveLaunchProfile} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>{editingLaunchProfile ? "Edit launch profile" : "New launch profile"}</DialogTitle><DialogDescription>Reusable Agent process settings for this workspace.</DialogDescription></DialogHeader><Field label="Profile name"><Input value={launchProfileName} onChange={(event) => setLaunchProfileName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Working directory"><Input className="font-mono" value={launchProfileCwd} onChange={(event) => setLaunchProfileCwd(event.target.value)} required /></Field><div className="sm:col-span-2"><Field label="Description"><Input value={launchProfileDescription} onChange={(event) => setLaunchProfileDescription(event.target.value)} maxLength={1000} /></Field></div><div className="sm:col-span-2"><Field label="Command"><Input className="font-mono" value={launchProfileCommand} onChange={(event) => setLaunchProfileCommand(event.target.value)} placeholder="codex" required /></Field></div><div className="sm:col-span-2"><Field label="Arguments, one per line"><Textarea className="min-h-28 font-mono text-xs" value={launchProfileArgs} onChange={(event) => setLaunchProfileArgs(event.target.value)} /></Field></div><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setProfileEditorOpen(false)}>Cancel</Button><Button type="submit"><Rocket />{editingLaunchProfile ? "Save profile" : "Create profile"}</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={profileEditorOpen} onOpenChange={(open) => { setProfileEditorOpen(open); if (!open) setEditingLaunchProfile(null) }}><DialogContent className="max-w-xl"><form onSubmit={saveLaunchProfile} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>{editingLaunchProfile ? "Edit launch profile" : "New launch profile"}</DialogTitle><DialogDescription>Reusable Agent process settings for this workspace.</DialogDescription></DialogHeader><Field label="Profile name"><Input value={launchProfileName} onChange={(event) => setLaunchProfileName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Working directory"><Input className="font-mono" value={launchProfileCwd} onChange={(event) => setLaunchProfileCwd(event.target.value)} required /></Field><div className="sm:col-span-2"><Field label="Description"><Input value={launchProfileDescription} onChange={(event) => setLaunchProfileDescription(event.target.value)} maxLength={1000} /></Field></div><div className="sm:col-span-2"><Field label="Command"><Input className="font-mono" value={launchProfileCommandLine} onChange={(event) => setLaunchProfileCommandLine(event.target.value)} placeholder="codex review --base main" required /></Field></div><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setProfileEditorOpen(false)}>Cancel</Button><Button type="submit"><Rocket />{editingLaunchProfile ? "Save profile" : "Create profile"}</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={Boolean(launchingProfile)} onOpenChange={(open) => !open && setLaunchingProfile(null)}><DialogContent><form onSubmit={launchFromProfile} className="space-y-4"><DialogHeader><DialogTitle>Run {launchingProfile?.name}</DialogTitle><DialogDescription>Choose where to start this Agent.</DialogDescription></DialogHeader><Field label="Machine"><Select value={launchMachineId} onValueChange={setLaunchMachineId} required><SelectTrigger><SelectValue placeholder="Select an online machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Agent name"><Input value={launchAgentName} onChange={(event) => setLaunchAgentName(event.target.value)} required maxLength={80} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setLaunchingProfile(null)}>Cancel</Button><Button type="submit" disabled={!launchMachineId}><Play />Run Agent</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start an agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Kind"><Select value={agentKind} onValueChange={changeAgentKind}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="codex">codex</SelectItem><SelectItem value="claude">claude</SelectItem><SelectItem value="command">command</SelectItem></SelectContent></Select></Field><Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field><Field label="Arguments, one per line"><Textarea rows={3} value={agentArgs} onChange={(event) => setAgentArgs(event.target.value)} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId}>Create agent</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start an agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch profile"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="manual">Manual configuration</SelectItem>{launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "manual" ? <><Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field><Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field></> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId}>Create agent</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
