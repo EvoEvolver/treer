@@ -88,6 +88,28 @@ flowchart TB
 - `skills/treer/SKILL.md` is embedded into the CLI at build time and is the
   managed-Agent operations contract.
 
+## Release distribution
+
+The repository release tool treats artifact identity, distribution, and rollout
+as separate boundaries. A trusted publisher collects the three machine-facing
+binaries for each platform, records their byte lengths and SHA-256 digests in a
+versioned manifest, and signs the exact manifest bytes with an Ed25519 release
+key. Version manifests and channel pointers have separate detached signatures.
+
+Cloudflare R2 stores immutable objects under `releases/<version>/`; mutable
+`channels/canary.json` and `channels/stable.json` identify a manifest by path and
+digest. The public R2 custom domain and cache are distribution infrastructure,
+not the trust root. Stable promotion changes only a signed channel pointer and
+requires the version tag to identify the commit recorded in the canary
+manifest.
+
+This publisher is ahead of the installed-machine update protocol. The current
+Controller updater still downloads flat Proxy artifact endpoints and validates
+executability before activation. A future remote rollout must verify the
+embedded release public key, signed channel, signed manifest, artifact digest,
+platform, and Host/Controller protocol compatibility before asking the Host to
+restart the Controller.
+
 ## Protocols and state
 
 | Link | Transport and encoding | Authentication |

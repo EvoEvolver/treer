@@ -17,6 +17,7 @@ lint:
 
 check:
     node scripts/check-docs.mjs
+    node --test scripts/release-r2.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
     cargo fmt --all -- --check
@@ -49,3 +50,21 @@ promote-production manifest:
 
 web-worker-dev:
     cd web && pnpm worker:dev
+
+artifacts-keygen:
+    node scripts/release-r2.mjs keygen
+
+artifacts-prepare version:
+    node scripts/release-r2.mjs prepare --version "{{version}}"
+
+artifacts-canary version:
+    node scripts/release-r2.mjs publish --version "{{version}}" --channel canary
+
+artifacts-stable version:
+    node scripts/release-r2.mjs promote --version "{{version}}" --from-channel canary --channel stable
+
+artifacts-verify version:
+    node scripts/release-r2.mjs verify --version "{{version}}"
+
+artifacts-test:
+    node --test scripts/release-r2.test.mjs

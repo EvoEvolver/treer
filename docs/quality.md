@@ -23,6 +23,7 @@ It executes:
 
 ```text
 node scripts/check-docs.mjs
+node --test scripts/release-r2.test.mjs
 pnpm --dir web typecheck
 pnpm --dir web build
 cargo fmt --all -- --check
@@ -80,6 +81,7 @@ forbids unsafe Rust workspace-wide, and treats Clippy warnings as errors.
 | Frontend | TypeScript typecheck, production build, and standalone container health/config routes | No checked-in browser workflow or visual regression test |
 | Architecture | Crate boundaries and shared protocol types | No dependency-boundary lint |
 | Documentation | Indexed maintained docs and mechanical link check | No freshness or source-claim automation |
+| Release publishing | Node tests cover version validation, complete artifact sets, deterministic manifests, detached signatures, and prepared-release immutability | No cross-platform artifact provenance, updater signature enforcement, or automated canary rollout test |
 | Operations | Structured tracing plus buffered directional machine traffic counters | No local metrics/traces harness or end-to-end performance assertions |
 | Event and cluster distribution | Event-envelope, lease/snapshot separation, durable projection replay, and two-Proxy command/terminal/network integration tests | No crash-safe domain-event outbox or automated NATS failure CI |
 | Security | Explicit trust tier and source-level tests | Allow-all policy and no production isolation backend |
@@ -101,6 +103,7 @@ repeated bottleneck or blocks the current product tier.
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |
 | Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, and affected-flow validation |
 | Documentation/index change | `node scripts/check-docs.mjs` |
+| Release manifest, signing, channel, or upload flow | `node --test scripts/release-r2.test.mjs` plus an isolated R2 canary publish and public download verification |
 
 Periodic maintenance should compare routes, protocol types, launch flags, and
 the database schema with the maintained docs, then correct drift in small

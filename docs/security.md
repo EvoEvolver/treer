@@ -106,6 +106,8 @@ authenticated Agent credential is mandatory for cross-machine control.
 | Password reset token | One user, 30 minutes, single use | Delivered through the configured email account; email access becomes an account-recovery trust boundary |
 | Admin session cookie | User invitation creation and aggregate platform resource counts | Separate high-impact trust boundary |
 | Enrollment key | One workspace, ten minutes, single use | Must be delivered to the intended machine securely |
+| Release signing key | All official binary manifests and channel pointers signed by one trusted publisher | The private key is an offline operator credential and must never enter the repository, Proxy, R2, or managed Agent environment |
+| Release public key | Verification of objects attributed to the release signing key | Distribution is trustworthy only after installed updaters embed and enforce this key; that verification is not implemented yet |
 | Machine Bearer credential | One machine record and workspace | Machine-only control is limited to resources on that machine; the credential remains long-lived |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
 | Agent workload credential | One managed Agent process; independently validated by Controller and Proxy for managed-Agent discovery, control, terminal, mail, service, inbox, and workload-token requests | Same-account host processes may inspect another process environment or Host metadata |
@@ -119,6 +121,15 @@ credential-owner binding, per-user runtime environment, token-usage ledger,
 quota, or invoice model. Placing personal subscription credentials on a shared
 Host would therefore extend trust to that Host and its operators; workspace
 scoping alone does not isolate those credentials.
+
+The R2 release publisher writes detached Ed25519 signatures for immutable
+manifests and mutable channel pointers, and records SHA-256 and byte length for
+every binary. Cloudflare account access can publish or replace objects, but it
+does not possess the release private key. This separation is not yet enforced
+by running machines: the current updater consumes unsigned flat Proxy artifact
+URLs. Do not claim supply-chain verification until the Controller embeds the
+release public key and rejects unsigned, mismatched, downgraded, or incompatible
+releases.
 
 ## Data and control-plane exposure
 

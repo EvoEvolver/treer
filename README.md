@@ -62,6 +62,66 @@ workflow artifact for 14 days. Pushing a `v*` tag creates or updates that
 GitHub Release with the three binaries and a `SHA256SUMS-darwin-aarch64.txt`
 file. Ordinary branch pushes do not run the artifact build.
 
+### Publish signed R2 releases
+
+Production release artifacts live in the `treer-releases` Cloudflare R2 bucket
+at `https://releases.treer.ai/`. The publisher keeps versioned objects immutable
+under `releases/<version>/` and updates the separately signed `canary` and
+`stable` pointers under `channels/`. R2 is only the distributor: every manifest
+and channel pointer has a detached Ed25519 signature, and every artifact is
+identified by its byte length and SHA-256 digest.
+
+Generate the release key once on the trusted publishing machine:
+
+```bash
+just artifacts-keygen
+```
+
+The private key defaults to
+`~/.config/treer/release-signing-key.pem` with owner-only permissions; its public
+key is written next to it. Back up the private key outside the repository. Set
+`TREER_RELEASE_SIGNING_KEY` and `TREER_RELEASE_PUBLIC_KEY` to use different
+paths. Neither key path nor Cloudflare credentials is written into the release
+manifest.
+
+Before publishing, collect all three binaries for every supported platform in
+the existing artifact tree:
+
+```text
+dist/<platform>/treer
+dist/<platform>/treer-agent-server
+dist/<platform>/treer-agent-host
+```
+
+The default platform set is `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`,
+and `darwin-aarch64`. A deliberately partial release can override it with a
+comma-separated `TREER_RELEASE_PLATFORMS`. The publisher requires a clean
+worktree and requires the release version to match `[workspace.package]` in
+`Cargo.toml`.
+
+Prepare locally, publish to canary, test it, and then promote the exact signed
+release to stable:
+
+```bash
+just artifacts-prepare v0.2.0
+just artifacts-canary v0.2.0
+just artifacts-verify v0.2.0
+git tag v0.2.0 # if the canary commit is not already tagged
+just artifacts-stable v0.2.0
+```
+
+Stable promotion requires the local version tag to point to the commit recorded
+in the canary manifest. It never uploads binaries again. Re-running an identical
+publish is idempotent; trying to reuse a version with different manifest bytes
+is rejected. Uploads use Wrangler v4 and its authenticated account. Override
+`TREER_RELEASE_BUCKET`, `TREER_RELEASE_BASE_URL`, `TREER_CLOUDFLARE_PROFILE`, or
+`TREER_WRANGLER` when publishing to another R2 environment.
+
+The current installed Controller updater still downloads the Proxy's flat
+`/artifacts/<platform>/...` endpoints. Signed channel consumption and remote
+rollout orchestration are separate follow-up work; publishing an R2 release does
+not yet change running machines.
+
 Open the web UI, select a workspace, and choose **Add machine**. The dialog
 separates installation from workspace enrollment. The installation command is
 public and reusable:

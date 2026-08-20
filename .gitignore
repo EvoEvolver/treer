@@ -9,3 +9,4 @@ web/.wrangler*/
 web/worker-configuration.d.ts
 web/*.tsbuildinfo
 /.references/
+/.wrangler/
