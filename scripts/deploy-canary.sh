@@ -83,13 +83,16 @@ echo "Canary control plane is healthy at $revision"
 
 domain=$(railway domain status "$domain_id" --project "$project_id" \
     --environment "$environment" --service "$proxy_service" --json)
-if [ "$(printf '%s' "$domain" | jq -r '.domain.certificate.status')" = \
-    CERTIFICATE_STATUS_TYPE_ISSUED ]; then
-    echo "Canary wildcard certificate is ready"
-else
-    echo "Canary wildcard DNS or certificate is not ready:" >&2
-    printf '%s' "$domain" | jq -r \
-        '.domain.dnsRecords[] | "  \(.recordType) \(.fqdn) -> \(.requiredValue) [\(.status)]"' >&2
-    printf '%s' "$domain" | jq -r \
-        'select(.domain.verification.verified == false) | "  TXT \(.domain.verification.dnsHost).\(.domain.dnsRecords[0].zone) -> \(.domain.verification.token) [unverified]"' >&2
-fi
+certificate=$(printf '%s' "$domain" | jq -r '.domain.certificate.status')
+case "$certificate" in
+    CERTIFICATE_STATUS_TYPE_VALID|CERTIFICATE_STATUS_TYPE_ISSUED)
+        echo "Canary wildcard certificate is ready"
+        ;;
+    *)
+        echo "Canary wildcard DNS or certificate is not ready:" >&2
+        printf '%s' "$domain" | jq -r \
+            '.domain.dnsRecords[] | "  \(.recordType) \(.fqdn) -> \(.requiredValue) [\(.status)]"' >&2
+        printf '%s' "$domain" | jq -r \
+            'select(.domain.verification.verified == false) | "  TXT \(.domain.verification.dnsHost).\(.domain.dnsRecords[0].zone) -> \(.domain.verification.token) [unverified]"' >&2
+        ;;
+esac
