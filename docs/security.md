@@ -1,7 +1,7 @@
 # Security model
 
 - Status: maintained
-- Last source review: 2026-08-21 at `07e02cd`
+- Last source review: 2026-08-21 at `239f9c6`
 
 Treer's current security target is a personal or trusted-lab deployment. The
 product offers scoped coordination and a clear upgrade path; it does not yet

@@ -1,7 +1,7 @@
 # Quality and maintenance
 
 - Status: maintained
-- Last reviewed: 2026-08-21 at `07e02cd`
+- Last reviewed: 2026-08-21 at `239f9c6`
 
 Treer keeps the local feedback loop as the canonical project gate. Add process
 only when it removes repeated rediscovery or catches a demonstrated class of
@@ -106,9 +106,10 @@ tests.
 
 ## Current engineering evidence
 
-The completion-audit E2E starts an authenticated Proxy, an isolated PostgreSQL
-database, two initial real Host/Controller pairs, two workspaces, five command
-Agents, both plugins through `treer plugin run`, and a fake Telegram Bot API. It
+At revision `239f9c6`, the completion-audit E2E starts an authenticated Proxy,
+an isolated PostgreSQL database, two initial real Host/Controller pairs, two
+workspaces and five command Agents, both plugins through `treer plugin run`, and
+a fake Telegram Bot API. It
 then restarts the primary as a distributed Proxy, adds a second Proxy plus a
 third Host/Controller and sixth Agent, and provisions an ephemeral JetStream.
 The harness verifies Core Message DAGs, repeatable receive/ack, send idempotency,

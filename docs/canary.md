@@ -1,7 +1,7 @@
 # Canary environment
 
 - Status: maintained
-- Last reviewed: 2026-08-21
+- Last reviewed: 2026-08-21 at `239f9c6`
 
 Canary is the required deployment target before production. It uses a separate
 Railway environment, PostgreSQL database, NATS instance, and Proxy plus a

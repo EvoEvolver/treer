@@ -1,11 +1,12 @@
 # Core messaging and CLI-only channel plugins execution plan
 
-- Status: in progress
+- Status: completed
 - Approved direction: 2026-08-21
-- Completion audit reopened: 2026-08-21
+- Completion date: 2026-08-21
 - Base revision: `1ba449b39be22c1f6da7f9bd56fbd8f6f5d3caac`
 - Implementation and E2E revision: `c27fda5`
-- Completion-gate revision: `07e02cd`
+- Original completion-gate revision: `07e02cd`
+- Completion-audit implementation revision: `239f9c6e9a68501efca686bc7f5927a01081553b`
 - Implementation branch: `feat/plugin-system-telegram`
 
 ## Goal
@@ -862,7 +863,8 @@ generated artifacts:
 4. `0357162 feat: add Telegram Core Message bridge plugin`
 5. `c27fda5 test: verify CLI-only messaging plugins end to end`
 6. `07e02cd fix: satisfy plugin release and lint gates`
-7. `docs: publish message and plugin operating contracts`
+7. `f26865c docs: publish message and plugin operating contracts`
+8. `239f9c6 fix: complete messaging plugin acceptance gates`
 
 Core contracts landed before channel implementations, and the legacy Mail
 removal followed migration coverage.
@@ -872,57 +874,62 @@ removal followed migration coverage.
 - [x] Product owner approved the Core Message / channel plugin boundary.
 - [x] Source baseline and current Mail/DAG/policy/CLI gaps reviewed.
 - [x] Execution plan indexed and target roadmap aligned.
-- [ ] Phase 0 contracts and legacy fixtures pass the completion audit.
-- [ ] Phase 1 Core Message persistence and protocols pass the completion audit.
-- [ ] Phase 2 Message CLI and embedded skill pass the completion audit.
-- [ ] Phase 3 plugin runner, broker, and human sessions pass the completion audit.
-- [ ] Phase 4 Mail plugin and migration pass the completion audit.
-- [ ] Phase 5 Telegram plugin passes the completion audit.
-- [ ] Phase 6 end-to-end, rollout, documentation, and full gate pass the completion audit.
+- [x] Phase 0 contracts and legacy fixtures pass the completion audit.
+- [x] Phase 1 Core Message persistence and protocols pass the completion audit.
+- [x] Phase 2 Message CLI and embedded skill pass the completion audit.
+- [x] Phase 3 plugin runner, broker, and human sessions pass the completion audit.
+- [x] Phase 4 Mail plugin and migration pass the completion audit.
+- [x] Phase 5 Telegram plugin passes the completion audit.
+- [x] Phase 6 end-to-end, rollout, documentation, and full gate pass the completion audit.
 
-## Delivered baseline and open completion audit
+## Completion-audit evidence and residual limits
 
-The delivered baseline moves canonical Message, delivery, ordered context
-DAG, policy, idempotency, acknowledgement, import, and body-free transactional
-outbox state into Proxy PostgreSQL. It exposes `treer message`, adds the
-manifest-limited plugin runner and broker, removes the Rust Mail workspace
-member, preserves a legacy migration pointer, and ships Mail and Telegram as
-CLI-only Python packages. The final documentation phase also removed the stale
-Mail server path from the clean Docker build context.
+Revision `239f9c6e9a68501efca686bc7f5927a01081553b` closes the reopened audit.
+It adds frozen CLI help/limit/process fixtures, bounded broker runtime/output,
+default-off rollout gates, operator uninstall with workspace/plugin session
+revocation and state preservation, one pinned policy revision per Message/ack
+batch, non-disclosing recipient denials, stricter Message bounds, confirmed
+JetStream publication/dedup, resumable schema-v2 Mail migration reports, and the
+missing App OAuth login return path.
 
-The following evidence passed on `feat/plugin-system-telegram`:
+The following evidence passed on that revision's worktree:
 
-- documentation index/link checks and 11 positive/negative first-party plugin
-  boundary checks;
-- release-tool tests, control-plane and Mail frontend typechecks/builds, Mail
-  and Telegram Python unit suites, and validation of both production manifests;
-- `cargo build --workspace`, formatting, all 210 Rust tests, and strict workspace
-  Clippy with warnings denied;
-- a clean release Docker build containing Proxy, Host, Controller, and CLI;
-- the real-process messaging E2E with authenticated Proxy, isolated PostgreSQL,
-  two Host/Controller pairs, two workspaces, five managed command Agents, both
-  plugins through the official runner, and a fake Telegram Bot API.
+- the real `just 1.58.0` runner executed `test-db-up` and the complete `check`
+  recipe; this container lacks `zsh`, so the invocation used Just's supported
+  `--shell bash --clear-shell-args --shell-arg=-cu` runtime override without
+  rewriting the `test-db-up` or `check` recipes;
+- documentation/index checks, 11 positive/negative first-party plugin source
+  checks, five release-tool tests, both frontend typechecks/builds, four Mail
+  tests, five Telegram tests, and validation of both production plugin packages;
+- workspace build and formatting, all 223 Rust unit tests plus doc tests, and
+  strict workspace Clippy with warnings denied;
+- Core/API tests for atomic Message/DAG/delivery/idempotency/outbox behavior,
+  monitor/enforce policy revisions, rollout gates, recipient non-disclosure,
+  plugin membership/service invalidation, session revocation, uninstall, broker
+  limits, contract fixtures, expiry, and body-free logs/errors/audit/events;
+- the unattended real-process E2E across authenticated Proxy/Controller/Host/CLI
+  processes, isolated PostgreSQL, SQLite and real-`psql` migration, Mail OAuth,
+  fake Telegram, plugin restart, two workspaces, then two Proxy replicas with
+  shared PostgreSQL and ephemeral JetStream. It proves cross-Proxy Message/DAG
+  exchange, remote Proxy restart, confirmed outbox publication, and event-ID
+  deduplication;
+- a real Chromium Mail audit at 1440x900 and 390x844 covering login through App
+  OAuth return, browser-to-Agent root Message, Agent reply, browser contextual
+  reply, desktop reader, mobile reader/list/compose, zero console errors, and
+  only the expected pre-login 401 requests. Screenshots stay under the ignored
+  `output/playwright/` tree.
 
-That E2E proves Core send/reply/get/list/receive/ack, multi-turn DAG mapping,
-repeatable delivery, explicit acknowledgement, Controller restart identity,
-Proxy-restart send idempotency, workspace isolation, body-free outbox/log paths,
-SQLite and real-`psql` legacy Mail migration, Mail PKCE/OAuth/directory/send/inbox
-compatibility, Telegram policy denial, native replies/topics, and plugin restart.
-The environment did not provide the `just` executable, so the commands listed in
-the `just check` recipe were executed directly against its PostgreSQL test
-container rather than through the recipe wrapper.
+The release and local-compose paths explicitly enable the two Proxy gates;
+bridge supervisors must separately enable CLI plugin execution. Mail migration
+now requires an actor and records source/structural checksums, target counts,
+timestamps, body-free failure stage, and resumable batch checkpoints.
 
-The following gaps prevent the plan from being marked complete and are active
-work rather than deferred completion criteria:
-
-- Mail compatibility is exercised at HTTP/API level, not through a real desktop
-  or mobile browser, and there is no visual regression suite.
-- Message has no dedicated multi-Proxy/NATS E2E. Existing NATS event and routing
-  tests pass, while the changed Message path is proven with one Proxy and no
-  broker dependency.
-- Telegram uses fake Bot API coverage, not a live bot; webhook and active-active
-  modes are absent, and an ambiguous accepted `sendMessage` may duplicate on
-  retry because Telegram provides no client idempotency key.
-- Plugin uninstall, automatic state migration, signed plugin archives, hostile
-  same-UID isolation, attachments, Message retention/export/deletion, and
-  billing remain outside this release slice.
+The remaining items are explicit product limits rather than completion
+blockers: there is no hostile same-UID plugin sandbox, automatic plugin state
+migration, signed plugin package distribution, Message attachment store,
+operator retention/export/deletion contract, or billing ledger. Telegram still
+uses a fake Bot API in automated tests, has no webhook/active-active mode, and
+may duplicate an externally accepted ambiguous send because the official API
+has no client idempotency key. Mail browser driving is release-audit evidence,
+not yet unattended CI or a visual regression suite, and the Railway black-box
+Canary does not start external-channel bridges.

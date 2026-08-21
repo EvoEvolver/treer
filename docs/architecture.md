@@ -1,7 +1,7 @@
 # Architecture
 
 - Status: maintained
-- Last source review: 2026-08-21 at `07e02cd`
+- Last source review: 2026-08-21 at `239f9c6`
 
 Treer separates the internet-facing control plane from machine-local process
 ownership. Shared Rust protocol crates connect the layers; the React application

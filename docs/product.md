@@ -1,7 +1,7 @@
 # Product direction
 
 - Status: maintained
-- Last source review: 2026-08-21 at `07e02cd`
+- Last source review: 2026-08-21 at `239f9c6`
 
 ## Purpose
 

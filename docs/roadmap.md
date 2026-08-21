@@ -1,7 +1,7 @@
 # Capability roadmap
 
 - Status: maintained
-- Last source review: 2026-08-21 at `07e02cd`
+- Last source review: 2026-08-21 at `239f9c6`
 
 ## Purpose
 
@@ -17,7 +17,7 @@ make. This roadmap owns capability categories and sequencing.
 
 ## Current baseline
 
-At `07e02cd`, Treer provides:
+At `239f9c6`, Treer provides:
 
 - organizations, members, invitations, and organization-scoped workspaces;
 - enrolled machines with a stable Host and replaceable Controller;
@@ -183,9 +183,9 @@ separate versioned state tree.
 
 Message is the first shared Core contract exercised by this plugin model. Mail
 migrated from its standalone Rust data/API service to a script plugin over
-`treer message`; Telegram is the first external channel adapter. The active
-[execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md) owns the
-remaining completion audit, compatibility, end-to-end, and rollout gates. The
+`treer message`; Telegram is the first external channel adapter. The completed
+[execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md) records
+the compatibility, browser, multi-Proxy, rollout, and full-gate evidence. The
 maintained package contract lives in [`plugins/README.md`](../plugins/README.md).
 
 ### Identity, policy, and delegation

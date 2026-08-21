@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-08-21
+- Last reviewed: 2026-08-21 at `239f9c6`
 
 Treer promotes an explicit Git commit through Canary before Production. A
 release is not a branch name, a mutable `latest` label, or the contents of an
