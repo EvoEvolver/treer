@@ -440,6 +440,9 @@ screens, cursor movement, per-keystroke input, paste, and dynamic resize. PTY
 input, replay, and live output remain raw bytes from the Host through the
 Controller and Proxy to the browser. The Host socket uses length-prefixed binary
 frames, and both WebSocket hops use binary frames instead of Base64 JSON payloads.
+On mobile, the workspace opens on the machine and Agent lists without mounting
+a terminal. Selecting an Agent opens its terminal directly in full-screen mode;
+closing it returns to those lists.
 Agents inherit `TREER_WORKSPACE_ID`,
 `TREER_SERVER_ID`, `TREER_AGENT_ID`, `TREER_AGENT_SERVER_URL`, and a private
 workload credential; they can use the local agent server API to discover or
