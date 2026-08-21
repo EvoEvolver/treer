@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Extension, Path, Query, State, WebSocketUpgrade};
+use axum::extract::{Extension, Form, OriginalUri, Path, Query, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, Version};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -18,16 +18,16 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
-    AgentCommand, AgentInboxRequest, AgentInboxResponse, AgentInfo, AgentLaunchProfile, ApiError,
-    CreateAgentLaunchProfileRequest, CreateAgentRequest, CreateMachineServiceRequest,
-    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, InputAgentRequest,
-    LaunchAgentProfileRequest, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
-    MailAddress, MailAddressKind, MailboxResponse, PromptAgentRequest, ProtocolError,
-    RenameRequest, SendAgentMailRequest, SendAgentMailResponse, ServiceIngress,
+    AgentCommand, AgentInfo, AgentLaunchProfile, ApiError, AppIdentityVerifyRequest, AppPrincipal,
+    AppPrincipalKind, CreateAgentLaunchProfileRequest, CreateAgentRequest,
+    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
+    InputAgentRequest, LaunchAgentProfileRequest, MachineEnrollmentRequest,
+    MachineEnrollmentResponse, MachineService, PromptAgentRequest, ProtocolError, RenameRequest,
+    ResolveAppRecipientsRequest, ResolveAppRecipientsResponse, ServiceIngress,
     ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
     VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, WorkspaceHuman, AGENT_ID_HEADER,
+    WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -44,12 +44,11 @@ use crate::policy::{
     ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE, ACTION_LAUNCH_PROFILE_CREATE,
     ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST, ACTION_LAUNCH_PROFILE_READ,
     ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE, ACTION_MACHINE_DELETE,
-    ACTION_MACHINE_UPDATE, ACTION_MAIL_READ, ACTION_MAIL_SEND, ACTION_SERVICE_CREATE,
-    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
-    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
-    RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_AGENT_MAILBOX,
-    RESOURCE_HUMAN_DIRECTORY, RESOURCE_HUMAN_MAILBOX, RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE,
-    RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
+    ACTION_MACHINE_UPDATE, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST,
+    ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
+    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT,
+    RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE,
+    RESOURCE_MACHINE_SERVICE, RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
 
@@ -296,14 +295,6 @@ pub fn router(
             post(agent_issue_identity_token),
         )
         .route(
-            "/agent/workspaces/{workspace_id}/mail",
-            post(agent_send_mail),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/inbox",
-            post(agent_read_inbox),
-        )
-        .route(
             "/agent/workspaces/{workspace_id}/humans",
             get(agent_list_humans),
         )
@@ -422,10 +413,6 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/snapshot",
             get(workspace_snapshot),
-        )
-        .route(
-            "/api/workspaces/{workspace_id}/inbox",
-            post(human_read_inbox),
         )
         .route("/api/workspaces/{workspace_id}/servers", get(list_servers))
         .route(
@@ -555,6 +542,17 @@ pub fn router(
         .route("/api/health", get(health))
         .route("/.well-known/jwks.json", get(workload_identity_jwks))
         .route("/.treer/identity/verify", post(verify_workload_identity))
+        .route("/.treer/apps/identity/verify", post(verify_app_identity))
+        .route("/api/apps/oauth/authorize", get(authorize_workspace_app))
+        .route("/api/apps/oauth/token", post(exchange_workspace_app_code))
+        .route(
+            "/api/apps/{service_id}/directory",
+            get(workspace_app_directory),
+        )
+        .route(
+            "/api/apps/{service_id}/recipients/resolve",
+            post(resolve_workspace_app_recipients),
+        )
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/config", get(auth::oauth_config))
         .route("/api/auth/oauth/{provider}/start", get(auth::oauth_start))
@@ -612,6 +610,361 @@ async fn verify_workload_identity(
         .into_response()
 }
 
+async fn verify_app_identity(
+    Extension(auth): Extension<AuthStore>,
+    Extension(identity): Extension<IdentityIssuer>,
+    Json(request): Json<AppIdentityVerifyRequest>,
+) -> Response {
+    let mut verified = identity.verify_app(&request.token, request.audience.trim());
+    if let Some(claims) = verified.claims.as_mut() {
+        let service_active = auth
+            .resolve_machine_service(&claims.workspace_id, &claims.service_id)
+            .await
+            .is_ok();
+        let membership_active = claims.principal_kind != AppPrincipalKind::Human
+            || match auth
+                .workspace_member_role(&claims.workspace_id, &claims.sub)
+                .await
+            {
+                Ok(role) => {
+                    claims.role = Some(role);
+                    true
+                }
+                Err(_) => false,
+            };
+        if !service_active || !membership_active {
+            verified.active = false;
+            verified.claims = None;
+        }
+    }
+    ([(header::CACHE_CONTROL, "no-store")], Json(verified)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct AppOAuthAuthorizeQuery {
+    response_type: String,
+    client_id: String,
+    redirect_uri: String,
+    state: String,
+    code_challenge: String,
+    code_challenge_method: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppOAuthTokenRequest {
+    grant_type: String,
+    code: String,
+    client_id: String,
+    redirect_uri: String,
+    code_verifier: String,
+}
+
+async fn authorize_workspace_app(
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    headers: HeaderMap,
+    OriginalUri(original_uri): OriginalUri,
+    Query(query): Query<AppOAuthAuthorizeQuery>,
+) -> Result<Response, ApiFailure> {
+    if query.response_type != "code"
+        || query.code_challenge_method != "S256"
+        || query.state.is_empty()
+        || query.state.len() > 512
+    {
+        return Err(ApiFailure::bad_request(
+            "invalid_app_oauth_request",
+            "app OAuth requires response_type=code, S256 PKCE, and a bounded state",
+        ));
+    }
+    let (redirect_uri, resolved) = resolve_app_redirect(
+        &auth,
+        &config,
+        query.client_id.trim(),
+        query.redirect_uri.trim(),
+    )
+    .await?;
+    let session = match auth::authenticate_request(&auth, &headers).await {
+        Ok(session) => session,
+        Err(error) => {
+            let (status, error) = error.into_parts();
+            if status != StatusCode::UNAUTHORIZED {
+                return Err(ApiFailure { status, error });
+            }
+            let mut return_to = config.proxy_public_url.clone();
+            return_to.set_path(original_uri.path());
+            return_to.set_query(original_uri.query());
+            let mut login = config.app_public_url.clone();
+            login.set_query(None);
+            login
+                .query_pairs_mut()
+                .append_pair("return_to", return_to.as_str());
+            return Ok(Redirect::to(login.as_str()).into_response());
+        }
+    };
+    let role = auth
+        .workspace_member_role(&resolved.ingress.workspace_id, &session.user_id)
+        .await?;
+    let code = auth
+        .create_app_oauth_code(
+            &auth::AppOAuthGrant {
+                workspace_id: resolved.ingress.workspace_id,
+                service_id: resolved.service.service_id,
+                user_id: session.user_id,
+                preferred_name: session.preferred_name,
+                role,
+            },
+            redirect_uri.as_str(),
+            query.code_challenge.trim(),
+        )
+        .await?;
+    let mut callback = redirect_uri;
+    callback
+        .query_pairs_mut()
+        .append_pair("code", &code)
+        .append_pair("state", &query.state);
+    Ok(Redirect::to(callback.as_str()).into_response())
+}
+
+async fn exchange_workspace_app_code(
+    Extension(auth): Extension<AuthStore>,
+    Extension(identity): Extension<IdentityIssuer>,
+    Form(request): Form<AppOAuthTokenRequest>,
+) -> Result<Response, ApiFailure> {
+    if request.grant_type != "authorization_code" {
+        return Err(ApiFailure::bad_request(
+            "unsupported_grant_type",
+            "app OAuth supports only the authorization_code grant",
+        ));
+    }
+    let grant = auth
+        .consume_app_oauth_code(
+            request.code.trim(),
+            request.client_id.trim(),
+            request.redirect_uri.trim(),
+            request.code_verifier.trim(),
+        )
+        .await?;
+    let token = identity
+        .issue_human(
+            &grant.workspace_id,
+            &grant.user_id,
+            &grant.preferred_name,
+            &grant.role,
+            &grant.service_id,
+        )
+        .map_err(|error| {
+            tracing::error!(%error, "failed to sign app human identity token");
+            ApiFailure::internal(
+                "identity_signing_failed",
+                "failed to sign app identity token",
+            )
+        })?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(token)).into_response())
+}
+
+async fn workspace_app_directory(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(identity): Extension<IdentityIssuer>,
+    Path(service_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiFailure> {
+    let claims = authenticate_workspace_app(&auth, &identity, &headers, &service_id).await?;
+    let principals = workspace_app_principals(&state, &auth, &claims.workspace_id).await?;
+    Ok(Json(json!({ "principals": principals })))
+}
+
+async fn resolve_workspace_app_recipients(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(identity): Extension<IdentityIssuer>,
+    Path(service_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ResolveAppRecipientsRequest>,
+) -> Result<Json<ResolveAppRecipientsResponse>, ApiFailure> {
+    if request.recipients.is_empty() || request.recipients.len() > 32 {
+        return Err(ApiFailure::bad_request(
+            "invalid_app_recipients",
+            "recipient resolution requires 1-32 targets",
+        ));
+    }
+    let claims = authenticate_workspace_app(&auth, &identity, &headers, &service_id).await?;
+    let principals = workspace_app_principals(&state, &auth, &claims.workspace_id).await?;
+    let sender = principals
+        .iter()
+        .find(|principal| principal.id == claims.sub && principal.kind == claims.principal_kind)
+        .cloned()
+        .unwrap_or(AppPrincipal {
+            kind: claims.principal_kind,
+            id: claims.sub.clone(),
+            name: claims.name.clone(),
+            role: claims.role.clone(),
+        });
+    let mut seen = HashSet::new();
+    let mut recipients = Vec::new();
+    for raw_target in request.recipients {
+        let target = raw_target.trim();
+        let target = if matches!(target, "self" | ".") {
+            claims.sub.as_str()
+        } else {
+            target
+        };
+        let recipient = resolve_app_principal(&principals, target)?;
+        if seen.insert((recipient.kind, recipient.id.clone())) {
+            recipients.push(recipient);
+        }
+    }
+    Ok(Json(ResolveAppRecipientsResponse { sender, recipients }))
+}
+
+async fn resolve_app_redirect(
+    auth: &AuthStore,
+    config: &IngressConfig,
+    service_id: &str,
+    redirect_uri: &str,
+) -> Result<(Url, auth::ResolvedServiceIngress), ApiFailure> {
+    let redirect = Url::parse(redirect_uri)
+        .map_err(|_| ApiFailure::bad_request("invalid_redirect_uri", "redirect URI is invalid"))?;
+    if !matches!(redirect.scheme(), "http" | "https")
+        || redirect.host_str().is_none()
+        || !redirect.username().is_empty()
+        || redirect.password().is_some()
+        || redirect.fragment().is_some()
+    {
+        return Err(ApiFailure::bad_request(
+            "invalid_redirect_uri",
+            "redirect URI must be an absolute HTTP URL without credentials or a fragment",
+        ));
+    }
+    let hostname = redirect.host_str().expect("redirect host checked above");
+    let resolved = auth
+        .resolve_service_ingress_hostname(hostname)
+        .await?
+        .filter(|resolved| {
+            resolved.ingress.enabled
+                && resolved.ingress.access == ServiceIngressAccess::Workspace
+                && resolved.service.service_id == service_id
+        })
+        .ok_or_else(|| {
+            ApiFailure::bad_request(
+                "invalid_redirect_uri",
+                "redirect URI is not an enabled workspace ingress for this service",
+            )
+        })?;
+    let expected_origin = config.url_for_hostname(hostname)?.origin();
+    if redirect.origin() != expected_origin {
+        return Err(ApiFailure::bad_request(
+            "invalid_redirect_uri",
+            "redirect URI origin does not match the registered service ingress",
+        ));
+    }
+    Ok((redirect, resolved))
+}
+
+async fn authenticate_workspace_app(
+    auth: &AuthStore,
+    identity: &IdentityIssuer,
+    headers: &HeaderMap,
+    service_id: &str,
+) -> Result<treer_protocol::AppIdentityClaims, ApiFailure> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiFailure::unauthorized(
+                "app_authentication_required",
+                "a service-audience Treer identity token is required",
+            )
+        })?;
+    let mut claims = identity
+        .verify_app(token, service_id)
+        .claims
+        .ok_or_else(|| {
+            ApiFailure::unauthorized(
+                "app_authentication_required",
+                "the Treer identity token is invalid for this service",
+            )
+        })?;
+    auth.resolve_machine_service(&claims.workspace_id, service_id)
+        .await
+        .map_err(|_| {
+            ApiFailure::unauthorized(
+                "app_authentication_required",
+                "the target workspace service is no longer active",
+            )
+        })?;
+    if claims.principal_kind == AppPrincipalKind::Human {
+        claims.role = Some(
+            auth.workspace_member_role(&claims.workspace_id, &claims.sub)
+                .await
+                .map_err(|_| {
+                    ApiFailure::unauthorized(
+                        "app_authentication_required",
+                        "the human identity is no longer a workspace member",
+                    )
+                })?,
+        );
+    }
+    Ok(claims)
+}
+
+async fn workspace_app_principals(
+    state: &AppState,
+    auth: &AuthStore,
+    workspace_id: &str,
+) -> Result<Vec<AppPrincipal>, ApiFailure> {
+    let snapshot = state.snapshot(workspace_id).await?;
+    let humans = auth.list_workspace_humans(workspace_id).await?;
+    Ok(snapshot
+        .agents
+        .into_iter()
+        .map(|agent| AppPrincipal {
+            kind: AppPrincipalKind::Agent,
+            id: agent.agent_id,
+            name: agent.name,
+            role: None,
+        })
+        .chain(humans.into_iter().map(|human| AppPrincipal {
+            kind: AppPrincipalKind::Human,
+            id: human.user_id,
+            name: human.preferred_name,
+            role: Some(human.role),
+        }))
+        .collect())
+}
+
+fn resolve_app_principal(
+    principals: &[AppPrincipal],
+    target: &str,
+) -> Result<AppPrincipal, ProtocolError> {
+    let mut matches = principals
+        .iter()
+        .filter(|principal| principal.id == target)
+        .cloned()
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        matches.extend(
+            principals
+                .iter()
+                .filter(|principal| principal.name == target)
+                .cloned(),
+        );
+    }
+    match matches.as_slice() {
+        [] => Err(ProtocolError::new(
+            "recipient_not_found",
+            format!("no Agent or human recipient matches {target}"),
+        )),
+        [recipient] => Ok(recipient.clone()),
+        _ => Err(ProtocolError::new(
+            "recipient_ambiguous",
+            format!("more than one Agent or human is named {target}; use a stable id"),
+        )),
+    }
+}
+
 async fn agent_issue_identity_token(
     State(state): State<AppState>,
     Extension(identity_api): Extension<WorkloadIdentityApi>,
@@ -660,137 +1013,6 @@ async fn agent_issue_identity_token(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(token)).into_response())
 }
 
-async fn agent_send_mail(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-    Json(request): Json<SendAgentMailRequest>,
-) -> Result<Json<SendAgentMailResponse>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let PolicySubject::Agent { agent_id, .. } = &subject else {
-        return Err(ApiFailure::internal(
-            "mail_subject_error",
-            "mail sender was not an agent",
-        ));
-    };
-    if request.recipients.is_empty() || request.recipients.len() > 32 {
-        return Err(ApiFailure::bad_request(
-            "invalid_mail_recipients",
-            "mail must have 1-32 recipients",
-        ));
-    }
-    let snapshot = state.snapshot(&workspace_id).await?;
-    let humans = auth.list_workspace_humans(&workspace_id).await?;
-    let sender = snapshot
-        .agents
-        .iter()
-        .find(|agent| agent.agent_id == *agent_id)
-        .ok_or_else(|| ProtocolError::new("agent_not_found", agent_id))?;
-    let mut seen = HashSet::new();
-    let mut recipients = Vec::new();
-    for raw_target in &request.recipients {
-        let target = raw_target.trim();
-        let target = if matches!(target, "self" | ".") {
-            agent_id.as_str()
-        } else {
-            target
-        };
-        let recipient = resolve_mail_recipient(&snapshot.agents, &humans, target)?;
-        if !seen.insert((recipient.kind, recipient.id.clone())) {
-            continue;
-        }
-        let resource_type = match recipient.kind {
-            MailAddressKind::Agent => RESOURCE_AGENT_MAILBOX,
-            MailAddressKind::Human => RESOURCE_HUMAN_MAILBOX,
-        };
-        policy
-            .authorize(&PolicyRequest::new(
-                &workspace_id,
-                subject.clone(),
-                ACTION_MAIL_SEND,
-                PolicyResource::new(resource_type, &recipient.id),
-            ))
-            .await?;
-        recipients.push(recipient);
-    }
-    let message = auth
-        .send_agent_mail(
-            &workspace_id,
-            MailAddress {
-                kind: MailAddressKind::Agent,
-                id: sender.agent_id.clone(),
-                name: sender.name.clone(),
-            },
-            recipients,
-            request.context_ids,
-            &request.body,
-        )
-        .await?;
-    Ok(Json(SendAgentMailResponse { message }))
-}
-
-fn resolve_mail_recipient(
-    agents: &[AgentInfo],
-    humans: &[WorkspaceHuman],
-    target: &str,
-) -> Result<MailAddress, ProtocolError> {
-    let mut matches = agents
-        .iter()
-        .filter(|agent| agent.agent_id == target)
-        .map(|agent| MailAddress {
-            kind: MailAddressKind::Agent,
-            id: agent.agent_id.clone(),
-            name: agent.name.clone(),
-        })
-        .chain(
-            humans
-                .iter()
-                .filter(|human| human.user_id == target)
-                .map(|human| MailAddress {
-                    kind: MailAddressKind::Human,
-                    id: human.user_id.clone(),
-                    name: human.preferred_name.clone(),
-                }),
-        )
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
-        matches.extend(
-            agents
-                .iter()
-                .filter(|agent| agent.name == target)
-                .map(|agent| MailAddress {
-                    kind: MailAddressKind::Agent,
-                    id: agent.agent_id.clone(),
-                    name: agent.name.clone(),
-                }),
-        );
-        matches.extend(
-            humans
-                .iter()
-                .filter(|human| human.preferred_name == target)
-                .map(|human| MailAddress {
-                    kind: MailAddressKind::Human,
-                    id: human.user_id.clone(),
-                    name: human.preferred_name.clone(),
-                }),
-        );
-    }
-    match matches.as_slice() {
-        [] => Err(ProtocolError::new(
-            "recipient_not_found",
-            format!("no Agent or human recipient matches {target}"),
-        )),
-        [recipient] => Ok(recipient.clone()),
-        _ => Err(ProtocolError::new(
-            "recipient_ambiguous",
-            format!("more than one Agent or human is named {target}; use a stable id"),
-        )),
-    }
-}
-
 async fn agent_list_humans(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -811,48 +1033,6 @@ async fn agent_list_humans(
     Ok(Json(json!({
         "humans": auth.list_workspace_humans(&workspace_id).await?
     })))
-}
-
-async fn agent_read_inbox(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-    Json(request): Json<AgentInboxRequest>,
-) -> Result<Json<AgentInboxResponse>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let PolicySubject::Agent { agent_id, .. } = &subject else {
-        return Err(ApiFailure::internal(
-            "mail_subject_error",
-            "mailbox reader was not an agent",
-        ));
-    };
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_MAIL_READ,
-            PolicyResource::new(RESOURCE_AGENT_MAILBOX, agent_id),
-        ))
-        .await?;
-    Ok(Json(
-        auth.read_agent_inbox(&workspace_id, agent_id, request.limit)
-            .await?,
-    ))
-}
-
-async fn human_read_inbox(
-    Extension(auth): Extension<AuthStore>,
-    Extension(session): Extension<CurrentSession>,
-    Path(workspace_id): Path<String>,
-    Json(request): Json<AgentInboxRequest>,
-) -> Result<Json<MailboxResponse>, ApiFailure> {
-    Ok(Json(
-        auth.read_human_mailbox(&workspace_id, &session.user_id, request.limit)
-            .await?,
-    ))
 }
 
 async fn bootstrap_info(
@@ -4317,94 +4497,36 @@ mod tests {
         assert_eq!(claims.machine_id, "machine-a");
     }
 
-    #[tokio::test]
-    async fn mail_recipients_share_one_agent_and_human_namespace() {
-        let snapshot = state_with_managed_agent()
-            .await
-            .snapshot("default")
-            .await
-            .expect("workspace snapshot");
-        let humans = vec![
-            WorkspaceHuman {
-                user_id: "usr_owner".to_string(),
-                preferred_name: "Owner".to_string(),
-                role: "owner".to_string(),
+    #[test]
+    fn app_recipients_share_one_agent_and_human_namespace() {
+        let principals = vec![
+            AppPrincipal {
+                kind: AppPrincipalKind::Agent,
+                id: "agent-reviewer".to_string(),
+                name: "reviewer".to_string(),
+                role: None,
             },
-            WorkspaceHuman {
-                user_id: "usr_reviewer".to_string(),
-                preferred_name: "reviewer".to_string(),
-                role: "member".to_string(),
+            AppPrincipal {
+                kind: AppPrincipalKind::Human,
+                id: "user-owner".to_string(),
+                name: "Owner".to_string(),
+                role: Some("owner".to_string()),
+            },
+            AppPrincipal {
+                kind: AppPrincipalKind::Human,
+                id: "user-reviewer".to_string(),
+                name: "reviewer".to_string(),
+                role: Some("member".to_string()),
             },
         ];
-
-        let human = resolve_mail_recipient(&snapshot.agents, &humans, "Owner")
-            .expect("unique preferred name");
-        assert_eq!(human.kind, MailAddressKind::Human);
-        assert_eq!(human.id, "usr_owner");
-
-        let stable_id = resolve_mail_recipient(&snapshot.agents, &humans, "usr_reviewer")
-            .expect("stable human id");
-        assert_eq!(stable_id.kind, MailAddressKind::Human);
-
-        let ambiguous = resolve_mail_recipient(&snapshot.agents, &humans, "reviewer")
-            .expect_err("Agent and human display names share one namespace");
+        let owner = resolve_app_principal(&principals, "Owner").expect("unique human name");
+        assert_eq!(owner.kind, AppPrincipalKind::Human);
+        assert_eq!(owner.id, "user-owner");
+        let stable = resolve_app_principal(&principals, "agent-reviewer").expect("stable Agent ID");
+        assert_eq!(stable.kind, AppPrincipalKind::Agent);
+        let ambiguous =
+            resolve_app_principal(&principals, "reviewer").expect_err("ambiguous display name");
         assert_eq!(ambiguous.code, "recipient_ambiguous");
-    }
-
-    #[tokio::test]
-    async fn managed_agent_mail_resolves_recipients_without_interrupting_runtime() {
-        let state = state_with_managed_agent().await;
-        let auth = AuthStore::for_test("admin-password").await;
-        auth.seed_test_workspace("default").await;
-        let policy = PolicyEngine::allow_all();
-        let machine = MachineSession {
-            server_id: Some("machine-a".to_string()),
-            workspace_id: Some("default".to_string()),
-        };
-        let mut sender_headers = HeaderMap::new();
-        sender_headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
-
-        let sent = agent_send_mail(
-            State(state.clone()),
-            Extension(auth.clone()),
-            Extension(policy.clone()),
-            Extension(machine.clone()),
-            sender_headers,
-            Path("default".to_string()),
-            Json(SendAgentMailRequest {
-                recipients: vec!["reviewer".to_string()],
-                context_ids: vec![],
-                body: "Check this when convenient.".to_string(),
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("send mail: {}", error.error.message));
-        assert_eq!(sent.0.message.sender.id, "agent-a");
-        assert_eq!(sent.0.message.recipients[0].id, "agent-b");
-        assert_eq!(
-            state
-                .resolve_agent("default", "agent-b")
-                .await
-                .expect("recipient remains available")
-                .status,
-            treer_protocol::AgentStatus::Idle
-        );
-
-        let mut recipient_headers = HeaderMap::new();
-        recipient_headers.insert(AGENT_ID_HEADER, "agent-b".parse().expect("agent header"));
-        let inbox = agent_read_inbox(
-            State(state),
-            Extension(auth),
-            Extension(policy),
-            Extension(machine),
-            recipient_headers,
-            Path("default".to_string()),
-            Json(AgentInboxRequest { limit: 50 }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("read inbox: {}", error.error.message));
-        assert_eq!(inbox.0.messages, [sent.0.message]);
-        assert_eq!(inbox.0.remaining_unread, 0);
     }
 
     #[tokio::test]

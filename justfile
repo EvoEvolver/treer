@@ -20,6 +20,8 @@ check:
     node --test scripts/release-r2.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
+    cd apps/mail/web && pnpm typecheck
+    cd apps/mail/web && pnpm build
     cargo fmt --all -- --check
     cargo test --workspace
     cargo clippy --workspace --all-targets -- -D warnings
@@ -32,6 +34,12 @@ web:
 
 web-build:
     cd web && pnpm build
+
+mail *args:
+    cargo run -p treer-mail -- {{args}}
+
+mail-web:
+    cd apps/mail/web && pnpm dev
 
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}

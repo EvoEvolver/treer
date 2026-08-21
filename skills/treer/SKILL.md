@@ -1,6 +1,6 @@
 ---
 name: treer
-description: Coordinate distributed coding agents and run commands on workspace machines through the Treer CLI. Use when the user explicitly mentions Treer or asks to discover, create, inspect, mail, read an inbox, prompt, wait for, send keys to, read, stop, or remotely access agents and machines registered in a Treer workspace. Requires a Treer-managed agent environment for self-relative operations.
+description: Coordinate distributed coding agents and run commands on workspace machines through the Treer CLI. Use when the user explicitly mentions Treer or asks to discover, create, inspect, prompt, wait for, send keys to, read, stop, or remotely access agents and machines registered in a Treer workspace. Requires a Treer-managed agent environment for self-relative operations.
 ---
 
 # Treer
@@ -193,65 +193,6 @@ that machine:
 treer machine delete <server-id>
 ```
 
-## Exchange non-interrupting mail
-
-Use durable mail for asynchronous coordination that must not inject terminal
-input or start a turn in the recipient. A root message needs one or more
-recipients and no context:
-
-```bash
-treer mail --to reviewer "Review the parser when you next check your inbox."
-```
-
-Use the exact returned `message_id` as context when replying. Repeat `--to` and
-`--context` for a group message or a merge in the message graph:
-
-```bash
-treer mail --to coordinator --context msg_123 "Review complete; two findings."
-treer mail -t coordinator -t tester -c msg_123 -c msg_456 "Both checks agree."
-```
-
-Mail does not notify, prompt, wake, or otherwise interrupt recipients. An Agent
-sees unread mail only when it explicitly calls:
-
-```bash
-treer inbox
-treer inbox --limit 100
-```
-
-`inbox` returns the oldest unread batch as JSON and marks that returned batch
-read. Check `remaining_unread` and call it again when it is nonzero. Preserve
-message IDs from the response when a later message should reference them.
-
-Recipient targets use one shared address space for Agents and humans. `--to`
-accepts an Agent ID, user ID, unique Agent name, unique preferred name, or
-`self`/`.` for the calling Agent. Stable IDs take precedence over display-name
-matches. If a name matches more than one Agent or human, Treer returns
-`recipient_ambiguous`; use a stable ID. Context messages must belong to the same
-workspace and must have been sent or received by the caller. Use `mail` for
-deferred collaboration; use `agent prompt` only when intentionally starting
-work in another Agent's terminal session.
-
-The human directory for a workspace is its parent organization's member list.
-Discover stable human addresses without exposing member email addresses:
-
-```bash
-treer human list
-```
-
-Use the same repeatable `--to` option for humans and Agents:
-
-```bash
-treer mail --to usr_123 "The deployment is ready for review."
-treer mail --to reviewer --to Owner "Please coordinate on this result."
-```
-
-Preferred names are valid only when unique across the combined Agent and human
-directory; IDs remain stable when names change. Humans read their workspace
-inbox from the web application. The central Inbox retains recent read messages
-and traces context messages visible in that mailbox; opening it marks unread
-deliveries in the returned batch read. Sending still does not notify or
-interrupt the human or any Agent.
 
 ## Create and coordinate a peer
 
@@ -366,8 +307,6 @@ validates every key before sending any bytes.
 - Read agent output before responding to an unexpected state.
 - Do not use `agent attach` from an automated agent workflow; it requires a
   human-operated TTY.
-- Mail is durable but pull-only. Do not claim that it wakes a recipient, reaches
-  a deleted Agent identity, or proves that the message body was acted upon.
 - Do not claim strict turn correlation for terminal-oriented `prompt --wait`.
 - Use `treer agent stop <target>` only when terminating that process is intended.
 - Use `treer agent delete <target>` only when permanent removal is intended.

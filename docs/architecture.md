@@ -13,6 +13,7 @@ and CLI remain clients of those contracts.
 flowchart TB
     Browser[Browser user] -->|HTTPS static assets| Web
     Browser -->|Cross-origin HTTPS and WSS, session cookie| Proxy
+    Browser -->|App OAuth + app session| Apps[Optional workspace apps]
     CLI[treer CLI] -->|loopback HTTP and WS| Controller
     Agent[Managed agent] -->|loopback HTTP and WS| Controller
 
@@ -36,6 +37,8 @@ flowchart TB
     end
 
     Controller <-->|outbound authenticated WebSocket| Proxy
+    Apps -->|App identity verification and directory resolution| Proxy
+    Apps --> AppDB[(App-owned SQLite or PostgreSQL)]
 ```
 
 ## Component ownership
@@ -50,6 +53,7 @@ flowchart TB
 | [`treer-protocol`](../crates/treer-protocol/src/lib.rs) | Shared public and Controller protocol models and frames | Runtime implementation |
 | [`treer-host-protocol`](../crates/treer-host-protocol/src/lib.rs) | Controller-to-Host request, response, and event contract | Proxy or browser concepts |
 | [`web`](../web/src/App.tsx) | Standalone static browser application, runtime Proxy discovery, control-plane interaction, and terminal UI | Backend policy or hidden business state |
+| [`apps`](../apps/README.md) | Optional service-owned APIs, databases, and frontends using Treer identity and routing | Proxy metadata tables or machine process ownership |
 
 ## Architectural invariants
 
@@ -67,13 +71,13 @@ flowchart TB
 - Shared wire models live in protocol crates. A client and server must not grow
   parallel copies of the same contract.
 - Every distributed lookup is scoped by workspace before machine or Agent ID.
-- Agent mail is a pull-only PostgreSQL path. Sending mail never becomes terminal
-  input or a runtime event, and reading an inbox marks only that recipient's
-  returned deliveries read.
+- Optional apps own their own storage and product behavior. The Proxy exposes
+  generic, workspace-scoped human OAuth, Agent workload identity verification,
+  a combined Agent/human directory, and stable recipient resolution. Apps do
+  not connect to the Proxy database.
 - A workspace's human directory is derived from its parent organization
-  membership. Mail uses one address model for Agents and humans: stable IDs or
-  unique display names resolve within the combined workspace directory. Member
-  emails are not exposed to managed Agents.
+  membership. Generic App directory responses expose stable IDs, preferred
+  names, and roles, but not member email addresses.
 - Enrolled machines establish outbound connections to the Proxy.
 - Persistent machine identity is scoped by installation hostname. Controller
   and Host configurations and service-manager entries are keyed by server ID;
@@ -134,6 +138,8 @@ archive built without either input reports `unknown` rather than guessing.
 | --- | --- | --- |
 | Browser to App | HTTPS static files and runtime JSON configuration | None |
 | Browser to Proxy | Cross-origin HTTP/JSON and WebSocket frames | Host-only user or admin session cookie; exact App origin allowlist |
+| Browser to optional App | HTTPS/HTTP JSON and static assets | App-owned session established through Proxy Authorization Code + S256 PKCE |
+| Optional App to Proxy | HTTP/JSON identity verification, directory, and recipient resolution | Service-audience human or Agent Bearer token |
 | Controller to Proxy | Persistent WebSocket, JSON and binary frames | Workspace-bound machine Bearer credential |
 | CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Managed-Agent requests require the matching Agent workload credential; local CLI requests require a private operator credential stored in the owner-only Controller config |
 | Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
@@ -143,9 +149,8 @@ archive built without either input reports `unknown` rather than guessing.
 PostgreSQL persists users, OAuth identities and short-lived OAuth states,
 organizations, memberships, sessions, password reset tokens, invitations,
 workspaces, enrollment records, machine credentials, the workload signing key,
-display names, workspace-scoped Agent launch profiles, Agent messages,
-per-Agent and per-human read state, message
-context edges, machine services, virtual hosts, service ingresses, ingress
+display names, workspace-scoped Agent launch profiles, machine services,
+virtual hosts, service ingresses, App OAuth authorization codes, ingress
 authorization sessions, append-only organization audit events, and hourly
 directional machine traffic counters. Administrator invitations
 create a user-owned personal organization during registration; organization
@@ -177,19 +182,14 @@ discards it. A new provider identity links to an existing user only when that
 verified email matches; subsequent logins resolve the stored provider and
 subject pair even if the provider email changes.
 
-Agent mail and human-directory requests travel from the caller's loopback API
-to the Proxy under the Controller's machine credential and caller Agent ID. The
-Controller first validates the private workload credential, and the Proxy
-verifies that the Agent belongs to that machine and workspace. Each `--to`
-target resolves across Agent IDs, user IDs, Agent names, and preferred names;
-ambiguous names are rejected. One message and its typed recipient deliveries
-are committed together. Agent `inbox` locks an oldest-first unread batch. The
-web workspace Inbox returns the human's recent delivery history newest-first,
-captures each row's prior unread state, and marks unread rows in that returned
-batch read. Its trace view links context messages already present in that
-delivery history; an inaccessible context remains an unresolved ID. This path
-is shared PostgreSQL state and neither requires NATS nor interrupts a live
-Agent or human.
+Optional apps authenticate Agents with the existing 60-second workload token.
+Humans authorize an enabled workspace service with Authorization Code and S256
+PKCE; the service ID is the client ID and redirect origins are derived from the
+service ingress registry. App authorization codes are hashed, short-lived,
+single-use PostgreSQL records. Human app tokens are rechecked against current
+membership, and all app tokens are rechecked against the target service. Apps
+can resolve stable Agent and human recipients through the Proxy but own their
+domain data and delivery semantics in a separate database.
 
 The managed-Agent CLI carries its Agent ID and workload credential on discovery,
 Agent control, and terminal WebSocket requests. The Controller validates and
@@ -206,7 +206,7 @@ per workspace in PostgreSQL. The typed store validates bounded documents, uses
 optimistic revision updates, and emits a transactional PostgreSQL notification.
 The Proxy compiles documents into action-indexed immutable rules and applies them
 to Agent discovery, inspection, creation, prompt, input, output, terminal,
-lifecycle, launch-profile CRUD/use, machine mutation, mail, service,
+lifecycle, launch-profile CRUD/use, machine mutation, service,
 virtual-host, network, and workload identity checks. A per-workspace five-second cache keeps JSONB reads off the hot
 path while bounding cross-replica update and revocation staleness.
 

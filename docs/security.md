@@ -111,9 +111,10 @@ authenticated Agent credential is mandatory for cross-machine control.
 | Machine Bearer credential | One machine record and workspace | Machine-only control is limited to resources on that machine; the credential remains long-lived |
 | Controller instance ID | One Controller process lifetime | Fences and diagnoses duplicate connections; it is carried inside an already authenticated machine connection and is not an authentication credential |
 | Agent ID | One Agent record in a workspace | Identifies a runtime, not the human who initiated every action |
-| Agent workload credential | One managed Agent process; independently validated by Controller and Proxy for managed-Agent discovery, control, terminal, mail, service, inbox, and workload-token requests | Same-account host processes may inspect another process environment or Host metadata |
+| Agent workload credential | One managed Agent process; independently validated by Controller and Proxy for managed-Agent discovery, control, terminal, service, and workload-token requests | Same-account host processes may inspect another process environment or Host metadata |
 | Local operator credential | One installed Controller; used by the human CLI and never injected into managed-Agent environments | Stored under the same OS account, so it is not a sandbox boundary against a hostile same-account process |
 | Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
+| Human App identity token | One user and workspace, audience-bound to one enabled service for 12 hours | Apps own their sessions and authorization; Proxy verification rechecks current membership and service existence |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
 
 Codex and Claude currently inherit the authenticated CLI state of the operating
@@ -134,23 +135,20 @@ releases.
 
 ## Data and control-plane exposure
 
-The Proxy can observe control messages, durable Agent mail bodies and metadata,
-every requested network destination, and relayed terminal and workspace
-virtual-host data. Agent mail is stored as plaintext in PostgreSQL;
-Agent launch profiles, including their executable and argument arrays, are also
+The Proxy can observe control messages, every requested network destination,
+and relayed terminal and workspace virtual-host data. Optional apps expose
+their data to their own service and database operators; the Proxy no longer
+stores Mail message bodies or read state. Agent launch profiles, including their executable and argument arrays, are
 stored as plaintext and readable by workspace members and authorized managed
 Agents. Launch profiles are configuration, not a secret store; credentials and
 tokens must not be placed in their command, arguments, description, or working
-directory.
-context IDs may reference only same-workspace messages the sender previously
-sent or received. Managed Agents may list the stable user ID, preferred name,
+directory. The standalone Mail app permits context IDs only for same-workspace
+messages the sender previously sent or received. Managed Agents may list the stable user ID, preferred name,
 and organization role of humans in their workspace organization, but the Agent
-directory does not expose member email addresses. Mail resolves Agent and human
+directory does not expose member email addresses. The App bridge resolves Agent and human
 IDs or unique display names through one workspace-scoped recipient namespace.
-Human inbox reads require a current user session and current membership in the
-workspace organization. Mailbox history contains only deliveries addressed to
-that user; the browser does not dereference context IDs that are absent from
-that history. Ordinary
+Human App OAuth requires current membership in the workspace organization.
+The Mail app keeps its own session and database. Ordinary
 outbound TCP payload stays between the source Controller and destination; the
 Proxy authorizes its route but cannot observe its payload through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy
