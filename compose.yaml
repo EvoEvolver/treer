@@ -42,6 +42,8 @@ services:
       TREER_NATS_STREAM: "TREER_EVENTS"
       TREER_NATS_SUBJECT_PREFIX: "treer.v1.events"
       TREER_NATS_CLUSTER_SUBJECT_PREFIX: "treer.v1.cluster"
+      TREER_ENABLE_CORE_MESSAGES: "true"
+      TREER_ENABLE_PLUGIN_SESSIONS: "true"
       TREER_APP_PUBLIC_URL: "http://127.0.0.1:3000/"
     ports:
       - "8787:8787"

@@ -52,12 +52,13 @@ use crate::policy::{
     ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST, ACTION_LAUNCH_PROFILE_READ,
     ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE, ACTION_MACHINE_DELETE,
     ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT, ACTION_MESSAGE_READ,
-    ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_PLUGIN_OAUTH, ACTION_SERVICE_CREATE,
-    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
-    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
-    RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE,
-    RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE, RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT,
-    RESOURCE_MESSAGE_MAILBOX, RESOURCE_PLUGIN_SESSION, RESOURCE_SERVICE_INGRESS,
+    ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_PLUGIN_OAUTH, ACTION_PLUGIN_UNINSTALL,
+    ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE,
+    ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE,
+    ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE,
+    RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE,
+    RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT, RESOURCE_MESSAGE_MAILBOX,
+    RESOURCE_PLUGIN_PACKAGE, RESOURCE_PLUGIN_SESSION, RESOURCE_SERVICE_INGRESS,
     RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
@@ -83,6 +84,26 @@ pub struct BootstrapConfig {
     public_url: Url,
     artifacts_dir: PathBuf,
     release_artifact_base_url: Url,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapabilityRollout {
+    core_messages: bool,
+    plugin_sessions: bool,
+}
+
+impl CapabilityRollout {
+    pub const fn new(core_messages: bool, plugin_sessions: bool) -> Self {
+        Self {
+            core_messages,
+            plugin_sessions,
+        }
+    }
+
+    #[cfg(test)]
+    const fn all_enabled() -> Self {
+        Self::new(true, true)
+    }
 }
 
 #[derive(Clone)]
@@ -287,6 +308,7 @@ pub fn router(
     ingress: IngressConfig,
     messages: MessageStore,
     plugin_sessions: PluginSessionStore,
+    rollout: CapabilityRollout,
 ) -> Router {
     let cors = browser.cors_layer();
     let workload_identity = WorkloadIdentityApi {
@@ -386,35 +408,74 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/messages",
-            get(list_core_messages).post(send_core_message),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/messages/receive",
-            post(receive_core_messages),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/messages/ack",
-            post(acknowledge_core_messages),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/messages/import",
-            post(import_core_messages),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/messages/{message_id}",
-            get(get_core_message),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/plugins/oauth/start",
-            post(start_plugin_oauth),
-        )
-        .route(
-            "/agent/workspaces/{workspace_id}/plugins/oauth/exchange",
-            post(exchange_plugin_oauth),
-        )
+        );
+    let agent_control = if rollout.core_messages {
+        agent_control
+            .route(
+                "/agent/workspaces/{workspace_id}/messages",
+                get(list_core_messages).post(send_core_message),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/receive",
+                post(receive_core_messages),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/ack",
+                post(acknowledge_core_messages),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/import",
+                post(import_core_messages),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/{message_id}",
+                get(get_core_message),
+            )
+    } else {
+        agent_control
+            .route(
+                "/agent/workspaces/{workspace_id}/messages",
+                any(core_messages_rollout_disabled),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/receive",
+                any(core_messages_rollout_disabled),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/ack",
+                any(core_messages_rollout_disabled),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/import",
+                any(core_messages_rollout_disabled),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/messages/{message_id}",
+                any(core_messages_rollout_disabled),
+            )
+    };
+    let agent_control = if rollout.plugin_sessions {
+        agent_control
+            .route(
+                "/agent/workspaces/{workspace_id}/plugins/oauth/start",
+                post(start_plugin_oauth),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/plugins/oauth/exchange",
+                post(exchange_plugin_oauth),
+            )
+    } else {
+        agent_control
+            .route(
+                "/agent/workspaces/{workspace_id}/plugins/oauth/start",
+                any(plugin_sessions_rollout_disabled),
+            )
+            .route(
+                "/agent/workspaces/{workspace_id}/plugins/oauth/exchange",
+                any(plugin_sessions_rollout_disabled),
+            )
+    };
+    let agent_control = agent_control
         .route(
             "/agent/workspaces/{workspace_id}/plugins/sessions/revoke",
             post(revoke_plugin_session),
@@ -422,6 +483,10 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/plugins/sessions/revoke-all",
             post(revoke_plugin_sessions),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/plugins/{plugin_id}/uninstall",
+            post(revoke_uninstalled_plugin),
         )
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
@@ -638,6 +703,20 @@ pub fn router(
         .layer(Extension(messages))
         .layer(Extension(plugin_sessions))
         .with_state(state)
+}
+
+async fn core_messages_rollout_disabled() -> ApiFailure {
+    ApiFailure::service_unavailable(
+        "core_messages_disabled",
+        "Core Message routes are disabled until rollout prerequisites pass",
+    )
+}
+
+async fn plugin_sessions_rollout_disabled() -> ApiFailure {
+    ApiFailure::service_unavailable(
+        "plugin_sessions_disabled",
+        "new plugin human sessions are disabled until rollout prerequisites pass",
+    )
 }
 
 async fn health() -> Json<Value> {
@@ -1012,6 +1091,45 @@ async fn revoke_plugin_sessions(
         .into_response())
 }
 
+async fn revoke_uninstalled_plugin(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path((workspace_id, plugin_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = control_policy_subject(&state, Some(&machine), &headers, &workspace_id)
+        .await?
+        .ok_or_else(|| {
+            ApiFailure::forbidden(
+                "plugin_uninstall_denied",
+                "plugin uninstall requires a local operator",
+            )
+        })?;
+    if !matches!(&subject, PolicySubject::Machine { .. }) {
+        return Err(ApiFailure::forbidden(
+            "plugin_uninstall_denied",
+            "plugin uninstall requires a local operator",
+        ));
+    }
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_PLUGIN_UNINSTALL,
+        PolicyResource::new(RESOURCE_PLUGIN_PACKAGE, &plugin_id),
+    )
+    .await?;
+    let revoked_sessions = plugin_sessions
+        .revoke_workspace_plugin(&workspace_id, &plugin_id)
+        .await?;
+    Ok(Json(json!({
+        "plugin_id": plugin_id,
+        "revoked_sessions": revoked_sessions
+    })))
+}
+
 async fn plugin_bridge_subject(
     state: &AppState,
     machine: &MachineSession,
@@ -1334,30 +1452,47 @@ async fn send_core_message(
         let recipient = resolve_app_principal(&directory, target)
             .map(MessagePrincipal::from)
             .map_err(|_| message_recipient_unavailable())?;
-        authorize_control(
-            &policy,
-            &workspace_id,
-            Some(&subject),
-            ACTION_MESSAGE_SEND,
-            message_mailbox_policy_resource(&recipient),
-        )
-        .await
-        .map_err(|_| message_recipient_unavailable())?;
         recipients.push(recipient);
     }
-    for context_id in &request.context_ids {
-        authorize_control(
-            &policy,
+    let recipient_count = recipients.len();
+    let mut policy_requests = recipients
+        .iter()
+        .map(|recipient| {
+            PolicyRequest::new(
+                &workspace_id,
+                subject.clone(),
+                ACTION_MESSAGE_SEND,
+                message_mailbox_policy_resource(recipient),
+            )
+        })
+        .collect::<Vec<_>>();
+    policy_requests.extend(request.context_ids.iter().map(|context_id| {
+        PolicyRequest::new(
             &workspace_id,
-            Some(&subject),
+            subject.clone(),
             ACTION_MESSAGE_READ,
             PolicyResource::new(RESOURCE_MESSAGE, context_id),
         )
-        .await?;
-    }
+    }));
+    let authorization = policy
+        .authorize_batch(&policy_requests)
+        .await
+        .map_err(|denial| {
+            if denial.request_index < recipient_count {
+                message_recipient_unavailable()
+            } else {
+                ApiFailure::from(denial.error)
+            }
+        })?;
     Ok(Json(
         messages
-            .send(&workspace_id, &sender, &recipients, &request)
+            .send_with_policy_revision(
+                &workspace_id,
+                &sender,
+                &recipients,
+                &request,
+                authorization.revision,
+            )
             .await?,
     ))
 }
@@ -1498,19 +1633,30 @@ async fn acknowledge_core_messages(
         &workspace_id,
     )
     .await?;
-    for delivery_id in &request.delivery_ids {
-        authorize_control(
-            &policy,
-            &workspace_id,
-            Some(&subject),
-            ACTION_MESSAGE_ACK,
-            PolicyResource::new(RESOURCE_MESSAGE_DELIVERY, delivery_id),
-        )
-        .await?;
-    }
+    let policy_requests = request
+        .delivery_ids
+        .iter()
+        .map(|delivery_id| {
+            PolicyRequest::new(
+                &workspace_id,
+                subject.clone(),
+                ACTION_MESSAGE_ACK,
+                PolicyResource::new(RESOURCE_MESSAGE_DELIVERY, delivery_id),
+            )
+        })
+        .collect::<Vec<_>>();
+    let authorization = policy
+        .authorize_batch(&policy_requests)
+        .await
+        .map_err(|denial| ApiFailure::from(denial.error))?;
     Ok(Json(
         messages
-            .acknowledge(&workspace_id, &principal, &request)
+            .acknowledge_with_policy_revision(
+                &workspace_id,
+                &principal,
+                &request,
+                authorization.revision,
+            )
             .await?,
     ))
 }
@@ -4708,11 +4854,17 @@ impl IntoResponse for ApiFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::io::Write;
     #[cfg(unix)]
     use std::process::{Command, Stdio};
     use tower::ServiceExt;
+    use treer_protocol::{
+        PolicyEffect, PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, WorkspacePolicyDocument,
+        POLICY_SCHEMA_VERSION,
+    };
+    use treer_proxy::policy_store::WorkspacePolicyStore;
 
     async fn state_with_managed_agent() -> AppState {
         let state = AppState::new();
@@ -4836,6 +4988,7 @@ mod tests {
             test_ingress_config(),
             messages,
             plugin_sessions,
+            CapabilityRollout::all_enabled(),
         );
         let response = app
             .oneshot(
@@ -4847,6 +5000,95 @@ mod tests {
             .await
             .expect("route response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rollout_gates_new_message_and_plugin_session_traffic_but_keep_revocation() {
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let enrollment = auth
+            .create_machine_enrollment("default", "test")
+            .await
+            .expect("create rollout test enrollment");
+        let machine = auth
+            .claim_machine_enrollment(&enrollment)
+            .await
+            .expect("claim rollout test machine");
+        let authorization = HeaderValue::from_str(&format!("Bearer {}", machine.machine_token))
+            .expect("machine authorization header");
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let plugin_sessions = PluginSessionStore::open(auth.pool())
+            .await
+            .expect("plugin session store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://treer.example/").expect("public URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            plugin_sessions,
+            CapabilityRollout::new(false, false),
+        );
+
+        for (path, code) in [
+            (
+                "/agent/workspaces/default/messages",
+                "core_messages_disabled",
+            ),
+            (
+                "/agent/workspaces/default/plugins/oauth/start",
+                "plugin_sessions_disabled",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .header(header::AUTHORIZATION, authorization.clone())
+                        .body(Body::empty())
+                        .expect("gated request"),
+                )
+                .await
+                .expect("gated route response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read rollout error");
+            let error: ApiError = serde_json::from_slice(&body).expect("decode rollout error");
+            assert_eq!(error.error.code, code);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/agent/workspaces/default/plugins/sessions/revoke-all")
+                    .header(header::AUTHORIZATION, authorization)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"plugin_id":"mail"}"#))
+                    .expect("revocation request"),
+            )
+            .await
+            .expect("revocation route response");
+        assert_ne!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read revocation error");
+        let error: ApiError = serde_json::from_slice(&body).expect("decode revocation error");
+        assert_ne!(error.error.code, "plugin_sessions_disabled");
     }
 
     #[tokio::test]
@@ -4961,6 +5203,7 @@ mod tests {
             test_ingress_config(),
             messages,
             plugin_sessions,
+            CapabilityRollout::all_enabled(),
         );
         let response = app
             .oneshot(
@@ -5013,6 +5256,7 @@ mod tests {
             test_ingress_config(),
             messages,
             plugin_sessions,
+            CapabilityRollout::all_enabled(),
         );
         let response = app
             .oneshot(
@@ -5426,18 +5670,15 @@ mod tests {
         assert_eq!(query.get("redirect_uri"), Some(&redirect_uri));
         let state_value = query.get("state").expect("OAuth state").clone();
         let challenge = query.get("code_challenge").expect("PKCE challenge").clone();
+        let grant = auth::AppOAuthGrant {
+            workspace_id: "default".to_string(),
+            service_id: service.service_id.clone(),
+            user_id: "user-a".to_string(),
+            preferred_name: "User A".to_string(),
+            role: "owner".to_string(),
+        };
         let code = auth
-            .create_app_oauth_code(
-                &auth::AppOAuthGrant {
-                    workspace_id: "default".to_string(),
-                    service_id: service.service_id.clone(),
-                    user_id: "user-a".to_string(),
-                    preferred_name: "User A".to_string(),
-                    role: "owner".to_string(),
-                },
-                &redirect_uri,
-                &challenge,
-            )
+            .create_app_oauth_code(&grant, &redirect_uri, &challenge)
             .await
             .expect("simulate browser authorization");
         let response = exchange_plugin_oauth(
@@ -5505,6 +5746,69 @@ mod tests {
         .await
         .expect_err("revoked session must fail");
         assert_eq!(error.error.code, "plugin_session_invalid");
+
+        let membership_session = plugin_sessions
+            .create_human_session("mail", "agent-a", &grant)
+            .await
+            .expect("create membership-bound session");
+        headers.insert(
+            PLUGIN_SESSION_HEADER,
+            membership_session
+                .session_capability
+                .parse()
+                .expect("membership session header"),
+        );
+        sqlx::query(
+            "DELETE FROM organization_members WHERE organization_id = 'org_default' AND user_id = 'user-a'",
+        )
+        .execute(&auth.pool())
+        .await
+        .expect("remove plugin human membership");
+        let error = message_request_principal(
+            &state,
+            &auth,
+            &plugin_sessions,
+            &machine,
+            &headers,
+            "default",
+        )
+        .await
+        .expect_err("membership removal must invalidate plugin session use");
+        assert_eq!(error.error.code, "plugin_session_invalid");
+        sqlx::query(
+            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+             VALUES('org_default', 'user-a', 'owner', $1)",
+        )
+        .bind(&now)
+        .execute(&auth.pool())
+        .await
+        .expect("restore plugin human membership");
+
+        let service_session = plugin_sessions
+            .create_human_session("mail", "agent-a", &grant)
+            .await
+            .expect("create service-bound session");
+        headers.insert(
+            PLUGIN_SESSION_HEADER,
+            service_session
+                .session_capability
+                .parse()
+                .expect("service session header"),
+        );
+        auth.delete_machine_service("default", &service.service_id)
+            .await
+            .expect("delete plugin service");
+        let error = message_request_principal(
+            &state,
+            &auth,
+            &plugin_sessions,
+            &machine,
+            &headers,
+            "default",
+        )
+        .await
+        .expect_err("service removal must invalidate plugin session use");
+        assert_eq!(error.error.code, "plugin_session_invalid");
     }
 
     #[test]
@@ -5537,6 +5841,182 @@ mod tests {
         let ambiguous =
             resolve_app_principal(&principals, "reviewer").expect_err("ambiguous display name");
         assert_eq!(ambiguous.code, "recipient_ambiguous");
+    }
+
+    #[tokio::test]
+    async fn message_api_pins_durable_policy_and_hides_recipient_resolution_details() {
+        let state = state_with_managed_agent().await;
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users(id, email, email_verified, preferred_name, password_hash, created_at) \
+             VALUES('user-reviewer', 'reviewer@example.test', TRUE, 'reviewer', 'unused', $1)",
+        )
+        .bind(&now)
+        .execute(&auth.pool())
+        .await
+        .expect("seed duplicate-name human");
+        sqlx::query(
+            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+             VALUES('org_default', 'user-reviewer', 'member', $1)",
+        )
+        .bind(&now)
+        .execute(&auth.pool())
+        .await
+        .expect("seed duplicate-name membership");
+
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let plugin_sessions = PluginSessionStore::open(auth.pool())
+            .await
+            .expect("plugin session store");
+        let policy_store = WorkspacePolicyStore::new(auth.pool());
+        let deny_send = WorkspacePolicyDocument {
+            schema_version: POLICY_SCHEMA_VERSION,
+            defaults: BTreeMap::from([(ACTION_MESSAGE_SEND.to_string(), PolicyEffect::Deny)]),
+            groups: BTreeMap::new(),
+            rules: Vec::new(),
+        };
+        let actor = PolicyPrincipalRef {
+            kind: PolicyPrincipalKind::Human,
+            id: "policy-owner".to_string(),
+        };
+        let monitor = policy_store
+            .replace(
+                "default",
+                0,
+                PolicyMode::Monitor,
+                deny_send.clone(),
+                actor.clone(),
+            )
+            .await
+            .expect("install monitor policy");
+        assert_eq!(monitor.revision, 1);
+
+        let machine = MachineSession {
+            server_id: Some("machine-a".to_string()),
+            workspace_id: Some("default".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+        let secret_body = "api-policy-body-must-not-enter-metadata";
+        let request = |recipient: &str, key: &str, body: &str| SendMessageRequest {
+            recipients: vec![recipient.to_string()],
+            context_ids: Vec::new(),
+            body: body.to_string(),
+            expires_at: None,
+            idempotency_key: Some(key.to_string()),
+            correlation_id: Some("cor_api_policy".to_string()),
+            trace_id: Some("trace_api_policy".to_string()),
+            external_source: None,
+        };
+
+        let sent = send_core_message(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(PolicyEngine::durable(policy_store.clone())),
+            Extension(messages.clone()),
+            Extension(plugin_sessions.clone()),
+            Extension(machine.clone()),
+            Path("default".to_string()),
+            headers.clone(),
+            Json(request("agent-b", "api-monitor-send", secret_body)),
+        )
+        .await
+        .expect("monitor policy must observe rather than deny");
+
+        let envelope: Value = sqlx::query_scalar(
+            "SELECT envelope FROM core_message_outbox \
+             WHERE workspace_id = 'default' AND action = 'message.created' \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&auth.pool())
+        .await
+        .expect("load Message outbox envelope");
+        assert_eq!(envelope["resource"]["id"], sent.0.message.message_id);
+        assert_eq!(envelope["workspace_revision"], monitor.revision);
+        assert!(!envelope.to_string().contains(secret_body));
+
+        let audit_payloads: Vec<String> =
+            sqlx::query_scalar("SELECT payload::text FROM organization_audit_events")
+                .fetch_all(&auth.pool())
+                .await
+                .expect("load audit payloads");
+        assert!(
+            audit_payloads
+                .iter()
+                .all(|payload| !payload.contains(secret_body)),
+            "Message bodies must not enter audit payloads"
+        );
+
+        let nonexistent = send_core_message(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Extension(messages.clone()),
+            Extension(plugin_sessions.clone()),
+            Extension(machine.clone()),
+            Path("default".to_string()),
+            headers.clone(),
+            Json(request("missing-recipient", "api-missing", "missing body")),
+        )
+        .await
+        .expect_err("nonexistent recipient must be hidden");
+        let duplicate = send_core_message(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Extension(messages.clone()),
+            Extension(plugin_sessions.clone()),
+            Extension(machine.clone()),
+            Path("default".to_string()),
+            headers.clone(),
+            Json(request("reviewer", "api-duplicate", "duplicate body")),
+        )
+        .await
+        .expect_err("duplicate-name recipient must be hidden");
+
+        let enforce = policy_store
+            .replace(
+                "default",
+                monitor.revision,
+                PolicyMode::Enforce,
+                deny_send,
+                actor,
+            )
+            .await
+            .expect("enforce policy");
+        assert_eq!(enforce.revision, 2);
+        let hidden = send_core_message(
+            State(state),
+            Extension(auth.clone()),
+            Extension(PolicyEngine::durable(policy_store)),
+            Extension(messages),
+            Extension(plugin_sessions),
+            Extension(machine),
+            Path("default".to_string()),
+            headers,
+            Json(request("agent-b", "api-hidden", "hidden body")),
+        )
+        .await
+        .expect_err("enforced policy must hide the recipient");
+
+        for error in [&nonexistent, &duplicate, &hidden] {
+            assert_eq!(error.status, StatusCode::NOT_FOUND);
+            assert_eq!(error.error.code, "message_recipient_unavailable");
+            assert_eq!(
+                error.error.message,
+                "a recipient does not exist or is not available to this sender"
+            );
+        }
+        let stored_messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM core_messages WHERE workspace_id = 'default'")
+                .fetch_one(&auth.pool())
+                .await
+                .expect("count stored Messages");
+        assert_eq!(stored_messages, 1, "all denied sends must be atomic");
     }
 
     #[tokio::test]

@@ -241,6 +241,7 @@ pub fn router(state: LocalApiState) -> Router {
             "/api/plugins/sessions/revoke-all",
             post(revoke_plugin_sessions),
         )
+        .route("/api/plugins/{plugin_id}/uninstall", post(uninstall_plugin))
         .with_state(state)
 }
 
@@ -436,6 +437,28 @@ async fn revoke_plugin_sessions(
     Ok(Json(
         state
             .post_as("plugins/sessions/revoke-all", &body, Some(&agent))
+            .await?,
+    ))
+}
+
+async fn uninstall_plugin(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    if validated_source_agent(&state, &headers)?.is_some() {
+        return Err(LocalApiError::unauthorized(ProtocolError::new(
+            "plugin_uninstall_denied",
+            "plugin uninstall requires a local operator",
+        )));
+    }
+    Ok(Json(
+        state
+            .post_as(
+                &format!("plugins/{}/uninstall", encode_path_segment(&plugin_id)),
+                &json!({}),
+                None,
+            )
             .await?,
     ))
 }

@@ -32,7 +32,9 @@ The following statements are grounded in current behavior:
   membership and workspace identity.
 - The browser application and Proxy use separate origins. Credentialed CORS and
   browser WebSocket checks accept only the configured App origin; session
-  cookies remain HttpOnly and scoped to the Proxy host.
+  cookies remain HttpOnly and scoped to the Proxy host. A login `return_to` is
+  accepted only for the configured Proxy origin and the two exact ingress/App
+  OAuth authorization paths.
 - Passwords, enrollment secrets, and machine credentials are hashed at rest.
 - Password reset links contain a short-lived single-use secret whose Argon2
   hash is stored in PostgreSQL. A successful reset revokes all user sessions.
@@ -63,6 +65,9 @@ The following statements are grounded in current behavior:
   acknowledgement, and operator-only import independently. Context edges do not
   grant access to a parent body, stable deliveries remain repeatable until
   explicit acknowledgement, and body-free outbox events recover after restart.
+  Multi-recipient sends and acknowledgement batches use one pinned policy
+  revision, and denied/hidden recipient resolution returns one non-disclosing
+  unavailable result.
 - The official plugin runner clears the inherited environment, keeps raw Agent,
   machine, and operator credentials in the parent process, and exposes only a
   private manifest-limited broker to nested `treer` commands. Policy evaluates
@@ -70,7 +75,9 @@ The following statements are grounded in current behavior:
 - Plugin browser OAuth produces a revocable capability bound to one plugin,
   workspace, service, bridge Agent, and current human membership. Mail stores
   only an opaque local cookie-to-capability mapping; logout revokes the Core
-  capability before deleting that mapping.
+  capability before deleting that mapping. Membership or service removal
+  invalidates later use, and operator plugin uninstall revokes every matching
+  Core session before removing local package versions.
 - An HTTP machine service can be published under a generated wildcard hostname.
   Public endpoints deliberately admit anonymous internet traffic; workspace
   endpoints require a current organization member session or a workload token
@@ -104,6 +111,12 @@ policy implementation preserves allow behavior when a workspace has no policy
 document. Local Controller control routes require either an Agent workload
 credential or a separate operator credential.
 
+The three Message/plugin rollout switches default off, but they are deployment
+sequencing controls rather than security controls. Once enabled, ordinary
+identity, immutable scope, and Policy checks remain authoritative. A plugin can
+be launched by any same-UID process that can invoke the CLI with the execution
+environment switch, so that switch must never be described as code isolation.
+
 The Controller preserves a validated managed-Agent identity and workload
 credential when proxying Agent control HTTP and terminal WebSocket requests.
 The Proxy validates the credential again and applies the stored workspace
@@ -130,7 +143,7 @@ authenticated Agent credential is mandatory for cross-machine control.
 | Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
 | Human App identity token | One user and workspace, audience-bound to one enabled service for 12 hours | Apps own their sessions and authorization; Proxy verification rechecks current membership and service existence |
 | Plugin broker token | One `treer plugin run` process and private Unix socket | Limits access to the broker but is not usable as a Proxy/Controller credential and is not a same-UID sandbox |
-| Plugin-human capability | One user, workspace, plugin ID, service, and bridge Agent until expiry or revocation | Rechecks membership and binding; the plugin's local cookie mapping and host process remain trusted |
+| Plugin-human capability | One user, workspace, plugin ID, service, and bridge Agent until expiry or revocation | Rechecks membership/service binding; logout, explicit revocation, or plugin uninstall revokes Core state, while the local cookie mapping and host process remain trusted |
 | Telegram bot token | One Telegram bot, supplied only to the Telegram plugin as a declared secret | Telegram and any same-UID process able to inspect it can act as the bot; it is not a Treer identity |
 | Telegram external identity | Numeric user, chat, topic, update, and Message IDs asserted by the bridge plugin | Admission metadata only; inbound Core Messages are authored by the authenticated bridge Agent |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
@@ -160,14 +173,17 @@ recipients, context edges, and acknowledgement state are plaintext in Core
 PostgreSQL and are visible to Proxy and database operators. They are not
 end-to-end encrypted. Message bodies are deliberately excluded from ordinary
 logs, structured errors, audit payloads, domain events, and the transactional
-Message outbox; this does not protect database rows or backups.
+Message outbox; this does not protect database rows or backups. Core does not
+yet provide an operator-facing retention/export/deletion policy or attachment
+store, so deployments must manage PostgreSQL retention and backups explicitly.
 
 Mail no longer owns a second Message database. Its plugin-owned SQLite state
 maps opaque browser cookies to Core plugin-human capabilities; the Mail process
 can observe bodies that it renders or sends. The Telegram plugin can observe
 bridged bodies and stores external offsets, delivery hashes, errors, and
 Telegram/Core ID mappings in its own SQLite database, but canonical bodies stay
-in Core. Its Bot API token remains plugin-owned. A configured numeric Telegram
+in Core. Plugin uninstall does not delete these state databases. Its Bot API
+token remains plugin-owned. A configured numeric Telegram
 allowlist is channel admission, not Treer authentication, and Telegram account
 compromise is outside Treer's trust boundary.
 

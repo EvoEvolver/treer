@@ -64,7 +64,7 @@ flowchart TB
 | [`treer-agent-server`](../crates/treer-agent-server/src/main.rs) | Machine Controller, local API, Agent definitions, state detection, Proxy link, network bridge | Durable PTY ownership |
 | [`treer-agent-host`](../crates/treer-agent-host/src/main.rs) | Stable child processes, Controller supervision, idempotent mutation cache | Users, workspaces, Agent brands, product policy |
 | [`treer-agent-runtime`](../crates/treer-agent-runtime/src/lib.rs) | PTY lifecycle, raw input/output, bounded replay, root-relative working directories | Distributed routing or identity |
-| [`treer-cli`](../crates/treer-cli/src/main.rs) | Human and managed-Agent commands, terminal attach, plugin package lifecycle, environment sanitization, and the manifest-limited local broker | Private wire-model variants or channel-specific behavior |
+| [`treer-cli`](../crates/treer-cli/src/main.rs) | Human and managed-Agent commands, terminal attach, Core Message surface, plugin package lifecycle, execution gate, environment sanitization, and the manifest-limited local broker | Private wire-model variants or channel-specific behavior |
 | [`treer-protocol`](../crates/treer-protocol/src/lib.rs) | Shared public and Controller protocol models and frames | Runtime implementation |
 | [`treer-host-protocol`](../crates/treer-host-protocol/src/lib.rs) | Controller-to-Host request, response, and event contract | Proxy or browser concepts |
 | [`web`](../web/src/App.tsx) | Standalone static browser application, runtime Proxy discovery, control-plane interaction, and terminal UI | Backend policy or hidden business state |
@@ -99,6 +99,10 @@ flowchart TB
   nested `treer` CLI invocation through the runner's private broker. The runner
   withholds raw Treer credentials and limits commands to manifest capabilities;
   workspace policy and immutable scope checks still authorize each request.
+- Plugin install is data-only. Uninstall first performs an operator-authorized
+  workspace/plugin session revocation, then removes all local immutable package
+  versions while deliberately preserving the separately rooted versioned state.
+  Automatic state migration and deletion are not part of this contract.
 - Plugin-owned state may contain browser-cookie mappings, external offsets,
   channel Message IDs, retry state, and external credentials. It must not access
   Core PostgreSQL, Core NATS, private Controller/Proxy routes, or Treer crates.
@@ -198,7 +202,9 @@ authorization sessions, append-only organization audit events, hourly
 directional machine traffic counters, immutable Core Messages, recipient
 deliveries, ordered context edges, sender-scoped send idempotency records,
 Message outbox entries, plugin OAuth states, and revocable plugin-human
-capabilities. Administrator invitations
+capabilities. Capability use rechecks current organization membership and the
+registered service binding; removing either invalidates the session.
+Administrator invitations
 create a user-owned personal organization during registration; organization
 invitations only create membership in their target organization. Both flows
 consume the invitation and write identity state in one transaction.
@@ -240,7 +246,11 @@ service ingress registry. App authorization codes are hashed, short-lived,
 single-use PostgreSQL records. Human app tokens are rechecked against current
 membership, and all app tokens are rechecked against the target service. Apps
 can resolve stable Agent and human recipients through the Proxy but own their
-domain data and delivery semantics in a separate database.
+domain data and delivery semantics in a separate database. When login is needed
+mid-flow, the standalone control-plane App preserves `return_to` only for the
+same configured Proxy origin and the exact `/.treer/ingress/authorize` or
+`/api/apps/oauth/authorize` path; it rejects arbitrary redirect paths and
+origins.
 
 CLI-only channel plugins use a narrower path. A managed bridge Agent starts an
 installed immutable package with `treer plugin run`. The runner clears the
@@ -253,13 +263,22 @@ capability may accompany only supported human-scoped broker commands. Telegram
 users never receive a Treer principal: inbound Messages remain authored by the
 bridge Agent and carry only sender-asserted external-source metadata.
 
+Three default-off rollout gates separate deployment from activation.
+`TREER_ENABLE_CORE_MESSAGES` controls every Core Message route,
+`TREER_ENABLE_PLUGIN_SESSIONS` controls creation/exchange of new plugin-human
+sessions while leaving revocation available, and the machine-local
+`TREER_ENABLE_PLUGIN_EXECUTION` controls `treer plugin run`. The first two are
+Proxy process configuration; the last is evaluated by the invoking CLI. They
+are rollout controls, not authorization or isolation boundaries.
+
 Core Message writes atomically store an immutable Message, ordered recipients
 and contexts, per-recipient delivery state, idempotency result, and body-free
 outbox event. `receive` is repeatable until explicit idempotent `ack`; history
 reads do not mutate delivery state. The outbox dispatcher retries after Proxy
-restart and publishes through the configured in-process or JetStream event bus.
-NATS is distribution, not Message truth, and a single-Proxy Message deployment
-does not require it.
+restart, marks an entry published only after the event adapter confirms it, and
+publishes through the configured in-process or JetStream event bus. JetStream
+uses the stable event ID for broker deduplication. NATS is distribution, not
+Message truth, and a single-Proxy Message deployment does not require it.
 
 The managed-Agent CLI carries its Agent ID and workload credential on discovery,
 Agent control, and terminal WebSocket requests. The Controller validates and
@@ -278,8 +297,12 @@ The Proxy compiles documents into action-indexed immutable rules and applies the
 to Agent discovery, inspection, creation, prompt, input, output, terminal,
 lifecycle, launch-profile CRUD/use, machine mutation, service,
 virtual-host, network, workload identity, Message send/read/receive/ack/import,
-and plugin OAuth checks. A per-workspace five-second cache keeps JSONB reads off the hot
-path while bounding cross-replica update and revocation staleness.
+plugin OAuth, and plugin uninstall checks. Multi-recipient Message sends and
+multi-delivery acknowledgements evaluate one batch against one pinned policy
+revision; monitor mode records the revision without denying and enforce mode
+applies its decision atomically. A per-workspace five-second cache keeps JSONB
+reads off the hot path while bounding cross-replica update and revocation
+staleness.
 
 Each Controller connection,
 pending command, browser session, terminal leg, and network route is
@@ -400,6 +423,12 @@ bridge; every directory or Message request still traverses the broker. Telegram
 owns long polling, numeric allowlists and bindings, update offsets, and
 Telegram/Core ID mappings. It commits an external send mapping before Core ack.
 Neither channel reads Core tables or subscribes to NATS.
+
+With several Proxy replicas, a Controller remains owned by one replica and a
+request may enter another. Core Message truth and idempotency remain in shared
+PostgreSQL; Core NATS routes the request to the owning replica, and the
+transactional outbox publishes one body-free event to JetStream. A reconnect or
+remote Proxy restart does not move canonical Message or acknowledgement state.
 
 ## Network paths
 

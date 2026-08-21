@@ -34,6 +34,8 @@ Start the proxy and web control plane:
 ```bash
 just test-db-up
 export DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
+export TREER_ENABLE_CORE_MESSAGES=true
+export TREER_ENABLE_PLUGIN_SESSIONS=true
 just stage-artifacts
 cargo run -p treer-proxy -- \
   --disable-auth \
@@ -49,6 +51,12 @@ pnpm dev
 `--disable-auth` is intended for local testing. It skips the login screen and
 uses a synthetic local user. Omit it and set `ADMIN_PASSWORD` for shared or
 deployed servers.
+
+Core Message routes and creation/exchange of plugin-bound human sessions are
+rollout-gated and default off. Enable the two Proxy gates above only after the
+database migration and policy defaults are ready. Plugin process execution has
+a separate machine-local gate, `TREER_ENABLE_PLUGIN_EXECUTION=true`; it is read
+by the CLI that starts a plugin and is not a security sandbox.
 
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
 places the current platform's `treer-agent-host`, `treer-agent-server`, and
@@ -713,11 +721,17 @@ treer plugin list
 treer plugin inspect mail
 ```
 
+New Message/session traffic and plugin execution are disabled by default. The
+Proxy must run with `TREER_ENABLE_CORE_MESSAGES=true` and
+`TREER_ENABLE_PLUGIN_SESSIONS=true`; the bridge process supervisor must set
+`TREER_ENABLE_PLUGIN_EXECUTION=true` for `treer plugin run`.
+
 Run each channel from a dedicated managed bridge Agent. Mail preserves the
 browser mailbox and uses a registered HTTP service plus generic plugin OAuth:
 
 ```bash
-treer plugin run mail --config /etc/treer/mail.json
+TREER_ENABLE_PLUGIN_EXECUTION=true \
+  treer plugin run mail --config /etc/treer/mail.json
 ```
 
 Build the Mail frontend before installing from a source checkout, and follow
@@ -731,6 +745,7 @@ reply mapping, and plugin-owned SQLite offset/mapping state:
 
 ```bash
 TELEGRAM_BOT_TOKEN='<BotFather token>' \
+  TREER_ENABLE_PLUGIN_EXECUTION=true \
   treer plugin run telegram --config /etc/treer/telegram.json
 ```
 
@@ -744,6 +759,10 @@ duplicate on retry.
 The manifest/broker boundary limits semantic commands and keeps credentials out
 of the plugin environment, but it is not a hostile same-UID sandbox. Run
 untrusted code under a separate operating-system user, container, or microVM.
+`treer plugin uninstall <id>` first revokes every Core human session for that
+workspace/plugin, then removes all locally installed package versions. It
+deliberately preserves versioned plugin state for recovery or audited cleanup;
+automatic state migration and state deletion are not provided.
 The maintained package contract and development rules are in
 [plugins/README.md](plugins/README.md).
 

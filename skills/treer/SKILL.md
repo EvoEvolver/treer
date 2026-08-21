@@ -249,8 +249,15 @@ An installed channel plugin may run from a dedicated managed bridge Agent:
 ```bash
 treer plugin list
 treer plugin inspect <plugin-id>
-treer plugin run <plugin-id> --config /operator-owned/config.json
+TREER_ENABLE_PLUGIN_EXECUTION=true \
+  treer plugin run <plugin-id> --config /operator-owned/config.json
 ```
+
+Core Message routes, creation of plugin-bound human sessions, and plugin
+execution each have an operator-controlled rollout gate and default off. A
+`core_messages_disabled`, `plugin_sessions_disabled`, or
+`plugin_execution_disabled` result means the deployment is not enabled for the
+workflow; report it instead of inventing another integration path.
 
 The plugin process must use the `TREER_CLI` nested command path supplied by the
 runner. Do not pass, print, or teach a plugin to consume raw Agent, machine, or
@@ -259,6 +266,8 @@ routes, Core PostgreSQL, or Core NATS. The runner limits commands to manifest
 capabilities and ordinary workspace policy still authorizes each operation.
 Package installation, secrets, channel setup, and migration are operator
 workflows documented in the repository rather than this managed-Agent skill.
+Plugin uninstall is also a local-operator workflow: it revokes Core human
+sessions, removes installed package versions, and preserves plugin state.
 
 Delete a machine only when it and all of its agents should be removed from the
 workspace. This revokes its credential but does not uninstall the service on

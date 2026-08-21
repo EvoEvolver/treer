@@ -307,6 +307,30 @@ impl PluginSessionStore {
         .await?;
         Ok(result.rows_affected())
     }
+
+    pub async fn revoke_workspace_plugin(
+        &self,
+        workspace_id: &str,
+        plugin_id: &str,
+    ) -> Result<u64, PluginStoreError> {
+        validate_plugin_id(plugin_id)?;
+        if workspace_id.is_empty() || workspace_id.len() > 256 {
+            return Err(PluginStoreError::contract(
+                "plugin_workspace_invalid",
+                "plugin workspace ID is invalid",
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE core_plugin_human_sessions SET revoked_at = $1 WHERE workspace_id = $2 \
+             AND plugin_id = $3 AND revoked_at IS NULL",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(workspace_id)
+        .bind(plugin_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 fn validate_bridge_agent_id(agent_id: &str) -> Result<(), PluginStoreError> {
@@ -473,21 +497,42 @@ mod tests {
                 .id,
             "user-a"
         );
-        assert!(store
-            .revoke(
-                "workspace-a",
+        let second = store
+            .create_human_session(
                 "mail",
-                "agent-bridge",
-                &response.session_capability,
+                "another-agent",
+                &AppOAuthGrant {
+                    workspace_id: "workspace-a".to_string(),
+                    service_id: "svc-mail-other".to_string(),
+                    user_id: "user-a".to_string(),
+                    preferred_name: "Owner".to_string(),
+                    role: "owner".to_string(),
+                },
             )
             .await
-            .expect("revoke"));
+            .expect("create second instance session");
+        assert_eq!(
+            store
+                .revoke_workspace_plugin("workspace-a", "mail")
+                .await
+                .expect("revoke workspace plugin"),
+            2
+        );
         assert!(store
             .authenticate(
                 "workspace-a",
                 "mail",
                 "agent-bridge",
                 &response.session_capability,
+            )
+            .await
+            .is_err());
+        assert!(store
+            .authenticate(
+                "workspace-a",
+                "mail",
+                "another-agent",
+                &second.session_capability,
             )
             .await
             .is_err());

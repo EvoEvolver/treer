@@ -71,8 +71,14 @@ Start it from the bridge Agent with the token in the declared secret variable:
 
 ```sh
 TELEGRAM_BOT_TOKEN='<BotFather token>' \
+  TREER_ENABLE_PLUGIN_EXECUTION=true \
   treer plugin run telegram --config /etc/treer/telegram.json
 ```
+
+The Proxy must also enable `TREER_ENABLE_CORE_MESSAGES=true`; Telegram does not
+use plugin OAuth sessions, but production releases enable the shared
+`TREER_ENABLE_PLUGIN_SESSIONS=true` gate for Mail. All rollout gates default
+off.
 
 The runner passes the token only to this plugin process. Do not put it in
 `plugin.json`, the config file, logs, shell history, or a service definition
@@ -151,5 +157,7 @@ external sends even though Core Messages remain intact.
 - Attachments, edits, deletes, reactions, polls, voice, payments, Mini Apps,
   webhooks, active-active polling, and Telegram-user human impersonation are
   deferred.
+- Core Message retention/export/deletion policy and billing are outside the
+  plugin contract.
 - The bot token and Message bodies must not appear in logs. The broker withholds
   Treer credentials but is not a hostile same-UID sandbox.

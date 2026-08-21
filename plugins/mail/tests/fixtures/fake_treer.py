@@ -213,6 +213,29 @@ def main() -> int:
         elif arguments[:2] == ["message", "import"]:
             operation_id = option(arguments, "--operation-id")
             records = json.loads(stdin)
+            state["import_attempts"] = int(state.get("import_attempts", 0)) + 1
+            fail_once_at = int(os.environ.get("FAKE_TREER_FAIL_IMPORT_ONCE_AT", "0"))
+            if (
+                fail_once_at == state["import_attempts"]
+                and not state.get("import_failure_injected")
+            ):
+                state["import_failure_injected"] = True
+                handle.seek(0)
+                handle.truncate()
+                json.dump(state, handle)
+                handle.flush()
+                print(
+                    json.dumps(
+                        {
+                            "error": {
+                                "code": "fake_import_interrupted",
+                                "message": "injected import interruption",
+                            }
+                        }
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
             if operation_id in state["imports"]:
                 response = state["imports"][operation_id]
             else:

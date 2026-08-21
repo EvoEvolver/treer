@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlsplit
 
 
 MAX_BATCH_SIZE = 1_000
+REPORT_SCHEMA_VERSION = 2
 
 
 class MigrationError(Exception):
@@ -33,6 +34,11 @@ def parse_args() -> argparse.Namespace:
         "--source-kind", choices=("auto", "sqlite", "postgres"), default="auto"
     )
     parser.add_argument("--workspace", required=True)
+    parser.add_argument(
+        "--actor",
+        required=True,
+        help="operator or change-ticket identity recorded in the cutover report",
+    )
     parser.add_argument("--treer", default=os.environ.get("TREER_CLI", "treer"))
     parser.add_argument("--url", help="optional local Controller URL for the operator CLI")
     parser.add_argument("--psql", default="psql")
@@ -357,6 +363,34 @@ def migration_fingerprint(messages: list[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def source_sha256(
+    kind: str,
+    source: str,
+    messages: list[dict[str, Any]],
+    sessions: dict[str, int],
+) -> tuple[str, str]:
+    digest = hashlib.sha256()
+    if kind == "sqlite":
+        with sqlite_path(source).open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest(), "database_file"
+    canonical = json.dumps(
+        {"messages": messages, "legacy_sessions": sessions},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest.update(canonical)
+    return digest.hexdigest(), "workspace_export"
+
+
+def timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
 def batches(values: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
     for offset in range(0, len(values), size):
         yield values[offset : offset + size]
@@ -434,70 +468,226 @@ def write_export(path: Path, messages: list[dict[str, Any]]) -> None:
     os.replace(temporary, path)
 
 
+def operation_id(checksum: str, index: int) -> str:
+    return f"mailmig-{checksum[:20]}-{index:06d}"
+
+
+def source_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "messages": len(messages),
+        "context_edges": sum(len(message.get("context_ids", [])) for message in messages),
+        "deliveries": sum(len(message["recipients"]) for message in messages),
+        "read_deliveries": sum(
+            1
+            for message in messages
+            for recipient in message["recipients"]
+            if recipient.get("read_at") is not None
+        ),
+    }
+
+
+def refresh_target_counts(report: dict[str, Any]) -> None:
+    completed = report["batches"]
+    report["completed_batch_count"] = len(completed)
+    report["target_counts"] = {
+        "processed_messages": sum(int(batch["message_count"]) for batch in completed),
+        "imported_messages": sum(int(batch["imported"]) for batch in completed),
+        "existing_messages": sum(int(batch["existing"]) for batch in completed),
+    }
+
+
+def validate_resume_report(
+    report: Any,
+    expected: dict[str, Any],
+    ordered_batches: list[list[dict[str, Any]]],
+) -> dict[str, Any]:
+    if not isinstance(report, dict):
+        raise MigrationError("existing migration report is not a JSON object")
+    for key in (
+        "schema_version",
+        "workspace_id",
+        "actor",
+        "source_kind",
+        "source_sha256",
+        "source_sha256_scope",
+        "structural_sha256",
+        "batch_size",
+        "message_count",
+        "context_edge_count",
+        "delivery_count",
+        "read_delivery_count",
+        "total_batch_count",
+        "dry_run",
+    ):
+        if report.get(key) != expected.get(key):
+            raise MigrationError(
+                f"existing migration report does not match the current {key}"
+            )
+    completed = report.get("batches")
+    if not isinstance(completed, list) or len(completed) > len(ordered_batches):
+        raise MigrationError("existing migration report has invalid batch checkpoints")
+    for index, checkpoint in enumerate(completed):
+        batch = ordered_batches[index]
+        expected_identity = {
+            "index": index,
+            "operation_id": operation_id(expected["source_sha256"], index),
+            "message_count": len(batch),
+            "first_message_id": batch[0]["message_id"],
+            "last_message_id": batch[-1]["message_id"],
+        }
+        if not isinstance(checkpoint, dict) or any(
+            checkpoint.get(key) != value for key, value in expected_identity.items()
+        ):
+            raise MigrationError("existing migration report has an invalid batch checkpoint")
+        for key in ("imported", "existing"):
+            if not isinstance(checkpoint.get(key), int) or checkpoint[key] < 0:
+                raise MigrationError("existing migration report has invalid target counts")
+        if not isinstance(checkpoint.get("started_at"), str) or not isinstance(
+            checkpoint.get("completed_at"), str
+        ):
+            raise MigrationError("existing migration report has invalid batch timestamps")
+    refresh_target_counts(report)
+    return report
+
+
 def main() -> int:
     args = parse_args()
+    report: dict[str, Any] | None = None
+    stage = "validate_arguments"
+    active_batch: int | None = None
     try:
         if not 1 <= args.batch_size <= MAX_BATCH_SIZE:
             raise MigrationError(f"batch size must be between 1 and {MAX_BATCH_SIZE}")
         if not args.workspace or len(args.workspace) > 256:
             raise MigrationError("workspace ID is empty or too long")
+        required_string(args.actor, "migration actor", 256)
+        stage = "read_source"
         kind = source_kind(args.source, args.source_kind)
         if kind == "sqlite":
             messages, sessions = load_sqlite(args.source, args.workspace)
         else:
             messages, sessions = load_postgres(args.source, args.workspace, args.psql)
+        stage = "validate_source"
         ordered = validate_and_order(messages, args.workspace)
-        checksum = migration_fingerprint(ordered)
+        structural_checksum = migration_fingerprint(ordered)
+        checksum, checksum_scope = source_sha256(
+            kind, args.source, ordered, sessions
+        )
         if args.export_file:
             write_export(args.export_file, ordered)
-        report: dict[str, Any] = {
-            "schema_version": 1,
+        ordered_batches = list(batches(ordered, args.batch_size))
+        counts = source_counts(ordered)
+        started_at = timestamp()
+        expected: dict[str, Any] = {
+            "schema_version": REPORT_SCHEMA_VERSION,
             "workspace_id": args.workspace,
+            "actor": args.actor,
             "source_kind": kind,
-            "structural_sha256": checksum,
-            "message_count": len(ordered),
-            "context_edge_count": sum(len(message.get("context_ids", [])) for message in ordered),
-            "delivery_count": sum(len(message["recipients"]) for message in ordered),
-            "read_delivery_count": sum(
-                1
-                for message in ordered
-                for recipient in message["recipients"]
-                if recipient.get("read_at") is not None
-            ),
+            "source_sha256": checksum,
+            "source_sha256_scope": checksum_scope,
+            "structural_sha256": structural_checksum,
+            "batch_size": args.batch_size,
+            "message_count": counts["messages"],
+            "context_edge_count": counts["context_edges"],
+            "delivery_count": counts["deliveries"],
+            "read_delivery_count": counts["read_deliveries"],
+            "total_batch_count": len(ordered_batches),
+            "dry_run": bool(args.dry_run),
+        }
+        fresh_report: dict[str, Any] = {
+            **expected,
             "legacy_sessions": sessions,
             "requires_human_relogin": sessions["active"] > 0,
-            "dry_run": bool(args.dry_run),
+            "started_at": started_at,
+            "last_attempt_started_at": started_at,
+            "resume_count": 0,
             "batches": [],
             "completed": bool(args.dry_run or not ordered),
         }
+        refresh_target_counts(fresh_report)
+        if fresh_report["completed"]:
+            fresh_report["completed_at"] = started_at
+
+        stage = "load_checkpoint"
+        existing: dict[str, Any] | None = None
+        if args.report.exists() and not args.dry_run:
+            try:
+                loaded = json.loads(args.report.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise MigrationError("existing migration report is unreadable") from error
+            if isinstance(loaded, dict) and loaded.get("dry_run") is True:
+                existing = None
+            else:
+                existing = validate_resume_report(loaded, expected, ordered_batches)
+        if existing is None:
+            report = fresh_report
+        else:
+            report = existing
+            report["last_attempt_started_at"] = started_at
+            report["resume_count"] = int(report.get("resume_count", 0)) + 1
+            report.pop("failed_at", None)
+            report.pop("failure", None)
+            if report.get("completed") is True:
+                atomic_json(args.report, report)
+                print(json.dumps(report, indent=2, sort_keys=True))
+                return 0
+            report["completed"] = False
         atomic_json(args.report, report)
         if args.dry_run:
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0
         if os.environ.get("TREER_PLUGIN_BROKER_SOCKET"):
             raise MigrationError("migration must use an operator CLI outside a plugin broker")
-        for index, batch in enumerate(batches(ordered, args.batch_size)):
-            operation_id = f"mailmig-{checksum[:20]}-{index:06d}"
+        for index, batch in enumerate(ordered_batches):
+            if index < len(report["batches"]):
+                continue
+            stage = "import_batch"
+            active_batch = index
+            batch_started_at = timestamp()
+            batch_operation_id = operation_id(checksum, index)
             response = run_import(
-                args.treer, args.workspace, args.url, operation_id, batch
+                args.treer,
+                args.workspace,
+                args.url,
+                batch_operation_id,
+                batch,
             )
             report["batches"].append(
                 {
                     "index": index,
-                    "operation_id": operation_id,
+                    "operation_id": batch_operation_id,
                     "message_count": len(batch),
                     "imported": response["imported"],
                     "existing": response["existing"],
                     "first_message_id": batch[0]["message_id"],
                     "last_message_id": batch[-1]["message_id"],
+                    "started_at": batch_started_at,
+                    "completed_at": timestamp(),
                 }
             )
+            refresh_target_counts(report)
             atomic_json(args.report, report)
+            active_batch = None
+        if report["target_counts"]["processed_messages"] != len(ordered):
+            raise MigrationError("completed batch counts do not match the source")
         report["completed"] = True
+        report["completed_at"] = timestamp()
+        report.pop("failed_at", None)
+        report.pop("failure", None)
         atomic_json(args.report, report)
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     except MigrationError as error:
+        if report is not None and not args.dry_run:
+            report["completed"] = False
+            report["failed_at"] = timestamp()
+            report["failure"] = {
+                "code": "mail_migration_failed",
+                "stage": stage,
+            }
+            if active_batch is not None:
+                report["failure"]["batch_index"] = active_batch
+            atomic_json(args.report, report)
         print(json.dumps({"error": {"code": "mail_migration_failed", "message": str(error)}}), file=sys.stderr)
         return 1
 

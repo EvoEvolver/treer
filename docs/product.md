@@ -109,5 +109,7 @@ and owns detailed sequencing. At the product level, the priorities remain:
    the current Host for personal and lab use.
 
 Subscription credentials are not currently isolated per platform user, and
-Treer does not implement billing. See [Security model](security.md) for the
+Treer does not implement billing. Core Messages are text-only and do not yet
+have operator-facing retention, export, or deletion policy. Plugin state has no
+automatic cross-version migration. See [Security model](security.md) for the
 credential risk and [Architecture](architecture.md) for the runtime boundary.

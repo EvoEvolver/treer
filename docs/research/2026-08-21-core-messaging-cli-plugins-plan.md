@@ -1,8 +1,8 @@
 # Core messaging and CLI-only channel plugins execution plan
 
-- Status: completed
+- Status: in progress
 - Approved direction: 2026-08-21
-- Completion date: 2026-08-21
+- Completion audit reopened: 2026-08-21
 - Base revision: `1ba449b39be22c1f6da7f9bd56fbd8f6f5d3caac`
 - Implementation and E2E revision: `c27fda5`
 - Completion-gate revision: `07e02cd`
@@ -872,17 +872,17 @@ removal followed migration coverage.
 - [x] Product owner approved the Core Message / channel plugin boundary.
 - [x] Source baseline and current Mail/DAG/policy/CLI gaps reviewed.
 - [x] Execution plan indexed and target roadmap aligned.
-- [x] Phase 0 contracts and legacy fixtures complete.
-- [x] Phase 1 Core Message persistence and protocols complete.
-- [x] Phase 2 Message CLI and embedded skill complete.
-- [x] Phase 3 plugin runner, broker, and human sessions complete.
-- [x] Phase 4 Mail plugin and migration complete.
-- [x] Phase 5 Telegram plugin complete.
-- [x] Phase 6 end-to-end, rollout, documentation, and full gate complete.
+- [ ] Phase 0 contracts and legacy fixtures pass the completion audit.
+- [ ] Phase 1 Core Message persistence and protocols pass the completion audit.
+- [ ] Phase 2 Message CLI and embedded skill pass the completion audit.
+- [ ] Phase 3 plugin runner, broker, and human sessions pass the completion audit.
+- [ ] Phase 4 Mail plugin and migration pass the completion audit.
+- [ ] Phase 5 Telegram plugin passes the completion audit.
+- [ ] Phase 6 end-to-end, rollout, documentation, and full gate pass the completion audit.
 
-## Completion evidence and residual limits
+## Delivered baseline and open completion audit
 
-The delivered release slice moves canonical Message, delivery, ordered context
+The delivered baseline moves canonical Message, delivery, ordered context
 DAG, policy, idempotency, acknowledgement, import, and body-free transactional
 outbox state into Proxy PostgreSQL. It exposes `treer message`, adds the
 manifest-limited plugin runner and broker, removes the Rust Mail workspace
@@ -912,8 +912,8 @@ The environment did not provide the `just` executable, so the commands listed in
 the `just check` recipe were executed directly against its PostgreSQL test
 container rather than through the recipe wrapper.
 
-The broader acceptance matrix remains useful future work, but these items are
-not claimed by the completed slice:
+The following gaps prevent the plan from being marked complete and are active
+work rather than deferred completion criteria:
 
 - Mail compatibility is exercised at HTTP/API level, not through a real desktop
   or mobile browser, and there is no visual regression suite.

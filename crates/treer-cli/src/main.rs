@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command as TokioCommand;
@@ -49,8 +49,11 @@ const PLUGIN_BROKER_TOKEN_ENV: &str = "TREER_PLUGIN_BROKER_TOKEN";
 const PLUGIN_HUMAN_SESSION_ENV: &str = "TREER_PLUGIN_HUMAN_SESSION";
 const INTERNAL_PLUGIN_ID_ENV: &str = "TREER_INTERNAL_PLUGIN_ID";
 const INTERNAL_PLUGIN_SESSION_ENV: &str = "TREER_INTERNAL_PLUGIN_SESSION";
+const PLUGIN_EXECUTION_ENABLED_ENV: &str = "TREER_ENABLE_PLUGIN_EXECUTION";
 const PLUGIN_BROKER_MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const PLUGIN_BROKER_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const PLUGIN_BROKER_MAX_CONCURRENCY: usize = 8;
+const PLUGIN_BROKER_MAX_RUNTIME_SECONDS: u64 = 120;
 const PLUGIN_PACKAGE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const PLUGIN_PACKAGE_MAX_FILES: usize = 4_096;
 const IGNORED_PLUGIN_DIRECTORIES: &[&str] = &[".git", "__pycache__", "node_modules", "target"];
@@ -261,6 +264,8 @@ enum PluginCommand {
     List,
     #[command(about = "Inspect the selected installed version of a plugin")]
     Inspect { id: String },
+    #[command(about = "Uninstall every local package version after revoking Core sessions")]
+    Uninstall { id: String },
     #[command(about = "Run a plugin in the foreground through a command-limited broker")]
     Run {
         id: String,
@@ -757,6 +762,33 @@ async fn run_cli() -> anyhow::Result<()> {
         .context("a command is required; run `treer --help` for usage")?;
     let command = match command {
         Command::Plugin {
+            command: PluginCommand::Uninstall { id },
+        } => {
+            validate_plugin_id(&id)?;
+            let client = ApiClient::new(
+                resolve_server_url(args.url.clone(), &args.workspace)?,
+                &args.workspace,
+            );
+            let revocation = client
+                .value(
+                    Method::POST,
+                    &format!("api/plugins/{}/uninstall", path_segment(&id)),
+                    None,
+                )
+                .await?;
+            let removed = uninstall_plugin_package(&id)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "plugin_id": id,
+                    "removed_versions": removed,
+                    "state_preserved": true,
+                    "core": revocation
+                }))?
+            );
+            return Ok(());
+        }
+        Command::Plugin {
             command: PluginCommand::Auth { command },
         } => {
             let client = ApiClient::new(
@@ -1249,7 +1281,11 @@ async fn run_plugin_command(
             let plugin = load_installed_plugin(&id)?;
             Ok(json!({"plugin": plugin}))
         }
+        PluginCommand::Uninstall { .. } => {
+            unreachable!("plugin uninstall revokes Core sessions before local removal")
+        }
         PluginCommand::Run { id, config } => {
+            require_plugin_execution_enabled()?;
             let package = load_installed_plugin(&id)?;
             let server_url = resolve_server_url(configured_url, workspace)?;
             let status = run_plugin_foreground(&package, &config, workspace, &server_url).await?;
@@ -1262,6 +1298,45 @@ async fn run_plugin_command(
         PluginCommand::Auth { .. } => {
             unreachable!("plugin auth commands use the brokered API client")
         }
+    }
+}
+
+fn require_plugin_execution_enabled() -> anyhow::Result<()> {
+    let configured = match env::var(PLUGIN_EXECUTION_ENABLED_ENV) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(CliFailure {
+                code: "plugin_execution_gate_invalid".to_string(),
+                message: format!("{PLUGIN_EXECUTION_ENABLED_ENV} must be valid UTF-8"),
+            }
+            .into())
+        }
+    };
+    let enabled = parse_plugin_execution_gate(configured.as_deref())?;
+    if enabled {
+        Ok(())
+    } else {
+        Err(CliFailure {
+            code: "plugin_execution_disabled".to_string(),
+            message: format!(
+                "plugin execution is disabled; set {PLUGIN_EXECUTION_ENABLED_ENV}=true after rollout prerequisites pass"
+            ),
+        }
+        .into())
+    }
+}
+
+fn parse_plugin_execution_gate(value: Option<&str>) -> Result<bool, CliFailure> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "true" | "yes" | "on") => Ok(true),
+        None | Some("0" | "false" | "no" | "off") => Ok(false),
+        Some(_) => Err(CliFailure {
+            code: "plugin_execution_gate_invalid".to_string(),
+            message: format!(
+                "{PLUGIN_EXECUTION_ENABLED_ENV} must be true/false, 1/0, yes/no, or on/off"
+            ),
+        }),
     }
 }
 
@@ -1946,6 +2021,91 @@ fn load_installed_plugin(id: &str) -> anyhow::Result<ValidatedPluginPackage> {
     Ok(package)
 }
 
+fn uninstall_plugin_package(id: &str) -> anyhow::Result<Vec<String>> {
+    let root = plugin_data_root()?;
+    uninstall_plugin_package_from(id, &root)
+}
+
+fn uninstall_plugin_package_from(id: &str, root: &Path) -> anyhow::Result<Vec<String>> {
+    validate_plugin_id(id)?;
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("plugin data root {} does not exist", root.display()))?;
+    let id_root = root.join(id);
+    let metadata =
+        fs::symlink_metadata(&id_root).with_context(|| format!("plugin {id} is not installed"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("installed plugin path is not a real directory");
+    }
+    let canonical = id_root.canonicalize()?;
+    if canonical.parent() != Some(root.as_path()) {
+        bail!("installed plugin path escaped the plugin data root");
+    }
+    let mut versions = fs::read_dir(&canonical)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let version = entry.file_name().to_string_lossy().to_string();
+            parse_semver(&version).ok().map(|_| version)
+        })
+        .collect::<Vec<_>>();
+    if versions.is_empty() {
+        bail!("plugin {id} has no installed versions");
+    }
+    versions.sort_by_key(|version| parse_semver(version).unwrap_or_default());
+    make_plugin_tree_removable(&canonical)?;
+    fs::remove_dir_all(&canonical)
+        .with_context(|| format!("failed to remove installed plugin {id}"))?;
+    Ok(versions)
+}
+
+fn make_plugin_tree_removable(root: &Path) -> anyhow::Result<()> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut index = 0;
+    while index < directories.len() {
+        for entry in fs::read_dir(&directories[index])? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                bail!("installed plugin tree contains a symlink");
+            }
+            if metadata.is_dir() {
+                directories.push(path);
+            } else if metadata.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+                }
+                #[cfg(not(unix))]
+                {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_readonly(false);
+                    fs::set_permissions(path, permissions)?;
+                }
+            } else {
+                bail!("installed plugin tree contains a non-regular file");
+            }
+        }
+        index += 1;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for directory in &directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    for directory in &directories {
+        let mut permissions = fs::metadata(directory)?.permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(directory, permissions)?;
+    }
+    Ok(())
+}
+
 fn installed_summary(package: &ValidatedPluginPackage) -> InstalledPluginSummary {
     InstalledPluginSummary {
         id: package.manifest.id.clone(),
@@ -2011,7 +2171,7 @@ async fn run_plugin_foreground(
         workspace: Arc::from(workspace),
         server_url: Arc::from(server_url.as_str()),
         executable: Arc::new(executable.clone()),
-        concurrency: Arc::new(Semaphore::new(8)),
+        concurrency: Arc::new(Semaphore::new(PLUGIN_BROKER_MAX_CONCURRENCY)),
     };
 
     let argv = &package.manifest.entrypoint.argv;
@@ -2235,6 +2395,22 @@ async fn execute_brokered_cli(
     context: &PluginBrokerContext,
     request: PluginBrokerRequest,
 ) -> anyhow::Result<PluginBrokerResponse> {
+    execute_brokered_cli_with_limits(
+        context,
+        request,
+        Duration::from_secs(PLUGIN_BROKER_MAX_RUNTIME_SECONDS),
+        PLUGIN_BROKER_MAX_OUTPUT_BYTES,
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn execute_brokered_cli_with_limits(
+    context: &PluginBrokerContext,
+    request: PluginBrokerRequest,
+    runtime_limit: Duration,
+    output_limit: usize,
+) -> anyhow::Result<PluginBrokerResponse> {
     let mut command = TokioCommand::new(context.executable.as_ref());
     command
         .arg("--url")
@@ -2271,19 +2447,46 @@ async fn execute_brokered_cli(
         }
         stdin.shutdown().await?;
     }
-    let output = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture brokered command stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture brokered command stderr")?;
+    let captured = async {
+        let (status, stdout, stderr) = tokio::try_join!(
+            async { child.wait().await.map_err(anyhow::Error::from) },
+            read_broker_output(stdout, output_limit),
+            read_broker_output(stderr, output_limit),
+        )?;
+        Ok::<_, anyhow::Error>((status, stdout, stderr))
+    };
+    let (status, stdout, stderr) = tokio::time::timeout(runtime_limit, captured)
         .await
         .map_err(|_| anyhow::anyhow!("brokered treer command exceeded its runtime limit"))??;
-    if output.stdout.len() > PLUGIN_BROKER_MAX_OUTPUT_BYTES
-        || output.stderr.len() > PLUGIN_BROKER_MAX_OUTPUT_BYTES
-    {
+    Ok(PluginBrokerResponse {
+        exit_code: status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    })
+}
+
+#[cfg(unix)]
+async fn read_broker_output<R>(reader: R, limit: usize) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    reader
+        .take((limit + 1) as u64)
+        .read_to_end(&mut output)
+        .await?;
+    if output.len() > limit {
         bail!("brokered treer command exceeded its output limit");
     }
-    Ok(PluginBrokerResponse {
-        exit_code: output.status.code().unwrap_or(1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    Ok(output)
 }
 
 fn plugin_command_capabilities(argv: &[String]) -> anyhow::Result<Vec<&'static str>> {
@@ -3212,6 +3415,26 @@ mod tests {
         }
     }
 
+    fn write_test_plugin(path: &Path, manifest: &PluginManifest) {
+        fs::create_dir_all(path).expect("create test plugin package");
+        fs::write(
+            path.join("plugin.json"),
+            serde_json::to_vec_pretty(manifest).expect("encode test manifest"),
+        )
+        .expect("write test manifest");
+        let script = manifest
+            .entrypoint
+            .argv
+            .iter()
+            .find(|value| Path::new(value).extension().is_some())
+            .expect("test manifest script");
+        let script = path.join(script);
+        if let Some(parent) = script.parent() {
+            fs::create_dir_all(parent).expect("create test script parent");
+        }
+        fs::write(script, "#!/bin/sh\nexit 0\n").expect("write test plugin script");
+    }
+
     #[test]
     fn key_names_encode_to_terminal_sequences() {
         assert_eq!(
@@ -3569,6 +3792,62 @@ mod tests {
     }
 
     #[test]
+    fn message_and_plugin_help_match_the_v1_contract_fixtures() {
+        let message = Args::try_parse_from(["treer", "message", "--help"])
+            .expect_err("help exits through clap")
+            .to_string();
+        let plugin = Args::try_parse_from(["treer", "plugin", "--help"])
+            .expect_err("help exits through clap")
+            .to_string();
+        assert_eq!(
+            message,
+            include_str!("../tests/fixtures/message-help-v1.txt")
+        );
+        assert_eq!(plugin, include_str!("../tests/fixtures/plugin-help-v1.txt"));
+    }
+
+    #[test]
+    fn message_and_plugin_limits_match_the_v1_contract_fixture() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/runtime-limits-v1.json"))
+                .expect("valid limits fixture");
+        assert_eq!(
+            fixture,
+            json!({
+                "schema_version": 1,
+                "message": {
+                    "body_bytes": treer_protocol::MAX_MESSAGE_BODY_BYTES,
+                    "contexts": treer_protocol::MAX_MESSAGE_CONTEXTS,
+                    "external_metadata_entries": treer_protocol::MAX_MESSAGE_EXTERNAL_METADATA_ENTRIES,
+                    "idempotency_key_bytes": treer_protocol::MAX_MESSAGE_IDEMPOTENCY_KEY_BYTES,
+                    "page_size": treer_protocol::MAX_MESSAGE_PAGE_SIZE,
+                    "recipients": treer_protocol::MAX_MESSAGE_RECIPIENTS,
+                    "wait_milliseconds": treer_protocol::MAX_MESSAGE_WAIT_MILLISECONDS,
+                },
+                "plugin": {
+                    "broker_concurrency": PLUGIN_BROKER_MAX_CONCURRENCY,
+                    "broker_output_bytes": PLUGIN_BROKER_MAX_OUTPUT_BYTES,
+                    "broker_request_bytes": PLUGIN_BROKER_MAX_REQUEST_BYTES,
+                    "broker_runtime_seconds": PLUGIN_BROKER_MAX_RUNTIME_SECONDS,
+                    "manifest_bytes": treer_protocol::MAX_PLUGIN_MANIFEST_BYTES,
+                    "package_bytes": PLUGIN_PACKAGE_MAX_BYTES,
+                    "package_files": PLUGIN_PACKAGE_MAX_FILES,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn process_fixture_plugin_package_matches_the_manifest_contract() {
+        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/minimal-plugin");
+        let validated = validate_plugin_package(&package).expect("validate fixture plugin");
+        assert_eq!(validated.manifest.id, "contract-fixture");
+        assert_eq!(validated.manifest.capabilities, ["message.receive"]);
+        assert_eq!(validated.manifest.configuration, ["FIXTURE_CHANNEL"]);
+        assert_eq!(validated.manifest.secrets, ["FIXTURE_SECRET"]);
+    }
+
+    #[test]
     fn plugin_broker_maps_commands_to_declared_capabilities() {
         assert_eq!(
             plugin_command_capabilities(&[
@@ -3638,6 +3917,20 @@ mod tests {
     }
 
     #[test]
+    fn plugin_execution_requires_an_explicit_valid_rollout_gate() {
+        assert!(!parse_plugin_execution_gate(None).expect("absent gate"));
+        for disabled in ["0", "false", "NO", "off"] {
+            assert!(!parse_plugin_execution_gate(Some(disabled)).expect("disabled gate"));
+        }
+        for enabled in ["1", "true", "YES", " on "] {
+            assert!(parse_plugin_execution_gate(Some(enabled)).expect("enabled gate"));
+        }
+        let invalid = parse_plugin_execution_gate(Some("eventually"))
+            .expect_err("ambiguous values must not enable plugin execution");
+        assert_eq!(invalid.code, "plugin_execution_gate_invalid");
+    }
+
+    #[test]
     fn plugin_manifests_cannot_reinject_runtime_credentials_or_paths() {
         let root = std::env::temp_dir().join(format!(
             "treer-plugin-manifest-test-{}",
@@ -3659,6 +3952,93 @@ mod tests {
         invalid_os.entrypoint.operating_systems = vec!["freebsd".to_string()];
         assert!(validate_plugin_manifest(&invalid_os, &root).is_err());
         fs::remove_dir(&root).expect("remove manifest test directory");
+    }
+
+    #[test]
+    fn plugin_manifest_failure_matrix_is_rejected_before_execution() {
+        let root = std::env::temp_dir().join(format!(
+            "treer-plugin-failure-matrix-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&root).expect("create failure matrix root");
+
+        let valid = root.join("valid");
+        write_test_plugin(&valid, &test_plugin_manifest());
+        validate_plugin_package(&valid).expect("baseline package is valid");
+
+        let malformed = root.join("malformed");
+        fs::create_dir(&malformed).expect("create malformed package");
+        fs::write(malformed.join("plugin.json"), b"{not-json").expect("write malformed manifest");
+        assert!(validate_plugin_package(&malformed).is_err());
+
+        let unknown_version = root.join("unknown-version");
+        let mut manifest = test_plugin_manifest();
+        manifest.schema_version += 1;
+        write_test_plugin(&unknown_version, &manifest);
+        assert!(validate_plugin_package(&unknown_version).is_err());
+
+        let duplicate_id = root.join("duplicate-id");
+        write_test_plugin(&duplicate_id, &test_plugin_manifest());
+        let duplicate_json = fs::read_to_string(duplicate_id.join("plugin.json"))
+            .expect("read duplicate manifest source")
+            .replacen(
+                "\"id\": \"telegram\",",
+                "\"id\": \"telegram\",\n  \"id\": \"telegram-copy\",",
+                1,
+            );
+        fs::write(duplicate_id.join("plugin.json"), duplicate_json)
+            .expect("write duplicate ID manifest");
+        assert!(validate_plugin_package(&duplicate_id).is_err());
+
+        let unknown_field = root.join("unknown-field");
+        write_test_plugin(&unknown_field, &test_plugin_manifest());
+        let mut value = serde_json::to_value(test_plugin_manifest()).expect("manifest value");
+        value
+            .as_object_mut()
+            .expect("manifest object")
+            .insert("private_api".to_string(), json!(true));
+        fs::write(
+            unknown_field.join("plugin.json"),
+            serde_json::to_vec(&value).expect("encode unknown field"),
+        )
+        .expect("write unknown field manifest");
+        assert!(validate_plugin_package(&unknown_field).is_err());
+
+        let unsafe_path = root.join("unsafe-path");
+        let mut manifest = test_plugin_manifest();
+        manifest.entrypoint.argv = vec!["sh".to_string(), "../escape.sh".to_string()];
+        fs::create_dir(&unsafe_path).expect("create unsafe path package");
+        fs::write(
+            unsafe_path.join("plugin.json"),
+            serde_json::to_vec(&manifest).expect("encode unsafe manifest"),
+        )
+        .expect("write unsafe manifest");
+        assert!(validate_plugin_package(&unsafe_path).is_err());
+
+        let duplicate_capability = root.join("duplicate-capability");
+        let mut manifest = test_plugin_manifest();
+        manifest.capabilities = vec!["message.send".to_string(), "message.send".to_string()];
+        write_test_plugin(&duplicate_capability, &manifest);
+        assert!(validate_plugin_package(&duplicate_capability).is_err());
+
+        let oversized_manifest = root.join("oversized-manifest");
+        fs::create_dir(&oversized_manifest).expect("create oversized manifest package");
+        fs::write(
+            oversized_manifest.join("plugin.json"),
+            vec![b' '; treer_protocol::MAX_PLUGIN_MANIFEST_BYTES + 1],
+        )
+        .expect("write oversized manifest");
+        assert!(validate_plugin_package(&oversized_manifest).is_err());
+
+        let oversized_package = root.join("oversized-package");
+        write_test_plugin(&oversized_package, &test_plugin_manifest());
+        fs::File::create(oversized_package.join("oversized.bin"))
+            .expect("create sparse oversized file")
+            .set_len(PLUGIN_PACKAGE_MAX_BYTES + 1)
+            .expect("size sparse oversized file");
+        assert!(validate_plugin_package(&oversized_package).is_err());
+
+        fs::remove_dir_all(&root).expect("remove failure matrix root");
     }
 
     #[cfg(unix)]
@@ -3716,6 +4096,94 @@ mod tests {
         fs::remove_dir(&root).expect("remove broker test directory");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_broker_enforces_request_concurrency_runtime_and_output_limits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "treer-plugin-broker-limits-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&root).expect("create broker limits root");
+        let context = |executable: PathBuf, concurrency: usize| PluginBrokerContext {
+            plugin_id: "fixture".to_string(),
+            token: Arc::from("test-token"),
+            capabilities: Arc::new(HashSet::from(["message.read".to_string()])),
+            workspace: Arc::from("workspace-a"),
+            server_url: Arc::from("http://127.0.0.1:1/"),
+            executable: Arc::new(executable),
+            concurrency: Arc::new(Semaphore::new(concurrency)),
+        };
+        let request = || PluginBrokerRequest {
+            token: "test-token".to_string(),
+            argv: vec!["message".to_string(), "list".to_string()],
+            stdin: None,
+            human_session: None,
+        };
+
+        let slow = root.join("slow.sh");
+        fs::write(&slow, "#!/bin/sh\nsleep 1\n").expect("write slow command");
+        fs::set_permissions(&slow, fs::Permissions::from_mode(0o700))
+            .expect("make slow command executable");
+        let runtime = execute_brokered_cli_with_limits(
+            &context(slow, 1),
+            request(),
+            Duration::from_millis(10),
+            1_024,
+        )
+        .await
+        .expect_err("runtime limit");
+        assert!(runtime.to_string().contains("runtime limit"));
+
+        let loud = root.join("loud.sh");
+        fs::write(&loud, "#!/bin/sh\nprintf '0123456789abcdef'\n").expect("write loud command");
+        fs::set_permissions(&loud, fs::Permissions::from_mode(0o700))
+            .expect("make loud command executable");
+        let output = execute_brokered_cli_with_limits(
+            &context(loud, 1),
+            request(),
+            Duration::from_secs(1),
+            8,
+        )
+        .await
+        .expect_err("output limit");
+        assert!(output.to_string().contains("output limit"));
+
+        let (server, _client) = UnixStream::pair().expect("create concurrency socket pair");
+        let concurrency = handle_plugin_broker_connection(
+            server,
+            context(std::env::current_exe().expect("test executable"), 0),
+        )
+        .await
+        .expect_err("concurrency limit");
+        assert!(concurrency.to_string().contains("concurrency limit"));
+
+        let socket_path = root.join("oversized.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind oversized request socket");
+        let oversized_context = context(std::env::current_exe().expect("test executable"), 1);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept oversized request");
+            handle_plugin_broker_connection(stream, oversized_context).await
+        });
+        let mut client = UnixStream::connect(&socket_path)
+            .await
+            .expect("connect oversized request");
+        client
+            .write_all(&vec![b'x'; PLUGIN_BROKER_MAX_REQUEST_BYTES + 1])
+            .await
+            .expect("write oversized request");
+        client.shutdown().await.expect("finish oversized request");
+        let oversized = server
+            .await
+            .expect("oversized server task")
+            .expect_err("request size limit");
+        assert!(oversized.to_string().contains("size limit"));
+
+        fs::remove_file(&socket_path).ok();
+        fs::remove_dir_all(&root).expect("remove broker limits root");
+    }
+
     #[test]
     fn plugin_install_is_data_only_and_immutable() {
         let root = std::env::temp_dir().join(format!(
@@ -3757,6 +4225,10 @@ mod tests {
         let result = install_plugin_package_into(&package, &installed).expect("install plugin");
         assert_eq!(result.id, "fixture");
         assert!(
+            install_plugin_package_into(&package, &installed).is_err(),
+            "the same plugin ID and version must not replace an immutable install"
+        );
+        assert!(
             !marker.exists(),
             "installation must not execute the entrypoint"
         );
@@ -3768,21 +4240,18 @@ mod tests {
             .expect("installed script metadata")
             .permissions()
             .readonly());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for directory in [
-                installed.join("fixture/0.1.0"),
-                installed.join("fixture"),
-                installed.clone(),
-            ] {
-                if directory.exists() {
-                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
-                        .expect("make test directory removable");
-                }
-            }
-        }
+        let state = root.join("state/workspace-a/fixture/0.1.0/state.sqlite3");
+        fs::create_dir_all(state.parent().expect("state parent")).expect("create plugin state");
+        fs::write(&state, b"preserved state").expect("write plugin state");
+        assert_eq!(
+            uninstall_plugin_package_from("fixture", &installed).expect("uninstall plugin"),
+            ["0.1.0"]
+        );
+        assert!(!installed.join("fixture").exists());
+        assert_eq!(
+            fs::read(&state).expect("read preserved state"),
+            b"preserved state"
+        );
         fs::remove_dir_all(&root).expect("remove install test directory");
     }
 

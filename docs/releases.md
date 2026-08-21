@@ -81,6 +81,11 @@ source commit as its compatible CLI, build Mail's static assets, validate the
 package, and retain the source revision in deployment records. Do not describe a
 binary release manifest as covering plugin bytes when it does not.
 
+`treer plugin uninstall <id>` revokes matching Core human sessions and removes
+all local package versions, but it preserves the versioned state tree. Back up
+and remove that state through a separate operator procedure. There is no
+automatic state migration or signed plugin distribution in this release flow.
+
 ## Canary release
 
 The operator needs authenticated Railway and Wrangler CLIs, Docker, `just`,
@@ -109,6 +114,13 @@ service before each build. The Docker builder embeds that candidate commit in
 the Proxy-bundled Host, Controller, and CLI artifacts; it is release metadata,
 not a mutable runtime version override.
 
+Canary and Production Proxy deployment scripts explicitly set
+`TREER_ENABLE_CORE_MESSAGES=true` and
+`TREER_ENABLE_PLUGIN_SESSIONS=true`. Both default off outside those scripts.
+`TREER_ENABLE_PLUGIN_EXECUTION=true` is machine-local CLI configuration and must
+be set separately by each bridge process supervisor after its package, config,
+secret, state backup, and Policy are ready.
+
 ## Production promotion
 
 Check out the same clean commit and retain its `.treer/releases` directory,
@@ -134,8 +146,9 @@ branch.
   later release removes an API.
 - Use expand-first PostgreSQL changes so old and new Proxy replicas can overlap.
 - Before a legacy Mail cutover, back up its SQLite/PostgreSQL database, stop the
-  Rust Mail writer, dry-run and execute `plugins/mail/migrate.py`, compare the
-  migration report, install the Mail plugin, and require users to log in again.
+  Rust Mail writer, dry-run and execute `plugins/mail/migrate.py` with a required
+  `--actor` identity, compare and retain the checksum/checkpoint report, install
+  the Mail plugin, and require users to log in again.
   Rollback to the old writer is safe only before any new Core Message write;
   after that point, repair forward and keep Core authoritative.
 - Back up each plugin's versioned state before replacing or moving it. Telegram
@@ -145,6 +158,11 @@ branch.
 - Telegram's Bot API does not accept a client idempotency key. A lost successful
   send response can produce a visible duplicate on retry; rollback and release
   notes must not claim external exactly-once delivery.
+- To stop channel traffic, first stop bridge processes or remove their local
+  plugin-execution gate, then revoke plugin sessions. Do not turn off Core
+  Message routes while a bridge still has an unacknowledged external delivery.
+  Disabling plugin-session creation/exchange leaves revocation and uninstall
+  available; none of the gates deletes Message rows or plugin state.
 - Before the first stable release, a Controller protocol bump may deliberately
   require a coordinated Proxy rollout and machine re-enrollment. Record that
   boundary in the release notes and reset Canary as one unit. Once stable

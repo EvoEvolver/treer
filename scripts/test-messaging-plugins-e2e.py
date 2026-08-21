@@ -30,6 +30,7 @@ PROXY = ROOT / "target/debug/treer-proxy"
 CONTROLLER = ROOT / "target/debug/treer-agent-server"
 HOST = ROOT / "target/debug/treer-agent-host"
 DEFAULT_DATABASE_URL = "postgres://treer:treer@127.0.0.1:55432/treer_test"
+DEFAULT_NATS_IMAGE = "nats:2.14.4-alpine3.22"
 PROCESS_TIMEOUT = 30
 WAIT_TIMEOUT = 30.0
 
@@ -257,6 +258,52 @@ class TemporaryDatabases:
                 print(f"e2e: warning: failed to drop temporary database {name}: {error}", file=sys.stderr)
 
 
+class NatsFixture:
+    def __init__(self, configured_url: str | None) -> None:
+        self.url = configured_url
+        self.container_name: str | None = None
+
+    def start(self) -> str:
+        if self.url is None:
+            require(shutil.which("docker") is not None, "Docker is required for the NATS E2E fixture")
+            port = free_port()
+            self.container_name = f"treer-nats-e2e-{uuid.uuid4().hex[:12]}"
+            command(
+                [
+                    "docker",
+                    "run",
+                    "--detach",
+                    "--rm",
+                    "--name",
+                    self.container_name,
+                    "--publish",
+                    f"127.0.0.1:{port}:4222",
+                    DEFAULT_NATS_IMAGE,
+                    "-js",
+                ],
+                timeout=180,
+            )
+            self.url = f"nats://127.0.0.1:{port}"
+        wait_for(self.healthy, "NATS JetStream")
+        return self.url
+
+    def healthy(self) -> bool:
+        require(self.url is not None, "NATS fixture has no URL")
+        parsed = urllib.parse.urlsplit(self.url)
+        require(parsed.hostname is not None, f"NATS URL has no host: {self.url}")
+        with socket.create_connection((parsed.hostname, parsed.port or 4222), timeout=1) as connection:
+            return connection.recv(512).startswith(b"INFO ")
+
+    def stop(self) -> None:
+        if self.container_name is not None:
+            command(
+                ["docker", "stop", "--time", "3", self.container_name],
+                timeout=15,
+                check=False,
+            )
+            self.container_name = None
+
+
 class AgentDriver:
     def __init__(self, control_dir: Path, agent: dict[str, Any]) -> None:
         self.control_dir = control_dir
@@ -482,7 +529,10 @@ class FakeTelegram:
         self.lock = threading.Lock()
         self.updates: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
-        self.next_message_id = 101
+        # Telegram assigns unique message IDs across user and bot messages in a
+        # chat. Keep fake bot IDs away from the fixture's inbound 100-series so
+        # the harness cannot manufacture a collision the real API forbids.
+        self.next_message_id = 1_000
         state = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -570,6 +620,45 @@ class FakeTelegram:
                 (dict(item) for item in self.sent if item.get("payload", {}).get("text") == text),
                 None,
             )
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+class ControlPlaneAppFixture:
+    def __init__(self, port: int, proxy_url: str) -> None:
+        index_path = ROOT / "web/dist/index.html"
+        require(index_path.is_file(), "browser fixture requires a built web/dist/index.html")
+        index = index_path.read_bytes()
+        runtime_config = json.dumps({"proxy_url": proxy_url}, separators=(",", ":")).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                path = urllib.parse.urlsplit(self.path).path
+                if path == "/config.json":
+                    self._reply(200, "application/json; charset=utf-8", runtime_config)
+                elif path == "/health":
+                    self._reply(200, "application/json; charset=utf-8", b'{"status":"ok"}')
+                else:
+                    self._reply(200, "text/html; charset=utf-8", index)
+
+            def _reply(self, status: int, content_type: str, body: bytes) -> None:
+                self.send_response(status)
+                self.send_header("content-type", content_type)
+                self.send_header("content-length", str(len(body)))
+                self.send_header("cache-control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *args: object) -> None:
+                return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{port}/"
 
     def stop(self) -> None:
         self.server.shutdown()
@@ -683,12 +772,29 @@ def driver_main(control_dir: Path) -> int:
 
 
 class Harness:
-    def __init__(self, root: Path, database_url: str) -> None:
+    def __init__(
+        self,
+        root: Path,
+        database_url: str,
+        nats_url: str | None,
+        browser_fixture: Path | None,
+    ) -> None:
         self.root = root
         self.databases = TemporaryDatabases(database_url)
+        self.nats = NatsFixture(nats_url)
         self.proxy_port = free_port()
+        self.secondary_proxy_port = free_port()
         self.mail_port = free_port()
+        self.app_port = free_port()
         self.proxy_url = f"http://127.0.0.1:{self.proxy_port}/"
+        self.secondary_proxy_url = f"http://127.0.0.1:{self.secondary_proxy_port}/"
+        self.app_url = f"http://127.0.0.1:{self.app_port}/"
+        suffix = uuid.uuid4().hex
+        self.nats_stream = f"TREER_E2E_{suffix.upper()}"
+        self.nats_event_prefix = f"treer.e2e.events.{suffix}"
+        self.nats_cluster_prefix = f"treer.e2e.cluster.{suffix}"
+        self.distributed = False
+        self.browser_fixture = browser_fixture
         self.shared_environment = os.environ.copy()
         self.shared_environment.update(
             {
@@ -697,9 +803,12 @@ class Harness:
                 "XDG_CONFIG_HOME": str(root / "xdg/config"),
                 "XDG_CACHE_HOME": str(root / "xdg/cache"),
                 "TREER_INVITATION_REQUIRED": "false",
+                "TREER_ENABLE_PLUGIN_EXECUTION": "true",
             }
         )
         self.proxy: ManagedProcess | None = None
+        self.secondary_proxy: ManagedProcess | None = None
+        self.app: ControlPlaneAppFixture | None = None
         self.machines: list[MachineStack] = []
         self.telegram: FakeTelegram | None = None
         self.user_headers: dict[str, str] = {}
@@ -708,38 +817,80 @@ class Harness:
         self.workspace_a = f"e2e-a-{uuid.uuid4().hex[:8]}"
         self.workspace_b = f"e2e-b-{uuid.uuid4().hex[:8]}"
 
-    def start_proxy(self) -> None:
+    def proxy_environment(self) -> dict[str, str]:
         environment = dict(self.shared_environment)
         environment.update(
             {
                 "DATABASE_URL": self.databases.core_url,
                 "RUST_LOG": "treer_proxy=info",
+                "TREER_ENABLE_CORE_MESSAGES": "true",
+                "TREER_ENABLE_PLUGIN_SESSIONS": "true",
             }
         )
-        self.proxy = ManagedProcess(
-            "Proxy",
+        if self.distributed:
+            require(self.nats.url is not None, "distributed Proxy requires NATS")
+            environment.update(
+                {
+                    "TREER_NATS_URL": self.nats.url,
+                    "TREER_NATS_STREAM": self.nats_stream,
+                    "TREER_NATS_SUBJECT_PREFIX": self.nats_event_prefix,
+                    "TREER_NATS_CLUSTER_SUBJECT_PREFIX": self.nats_cluster_prefix,
+                }
+            )
+        else:
+            for name in (
+                "TREER_NATS_URL",
+                "TREER_NATS_STREAM",
+                "TREER_NATS_SUBJECT_PREFIX",
+                "TREER_NATS_CLUSTER_SUBJECT_PREFIX",
+            ):
+                environment.pop(name, None)
+        return environment
+
+    def spawn_proxy(self, label: str, port: int, public_url: str, log_name: str) -> ManagedProcess:
+        return ManagedProcess(
+            label,
             [
                 str(PROXY),
                 "--admin-password",
                 "e2e-admin-password",
                 "--listen",
-                f"127.0.0.1:{self.proxy_port}",
+                f"127.0.0.1:{port}",
                 "--public-url",
-                self.proxy_url,
+                public_url,
                 "--app-public-url",
-                self.proxy_url,
+                self.app_url if self.browser_fixture else public_url,
                 "--ingress-public-url",
                 f"http://ingress.test:{self.mail_port}/",
             ],
-            self.root / "logs/proxy.log",
-            env=environment,
+            self.root / "logs" / log_name,
+            env=self.proxy_environment(),
         )
+
+    def start_proxy(self) -> None:
+        self.proxy = self.spawn_proxy("Proxy", self.proxy_port, self.proxy_url, "proxy.log")
         wait_for(self.proxy_healthy, "Proxy health")
 
+    def start_secondary_proxy(self) -> None:
+        self.secondary_proxy = self.spawn_proxy(
+            "Proxy secondary",
+            self.secondary_proxy_port,
+            self.secondary_proxy_url,
+            "proxy-secondary.log",
+        )
+        wait_for(
+            lambda: self.proxy_url_healthy(self.secondary_proxy, self.secondary_proxy_url),
+            "secondary Proxy health",
+        )
+
     def proxy_healthy(self) -> bool:
-        require(self.proxy is not None, "Proxy process is missing")
-        self.proxy.require_running()
-        status, _, value = request_url(urllib.parse.urljoin(self.proxy_url, "api/auth/config"))
+        return self.proxy_url_healthy(self.proxy, self.proxy_url)
+
+    @staticmethod
+    def proxy_url_healthy(process: ManagedProcess | None, url: str) -> bool:
+        require(process is not None, "Proxy process is missing")
+        process.require_running()
+        status, _, value = request_url(urllib.parse.urljoin(url, "api/auth/config"))
         return status == 200 and isinstance(value, dict)
 
     def restart_proxy(self) -> None:
@@ -752,6 +903,26 @@ class Harness:
                 lambda machine=machine: self.controller_reaches_proxy(machine),
                 f"{machine.label} reconnect to Proxy",
             )
+
+    def restart_secondary_proxy(self) -> None:
+        require(self.secondary_proxy is not None, "secondary Proxy process is missing")
+        self.secondary_proxy.stop()
+        self.secondary_proxy = None
+        self.start_secondary_proxy()
+
+    def enable_distributed_proxies(self) -> None:
+        self.nats.start()
+        require(self.proxy is not None, "Proxy process is missing")
+        self.proxy.stop()
+        self.proxy = None
+        self.distributed = True
+        self.start_proxy()
+        for machine in self.machines:
+            wait_for(
+                lambda machine=machine: self.controller_reaches_proxy(machine),
+                f"{machine.label} reconnect to distributed Proxy",
+            )
+        self.start_secondary_proxy()
 
     def controller_reaches_proxy(self, machine: MachineStack) -> bool:
         value = machine.cli_json(self.shared_environment, ["discover"])
@@ -809,10 +980,15 @@ class Harness:
         )
 
     def install_plugins(self) -> None:
-        for plugin in ("mail", "telegram"):
+        packages = {
+            "mail": ROOT / "plugins/mail",
+            "telegram": ROOT / "plugins/telegram",
+            "contract-fixture": ROOT / "crates/treer-cli/tests/fixtures/minimal-plugin",
+        }
+        for plugin, package in packages.items():
             value = json.loads(
                 command(
-                    [str(TREER), "plugin", "install", str(ROOT / "plugins" / plugin)],
+                    [str(TREER), "plugin", "install", str(package)],
                     env=self.shared_environment,
                 ).stdout
             )
@@ -906,6 +1082,13 @@ class Harness:
             )
         )
         self.restart_proxy()
+        wait_for(
+            lambda: sender.run_json([str(TREER), "whoami"])
+            .get("agent", {})
+            .get("agent_id")
+            == sender.agent_id,
+            "sender Agent projection after Proxy restart",
+        )
         replay_after = sender.run_json(
             self.message_cli(
                 "send",
@@ -947,6 +1130,57 @@ class Harness:
         require("message_context_not_found" in str(cross_context.get("stderr")), "wrong context error")
         require(machine_b.healthy(), "workspace B Controller stopped during isolation test")
 
+    def test_plugin_contract_fixture(self, driver: AgentDriver) -> None:
+        log("minimal plugin config, secret, restart, broker command, and direct-mode boundaries")
+        config = self.root / "contract-fixture.json"
+        json_write(config, {"marker": "fixture-v1"})
+        environment = {
+            "FIXTURE_CHANNEL": "fixture-channel",
+            "FIXTURE_SECRET": "fixture-secret",
+        }
+        for expected_run in (1, 2):
+            result = driver.run_json(
+                [
+                    str(TREER),
+                    "plugin",
+                    "run",
+                    "contract-fixture",
+                    "--config",
+                    str(config),
+                ],
+                env=environment,
+            )
+            require(result.get("exit_code") == 0, "fixture plugin did not exit successfully")
+            state_path = wait_for(
+                lambda: next(
+                    iter(
+                        (self.root / "xdg/state/treer/plugins").rglob(
+                            "fixture-state.json"
+                        )
+                    ),
+                    None,
+                ),
+                "fixture plugin state",
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            require(state.get("runs") == expected_run, "fixture plugin state did not survive restart")
+            require(
+                state.get("config_marker") == "fixture-v1"
+                and state.get("configuration") == "fixture-channel",
+                "fixture plugin did not receive declared configuration",
+            )
+            require(
+                state.get("secret_sha256")
+                == hashlib.sha256(b"fixture-secret").hexdigest(),
+                "fixture plugin did not receive the declared secret",
+            )
+            require(
+                state.get("allowed_command") == "message.receive"
+                and state.get("undeclared_error") == "plugin_command_denied"
+                and state.get("direct_override_error") == "plugin_command_denied",
+                "fixture plugin escaped its command-limited broker",
+            )
+
     def create_legacy_sqlite(self, path: Path, workspace_id: str) -> None:
         sql = (ROOT / "plugins/mail/tests/fixtures/legacy-mail-v1.sqlite.sql").read_text(
             encoding="utf-8"
@@ -970,6 +1204,8 @@ class Harness:
             str(sqlite_source),
             "--workspace",
             self.workspace_a,
+            "--actor",
+            "messaging-e2e",
             "--treer",
             str(TREER),
             "--url",
@@ -1016,6 +1252,8 @@ class Harness:
                 "postgres",
                 "--workspace",
                 self.workspace_b,
+                "--actor",
+                "messaging-e2e",
                 "--treer",
                 str(TREER),
                 "--url",
@@ -1076,6 +1314,7 @@ class Harness:
                 "workspace",
             ],
         )["ingress"]
+        local_mail = f"http://127.0.0.1:{self.mail_port}/"
         mail_config = self.root / "mail.json"
         json_write(
             mail_config,
@@ -1090,34 +1329,39 @@ class Harness:
             "mail",
             [str(TREER), "plugin", "run", "mail", "--config", str(mail_config)],
         )
-        local_mail = f"http://127.0.0.1:{self.mail_port}/"
         wait_for(
             lambda: request_url(urllib.parse.urljoin(local_mail, "api/health"))[0] == 200,
             "Mail plugin health",
         )
-        status, headers, oauth_start = request_url(
-            urllib.parse.urljoin(local_mail, "api/auth/start?return_to=%2Finbox")
-        )
-        require(
-            status == 302 and "location" in headers,
-            f"Mail OAuth start did not redirect: HTTP {status}: {oauth_start}",
-        )
-        status, authorize_headers, authorize = request_url(
-            headers["location"], headers=self.user_headers
-        )
-        require(
-            status == 303 and "location" in authorize_headers,
-            f"Core OAuth did not authorize: HTTP {status}: {authorize}",
-        )
-        callback = urllib.parse.urlsplit(authorize_headers["location"])
-        local_callback = urllib.parse.urlunsplit(
-            ("http", f"127.0.0.1:{self.mail_port}", callback.path, callback.query, "")
-        )
-        status, callback_headers, _ = request_url(local_callback)
-        require(status == 302, "Mail OAuth callback did not redirect")
-        cookie = callback_headers.get("set-cookie", "").split(";", 1)[0]
-        require(cookie.startswith("treer_mail_session="), "Mail did not issue its browser cookie")
-        authenticated = {"cookie": cookie}
+        if self.browser_fixture is not None:
+            self.test_mail_in_real_browser(target, str(ingress["url"]))
+
+        def login_mail() -> dict[str, str]:
+            status, headers, oauth_start = request_url(
+                urllib.parse.urljoin(local_mail, "api/auth/start?return_to=%2Finbox")
+            )
+            require(
+                status == 302 and "location" in headers,
+                f"Mail OAuth start did not redirect: HTTP {status}: {oauth_start}",
+            )
+            status, authorize_headers, authorize = request_url(
+                headers["location"], headers=self.user_headers
+            )
+            require(
+                status == 303 and "location" in authorize_headers,
+                f"Core OAuth did not authorize: HTTP {status}: {authorize}",
+            )
+            callback = urllib.parse.urlsplit(authorize_headers["location"])
+            local_callback = urllib.parse.urlunsplit(
+                ("http", f"127.0.0.1:{self.mail_port}", callback.path, callback.query, "")
+            )
+            status, callback_headers, _ = request_url(local_callback)
+            require(status == 302, "Mail OAuth callback did not redirect")
+            cookie = callback_headers.get("set-cookie", "").split(";", 1)[0]
+            require(cookie.startswith("treer_mail_session="), "Mail did not issue its browser cookie")
+            return {"cookie": cookie}
+
+        authenticated = login_mail()
         session = require_json_response(
             urllib.parse.urljoin(local_mail, "api/auth/session"), headers=authenticated
         )
@@ -1130,6 +1374,49 @@ class Harness:
             target.agent_id in principal_ids and self.user_id in principal_ids,
             "Mail directory is incomplete",
         )
+        message_count_before = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_messages WHERE workspace_id = :'workspace';\n",
+                variables={"workspace": self.workspace_a},
+                tuples=True,
+            )
+        )
+        self.install_deny_policy(
+            rule_id="deny-mail-send",
+            subject_kind="human",
+            subject_id=self.user_id,
+            action="message.send",
+            resource_kind="message.mailbox",
+            resource_id=target.agent_id,
+        )
+        time.sleep(5.2)
+        status, _, denied_send = request_url(
+            urllib.parse.urljoin(local_mail, "api/messages"),
+            "POST",
+            {"recipients": [target.agent_id], "context_ids": [], "body": "mail policy denied"},
+            authenticated,
+        )
+        require(
+            status == 404
+            and isinstance(denied_send, dict)
+            and denied_send.get("error", {}).get("code") == "message_recipient_unavailable",
+            f"Mail send policy denial was not non-disclosing: HTTP {status}: {denied_send}",
+        )
+        message_count_after = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_messages WHERE workspace_id = :'workspace';\n",
+                variables={"workspace": self.workspace_a},
+                tuples=True,
+            )
+        )
+        require(
+            message_count_after == message_count_before,
+            "denied Mail send changed durable Message state",
+        )
+        self.clear_policy()
+        time.sleep(5.2)
         sent = require_json_response(
             urllib.parse.urljoin(local_mail, "api/messages"),
             "POST",
@@ -1152,6 +1439,51 @@ class Harness:
             )
         )
         self.ack(target, target_delivery, "e2e-ack-mail-target")
+        pending_before = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_message_deliveries \
+                 WHERE workspace_id = :'workspace' AND recipient_kind = 'human' \
+                 AND recipient_id = :'recipient' AND acknowledged_at IS NULL;\n",
+                variables={"workspace": self.workspace_a, "recipient": self.user_id},
+                tuples=True,
+            )
+        )
+        require(pending_before > 0, "Mail reply did not create an unacknowledged human delivery")
+        self.install_deny_policy(
+            rule_id="deny-mail-receive",
+            subject_kind="human",
+            subject_id=self.user_id,
+            action="message.receive",
+            resource_kind="message.mailbox",
+            resource_id=self.user_id,
+        )
+        time.sleep(5.2)
+        status, _, denied_receive = request_url(
+            urllib.parse.urljoin(local_mail, "api/inbox"),
+            "POST",
+            {"limit": 50},
+            authenticated,
+        )
+        require(
+            status == 403
+            and isinstance(denied_receive, dict)
+            and denied_receive.get("error", {}).get("code") == "policy_denied",
+            f"Mail receive policy denial was not preserved: HTTP {status}: {denied_receive}",
+        )
+        pending_after = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_message_deliveries \
+                 WHERE workspace_id = :'workspace' AND recipient_kind = 'human' \
+                 AND recipient_id = :'recipient' AND acknowledged_at IS NULL;\n",
+                variables={"workspace": self.workspace_a, "recipient": self.user_id},
+                tuples=True,
+            )
+        )
+        require(pending_after == pending_before, "denied Mail receive mutated delivery state")
+        self.clear_policy()
+        time.sleep(5.2)
         inbox = require_json_response(
             urllib.parse.urljoin(local_mail, "api/inbox"),
             "POST",
@@ -1169,21 +1501,122 @@ class Harness:
             urllib.parse.urljoin(local_mail, "api/auth/session"), headers=authenticated
         )
         require(status == 401, "revoked Mail session remained usable")
+
+        uninstall_session = login_mail()
+        require_json_response(
+            urllib.parse.urljoin(local_mail, "api/auth/session"), headers=uninstall_session
+        )
+        mail_state_files = list(
+            (self.root / "xdg/state/treer/plugins").rglob("mail-state.sqlite3")
+        )
+        require(mail_state_files, "Mail plugin did not create durable plugin-owned state")
+        uninstalled = machine.cli_json(
+            self.shared_environment,
+            ["plugin", "uninstall", "mail"],
+        )
+        require(
+            uninstalled.get("removed_versions") == ["0.1.0"]
+            and uninstalled.get("state_preserved") is True,
+            f"Mail uninstall did not remove only immutable packages: {uninstalled}",
+        )
+        require(
+            int(uninstalled.get("core", {}).get("revoked_sessions", 0)) >= 1,
+            "Mail uninstall did not revoke workspace plugin sessions",
+        )
+        status, _, _ = request_url(
+            urllib.parse.urljoin(local_mail, "api/auth/session"), headers=uninstall_session
+        )
+        require(status == 401, "Mail session remained usable after plugin uninstall")
+        require(
+            all(path.is_file() for path in mail_state_files),
+            "Mail uninstall deleted plugin-owned state",
+        )
         mail_bridge.stop("mail")
 
-    def install_deny_policy(self, bridge_id: str, target_id: str) -> None:
+    def test_mail_in_real_browser(self, target: AgentDriver, local_mail: str) -> None:
+        require(self.browser_fixture is not None, "browser fixture path is missing")
+        fixture = self.browser_fixture.resolve()
+        done = fixture.with_suffix(fixture.suffix + ".done")
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        done.unlink(missing_ok=True)
+
+        def publish(status: str, **extra: Any) -> None:
+            json_write(
+                fixture,
+                {
+                    "status": status,
+                    "mail_url": local_mail,
+                    "proxy_url": self.proxy_url,
+                    "app_url": self.app_url,
+                    "email": "e2e@treer.invalid",
+                    "password": "e2e-user-password",
+                    "target_name": "target",
+                    "desktop_viewport": {"width": 1440, "height": 900},
+                    "mobile_viewport": {"width": 390, "height": 844},
+                    "done_file": str(done),
+                    **extra,
+                },
+            )
+
+        log(f"Mail real-browser fixture ready at {fixture}")
+        publish("ready")
+        root_delivery = self.wait_delivery(target, "playwright mail root", timeout=600)
+        root_message = root_delivery["message"]
+        self.ack(target, root_delivery, "e2e-ack-playwright-mail-root")
+        reply = target.run_json(
+            self.message_cli(
+                "reply",
+                str(root_message["message_id"]),
+                "--to",
+                self.user_id,
+                "--body",
+                "playwright mail agent reply",
+                "--idempotency-key",
+                "e2e-playwright-mail-agent-reply",
+            )
+        )
+        reply_message = reply["message"]
+        publish(
+            "reply_ready",
+            root_message_id=root_message["message_id"],
+            reply_message_id=reply_message["message_id"],
+        )
+        browser_reply = self.wait_delivery(target, "playwright mail browser reply", timeout=600)
+        require(
+            browser_reply["message"]["context_ids"] == [reply_message["message_id"]],
+            "real-browser Mail reply lost its Core DAG edge",
+        )
+        self.ack(target, browser_reply, "e2e-ack-playwright-mail-browser-reply")
+        publish(
+            "flow_complete",
+            root_message_id=root_message["message_id"],
+            reply_message_id=reply_message["message_id"],
+            browser_reply_message_id=browser_reply["message"]["message_id"],
+        )
+        wait_for(done.is_file, "real-browser Mail evidence completion", timeout=600)
+
+    def install_deny_policy(
+        self,
+        *,
+        rule_id: str,
+        subject_kind: str,
+        subject_id: str,
+        action: str,
+        resource_kind: str,
+        resource_id: str,
+    ) -> None:
         document = {
             "schema_version": 1,
             "defaults": {},
             "groups": {},
             "rules": [
                 {
-                    "id": "deny-telegram-send",
+                    "id": rule_id,
                     "priority": 100,
                     "effect": "deny",
-                    "subjects": [{"kind": "agent", "id": bridge_id}],
-                    "actions": ["message.send"],
-                    "resources": [{"kind": "message.mailbox", "id": target_id}],
+                    "subjects": [{"kind": subject_kind, "id": subject_id}],
+                    "actions": [action],
+                    "resources": [{"kind": resource_kind, "id": resource_id}],
                 }
             ],
         }
@@ -1236,7 +1669,7 @@ ON CONFLICT(workspace_id) DO UPDATE SET
                         "chat_id": 42,
                         "message_thread_id": 7,
                         "target_agent_id": target.agent_id,
-                        "wake_agent": False,
+                        "wake_agent": True,
                     }
                 ],
                 "poll_timeout_seconds": 1,
@@ -1248,8 +1681,23 @@ ON CONFLICT(workspace_id) DO UPDATE SET
                 "respond_to_denied": True,
             },
         )
-        self.install_deny_policy(telegram_bridge.agent_id, target.agent_id)
+        self.install_deny_policy(
+            rule_id="deny-telegram-send",
+            subject_kind="agent",
+            subject_id=telegram_bridge.agent_id,
+            action="message.send",
+            resource_kind="message.mailbox",
+            resource_id=target.agent_id,
+        )
         time.sleep(5.2)
+        messages_before_denied_send = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_messages WHERE workspace_id = :'workspace';\n",
+                variables={"workspace": self.workspace_a},
+                tuples=True,
+            )
+        )
         self.telegram.add_update(10, 100, "telegram root")
         telegram_bridge.start(
             "telegram",
@@ -1263,12 +1711,82 @@ ON CONFLICT(workspace_id) DO UPDATE SET
             if item.get("message", {}).get("body") == "telegram root"
         ]
         require(not denied, "workspace Policy did not deny the brokered Telegram send")
+        messages_after_denied_send = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_messages WHERE workspace_id = :'workspace';\n",
+                variables={"workspace": self.workspace_a},
+                tuples=True,
+            )
+        )
+        require(
+            messages_after_denied_send == messages_before_denied_send,
+            "denied Telegram send changed durable Message state",
+        )
         self.clear_policy()
         time.sleep(5.2)
         first = self.wait_delivery(target, "telegram root", timeout=20)
         message_1 = first["message"]
         require(message_1["external_source"]["channel"] == "telegram", "Telegram source annotation missing")
         self.ack(target, first, "e2e-ack-telegram-root")
+
+        telegram_state = wait_for(
+            lambda: next(
+                iter((self.root / "xdg/state/treer/plugins").rglob("telegram-state.sqlite3")),
+                None,
+            ),
+            "Telegram plugin state database",
+        )
+        self.install_deny_policy(
+            rule_id="deny-telegram-wake",
+            subject_kind="agent",
+            subject_id=telegram_bridge.agent_id,
+            action="agent.prompt",
+            resource_kind="agent",
+            resource_id=target.agent_id,
+        )
+        time.sleep(5.2)
+        messages_before_denied_wake = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_messages WHERE workspace_id = :'workspace';\n",
+                variables={"workspace": self.workspace_a},
+                tuples=True,
+            )
+        )
+        self.telegram.add_update(11, 101, "telegram wake denied")
+        wake_delivery = self.wait_delivery(target, "telegram wake denied")
+        self.ack(target, wake_delivery, "e2e-ack-telegram-wake-denied")
+        messages_after_denied_wake = int(
+            psql(
+                self.databases.core_url,
+                "SELECT COUNT(*) FROM core_messages WHERE workspace_id = :'workspace';\n",
+                variables={"workspace": self.workspace_a},
+                tuples=True,
+            )
+        )
+        require(
+            messages_after_denied_wake == messages_before_denied_wake + 1,
+            "agent.prompt denial prevented or duplicated the durable Telegram Message",
+        )
+
+        def wake_was_denied() -> bool:
+            with sqlite3.connect(telegram_state) as connection:
+                row = connection.execute(
+                    "SELECT wake_status, last_error FROM processed_updates WHERE update_id = 11"
+                ).fetchone()
+            return row == ("failed", "policy_denied")
+
+        wait_for(wake_was_denied, "durable Telegram agent.prompt policy denial")
+        self.install_deny_policy(
+            rule_id="deny-telegram-receive",
+            subject_kind="agent",
+            subject_id=telegram_bridge.agent_id,
+            action="message.receive",
+            resource_kind="message.mailbox",
+            resource_id=telegram_bridge.agent_id,
+        )
+        time.sleep(5.2)
 
         response = target.run_json(
             self.message_cli(
@@ -1283,9 +1801,43 @@ ON CONFLICT(workspace_id) DO UPDATE SET
             )
         )
         message_2 = response["message"]
+        delivery_id = str(response["delivery_ids"][0])
+        time.sleep(1.0)
+        require(
+            self.telegram.sent_message("telegram agent reply") is None,
+            "Telegram sent a Core delivery while message.receive was denied",
+        )
+        acknowledged = psql(
+            self.databases.core_url,
+            "SELECT COALESCE(acknowledged_at, '') FROM core_message_deliveries \
+             WHERE workspace_id = :'workspace' AND delivery_id = :'delivery';\n",
+            variables={"workspace": self.workspace_a, "delivery": delivery_id},
+            tuples=True,
+        )
+        require(not acknowledged, "denied Telegram receive acknowledged the Core delivery")
+        with sqlite3.connect(telegram_state) as connection:
+            outbound_intents = connection.execute(
+                "SELECT COUNT(*) FROM outbound_deliveries WHERE delivery_id = ?",
+                (delivery_id,),
+            ).fetchone()[0]
+        require(outbound_intents == 0, "denied Telegram receive created outbound channel state")
+        self.clear_policy()
+        time.sleep(5.2)
         outbound = wait_for(
             lambda: self.telegram.sent_message("telegram agent reply") if self.telegram else None,
             "Telegram native reply",
+        )
+        wait_for(
+            lambda: bool(
+                psql(
+                    self.databases.core_url,
+                    "SELECT COALESCE(acknowledged_at, '') FROM core_message_deliveries \
+                     WHERE workspace_id = :'workspace' AND delivery_id = :'delivery';\n",
+                    variables={"workspace": self.workspace_a, "delivery": delivery_id},
+                    tuples=True,
+                )
+            ),
+            "Telegram acknowledgement after message.receive policy recovery",
         )
         payload = outbound["payload"]
         require(payload.get("message_thread_id") == 7, "Telegram topic was not preserved")
@@ -1294,7 +1846,7 @@ ON CONFLICT(workspace_id) DO UPDATE SET
             "Core context did not become a Telegram native reply",
         )
         telegram_message_2 = int(outbound["message_id"])
-        self.telegram.add_update(11, 102, "telegram follow-up", reply_to=telegram_message_2)
+        self.telegram.add_update(12, 102, "telegram follow-up", reply_to=telegram_message_2)
         third = self.wait_delivery(target, "telegram follow-up")
         require(
             third["message"]["context_ids"] == [message_2["message_id"]],
@@ -1303,7 +1855,7 @@ ON CONFLICT(workspace_id) DO UPDATE SET
         self.ack(target, third, "e2e-ack-telegram-follow-up")
 
         telegram_bridge.stop("telegram")
-        self.telegram.add_update(12, 103, "telegram after restart", reply_to=telegram_message_2)
+        self.telegram.add_update(13, 103, "telegram after restart", reply_to=telegram_message_2)
         telegram_bridge.start(
             "telegram",
             [str(TREER), "plugin", "run", "telegram", "--config", str(telegram_config)],
@@ -1317,13 +1869,153 @@ ON CONFLICT(workspace_id) DO UPDATE SET
         self.ack(target, restarted, "e2e-ack-telegram-restart")
         telegram_bridge.stop("telegram")
 
+    def test_multi_proxy_nats(self, sender: AgentDriver) -> None:
+        log("two Proxy replicas, shared PostgreSQL, JetStream outbox, deduplication, and restart")
+        self.enable_distributed_proxies()
+        wait_for(
+            lambda: sender.run_json([str(TREER), "whoami"])
+            .get("agent", {})
+            .get("agent_id")
+            == sender.agent_id,
+            "sender Agent projection on the distributed primary Proxy",
+        )
+        remote_machine = MachineStack(
+            self.root,
+            "machine-remote",
+            self.secondary_proxy_url,
+            self.workspace_a,
+            self.enroll(self.workspace_a, "remote machine"),
+            self.shared_environment,
+        )
+        self.machines.append(remote_machine)
+
+        def secondary_knows_remote_machine() -> bool:
+            discovery = remote_machine.cli_json(self.shared_environment, ["discover"])
+            return any(
+                machine.get("server_id") == remote_machine.server_id
+                and machine.get("status") == "online"
+                for machine in discovery.get("servers", [])
+                if isinstance(machine, dict)
+            )
+
+        wait_for(
+            secondary_knows_remote_machine,
+            "remote machine online on the secondary Proxy",
+        )
+        remote = remote_machine.create_driver(
+            self.shared_environment,
+            self.root / "agents/remote",
+            "remote-target",
+        )
+
+        def primary_knows_remote() -> bool:
+            discovery = sender.run_json([str(TREER), "discover"])
+            return any(
+                agent.get("agent_id") == remote.agent_id
+                for agent in discovery.get("agents", [])
+                if isinstance(agent, dict)
+            )
+
+        wait_for(primary_knows_remote, "remote Agent projection on the primary Proxy")
+        sent = sender.run_json(
+            self.message_cli(
+                "send",
+                "--to",
+                remote.agent_id,
+                "--idempotency-key",
+                "e2e-multi-proxy-root",
+                "--body",
+                "multi-proxy root",
+            )
+        )
+        message = sent["message"]
+
+        def dispatched_outbox() -> dict[str, Any] | None:
+            raw = psql(
+                self.databases.core_url,
+                "SELECT json_build_object(\
+                    'event_id', event_id,\
+                    'attempts', attempts,\
+                    'dispatched', dispatched_at IS NOT NULL\
+                 )::text FROM core_message_outbox \
+                 WHERE action = 'message.created' \
+                   AND envelope->'resource'->>'id' = :'message_id';\n",
+                variables={"message_id": str(message["message_id"])},
+                tuples=True,
+            )
+            if not raw:
+                return None
+            value = json.loads(raw)
+            return value if value.get("dispatched") else None
+
+        outbox = wait_for(dispatched_outbox, "confirmed JetStream Message outbox publish")
+        require(
+            int(outbox.get("attempts", 0)) >= 1 and str(outbox.get("event_id", "")).startswith("evt_"),
+            "Message outbox was not confirmed by JetStream",
+        )
+
+        self.restart_secondary_proxy()
+        wait_for(
+            lambda: self.controller_reaches_proxy(remote_machine),
+            "remote Controller reconnect after secondary Proxy restart",
+        )
+        delivery = self.wait_delivery(remote, "multi-proxy root")
+        require(
+            delivery["message"]["message_id"] == message["message_id"],
+            "cross-Proxy delivery changed the durable Message",
+        )
+        self.ack(remote, delivery, "e2e-ack-multi-proxy-root")
+        reply = remote.run_json(
+            self.message_cli(
+                "reply",
+                str(message["message_id"]),
+                "--body",
+                "multi-proxy reply",
+                "--idempotency-key",
+                "e2e-multi-proxy-reply",
+            )
+        )
+        require(
+            reply["message"]["context_ids"] == [message["message_id"]],
+            "cross-Proxy reply lost its DAG edge",
+        )
+        reply_delivery = self.wait_delivery(sender, "multi-proxy reply")
+        self.ack(sender, reply_delivery, "e2e-ack-multi-proxy-reply")
+
+        nats_environment = dict(self.shared_environment)
+        require(self.nats.url is not None, "NATS fixture URL is missing")
+        nats_environment["TREER_TEST_NATS_URL"] = self.nats.url
+        command(
+            [
+                "cargo",
+                "test",
+                "-p",
+                "treer-proxy",
+                "event_bus::tests::configured_nats_persists_and_deduplicates_events",
+                "--",
+                "--exact",
+            ],
+            env=nats_environment,
+            timeout=180,
+        )
+
+        for process in (self.proxy, self.secondary_proxy):
+            require(process is not None, "distributed Proxy process is missing")
+            proxy_log = process.log_path.read_text(encoding="utf-8", errors="replace")
+            require("distributed=true" in proxy_log, f"{process.label} did not enter distributed mode")
+
     def verify_safe_metadata(self) -> None:
         known_bodies = [
             "core root",
             "core reply",
             "mail to target",
+            "playwright mail root",
+            "playwright mail agent reply",
+            "playwright mail browser reply",
             "telegram root",
             "telegram agent reply",
+            "multi-proxy root",
+            "multi-proxy reply",
         ]
         payloads = psql(
             self.databases.core_url,
@@ -1332,8 +2024,10 @@ ON CONFLICT(workspace_id) DO UPDATE SET
         )
         for body in known_bodies:
             require(body not in payloads, f"Message body leaked into the outbox: {body}")
-        if self.proxy is not None:
-            proxy_log = self.proxy.log_path.read_text(encoding="utf-8", errors="replace")
+        for process in (self.proxy, self.secondary_proxy):
+            if process is None:
+                continue
+            proxy_log = process.log_path.read_text(encoding="utf-8", errors="replace")
             for body in known_bodies:
                 require(body not in proxy_log, f"Message body leaked into Proxy logs: {body}")
 
@@ -1342,6 +2036,8 @@ ON CONFLICT(workspace_id) DO UPDATE SET
             require(binary.is_file(), f"missing {binary}; run `cargo build --workspace`")
         require(shutil.which("psql") is not None, "psql is required for the E2E harness")
         self.databases.create()
+        if self.browser_fixture is not None:
+            self.app = ControlPlaneAppFixture(self.app_port, self.proxy_url)
         self.start_proxy()
         self.setup_identity_and_workspaces()
         machine_a = MachineStack(
@@ -1374,9 +2070,11 @@ ON CONFLICT(workspace_id) DO UPDATE SET
         other = machine_b.create_driver(self.shared_environment, self.root / "agents/other", "other")
 
         self.test_core(machine_a, machine_b, target, sender, other)
+        self.test_plugin_contract_fixture(sender)
         self.test_migrations(machine_a, machine_b)
         self.test_mail(machine_a, target, mail_bridge)
         self.test_telegram(target, telegram_bridge)
+        self.test_multi_proxy_nats(sender)
         self.verify_safe_metadata()
         log("all real-process messaging and plugin checks passed")
 
@@ -1387,10 +2085,17 @@ ON CONFLICT(workspace_id) DO UPDATE SET
         for machine in reversed(self.machines):
             machine.stop()
         self.machines.clear()
+        if self.secondary_proxy is not None:
+            self.secondary_proxy.stop()
+            self.secondary_proxy = None
         if self.proxy is not None:
             self.proxy.stop()
             self.proxy = None
+        if self.app is not None:
+            self.app.stop()
+            self.app = None
         self.databases.drop()
+        self.nats.stop()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1401,8 +2106,25 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("TREER_TEST_DATABASE_URL", DEFAULT_DATABASE_URL),
         help="administrative PostgreSQL URL used to create isolated temporary databases",
     )
+    parser.add_argument(
+        "--nats-url",
+        default=os.environ.get("TREER_TEST_NATS_URL"),
+        help="existing unauthenticated NATS URL; otherwise an ephemeral Docker fixture is used",
+    )
+    parser.add_argument(
+        "--browser-fixture",
+        type=Path,
+        help="publish a real-browser Mail fixture and wait for its completion marker",
+    )
     parser.add_argument("--keep-temp", action="store_true", help="retain process logs and fixture state")
     return parser.parse_args()
+
+
+def retain_artifacts(source: Path, destination: Path) -> None:
+    def ignore_runtime_sockets(directory: str, names: list[str]) -> list[str]:
+        return [name for name in names if (Path(directory) / name).is_socket()]
+
+    shutil.copytree(source, destination, ignore=ignore_runtime_sockets)
 
 
 def main() -> int:
@@ -1411,17 +2133,19 @@ def main() -> int:
         return driver_main(args.agent_driver)
     temporary = tempfile.TemporaryDirectory(prefix="treer-messaging-e2e-")
     root = Path(temporary.name)
-    harness = Harness(root, args.database_url)
+    harness = Harness(root, args.database_url, args.nats_url, args.browser_fixture)
     try:
         harness.run()
         if args.keep_temp:
             retained = Path(tempfile.gettempdir()) / f"treer-messaging-e2e-retained-{uuid.uuid4().hex[:8]}"
-            shutil.copytree(root, retained)
+            retain_artifacts(root, retained)
             log(f"retained E2E artifacts at {retained}")
         return 0
     except Exception as error:
         print(f"e2e: FAILED: {error}", file=sys.stderr)
-        for process in ([harness.proxy] if harness.proxy is not None else []):
+        for process in (harness.proxy, harness.secondary_proxy):
+            if process is None:
+                continue
             print(f"\n--- {process.label} log ---\n{process.tail(12000)}", file=sys.stderr)
         for machine in harness.machines:
             print(
@@ -1430,7 +2154,7 @@ def main() -> int:
             )
         retained = Path(tempfile.gettempdir()) / f"treer-messaging-e2e-failed-{uuid.uuid4().hex[:8]}"
         try:
-            shutil.copytree(root, retained)
+            retain_artifacts(root, retained)
             print(f"e2e: retained failure artifacts at {retained}", file=sys.stderr)
         except OSError:
             pass

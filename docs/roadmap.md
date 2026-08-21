@@ -32,7 +32,8 @@ At `07e02cd`, Treer provides:
   sender-scoped idempotency, policy actions, an ordered context DAG, a
   transactional Message outbox, and `treer message` commands;
 - a manifest-limited CLI plugin runner and private local broker that withhold raw
-  Treer credentials from plugin scripts;
+  Treer credentials from plugin scripts, enforce bounded requests/runtime/output,
+  and support session-revoking package uninstall while preserving channel state;
 - Mail and Telegram channel plugins whose Core integration is nested `treer`
   commands, with channel presentation, secrets, and mapping state kept outside
   Core;
@@ -45,6 +46,8 @@ Important gaps remain: work is still terminal- and Message-oriented rather than
 task-oriented; restrictive policy defaults and policy-management UX are absent;
 the generic domain-event publisher has no transactional outbox outside the
 Message subsystem; plugin scripts are not isolated from hostile same-UID code;
+automatic plugin state migration and signed distribution are absent; Message
+attachments and operator retention/export/deletion policy are absent;
 visibility is coarse; telemetry is local; billing is absent; and the web
 application is not yet a programmable workspace surface.
 
@@ -173,13 +176,16 @@ manifest-limited broker used by nested `treer` commands. Manifest capabilities
 set an upper bound; authenticated identity, workspace policy, and immutable Core
 guards still authorize each operation. Withholding raw credentials provides a
 comprehensible capability boundary without claiming that same-UID arbitrary
-scripts are a hostile-code sandbox.
+scripts are a hostile-code sandbox. New plugin process execution is an explicit,
+default-off CLI rollout gate. Package uninstall revokes plugin-human sessions
+before removing immutable package versions and deliberately preserves the
+separate versioned state tree.
 
 Message is the first shared Core contract exercised by this plugin model. Mail
 migrated from its standalone Rust data/API service to a script plugin over
-`treer message`; Telegram is the first external channel adapter. The completed
-[execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md) records
-the migration, compatibility, end-to-end evidence, and remaining limits. The
+`treer message`; Telegram is the first external channel adapter. The active
+[execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md) owns the
+remaining completion audit, compatibility, end-to-end, and rollout gates. The
 maintained package contract lives in [`plugins/README.md`](../plugins/README.md).
 
 ### Identity, policy, and delegation

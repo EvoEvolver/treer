@@ -52,8 +52,13 @@ Create an operator-owned JSON file readable by the bridge Agent:
 Start the installed package from the managed bridge Agent:
 
 ```sh
-treer plugin run mail --config /etc/treer/mail.json
+TREER_ENABLE_PLUGIN_EXECUTION=true \
+  treer plugin run mail --config /etc/treer/mail.json
 ```
+
+The Proxy must also have `TREER_ENABLE_CORE_MESSAGES=true` and
+`TREER_ENABLE_PLUGIN_SESSIONS=true`. All three gates default off so a deployment
+can apply schema and policy changes before admitting new channel traffic.
 
 The manifest grants only `plugin.oauth`, human/Agent directory reads, and
 Message send/read/receive/ack. Mail has no direct Proxy URL, Core database, NATS,
@@ -81,7 +86,11 @@ OAuth creates a revocable capability bound to this plugin, workspace, service,
 and bridge Agent. The browser receives only an HttpOnly, SameSite=Lax Mail
 cookie. Each authenticated request rechecks the capability and current workspace
 membership. Logout revokes Core capability state before deleting the local
-cookie mapping.
+cookie mapping. Deleting the registered service, removing the member, revoking
+the session, or uninstalling the plugin invalidates subsequent use. The control
+plane login preserves only the exact same-Proxy App OAuth authorization return
+path, so an unauthenticated Mail login can resume without accepting an arbitrary
+redirect.
 
 Recent history and inbox reads translate Core's explicit delivery ack into the
 legacy `unread` and `remaining_unread` response. Human-to-Agent and
@@ -103,6 +112,7 @@ or `.pgpass` so database credentials do not appear in its command arguments.
    python3 plugins/mail/migrate.py \
      --source sqlite://treer-mail.db \
      --workspace <workspace-id> \
+     --actor <operator-or-change-ticket> \
      --dry-run \
      --export-file mail-legacy.jsonl \
      --report mail-migration-report.json
@@ -115,16 +125,20 @@ or `.pgpass` so database credentials do not appear in its command arguments.
    python3 plugins/mail/migrate.py \
      --source sqlite://treer-mail.db \
      --workspace <workspace-id> \
+     --actor <operator-or-change-ticket> \
      --export-file mail-legacy.jsonl \
      --report mail-migration-report.json
    ```
 
    Use a `postgresql://` source and `--psql /path/to/psql` for PostgreSQL.
 
-4. Compare Message, delivery, read-delivery, and context-edge counts in the
-   report. Every batch has a deterministic operation ID, so rerunning an
-   interrupted import returns the original Core result instead of duplicating
-   Messages.
+4. Preserve the schema-v2 report. It records the actor, source checksum and
+   checksum scope, structural checksum, source counts, batch timestamps,
+   deterministic operation IDs, and target counts without Message bodies.
+   Rerunning with the same report verifies those identities, skips completed
+   checkpoints, and resumes the first incomplete batch. A changed source,
+   workspace, actor, batch size, or checksum is rejected rather than merged into
+   an earlier cutover record.
 5. Start the plugin on the existing service/ingress, verify health, log in again,
    inspect migrated branching context, and exchange a new reply before reopening
    access.
@@ -134,6 +148,11 @@ recipient snapshots, recipient order, read state, and ordered context edges. It
 never mutates or deletes the source database. Legacy App browser sessions are
 reported but deliberately not converted because that would broaden an old App
 token into the new plugin capability model.
+
+On an import failure, the report records only a stable failure code, stage,
+optional batch index, and timestamp; the detailed body-free error remains on
+stderr. The source database and completed Core batches are left intact for a
+validated resume.
 
 Retain the source backup read-only through the rollback window. Before any new
 Core Message is created, rollback may point the service back to the old binary.
@@ -149,3 +168,5 @@ writes. Restoring the old database after that point would create split history.
   not an active-active session store.
 - The CLI broker withholds credentials but does not isolate hostile same-UID
   plugin code.
+- Attachments, Message retention/export/deletion policy, billing, and
+  active-active Mail plugin instances are not implemented.

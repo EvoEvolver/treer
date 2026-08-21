@@ -48,6 +48,21 @@ just plugin-boundary-test
 just messaging-e2e
 ```
 
+For a browser-assisted Mail release audit, start the same harness with a fixture
+path under the ignored Playwright artifact directory:
+
+```bash
+python3 scripts/test-messaging-plugins-e2e.py \
+  --browser-fixture output/playwright/mail/fixture.json \
+  --keep-temp
+```
+
+The fixture exposes only ephemeral test URLs/credentials and status. A real
+browser driver completes the root/reply/reply DAG flow, records desktop/mobile
+screenshots and console/network evidence under `output/playwright/`, then writes
+the fixture completion marker. This is a release-audit mode, not an unattended
+step in `just check`.
+
 Run the closest focused check while iterating, then run the full gate before
 handoff. The docs-only GitHub Actions workflow checks documentation structure
 and links on relevant pull requests and pushes to `main`; it does not replace
@@ -91,31 +106,35 @@ tests.
 
 ## Current engineering evidence
 
-At completion-gate revision `07e02cd`, the plugin boundary, Mail, Telegram,
-formatting, strict Clippy, clean Docker build, and real-process messaging checks
-pass. The E2E
-harness starts an authenticated Proxy, isolated PostgreSQL database, two real
-Host/Controller pairs, two workspaces, five command Agents, both plugins through
-`treer plugin run`, and a fake Telegram Bot API. It verifies Core Message DAGs,
-repeatable receive and ack, send idempotency across Proxy restart, Controller
-restart identity, workspace isolation, SQLite and real-`psql` Mail migration,
-Mail browser OAuth/API compatibility, Telegram policy denial/native replies,
-plugin restart, and absence of Message bodies from outbox events and Proxy logs.
-The source uses shared protocol crates, forbids unsafe Rust workspace-wide, and
-treats Clippy warnings as errors.
+The completion-audit E2E starts an authenticated Proxy, an isolated PostgreSQL
+database, two initial real Host/Controller pairs, two workspaces, five command
+Agents, both plugins through `treer plugin run`, and a fake Telegram Bot API. It
+then restarts the primary as a distributed Proxy, adds a second Proxy plus a
+third Host/Controller and sixth Agent, and provisions an ephemeral JetStream.
+The harness verifies Core Message DAGs, repeatable receive/ack, send idempotency,
+Controller/Proxy restart identity, workspace isolation,
+SQLite and real-`psql` Mail migration resume, Mail browser OAuth/API
+compatibility, Telegram policy denial/native replies, plugin restart,
+cross-Proxy Message exchange, confirmed outbox publication/event-ID dedup, and
+absence of Message bodies from outbox events and Proxy logs. The source uses
+shared protocol crates, forbids unsafe Rust workspace-wide, and treats Clippy
+warnings as errors. Focused Proxy/store tests additionally cover one pinned
+Policy revision for multi-target sends and acknowledgements in monitor/enforce
+modes, non-disclosing recipient failures, bounds, expiry, and body-free audit,
+error, and outbox payloads.
 
 | Area | Present evidence | Remaining gap |
 | --- | --- | --- |
 | Rust behavior | Workspace tests, format check, strict Clippy | No normal cross-platform PR CI |
-| Frontend | Control-plane and Mail TypeScript typecheck/build plus container health/config routes | No real-browser desktop/mobile automation or visual regression test |
-| Core Message | Store/API/CLI tests plus real Proxy/Controller/Host restart, DAG, ack, idempotency, policy, migration, log, and workspace-isolation E2E | No multi-Proxy/NATS Message routing E2E, retention/export/delete contract, or attachment support |
-| Plugin boundary | Manifest validation, 11 positive/negative static-boundary tests, credential withholding, capability denial, and official-runner E2E | Same-UID hostile-code isolation, uninstall, and automatic state migration are not implemented |
-| Mail and Telegram | Python unit suites, Mail frontend build, fake CLI/API fixtures, real brokered Mail OAuth/migration and Telegram reply/restart E2E | No real external Telegram canary, active-active plugin mode, webhook mode, or browser automation; an ambiguous Telegram send can duplicate externally |
+| Frontend | Control-plane and Mail typecheck/build, App OAuth return-path regression coverage, container health/config routes, and a real-browser desktop/mobile Mail audit | Browser driving is not yet unattended and there is no visual regression suite |
+| Core Message | Store/API/CLI contract fixtures plus real Proxy/Controller/Host restart, DAG, ack, idempotency, policy revision, migration, log, workspace isolation, and two-Proxy PostgreSQL/NATS E2E | No retention/export/delete contract, attachment support, or load/failure-injection suite |
+| Plugin boundary | Manifest failure matrix, 11 positive/negative source checks, credential withholding, command/direct-override denial, broker limits, rollout gate, uninstall/session revocation, state preservation, and official-runner E2E | Same-UID hostile-code isolation, automatic state migration, and signed package distribution are not implemented |
+| Mail and Telegram | Python unit suites, Mail frontend build/browser audit, fake CLI/API fixtures, resumable SQLite/PostgreSQL migration, real brokered Mail OAuth and Telegram reply/restart E2E | No real external Telegram canary, active-active plugin mode, webhook mode, or unattended browser automation; an ambiguous Telegram send can duplicate externally |
 | Architecture | Crate boundaries, shared protocol types, and first-party plugin source scan | No general Rust dependency-boundary lint |
 | Documentation | Indexed maintained docs and mechanical link check | No freshness or source-claim automation |
 | Release publishing | Native four-platform builds carry commit/platform metadata and checksums; Node tests cover complete artifact sets, deterministic manifests, detached signatures, and prepared-release immutability | No updater signature enforcement or automated R2 artifact rollout test |
 | Operations | Structured tracing plus buffered directional machine traffic counters | No local metrics/traces harness or end-to-end performance assertions |
-| Event and cluster distribution | Event-envelope, Message-specific transactional outbox, lease/snapshot separation, durable projection replay, and two-Proxy command/terminal/network integration tests | No generic transactional outbox, multi-Proxy Message E2E, or automated NATS failure CI |
+| Event and cluster distribution | Event envelope, Message transactional outbox, confirmed JetStream publication/dedup, lease/snapshot separation, durable projection replay, and two-Proxy Message/command/terminal/network tests | No generic transactional outbox or automated NATS partition/failure CI |
 | Security | Explicit trust tier, Message/plugin policy checks, static plugin boundary, and source-level tests | Allow-all policy when no document exists, same-UID plugin exposure, and no production isolation backend |
 | Accounting | Transactional organization-management audit, best-effort lifecycle events, and hourly directional machine traffic | Runtime audit has no transactional outbox; no quota or billing ledger |
 
@@ -131,13 +150,13 @@ repeated bottleneck or blocks the current product tier.
 | Proxy auth, membership, or routing | Authorization and cross-workspace isolation tests |
 | Host mutation or Controller restart | Idempotency and process-survival tests |
 | Core Message model, route, store, or CLI | DAG/visibility, per-recipient delivery, idempotency, acknowledgement, policy, outbox body-exclusion, restart, and cross-workspace tests; run `just messaging-e2e` |
-| Plugin manifest, broker, install, or runner | Manifest/unit tests, credential/capability denials, `just plugin-boundary-test`, package validation, and `just messaging-e2e` |
+| Plugin manifest, broker, install, uninstall, or runner | Manifest/unit tests, credential/capability/direct-override denials, state preservation/session revocation, `just plugin-boundary-test`, package validation, and `just messaging-e2e` |
 | Mail or Telegram adapter | Package unit tests, frontend build when applicable, external API fixture coverage, mapping/ack crash ordering, migration/restart tests, and `just messaging-e2e` |
 | Service identity, runtime path, or connection ownership | Hostname/server-scoping tests, generated service-manager assertions, and duplicate-Controller fencing tests |
 | Runtime path logic | Working-directory containment and escape tests |
 | Network namespace, DNS, SOCKS, virtual host, or public ingress | Unit/integration coverage plus the two-machine Railway Canary workflow; add focused checks for changed authentication/header, streaming, WebSocket, or containment behavior |
 | Domain event or NATS adapter | Envelope/subject tests plus real JetStream persistence and two-Proxy routing checks |
-| Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, and affected-flow validation |
+| Browser interaction | Typecheck/build plus App-to-Proxy CORS, runtime config, authorization return-path checks, affected-flow validation, and a desktop/mobile browser audit when the user journey changes |
 | Documentation/index change | `node scripts/check-docs.mjs` |
 | Release manifest, signing, channel, or upload flow | `node --test scripts/release-r2.test.mjs` plus an isolated R2 canary publish and public download verification |
 

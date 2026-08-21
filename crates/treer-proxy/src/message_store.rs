@@ -28,6 +28,10 @@ use crate::event_bus::EventBus;
 const MAX_IMPORT_MESSAGES: usize = 1_000;
 const MAX_ACK_DELIVERIES: usize = 100;
 const OUTBOX_BATCH_SIZE: i64 = 100;
+const MAX_MESSAGE_ID_BYTES: usize = 256;
+const MAX_MESSAGE_SNAPSHOT_NAME_BYTES: usize = 256;
+const MAX_MESSAGE_SNAPSHOT_ROLE_BYTES: usize = 128;
+const MAX_MESSAGE_LINEAGE_ID_BYTES: usize = 256;
 
 #[derive(Clone)]
 pub struct MessageStore {
@@ -106,12 +110,25 @@ impl MessageStore {
         });
     }
 
+    #[cfg(test)]
     pub async fn send(
         &self,
         workspace_id: &str,
         sender: &MessagePrincipal,
         recipients: &[MessagePrincipal],
         request: &SendMessageRequest,
+    ) -> Result<SendMessageResponse, MessageStoreError> {
+        self.send_with_policy_revision(workspace_id, sender, recipients, request, None)
+            .await
+    }
+
+    pub async fn send_with_policy_revision(
+        &self,
+        workspace_id: &str,
+        sender: &MessagePrincipal,
+        recipients: &[MessagePrincipal],
+        request: &SendMessageRequest,
+        policy_revision: Option<u64>,
     ) -> Result<SendMessageResponse, MessageStoreError> {
         validate_workspace_and_principal(workspace_id, sender)?;
         validate_send(recipients, request)?;
@@ -286,7 +303,7 @@ impl MessageStore {
                 trace_id: request.trace_id.clone(),
                 causation_id: None,
                 correlation_id: request.correlation_id.clone(),
-                workspace_revision: None,
+                workspace_revision: policy_revision,
                 payload: json!({
                     "message_id": message_id,
                     "delivery_ids": delivery_ids,
@@ -415,11 +432,11 @@ impl MessageStore {
                 ),
             ));
         }
+        let notified = self.changed.notified();
         let first = self.receive_now(workspace_id, principal, limit).await?;
         if !first.deliveries.is_empty() || wait_milliseconds == 0 {
             return Ok(first);
         }
-        let notified = self.changed.notified();
         let _ = tokio::time::timeout(Duration::from_millis(wait_milliseconds), notified).await;
         self.receive_now(workspace_id, principal, limit).await
     }
@@ -462,11 +479,23 @@ impl MessageStore {
         })
     }
 
+    #[cfg(test)]
     pub async fn acknowledge(
         &self,
         workspace_id: &str,
         principal: &MessagePrincipal,
         request: &AcknowledgeMessagesRequest,
+    ) -> Result<AcknowledgeMessagesResponse, MessageStoreError> {
+        self.acknowledge_with_policy_revision(workspace_id, principal, request, None)
+            .await
+    }
+
+    pub async fn acknowledge_with_policy_revision(
+        &self,
+        workspace_id: &str,
+        principal: &MessagePrincipal,
+        request: &AcknowledgeMessagesRequest,
+        policy_revision: Option<u64>,
     ) -> Result<AcknowledgeMessagesResponse, MessageStoreError> {
         validate_ack(request)?;
         let request_hash = request_hash(&request.delivery_ids)?;
@@ -559,7 +588,7 @@ impl MessageStore {
                     trace_id: None,
                     causation_id: None,
                     correlation_id: Some(request.operation_id.clone()),
-                    workspace_revision: None,
+                    workspace_revision: policy_revision,
                     payload: json!({
                         "delivery_id": delivery_id,
                         "message_id": message_id
@@ -742,7 +771,7 @@ impl MessageStore {
             let event_id: String = row.get("event_id");
             let envelope = serde_json::from_value::<DomainEventEnvelope>(row.get("envelope"))
                 .map_err(|_| MessageStoreError::Corrupt)?;
-            if event_bus.publish(envelope).is_err() {
+            if event_bus.publish_confirmed(envelope).await.is_err() {
                 break;
             }
             sqlx::query(
@@ -775,13 +804,27 @@ fn validate_workspace_and_principal(
     workspace_id: &str,
     principal: &MessagePrincipal,
 ) -> Result<(), MessageStoreError> {
-    if workspace_id.is_empty() || workspace_id.len() > 256 || principal.id.is_empty() {
+    if workspace_id.is_empty()
+        || workspace_id.len() > MAX_MESSAGE_ID_BYTES
+        || principal.id.is_empty()
+        || workspace_id.chars().any(char::is_control)
+        || principal.id.chars().any(char::is_control)
+    {
         return Err(MessageStoreError::contract(
             "message_principal_invalid",
             "workspace and principal IDs must be non-empty and bounded",
         ));
     }
-    if principal.id.len() > 256 || principal.name.is_empty() || principal.name.len() > 256 {
+    if principal.id.len() > MAX_MESSAGE_ID_BYTES
+        || principal.name.is_empty()
+        || principal.name.len() > MAX_MESSAGE_SNAPSHOT_NAME_BYTES
+        || principal.name.chars().any(char::is_control)
+        || principal.role.as_ref().is_some_and(|role| {
+            role.is_empty()
+                || role.len() > MAX_MESSAGE_SNAPSHOT_ROLE_BYTES
+                || role.chars().any(char::is_control)
+        })
+    {
         return Err(MessageStoreError::contract(
             "message_principal_invalid",
             "principal identity snapshot is invalid",
@@ -804,6 +847,17 @@ fn validate_send(
         return Err(MessageStoreError::contract(
             "message_recipients_invalid",
             format!("message must have 1-{MAX_MESSAGE_RECIPIENTS} recipients"),
+        ));
+    }
+    if recipients.len() != request.recipients.len()
+        || request
+            .recipients
+            .iter()
+            .any(|target| target.trim().is_empty() || target.len() > MAX_MESSAGE_ID_BYTES)
+    {
+        return Err(MessageStoreError::contract(
+            "message_recipients_invalid",
+            "resolved recipients do not match the bounded request targets",
         ));
     }
     if request.context_ids.len() > MAX_MESSAGE_CONTEXTS {
@@ -841,6 +895,21 @@ fn validate_send(
                 format!(
                     "message idempotency key must contain 1-{MAX_MESSAGE_IDEMPOTENCY_KEY_BYTES} bytes"
                 ),
+            ));
+        }
+    }
+    for (value, label) in [
+        (request.correlation_id.as_deref(), "correlation"),
+        (request.trace_id.as_deref(), "trace"),
+    ] {
+        if value.is_some_and(|value| {
+            value.is_empty()
+                || value.len() > MAX_MESSAGE_LINEAGE_ID_BYTES
+                || value.chars().any(char::is_control)
+        }) {
+            return Err(MessageStoreError::contract(
+                "message_lineage_invalid",
+                format!("message {label} ID is empty or exceeds its bounds"),
             ));
         }
     }
@@ -1491,6 +1560,15 @@ mod tests {
         }
     }
 
+    fn human(id: &str) -> MessagePrincipal {
+        MessagePrincipal {
+            kind: MessagePrincipalKind::Human,
+            id: id.to_string(),
+            name: id.to_string(),
+            role: Some("member".to_string()),
+        }
+    }
+
     fn request(
         recipients: &[&str],
         contexts: Vec<String>,
@@ -1525,7 +1603,10 @@ mod tests {
             .await
             .expect("send message");
         assert!(!first.idempotent_replay);
-        let replay = store
+        let reopened = MessageStore::open(store.pool.clone())
+            .await
+            .expect("reopen message store");
+        let replay = reopened
             .send(
                 "workspace-a",
                 &sender,
@@ -1538,12 +1619,12 @@ mod tests {
         assert_eq!(first.message.message_id, replay.message.message_id);
         assert_eq!(first.delivery_ids, replay.delivery_ids);
 
-        let received = store
+        let received = reopened
             .receive("workspace-a", &recipient, 50, 0)
             .await
             .expect("receive message");
         assert_eq!(received.deliveries.len(), 1);
-        let repeated = store
+        let repeated = reopened
             .receive("workspace-a", &recipient, 50, 0)
             .await
             .expect("repeat receive");
@@ -1553,19 +1634,21 @@ mod tests {
             delivery_ids: first.delivery_ids.clone(),
             operation_id: "ack-1".to_string(),
         };
-        let acknowledged = store
+        let acknowledged = reopened
             .acknowledge("workspace-a", &recipient, &ack)
             .await
             .expect("ack message");
         assert_eq!(acknowledged.acknowledged_delivery_ids, first.delivery_ids);
         assert_eq!(
-            store
+            MessageStore::open(store.pool.clone())
+                .await
+                .expect("reopen after acknowledgement")
                 .acknowledge("workspace-a", &recipient, &ack)
                 .await
                 .expect("replay ack"),
             acknowledged
         );
-        assert!(store
+        assert!(reopened
             .receive("workspace-a", &recipient, 50, 0)
             .await
             .expect("empty receive")
@@ -1652,6 +1735,474 @@ mod tests {
             .await
             .expect_err("invisible context must fail");
         assert_eq!(invisible.code(), "message_context_not_found");
+    }
+
+    #[tokio::test]
+    async fn multi_recipient_delivery_and_acknowledgement_are_atomic_and_independent() {
+        let store = test_store().await;
+        let sender = agent("sender");
+        let agent_recipient = agent("agent-recipient");
+        let human_recipient = human("human-recipient");
+        let sent = store
+            .send(
+                "workspace-a",
+                &sender,
+                &[agent_recipient.clone(), human_recipient.clone()],
+                &request(
+                    &["agent-recipient", "human-recipient"],
+                    Vec::new(),
+                    "one atomic message",
+                    "multi-recipient",
+                ),
+            )
+            .await
+            .expect("send to Agent and human");
+        assert_eq!(sent.delivery_ids.len(), 2);
+        assert_eq!(
+            store
+                .receive("workspace-a", &agent_recipient, 10, 0)
+                .await
+                .expect("Agent receive")
+                .deliveries[0]
+                .delivery_id,
+            sent.delivery_ids[0]
+        );
+        assert_eq!(
+            store
+                .receive("workspace-a", &human_recipient, 10, 0)
+                .await
+                .expect("human receive")
+                .deliveries[0]
+                .delivery_id,
+            sent.delivery_ids[1]
+        );
+
+        store
+            .acknowledge(
+                "workspace-a",
+                &agent_recipient,
+                &AcknowledgeMessagesRequest {
+                    delivery_ids: vec![sent.delivery_ids[0].clone()],
+                    operation_id: "agent-ack".to_string(),
+                },
+            )
+            .await
+            .expect("ack Agent delivery");
+        assert!(store
+            .receive("workspace-a", &agent_recipient, 10, 0)
+            .await
+            .expect("Agent inbox after ack")
+            .deliveries
+            .is_empty());
+        assert_eq!(
+            store
+                .receive("workspace-a", &human_recipient, 10, 0)
+                .await
+                .expect("human delivery remains")
+                .deliveries
+                .len(),
+            1
+        );
+
+        let failed = store
+            .acknowledge(
+                "workspace-a",
+                &human_recipient,
+                &AcknowledgeMessagesRequest {
+                    delivery_ids: vec![
+                        sent.delivery_ids[1].clone(),
+                        "dlv-does-not-exist".to_string(),
+                    ],
+                    operation_id: "atomic-failed-ack".to_string(),
+                },
+            )
+            .await
+            .expect_err("a partially invalid ack batch must roll back");
+        assert_eq!(failed.code(), "message_delivery_not_found");
+        assert_eq!(
+            store
+                .receive("workspace-a", &human_recipient, 10, 0)
+                .await
+                .expect("failed batch preserved delivery")
+                .deliveries
+                .len(),
+            1
+        );
+        let failed_operation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM core_message_ack_operations WHERE operation_id = $1",
+        )
+        .bind("atomic-failed-ack")
+        .fetch_one(&store.pool)
+        .await
+        .expect("count failed ack operations");
+        assert_eq!(failed_operation_count, 0);
+    }
+
+    #[tokio::test]
+    async fn context_edges_never_grant_body_visibility_and_all_invalid_edges_roll_back() {
+        let store = test_store().await;
+        let alice = agent("alice");
+        let bob = agent("bob");
+        let carol = agent("carol");
+        let root_body = "private root body";
+        let root = store
+            .send(
+                "workspace-a",
+                &alice,
+                std::slice::from_ref(&bob),
+                &request(&["bob"], Vec::new(), root_body, "private-root"),
+            )
+            .await
+            .expect("private root");
+        let child = store
+            .send(
+                "workspace-a",
+                &bob,
+                std::slice::from_ref(&carol),
+                &request(
+                    &["carol"],
+                    vec![root.message.message_id.clone()],
+                    "visible child",
+                    "visible-child",
+                ),
+            )
+            .await
+            .expect("child may reference visible root");
+        assert_eq!(
+            child.message.context_ids,
+            std::slice::from_ref(&root.message.message_id)
+        );
+        assert!(!serde_json::to_string(&child.message)
+            .expect("serialize child")
+            .contains(root_body));
+        assert_eq!(
+            store
+                .get("workspace-a", &carol, &root.message.message_id)
+                .await
+                .expect_err("context edge must not reveal root")
+                .code(),
+            "message_not_found"
+        );
+
+        let baseline_messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM core_messages WHERE workspace_id = $1")
+                .bind("workspace-a")
+                .fetch_one(&store.pool)
+                .await
+                .expect("count baseline messages");
+        let missing = store
+            .send(
+                "workspace-a",
+                &alice,
+                std::slice::from_ref(&bob),
+                &request(
+                    &["bob"],
+                    vec!["msg-missing".to_string()],
+                    "must roll back",
+                    "missing-context",
+                ),
+            )
+            .await
+            .expect_err("missing context");
+        assert_eq!(missing.code(), "message_context_not_found");
+
+        let cross_workspace = store
+            .send(
+                "workspace-b",
+                &alice,
+                std::slice::from_ref(&bob),
+                &request(&["bob"], Vec::new(), "other workspace", "cross-root"),
+            )
+            .await
+            .expect("cross-workspace root");
+        assert_eq!(
+            store
+                .send(
+                    "workspace-a",
+                    &alice,
+                    std::slice::from_ref(&bob),
+                    &request(
+                        &["bob"],
+                        vec![cross_workspace.message.message_id],
+                        "cross edge",
+                        "cross-edge",
+                    ),
+                )
+                .await
+                .expect_err("cross-workspace context")
+                .code(),
+            "message_context_not_found"
+        );
+        assert_eq!(
+            store
+                .send(
+                    "workspace-a",
+                    &carol,
+                    std::slice::from_ref(&alice),
+                    &request(
+                        &["alice"],
+                        vec![root.message.message_id.clone()],
+                        "invisible edge",
+                        "invisible-edge",
+                    ),
+                )
+                .await
+                .expect_err("invisible context")
+                .code(),
+            "message_context_not_found"
+        );
+        assert_eq!(
+            store
+                .send(
+                    "workspace-a",
+                    &bob,
+                    std::slice::from_ref(&alice),
+                    &request(
+                        &["alice"],
+                        vec![
+                            root.message.message_id.clone(),
+                            root.message.message_id.clone(),
+                        ],
+                        "duplicate edge",
+                        "duplicate-edge",
+                    ),
+                )
+                .await
+                .expect_err("duplicate contexts")
+                .code(),
+            "message_contexts_invalid"
+        );
+        let final_messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM core_messages WHERE workspace_id = $1")
+                .bind("workspace-a")
+                .fetch_one(&store.pool)
+                .await
+                .expect("count final messages");
+        assert_eq!(final_messages, baseline_messages);
+
+        let importer = MessagePrincipal {
+            kind: MessagePrincipalKind::Machine,
+            id: "machine-a".to_string(),
+            name: "machine-a".to_string(),
+            role: None,
+        };
+        let legacy = |id: &str, contexts: Vec<String>| LegacyMailMessage {
+            message_id: id.to_string(),
+            workspace_id: "workspace-import".to_string(),
+            sender: alice.clone(),
+            recipients: vec![treer_protocol::LegacyMailRecipient {
+                principal: bob.clone(),
+                position: 0,
+                read_at: None,
+            }],
+            context_ids: contexts,
+            body: format!("legacy {id}"),
+            created_at: "2026-08-21T12:00:00Z".parse().expect("timestamp"),
+        };
+        let forward = store
+            .import_legacy_mail(
+                "workspace-import",
+                &importer,
+                &ImportMessagesRequest {
+                    format: "legacy-mail-v1".to_string(),
+                    operation_id: "forward-import".to_string(),
+                    messages: vec![
+                        legacy("legacy-child", vec!["legacy-parent".to_string()]),
+                        legacy("legacy-parent", Vec::new()),
+                    ],
+                },
+            )
+            .await
+            .expect_err("forward import edge");
+        assert_eq!(forward.code(), "message_import_not_topological");
+        let imported: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM core_messages WHERE workspace_id = $1")
+                .bind("workspace-import")
+                .fetch_one(&store.pool)
+                .await
+                .expect("count rolled-back import");
+        assert_eq!(imported, 0);
+    }
+
+    #[tokio::test]
+    async fn expiry_preserves_history_while_bounds_reject_oversized_requests() {
+        let store = test_store().await;
+        let sender = agent("sender");
+        let recipient = agent("recipient");
+        let mut expiring = request(&["recipient"], Vec::new(), "expires", "expires-key");
+        expiring.expires_at = Some(Utc::now() + chrono::Duration::hours(1));
+        let sent = store
+            .send(
+                "workspace-a",
+                &sender,
+                std::slice::from_ref(&recipient),
+                &expiring,
+            )
+            .await
+            .expect("future expiry");
+        sqlx::query(
+            "UPDATE core_messages SET expires_at = $1 WHERE workspace_id = $2 AND message_id = $3",
+        )
+        .bind("2000-01-01T00:00:00Z")
+        .bind("workspace-a")
+        .bind(&sent.message.message_id)
+        .execute(&store.pool)
+        .await
+        .expect("expire message history");
+        sqlx::query(
+            "UPDATE core_message_deliveries SET expires_at = $1 WHERE workspace_id = $2 AND message_id = $3",
+        )
+        .bind("2000-01-01T00:00:00Z")
+        .bind("workspace-a")
+        .bind(&sent.message.message_id)
+        .execute(&store.pool)
+        .await
+        .expect("expire delivery");
+        assert!(store
+            .receive("workspace-a", &recipient, 10, 0)
+            .await
+            .expect("expired receive")
+            .deliveries
+            .is_empty());
+        assert_eq!(
+            store
+                .get("workspace-a", &recipient, &sent.message.message_id)
+                .await
+                .expect("expired history remains")
+                .body,
+            "expires"
+        );
+        assert_eq!(
+            store
+                .list("workspace-a", &recipient, None, 10)
+                .await
+                .expect("expired list history")
+                .messages
+                .len(),
+            1
+        );
+
+        let mut oversized_body = request(&["recipient"], Vec::new(), "x", "body-bound");
+        oversized_body.body = "x".repeat(MAX_MESSAGE_BODY_BYTES + 1);
+        assert_eq!(
+            validate_send(std::slice::from_ref(&recipient), &oversized_body)
+                .expect_err("oversized body")
+                .code(),
+            "message_body_invalid"
+        );
+        let recipients = (0..=MAX_MESSAGE_RECIPIENTS)
+            .map(|index| agent(&format!("recipient-{index}")))
+            .collect::<Vec<_>>();
+        let too_many_recipients = request(
+            &(0..=MAX_MESSAGE_RECIPIENTS)
+                .map(|index| format!("recipient-{index}"))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            Vec::new(),
+            "recipient bound",
+            "recipient-bound",
+        );
+        assert_eq!(
+            validate_send(&recipients, &too_many_recipients)
+                .expect_err("too many recipients")
+                .code(),
+            "message_recipients_invalid"
+        );
+        let contexts = (0..=MAX_MESSAGE_CONTEXTS)
+            .map(|index| format!("msg-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_send(
+                std::slice::from_ref(&recipient),
+                &request(&["recipient"], contexts, "context bound", "context-bound"),
+            )
+            .expect_err("too many contexts")
+            .code(),
+            "message_contexts_invalid"
+        );
+        assert_eq!(
+            validate_page_size(0).expect_err("zero page").code(),
+            "message_limit_invalid"
+        );
+        assert_eq!(
+            store
+                .receive(
+                    "workspace-a",
+                    &recipient,
+                    1,
+                    MAX_MESSAGE_WAIT_MILLISECONDS + 1,
+                )
+                .await
+                .expect_err("oversized wait")
+                .code(),
+            "message_wait_invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbox_is_atomic_body_free_and_records_the_pinned_policy_revision() {
+        let store = test_store().await;
+        let sender = agent("sender");
+        let recipient = agent("recipient");
+        let secret_body = "body-that-must-stay-out-of-errors-and-events";
+        store
+            .send_with_policy_revision(
+                "workspace-a",
+                &sender,
+                std::slice::from_ref(&recipient),
+                &request(&["recipient"], Vec::new(), secret_body, "revision-key"),
+                Some(77),
+            )
+            .await
+            .expect("send with pinned revision");
+        let envelope: Value = sqlx::query_scalar(
+            "SELECT envelope FROM core_message_outbox WHERE action = 'message.created'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .expect("load created event");
+        assert_eq!(envelope["workspace_revision"], 77);
+        assert!(!envelope.to_string().contains(secret_body));
+
+        let before_messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM core_messages")
+            .fetch_one(&store.pool)
+            .await
+            .expect("count messages");
+        let before_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM core_message_outbox")
+            .fetch_one(&store.pool)
+            .await
+            .expect("count events");
+        let failure = store
+            .send(
+                "workspace-a",
+                &sender,
+                std::slice::from_ref(&recipient),
+                &request(
+                    &["recipient"],
+                    vec!["missing-context".to_string()],
+                    secret_body,
+                    "failed-atomic-send",
+                ),
+            )
+            .await
+            .expect_err("invalid send must roll back");
+        assert!(!failure.to_string().contains(secret_body));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM core_messages")
+                .fetch_one(&store.pool)
+                .await
+                .expect("count messages after failure"),
+            before_messages
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM core_message_outbox")
+                .fetch_one(&store.pool)
+                .await
+                .expect("count events after failure"),
+            before_events
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,16 @@
+Validate, install, inspect, and run CLI-only script plugins
+
+Usage: treer plugin <COMMAND>
+
+Commands:
+  validate   Validate a plugin package without executing it
+  install    Install an immutable plugin package without executing it
+  list       List installed plugin versions
+  inspect    Inspect the selected installed version of a plugin
+  uninstall  Uninstall every local package version after revoking Core sessions
+  run        Run a plugin in the foreground through a command-limited broker
+  auth       Manage a broker-bound human session for this plugin
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help

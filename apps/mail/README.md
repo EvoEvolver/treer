@@ -8,6 +8,8 @@ procedure.
 
 Do not start the old service after cutover. Back up its SQLite or PostgreSQL
 database, stop writes, and follow the plugin's documented `migrate.py` workflow.
-The migration never deletes or modifies the source database. Legacy browser
+The migration requires an explicit `--actor`, preserves source/structural
+checksums and resumable batch checkpoints, and never deletes or modifies the
+source database. Legacy browser
 sessions require one new login because their broad App token cannot be safely
 converted into a plugin-bound human capability.

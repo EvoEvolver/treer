@@ -49,6 +49,7 @@ pub const ACTION_MESSAGE_RECEIVE: &str = "message.receive";
 pub const ACTION_MESSAGE_ACK: &str = "message.ack";
 pub const ACTION_MESSAGE_IMPORT: &str = "message.import";
 pub const ACTION_PLUGIN_OAUTH: &str = "plugin.oauth";
+pub const ACTION_PLUGIN_UNINSTALL: &str = "plugin.uninstall";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT: &str = "agent";
 pub const RESOURCE_AGENT_LAUNCH_PROFILE: &str = "agent.launch_profile";
@@ -62,6 +63,7 @@ pub const RESOURCE_MESSAGE_MAILBOX: &str = "message.mailbox";
 pub const RESOURCE_MESSAGE_DELIVERY: &str = "message.delivery";
 pub const RESOURCE_MESSAGE_IMPORT: &str = "message.import";
 pub const RESOURCE_PLUGIN_SESSION: &str = "plugin.session";
+pub const RESOURCE_PLUGIN_PACKAGE: &str = "plugin.package";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySubject {
@@ -187,8 +189,41 @@ pub enum PolicyEvaluation {
 pub type PolicyFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PolicyEvaluation, ProtocolError>> + Send + 'a>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyBatchEvaluation {
+    pub evaluations: Vec<PolicyEvaluation>,
+    pub revision: Option<u64>,
+}
+
+pub type PolicyBatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<PolicyBatchEvaluation, ProtocolError>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyBatchAuthorization {
+    pub revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyBatchDenial {
+    pub request_index: usize,
+    pub error: ProtocolError,
+}
+
 pub trait PolicyEvaluator: Send + Sync {
     fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a>;
+
+    fn evaluate_batch<'a>(&'a self, requests: &'a [PolicyRequest]) -> PolicyBatchFuture<'a> {
+        Box::pin(async move {
+            let mut evaluations = Vec::with_capacity(requests.len());
+            for request in requests {
+                evaluations.push(self.evaluate(request).await?);
+            }
+            Ok(PolicyBatchEvaluation {
+                evaluations,
+                revision: None,
+            })
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -228,6 +263,92 @@ impl PolicyEngine {
         }
         self.default_decision.clone().into_result()
     }
+
+    pub async fn authorize_batch(
+        &self,
+        requests: &[PolicyRequest],
+    ) -> Result<PolicyBatchAuthorization, PolicyBatchDenial> {
+        if requests.is_empty() {
+            return Ok(PolicyBatchAuthorization { revision: None });
+        }
+        let workspace_id = &requests[0].workspace_id;
+        if requests
+            .iter()
+            .any(|request| request.workspace_id != *workspace_id)
+        {
+            return Err(PolicyBatchDenial {
+                request_index: 0,
+                error: ProtocolError::new(
+                    "policy_batch_workspace_mismatch",
+                    "a policy batch must belong to one workspace",
+                ),
+            });
+        }
+
+        let mut unresolved = vec![true; requests.len()];
+        let mut revision = None;
+        for evaluator in self.evaluators.iter() {
+            if unresolved.iter().all(|value| !value) {
+                break;
+            }
+            let batch =
+                evaluator
+                    .evaluate_batch(requests)
+                    .await
+                    .map_err(|error| PolicyBatchDenial {
+                        request_index: 0,
+                        error,
+                    })?;
+            if batch.evaluations.len() != requests.len() {
+                return Err(PolicyBatchDenial {
+                    request_index: 0,
+                    error: ProtocolError::new(
+                        "policy_batch_invalid",
+                        "a policy evaluator returned an invalid batch result",
+                    ),
+                });
+            }
+            if let Some(batch_revision) = batch.revision {
+                if revision.is_some_and(|current| current != batch_revision) {
+                    return Err(PolicyBatchDenial {
+                        request_index: 0,
+                        error: ProtocolError::new(
+                            "policy_batch_revision_conflict",
+                            "policy evaluators did not use one pinned revision",
+                        ),
+                    });
+                }
+                revision = Some(batch_revision);
+            }
+            for (index, evaluation) in batch.evaluations.into_iter().enumerate() {
+                if !unresolved[index] {
+                    continue;
+                }
+                match evaluation {
+                    PolicyEvaluation::Abstain => {}
+                    PolicyEvaluation::Decide(PolicyDecision::Allow) => unresolved[index] = false,
+                    PolicyEvaluation::Decide(PolicyDecision::Deny(denial)) => {
+                        return Err(PolicyBatchDenial {
+                            request_index: index,
+                            error: denial.into_error(),
+                        });
+                    }
+                }
+            }
+        }
+        for (index, is_unresolved) in unresolved.into_iter().enumerate() {
+            if !is_unresolved {
+                continue;
+            }
+            if let PolicyDecision::Deny(denial) = self.default_decision.clone() {
+                return Err(PolicyBatchDenial {
+                    request_index: index,
+                    error: denial.into_error(),
+                });
+            }
+        }
+        Ok(PolicyBatchAuthorization { revision })
+    }
 }
 
 const POLICY_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -238,6 +359,7 @@ struct CachedWorkspacePolicy {
 }
 
 struct CompiledWorkspacePolicy {
+    revision: u64,
     mode: PolicyMode,
     defaults: BTreeMap<String, PolicyEffect>,
     groups: HashMap<String, Vec<PolicyPrincipalRef>>,
@@ -293,6 +415,39 @@ impl PolicyEvaluator for DurablePolicyEvaluator {
             Ok(PolicyEvaluation::Decide(policy.evaluate(request)))
         })
     }
+
+    fn evaluate_batch<'a>(&'a self, requests: &'a [PolicyRequest]) -> PolicyBatchFuture<'a> {
+        Box::pin(async move {
+            let Some(first) = requests.first() else {
+                return Ok(PolicyBatchEvaluation {
+                    evaluations: Vec::new(),
+                    revision: None,
+                });
+            };
+            if requests
+                .iter()
+                .any(|request| request.workspace_id != first.workspace_id)
+            {
+                return Err(ProtocolError::new(
+                    "policy_batch_workspace_mismatch",
+                    "a policy batch must belong to one workspace",
+                ));
+            }
+            let Some(policy) = self.compiled(&first.workspace_id).await? else {
+                return Ok(PolicyBatchEvaluation {
+                    evaluations: vec![PolicyEvaluation::Abstain; requests.len()],
+                    revision: None,
+                });
+            };
+            Ok(PolicyBatchEvaluation {
+                evaluations: requests
+                    .iter()
+                    .map(|request| PolicyEvaluation::Decide(policy.evaluate(request)))
+                    .collect(),
+                revision: Some(policy.revision),
+            })
+        })
+    }
 }
 
 impl CompiledWorkspacePolicy {
@@ -315,6 +470,7 @@ impl CompiledWorkspacePolicy {
             });
         }
         Self {
+            revision: policy.revision,
             mode: policy.mode,
             defaults: policy.document.defaults,
             groups: policy
@@ -443,6 +599,7 @@ impl PolicyDecision {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use treer_protocol::{PolicyPrincipalGroup, WorkspacePolicyDocument, POLICY_SCHEMA_VERSION};
 
     struct StaticEvaluator(PolicyEvaluation);
@@ -450,6 +607,30 @@ mod tests {
     impl PolicyEvaluator for StaticEvaluator {
         fn evaluate<'a>(&'a self, _request: &'a PolicyRequest) -> PolicyFuture<'a> {
             Box::pin(async { Ok(self.0.clone()) })
+        }
+    }
+
+    struct PinnedBatchEvaluator {
+        calls: Arc<AtomicUsize>,
+        revision: u64,
+        evaluations: Vec<PolicyEvaluation>,
+    }
+
+    impl PolicyEvaluator for PinnedBatchEvaluator {
+        fn evaluate<'a>(&'a self, _request: &'a PolicyRequest) -> PolicyFuture<'a> {
+            Box::pin(async {
+                panic!("batch authorization must not fall back to per-item evaluation")
+            })
+        }
+
+        fn evaluate_batch<'a>(&'a self, _requests: &'a [PolicyRequest]) -> PolicyBatchFuture<'a> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(PolicyBatchEvaluation {
+                    evaluations: self.evaluations.clone(),
+                    revision: Some(self.revision),
+                })
+            })
         }
     }
 
@@ -491,6 +672,51 @@ mod tests {
             .await
             .expect_err("explicit deny should stop evaluation");
         assert_eq!(error.code, "policy_denied");
+    }
+
+    #[tokio::test]
+    async fn batch_authorization_uses_one_evaluator_snapshot_and_reports_denied_index() {
+        let requests = vec![request(), request(), request()];
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = PolicyEngine::new(
+            PolicyDecision::Allow,
+            vec![Arc::new(PinnedBatchEvaluator {
+                calls: calls.clone(),
+                revision: 42,
+                evaluations: vec![
+                    PolicyEvaluation::Decide(PolicyDecision::Allow),
+                    PolicyEvaluation::Decide(PolicyDecision::Allow),
+                    PolicyEvaluation::Decide(PolicyDecision::Allow),
+                ],
+            })],
+        );
+        let authorized = engine
+            .authorize_batch(&requests)
+            .await
+            .expect("authorize one pinned batch");
+        assert_eq!(authorized.revision, Some(42));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let denied = PolicyEngine::new(
+            PolicyDecision::Allow,
+            vec![Arc::new(PinnedBatchEvaluator {
+                calls,
+                revision: 43,
+                evaluations: vec![
+                    PolicyEvaluation::Decide(PolicyDecision::Allow),
+                    PolicyEvaluation::Decide(PolicyDecision::Deny(PolicyDenial::new(
+                        "policy_denied",
+                        "blocked by test",
+                    ))),
+                    PolicyEvaluation::Decide(PolicyDecision::Allow),
+                ],
+            })],
+        )
+        .authorize_batch(&requests)
+        .await
+        .expect_err("batch denial should identify its request");
+        assert_eq!(denied.request_index, 1);
+        assert_eq!(denied.error.code, "policy_denied");
     }
 
     #[test]

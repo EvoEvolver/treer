@@ -1,5 +1,6 @@
 /target/
 /dist/
+/output/
 /.treer/
 /.vscode/
 .DS_Store

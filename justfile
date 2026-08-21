@@ -44,7 +44,7 @@ web-build:
     cd web && pnpm build
 
 mail config:
-    cargo run -p treer-cli -- plugin run mail --config {{config}}
+    TREER_ENABLE_PLUGIN_EXECUTION=true cargo run -p treer-cli -- plugin run mail --config {{config}}
 
 mail-web:
     cd plugins/mail/web && pnpm dev

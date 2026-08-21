@@ -53,11 +53,20 @@ just release-canary HEAD
 the current worktree to the Railway Proxy and the built App artifact to
 Cloudflare, and verifies their health endpoints. It also sets the Canary public
 URLs explicitly so this environment cannot accidentally emit Production
-installation or App links.
+installation or App links. The Proxy deployment explicitly enables
+`TREER_ENABLE_CORE_MESSAGES=true` and
+`TREER_ENABLE_PLUGIN_SESSIONS=true`; self-hosted launches default both gates
+off.
 
 The local gate inside `release-canary` includes first-party plugin source
 boundary checks, Mail and Telegram package tests, package validation, and the
 real-process Core Message/plugin E2E against the local test PostgreSQL service.
+That harness covers both a single Proxy without NATS and two Proxy replicas with
+shared PostgreSQL and an ephemeral JetStream, including cross-replica Message
+routing, confirmed body-free outbox publication, event-ID deduplication, and
+restart. A separate browser-assisted fixture exercises the real Mail UI at
+desktop and mobile viewports; it is audit evidence rather than part of the
+unattended `just check` recipe.
 The Railway black-box workflow below does not currently install a Mail bridge,
 contact Telegram, or automate a Mail browser. Do not cite it as external-channel
 canary evidence; those are separate future fixtures.
@@ -92,7 +101,8 @@ remain reproducible.
 First-party plugin packages are source artifacts under `plugins/`, not extra
 Rust machine binaries. A dedicated bridge deployment must install the exact
 package version separately, provide its operator-owned configuration and
-secret, and preserve its plugin state. The two standard Canary machines do not
+secret, set `TREER_ENABLE_PLUGIN_EXECUTION=true` in its supervisor, and preserve
+its plugin state. The two standard Canary machines do not
 start those bridge processes during the current network-focused workflow.
 
 Normal tests deliberately reuse the image already deployed to each service. To
