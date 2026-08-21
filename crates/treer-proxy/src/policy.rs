@@ -43,6 +43,12 @@ pub const ACTION_INGRESS_LIST: &str = "ingress.list";
 pub const ACTION_INGRESS_CREATE: &str = "ingress.create";
 pub const ACTION_INGRESS_UPDATE: &str = "ingress.update";
 pub const ACTION_INGRESS_DELETE: &str = "ingress.delete";
+pub const ACTION_MESSAGE_SEND: &str = "message.send";
+pub const ACTION_MESSAGE_READ: &str = "message.read";
+pub const ACTION_MESSAGE_RECEIVE: &str = "message.receive";
+pub const ACTION_MESSAGE_ACK: &str = "message.ack";
+pub const ACTION_MESSAGE_IMPORT: &str = "message.import";
+pub const ACTION_PLUGIN_OAUTH: &str = "plugin.oauth";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT: &str = "agent";
 pub const RESOURCE_AGENT_LAUNCH_PROFILE: &str = "agent.launch_profile";
@@ -51,11 +57,18 @@ pub const RESOURCE_HUMAN_DIRECTORY: &str = "human.directory";
 pub const RESOURCE_MACHINE_SERVICE: &str = "machine.service";
 pub const RESOURCE_VIRTUAL_HOST: &str = "virtual_host";
 pub const RESOURCE_SERVICE_INGRESS: &str = "service.ingress";
+pub const RESOURCE_MESSAGE: &str = "message";
+pub const RESOURCE_MESSAGE_MAILBOX: &str = "message.mailbox";
+pub const RESOURCE_MESSAGE_DELIVERY: &str = "message.delivery";
+pub const RESOURCE_MESSAGE_IMPORT: &str = "message.import";
+pub const RESOURCE_PLUGIN_SESSION: &str = "plugin.session";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySubject {
     Agent { server_id: String, agent_id: String },
     Machine { server_id: String },
+    Human { user_id: String },
+    Service { service_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,6 +410,8 @@ fn subject_parts(subject: &PolicySubject) -> (PolicyPrincipalKind, &str, &str) {
         PolicySubject::Machine { server_id } => {
             (PolicyPrincipalKind::Machine, server_id, server_id)
         }
+        PolicySubject::Human { user_id } => (PolicyPrincipalKind::Human, user_id, ""),
+        PolicySubject::Service { service_id } => (PolicyPrincipalKind::Service, service_id, ""),
     }
 }
 
@@ -404,6 +419,13 @@ fn resource_principal(resource: &PolicyResource) -> Option<(PolicyPrincipalKind,
     match resource.kind.as_str() {
         RESOURCE_AGENT => Some((PolicyPrincipalKind::Agent, &resource.id)),
         RESOURCE_MACHINE => Some((PolicyPrincipalKind::Machine, &resource.id)),
+        RESOURCE_MESSAGE_MAILBOX => match resource.attributes.get("principal_kind")?.as_str() {
+            "agent" => Some((PolicyPrincipalKind::Agent, &resource.id)),
+            "human" => Some((PolicyPrincipalKind::Human, &resource.id)),
+            "machine" => Some((PolicyPrincipalKind::Machine, &resource.id)),
+            "service" => Some((PolicyPrincipalKind::Service, &resource.id)),
+            _ => None,
+        },
         _ => None,
     }
 }

@@ -18,16 +18,21 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
-    AgentCommand, AgentInfo, AgentLaunchProfile, ApiError, AppIdentityVerifyRequest, AppPrincipal,
-    AppPrincipalKind, CreateAgentLaunchProfileRequest, CreateAgentRequest,
-    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
-    InputAgentRequest, LaunchAgentProfileRequest, MachineEnrollmentRequest,
-    MachineEnrollmentResponse, MachineService, PromptAgentRequest, ProtocolError, RenameRequest,
-    ResolveAppRecipientsRequest, ResolveAppRecipientsResponse, ServiceIngress,
-    ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    AcknowledgeMessagesRequest, AgentCommand, AgentInfo, AgentLaunchProfile, ApiError,
+    AppIdentityVerifyRequest, AppPrincipal, AppPrincipalKind, CreateAgentLaunchProfileRequest,
+    CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
+    CreateVirtualNetworkHostRequest, GetMessageResponse, ImportMessagesRequest, InputAgentRequest,
+    LaunchAgentProfileRequest, ListMessagesQuery, MachineEnrollmentRequest,
+    MachineEnrollmentResponse, MachineService, MessagePrincipal, MessagePrincipalKind,
+    PluginOAuthExchangeRequest, PluginOAuthExchangeResponse, PluginOAuthStartRequest,
+    PluginOAuthStartResponse, PromptAgentRequest, ProtocolError, ReceiveMessagesRequest,
+    RenameRequest, ResolveAppRecipientsRequest, ResolveAppRecipientsResponse,
+    RevokePluginSessionRequest, RevokePluginSessionsRequest, RevokePluginSessionsResponse,
+    SendMessageRequest, ServiceIngress, ServiceIngressAccess, TerminalClientMessage,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
+    WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER, PLUGIN_ID_HEADER,
+    PLUGIN_SESSION_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -36,6 +41,8 @@ use crate::agent_socket;
 use crate::audit::NewWorkspaceAuditEvent;
 use crate::auth::{self, AuthStore, CurrentSession, MachineSession, ProfileMutationActor};
 use crate::identity::IdentityIssuer;
+use crate::message_store::{MessageStore, MessageStoreError};
+use crate::plugin_store::{PluginSessionStore, PluginStoreError};
 use crate::policy::{
     PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_CREATE,
     ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT, ACTION_AGENT_METADATA_READ,
@@ -44,11 +51,14 @@ use crate::policy::{
     ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE, ACTION_LAUNCH_PROFILE_CREATE,
     ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST, ACTION_LAUNCH_PROFILE_READ,
     ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE, ACTION_MACHINE_DELETE,
-    ACTION_MACHINE_UPDATE, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST,
-    ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
-    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT,
-    RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE,
-    RESOURCE_MACHINE_SERVICE, RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
+    ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT, ACTION_MESSAGE_READ,
+    ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_PLUGIN_OAUTH, ACTION_SERVICE_CREATE,
+    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
+    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
+    RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE,
+    RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE, RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT,
+    RESOURCE_MESSAGE_MAILBOX, RESOURCE_PLUGIN_SESSION, RESOURCE_SERVICE_INGRESS,
+    RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
 
@@ -62,6 +72,8 @@ fn control_audit_actor<'a>(
     match subject {
         Some(PolicySubject::Agent { agent_id, .. }) => ("agent", Some(agent_id.as_str())),
         Some(PolicySubject::Machine { server_id }) => ("machine", Some(server_id.as_str())),
+        Some(PolicySubject::Human { user_id }) => ("human", Some(user_id.as_str())),
+        Some(PolicySubject::Service { service_id }) => ("service", Some(service_id.as_str())),
         None => ("system", None),
     }
 }
@@ -272,6 +284,8 @@ pub fn router(
     identity: IdentityIssuer,
     browser: BrowserAccess,
     ingress: IngressConfig,
+    messages: MessageStore,
+    plugin_sessions: PluginSessionStore,
 ) -> Router {
     let cors = browser.cors_layer();
     let workload_identity = WorkloadIdentityApi {
@@ -371,6 +385,42 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/messages",
+            get(list_core_messages).post(send_core_message),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/messages/receive",
+            post(receive_core_messages),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/messages/ack",
+            post(acknowledge_core_messages),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/messages/import",
+            post(import_core_messages),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/messages/{message_id}",
+            get(get_core_message),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/plugins/oauth/start",
+            post(start_plugin_oauth),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/plugins/oauth/exchange",
+            post(exchange_plugin_oauth),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/plugins/sessions/revoke",
+            post(revoke_plugin_session),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/plugins/sessions/revoke-all",
+            post(revoke_plugin_sessions),
         )
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
@@ -584,6 +634,8 @@ pub fn router(
         .layer(Extension(auth_store))
         .layer(Extension(browser))
         .layer(Extension(ingress))
+        .layer(Extension(messages))
+        .layer(Extension(plugin_sessions))
         .with_state(state)
 }
 
@@ -760,6 +812,282 @@ async fn exchange_workspace_app_code(
             )
         })?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(token)).into_response())
+}
+
+async fn start_plugin_oauth(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<PluginOAuthStartRequest>,
+) -> Result<Response, ApiFailure> {
+    let (subject, server_id, bridge_agent_id) =
+        plugin_bridge_subject(&state, &machine, &headers, &workspace_id).await?;
+    let plugin_id = require_plugin_id(&headers, &request.plugin_id)?;
+    let service =
+        require_plugin_service(&auth, &workspace_id, request.service_id.trim(), &server_id).await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_PLUGIN_OAUTH,
+        plugin_session_policy_resource(&plugin_id, &service.service_id, &bridge_agent_id),
+    )
+    .await?;
+    let (redirect_uri, resolved) = resolve_app_redirect(
+        &auth,
+        &config,
+        &service.service_id,
+        request.redirect_uri.trim(),
+    )
+    .await?;
+    if resolved.ingress.workspace_id != workspace_id {
+        return Err(ApiFailure::bad_request(
+            "plugin_oauth_service_invalid",
+            "plugin OAuth service and redirect do not belong to this workspace",
+        ));
+    }
+
+    let verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let challenge = auth::pkce_challenge(&verifier);
+    let (state_value, expires_at) = plugin_sessions
+        .create_oauth_state(
+            &workspace_id,
+            &plugin_id,
+            &service.service_id,
+            &bridge_agent_id,
+            redirect_uri.as_str(),
+            &verifier,
+        )
+        .await?;
+    let mut authorize_url = config.proxy_public_url.clone();
+    authorize_url.set_path("/api/apps/oauth/authorize");
+    authorize_url.set_query(None);
+    authorize_url.set_fragment(None);
+    authorize_url
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &service.service_id)
+        .append_pair("redirect_uri", redirect_uri.as_str())
+        .append_pair("state", &state_value)
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256");
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(PluginOAuthStartResponse {
+            authorize_url: authorize_url.into(),
+            expires_at,
+        }),
+    )
+        .into_response())
+}
+
+async fn exchange_plugin_oauth(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<PluginOAuthExchangeRequest>,
+) -> Result<Response, ApiFailure> {
+    let (subject, server_id, bridge_agent_id) =
+        plugin_bridge_subject(&state, &machine, &headers, &workspace_id).await?;
+    let plugin_id = require_plugin_id(&headers, &request.plugin_id)?;
+    let service =
+        require_plugin_service(&auth, &workspace_id, request.service_id.trim(), &server_id).await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_PLUGIN_OAUTH,
+        plugin_session_policy_resource(&plugin_id, &service.service_id, &bridge_agent_id),
+    )
+    .await?;
+    let state_record = plugin_sessions
+        .consume_oauth_state(
+            request.state.trim(),
+            &workspace_id,
+            &plugin_id,
+            &service.service_id,
+            &bridge_agent_id,
+        )
+        .await?;
+    let grant = auth
+        .consume_app_oauth_code(
+            request.code.trim(),
+            &state_record.service_id,
+            &state_record.redirect_uri,
+            &state_record.verifier,
+        )
+        .await?;
+    if grant.workspace_id != state_record.workspace_id
+        || grant.service_id != state_record.service_id
+        || state_record.plugin_id != plugin_id
+        || state_record.bridge_agent_id != bridge_agent_id
+    {
+        return Err(ApiFailure::unauthorized(
+            "plugin_oauth_exchange_invalid",
+            "plugin OAuth code is not valid for this plugin instance",
+        ));
+    }
+    let response: PluginOAuthExchangeResponse = plugin_sessions
+        .create_human_session(&plugin_id, &bridge_agent_id, &grant)
+        .await?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response())
+}
+
+async fn revoke_plugin_session(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<RevokePluginSessionRequest>,
+) -> Result<Response, ApiFailure> {
+    let (subject, _, bridge_agent_id) =
+        plugin_bridge_subject(&state, &machine, &headers, &workspace_id).await?;
+    let plugin_id = require_plugin_id(&headers, &request.plugin_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_PLUGIN_OAUTH,
+        plugin_session_policy_resource(&plugin_id, "*", &bridge_agent_id),
+    )
+    .await?;
+    let revoked = plugin_sessions
+        .revoke(
+            &workspace_id,
+            &plugin_id,
+            &bridge_agent_id,
+            request.session_capability.trim(),
+        )
+        .await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(RevokePluginSessionsResponse {
+            revoked: u64::from(revoked),
+        }),
+    )
+        .into_response())
+}
+
+async fn revoke_plugin_sessions(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<RevokePluginSessionsRequest>,
+) -> Result<Response, ApiFailure> {
+    let (subject, _, bridge_agent_id) =
+        plugin_bridge_subject(&state, &machine, &headers, &workspace_id).await?;
+    let plugin_id = require_plugin_id(&headers, &request.plugin_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_PLUGIN_OAUTH,
+        plugin_session_policy_resource(&plugin_id, "*", &bridge_agent_id),
+    )
+    .await?;
+    let revoked = plugin_sessions
+        .revoke_plugin(&workspace_id, &plugin_id, &bridge_agent_id)
+        .await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(RevokePluginSessionsResponse { revoked }),
+    )
+        .into_response())
+}
+
+async fn plugin_bridge_subject(
+    state: &AppState,
+    machine: &MachineSession,
+    headers: &HeaderMap,
+    workspace_id: &str,
+) -> Result<(PolicySubject, String, String), ApiFailure> {
+    let subject = agent_policy_subject(state, machine, headers, workspace_id).await?;
+    let PolicySubject::Agent {
+        server_id,
+        agent_id,
+    } = &subject
+    else {
+        return Err(ApiFailure::unauthorized(
+            "plugin_bridge_agent_required",
+            "a managed bridge Agent is required for plugin operations",
+        ));
+    };
+    Ok((subject.clone(), server_id.clone(), agent_id.clone()))
+}
+
+fn require_plugin_id(headers: &HeaderMap, expected: &str) -> Result<String, ApiFailure> {
+    let supplied = headers
+        .get(PLUGIN_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiFailure::unauthorized(
+                "plugin_context_required",
+                "the plugin broker context is required",
+            )
+        })?;
+    if supplied != expected.trim()
+        || supplied.len() > 63
+        || !supplied.as_bytes()[0].is_ascii_lowercase()
+        || !supplied
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(ApiFailure::unauthorized(
+            "plugin_context_invalid",
+            "the plugin broker context does not match this request",
+        ));
+    }
+    Ok(supplied.to_string())
+}
+
+async fn require_plugin_service(
+    auth: &AuthStore,
+    workspace_id: &str,
+    service_id: &str,
+    server_id: &str,
+) -> Result<MachineService, ApiFailure> {
+    let service = auth
+        .resolve_machine_service(workspace_id, service_id)
+        .await
+        .map_err(|_| {
+            ApiFailure::forbidden(
+                "plugin_service_unavailable",
+                "the plugin service is unavailable to this bridge Agent",
+            )
+        })?;
+    if service.service_id != service_id || service.server_id != server_id {
+        return Err(ApiFailure::forbidden(
+            "plugin_service_unavailable",
+            "the plugin service is unavailable to this bridge Agent",
+        ));
+    }
+    Ok(service)
+}
+
+fn plugin_session_policy_resource(
+    plugin_id: &str,
+    service_id: &str,
+    bridge_agent_id: &str,
+) -> PolicyResource {
+    PolicyResource::new(RESOURCE_PLUGIN_SESSION, plugin_id)
+        .with_attribute("service_id", service_id)
+        .with_attribute("bridge_agent_id", bridge_agent_id)
 }
 
 async fn workspace_app_directory(
@@ -965,6 +1293,364 @@ fn resolve_app_principal(
     }
 }
 
+async fn send_core_message(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SendMessageRequest>,
+) -> Result<Json<treer_protocol::SendMessageResponse>, ApiFailure> {
+    let (subject, sender) = message_request_principal(
+        &state,
+        &auth,
+        &plugin_sessions,
+        &machine,
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    if request.recipients.is_empty() || request.recipients.len() > 32 {
+        return Err(ApiFailure::bad_request(
+            "message_recipients_invalid",
+            "message requires 1-32 recipients",
+        ));
+    }
+    let directory = workspace_app_principals(&state, &auth, &workspace_id).await?;
+    let mut recipients = Vec::with_capacity(request.recipients.len());
+    for target in &request.recipients {
+        let target = if matches!(target.trim(), "self" | ".") {
+            sender.id.as_str()
+        } else {
+            target.trim()
+        };
+        let recipient = resolve_app_principal(&directory, target)
+            .map(MessagePrincipal::from)
+            .map_err(|_| message_recipient_unavailable())?;
+        authorize_control(
+            &policy,
+            &workspace_id,
+            Some(&subject),
+            ACTION_MESSAGE_SEND,
+            message_mailbox_policy_resource(&recipient),
+        )
+        .await
+        .map_err(|_| message_recipient_unavailable())?;
+        recipients.push(recipient);
+    }
+    for context_id in &request.context_ids {
+        authorize_control(
+            &policy,
+            &workspace_id,
+            Some(&subject),
+            ACTION_MESSAGE_READ,
+            PolicyResource::new(RESOURCE_MESSAGE, context_id),
+        )
+        .await?;
+    }
+    Ok(Json(
+        messages
+            .send(&workspace_id, &sender, &recipients, &request)
+            .await?,
+    ))
+}
+
+async fn get_core_message(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path((workspace_id, message_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<GetMessageResponse>, ApiFailure> {
+    let (subject, principal) = message_request_principal(
+        &state,
+        &auth,
+        &plugin_sessions,
+        &machine,
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_MESSAGE_READ,
+        PolicyResource::new(RESOURCE_MESSAGE, &message_id),
+    )
+    .await?;
+    Ok(Json(GetMessageResponse {
+        message: messages.get(&workspace_id, &principal, &message_id).await?,
+    }))
+}
+
+async fn list_core_messages(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<ListMessagesQuery>,
+    headers: HeaderMap,
+) -> Result<Json<treer_protocol::MessagePage>, ApiFailure> {
+    let (subject, principal) = message_request_principal(
+        &state,
+        &auth,
+        &plugin_sessions,
+        &machine,
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_MESSAGE_READ,
+        message_mailbox_policy_resource(&principal),
+    )
+    .await?;
+    Ok(Json(
+        messages
+            .list(
+                &workspace_id,
+                &principal,
+                query.before.as_deref(),
+                query.limit,
+            )
+            .await?,
+    ))
+}
+
+async fn receive_core_messages(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ReceiveMessagesRequest>,
+) -> Result<Json<treer_protocol::ReceiveMessagesResponse>, ApiFailure> {
+    let (subject, principal) = message_request_principal(
+        &state,
+        &auth,
+        &plugin_sessions,
+        &machine,
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_MESSAGE_RECEIVE,
+        message_mailbox_policy_resource(&principal),
+    )
+    .await?;
+    Ok(Json(
+        messages
+            .receive(
+                &workspace_id,
+                &principal,
+                request.limit,
+                request.wait_milliseconds,
+            )
+            .await?,
+    ))
+}
+
+async fn acknowledge_core_messages(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<AcknowledgeMessagesRequest>,
+) -> Result<Json<treer_protocol::AcknowledgeMessagesResponse>, ApiFailure> {
+    let (subject, principal) = message_request_principal(
+        &state,
+        &auth,
+        &plugin_sessions,
+        &machine,
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    for delivery_id in &request.delivery_ids {
+        authorize_control(
+            &policy,
+            &workspace_id,
+            Some(&subject),
+            ACTION_MESSAGE_ACK,
+            PolicyResource::new(RESOURCE_MESSAGE_DELIVERY, delivery_id),
+        )
+        .await?;
+    }
+    Ok(Json(
+        messages
+            .acknowledge(&workspace_id, &principal, &request)
+            .await?,
+    ))
+}
+
+async fn import_core_messages(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    machine: Option<Extension<MachineSession>>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ImportMessagesRequest>,
+) -> Result<Json<treer_protocol::ImportMessagesResponse>, ApiFailure> {
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?
+    .ok_or_else(|| {
+        ApiFailure::forbidden(
+            "message_import_denied",
+            "message import requires a local operator",
+        )
+    })?;
+    let PolicySubject::Machine { server_id } = &subject else {
+        return Err(ApiFailure::forbidden(
+            "message_import_denied",
+            "message import requires a local operator",
+        ));
+    };
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_MESSAGE_IMPORT,
+        PolicyResource::new(RESOURCE_MESSAGE_IMPORT, &workspace_id),
+    )
+    .await?;
+    let importer = MessagePrincipal {
+        kind: MessagePrincipalKind::Machine,
+        id: server_id.clone(),
+        name: server_id.clone(),
+        role: None,
+    };
+    Ok(Json(
+        messages
+            .import_legacy_mail(&workspace_id, &importer, &request)
+            .await?,
+    ))
+}
+
+async fn message_request_principal(
+    state: &AppState,
+    auth: &AuthStore,
+    plugin_sessions: &PluginSessionStore,
+    machine: &MachineSession,
+    headers: &HeaderMap,
+    workspace_id: &str,
+) -> Result<(PolicySubject, MessagePrincipal), ApiFailure> {
+    let subject = agent_policy_subject(state, machine, headers, workspace_id).await?;
+    let PolicySubject::Agent {
+        server_id,
+        agent_id,
+    } = &subject
+    else {
+        return Err(ApiFailure::unauthorized(
+            "message_agent_required",
+            "managed Agent identity is required for this Message operation",
+        ));
+    };
+    let plugin_id = optional_header_text(headers, PLUGIN_ID_HEADER, 63)?;
+    let plugin_session = optional_header_text(headers, PLUGIN_SESSION_HEADER, 512)?;
+    if plugin_session.is_some() && plugin_id.is_none() {
+        return Err(plugin_session_invalid());
+    }
+    if let (Some(plugin_id), Some(capability)) = (plugin_id, plugin_session) {
+        let mut session = plugin_sessions
+            .authenticate(workspace_id, plugin_id, agent_id, capability)
+            .await
+            .map_err(|_| plugin_session_invalid())?;
+        let service = auth
+            .resolve_machine_service(workspace_id, &session.service_id)
+            .await
+            .map_err(|_| plugin_session_invalid())?;
+        if service.server_id != *server_id {
+            return Err(plugin_session_invalid());
+        }
+        session.principal.role = Some(
+            auth.workspace_member_role(workspace_id, &session.principal.id)
+                .await
+                .map_err(|_| plugin_session_invalid())?,
+        );
+        return Ok((
+            PolicySubject::Human {
+                user_id: session.principal.id.clone(),
+            },
+            session.principal,
+        ));
+    }
+
+    let agent = state.resolve_agent(workspace_id, agent_id).await?;
+    Ok((
+        subject,
+        MessagePrincipal {
+            kind: MessagePrincipalKind::Agent,
+            id: agent.agent_id,
+            name: agent.name,
+            role: None,
+        },
+    ))
+}
+
+fn optional_header_text<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+    maximum: usize,
+) -> Result<Option<&'a str>, ApiFailure> {
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| plugin_session_invalid())?.trim();
+    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
+        return Err(plugin_session_invalid());
+    }
+    Ok(Some(value))
+}
+
+fn plugin_session_invalid() -> ApiFailure {
+    ApiFailure::unauthorized(
+        "plugin_session_invalid",
+        "the plugin human session is invalid, expired, or unavailable",
+    )
+}
+
+fn message_mailbox_policy_resource(principal: &MessagePrincipal) -> PolicyResource {
+    PolicyResource::new(RESOURCE_MESSAGE_MAILBOX, &principal.id)
+        .with_attribute("principal_kind", principal.kind.as_str())
+}
+
+fn message_recipient_unavailable() -> ApiFailure {
+    ApiFailure::not_found(
+        "message_recipient_unavailable",
+        "a recipient does not exist or is not available to this sender",
+    )
+}
+
 async fn agent_issue_identity_token(
     State(state): State<AppState>,
     Extension(identity_api): Extension<WorkloadIdentityApi>,
@@ -1017,11 +1703,20 @@ async fn agent_list_humans(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
     Extension(machine): Extension<MachineSession>,
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let (subject, _) = message_request_principal(
+        &state,
+        &auth,
+        &plugin_sessions,
+        &machine,
+        &headers,
+        &workspace_id,
+    )
+    .await?;
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -2670,6 +3365,8 @@ fn policy_actor_name(subject: &PolicySubject) -> String {
     match subject {
         PolicySubject::Agent { agent_id, .. } => format!("agent:{agent_id}"),
         PolicySubject::Machine { server_id } => format!("machine:{server_id}"),
+        PolicySubject::Human { user_id } => format!("human:{user_id}"),
+        PolicySubject::Service { service_id } => format!("service:{service_id}"),
     }
 }
 
@@ -2720,7 +3417,9 @@ fn require_agent_owns_service(
             "ingress_service_not_owned",
             "agents may publish only services registered on their own machine",
         )),
-        PolicySubject::Machine { .. } => Err(ApiFailure::forbidden(
+        PolicySubject::Machine { .. }
+        | PolicySubject::Human { .. }
+        | PolicySubject::Service { .. } => Err(ApiFailure::forbidden(
             "ingress_agent_required",
             "a managed agent identity is required to publish a service",
         )),
@@ -3007,19 +3706,37 @@ fn agent_request_from_launch_profile(
 
 async fn list_agents(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
     let snapshot = state.snapshot(&workspace_id).await?;
-    let subject = control_policy_subject(
-        &state,
-        machine.as_ref().map(|value| &value.0),
-        &headers,
-        &workspace_id,
-    )
-    .await?;
+    let subject = if headers.contains_key(PLUGIN_SESSION_HEADER) {
+        let machine = machine.as_ref().ok_or_else(plugin_session_invalid)?;
+        Some(
+            message_request_principal(
+                &state,
+                &auth,
+                &plugin_sessions,
+                &machine.0,
+                &headers,
+                &workspace_id,
+            )
+            .await?
+            .0,
+        )
+    } else {
+        control_policy_subject(
+            &state,
+            machine.as_ref().map(|value| &value.0),
+            &headers,
+            &workspace_id,
+        )
+        .await?
+    };
     let mut agents = Vec::new();
     for agent in snapshot.agents {
         if matches!(subject.as_ref(), Some(PolicySubject::Machine { server_id }) if server_id != &agent.server_id)
@@ -3045,19 +3762,37 @@ async fn list_agents(
 
 async fn get_agent(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    Extension(plugin_sessions): Extension<PluginSessionStore>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
-    let subject = control_policy_subject(
-        &state,
-        machine.as_ref().map(|value| &value.0),
-        &headers,
-        &workspace_id,
-    )
-    .await?;
+    let subject = if headers.contains_key(PLUGIN_SESSION_HEADER) {
+        let machine = machine.as_ref().ok_or_else(plugin_session_invalid)?;
+        Some(
+            message_request_principal(
+                &state,
+                &auth,
+                &plugin_sessions,
+                &machine.0,
+                &headers,
+                &workspace_id,
+            )
+            .await?
+            .0,
+        )
+    } else {
+        control_policy_subject(
+            &state,
+            machine.as_ref().map(|value| &value.0),
+            &headers,
+            &workspace_id,
+        )
+        .await?
+    };
     require_machine_target(subject.as_ref(), &agent.server_id)?;
     authorize_control(
         &policy,
@@ -3877,6 +4612,76 @@ impl From<auth::AuthFailure> for ApiFailure {
     }
 }
 
+impl From<MessageStoreError> for ApiFailure {
+    fn from(error: MessageStoreError) -> Self {
+        match error {
+            MessageStoreError::Contract { code, message } => {
+                let status = match code {
+                    "message_not_found"
+                    | "message_context_not_found"
+                    | "message_delivery_not_found" => StatusCode::NOT_FOUND,
+                    "message_idempotency_conflict"
+                    | "message_ack_idempotency_conflict"
+                    | "message_import_idempotency_conflict"
+                    | "message_import_conflict" => StatusCode::CONFLICT,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                Self {
+                    status,
+                    error: ProtocolError::new(code, message),
+                }
+            }
+            MessageStoreError::Database(_) => {
+                tracing::error!("Core Message database operation failed");
+                Self::service_unavailable(
+                    "message_store_unavailable",
+                    "Core Message storage is unavailable",
+                )
+            }
+            MessageStoreError::Corrupt => {
+                tracing::error!("Core Message storage returned invalid data");
+                Self::internal(
+                    "message_store_corrupt",
+                    "Core Message storage contains invalid data",
+                )
+            }
+        }
+    }
+}
+
+impl From<PluginStoreError> for ApiFailure {
+    fn from(error: PluginStoreError) -> Self {
+        match error {
+            PluginStoreError::Contract { code, message } => {
+                let status = match code {
+                    "plugin_oauth_state_invalid" | "plugin_session_invalid" => {
+                        StatusCode::UNAUTHORIZED
+                    }
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                Self {
+                    status,
+                    error: ProtocolError::new(code, message),
+                }
+            }
+            PluginStoreError::Database(_) => {
+                tracing::error!("plugin session database operation failed");
+                Self::service_unavailable(
+                    "plugin_session_store_unavailable",
+                    "plugin session storage is unavailable",
+                )
+            }
+            PluginStoreError::Corrupt => {
+                tracing::error!("plugin session storage returned invalid data");
+                Self::internal(
+                    "plugin_session_store_corrupt",
+                    "plugin session storage contains invalid data",
+                )
+            }
+        }
+    }
+}
+
 impl From<serde_json::Error> for ApiFailure {
     fn from(error: serde_json::Error) -> Self {
         Self {
@@ -4001,6 +4806,12 @@ mod tests {
     #[tokio::test]
     async fn trailing_slash_browser_tunnel_route_is_registered() {
         let auth = AuthStore::for_test("admin-password").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let plugin_sessions = PluginSessionStore::open(auth.pool())
+            .await
+            .expect("plugin session store");
         let identity = IdentityIssuer::load(
             &auth,
             &Url::parse("https://treer.example/").expect("public URL"),
@@ -4015,6 +4826,8 @@ mod tests {
             identity,
             test_browser_access(),
             test_ingress_config(),
+            messages,
+            plugin_sessions,
         );
         let response = app
             .oneshot(
@@ -4118,6 +4931,12 @@ mod tests {
     #[tokio::test]
     async fn cors_preflight_allows_the_configured_app_with_credentials() {
         let auth = AuthStore::for_test("admin-password").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let plugin_sessions = PluginSessionStore::open(auth.pool())
+            .await
+            .expect("plugin session store");
         let identity = IdentityIssuer::load(
             &auth,
             &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
@@ -4132,6 +4951,8 @@ mod tests {
             identity,
             test_browser_access(),
             test_ingress_config(),
+            messages,
+            plugin_sessions,
         );
         let response = app
             .oneshot(
@@ -4162,6 +4983,12 @@ mod tests {
     #[tokio::test]
     async fn cors_headers_are_present_on_authenticated_route_errors() {
         let auth = AuthStore::for_test("admin-password").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let plugin_sessions = PluginSessionStore::open(auth.pool())
+            .await
+            .expect("plugin session store");
         let identity = IdentityIssuer::load(
             &auth,
             &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
@@ -4176,6 +5003,8 @@ mod tests {
             identity,
             test_browser_access(),
             test_ingress_config(),
+            messages,
+            plugin_sessions,
         );
         let response = app
             .oneshot(
@@ -4495,6 +5324,179 @@ mod tests {
         let claims = verified.claims.expect("verified claims");
         assert_eq!(claims.sub, "agent-a");
         assert_eq!(claims.machine_id, "machine-a");
+    }
+
+    #[tokio::test]
+    async fn plugin_oauth_creates_a_revocable_human_message_identity() {
+        let state = state_with_managed_agent().await;
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users(id, email, email_verified, preferred_name, password_hash, created_at) \
+             VALUES('user-a', 'user-a@example.test', TRUE, 'User A', 'unused', $1)",
+        )
+        .bind(&now)
+        .execute(&auth.pool())
+        .await
+        .expect("seed plugin human");
+        sqlx::query(
+            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+             VALUES('org_default', 'user-a', 'owner', $1)",
+        )
+        .bind(&now)
+        .execute(&auth.pool())
+        .await
+        .expect("seed plugin human membership");
+        let service = auth
+            .create_machine_service(
+                "default",
+                "test",
+                CreateMachineServiceRequest {
+                    name: "mail".to_string(),
+                    server_id: "machine-a".to_string(),
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 8080,
+                    protocol: treer_protocol::MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create Mail service");
+        let ingress = auth
+            .create_service_ingress(
+                "default",
+                "test",
+                "apps.treer.ai",
+                CreateServiceIngressRequest {
+                    service_id: service.service_id.clone(),
+                    slug: Some("mail".to_string()),
+                    access: ServiceIngressAccess::Workspace,
+                },
+            )
+            .await
+            .expect("create Mail ingress");
+        let redirect_uri = format!("https://{}/api/auth/callback", ingress.hostname);
+        let plugin_sessions = PluginSessionStore::open(auth.pool())
+            .await
+            .expect("plugin session store");
+        let machine = MachineSession {
+            server_id: Some("machine-a".to_string()),
+            workspace_id: Some("default".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
+        headers.insert(PLUGIN_ID_HEADER, "mail".parse().expect("plugin header"));
+
+        let response = start_plugin_oauth(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Extension(test_ingress_config()),
+            Extension(plugin_sessions.clone()),
+            Extension(machine.clone()),
+            Path("default".to_string()),
+            headers.clone(),
+            Json(PluginOAuthStartRequest {
+                plugin_id: "mail".to_string(),
+                service_id: service.service_id.clone(),
+                redirect_uri: redirect_uri.clone(),
+            }),
+        )
+        .await
+        .expect("start plugin OAuth");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read OAuth start response");
+        let started: PluginOAuthStartResponse =
+            serde_json::from_slice(&body).expect("decode OAuth start response");
+        let authorize_url = Url::parse(&started.authorize_url).expect("authorize URL");
+        let query = authorize_url
+            .query_pairs()
+            .into_owned()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(query.get("client_id"), Some(&service.service_id));
+        assert_eq!(query.get("redirect_uri"), Some(&redirect_uri));
+        let state_value = query.get("state").expect("OAuth state").clone();
+        let challenge = query.get("code_challenge").expect("PKCE challenge").clone();
+        let code = auth
+            .create_app_oauth_code(
+                &auth::AppOAuthGrant {
+                    workspace_id: "default".to_string(),
+                    service_id: service.service_id.clone(),
+                    user_id: "user-a".to_string(),
+                    preferred_name: "User A".to_string(),
+                    role: "owner".to_string(),
+                },
+                &redirect_uri,
+                &challenge,
+            )
+            .await
+            .expect("simulate browser authorization");
+        let response = exchange_plugin_oauth(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Extension(plugin_sessions.clone()),
+            Extension(machine.clone()),
+            Path("default".to_string()),
+            headers.clone(),
+            Json(PluginOAuthExchangeRequest {
+                plugin_id: "mail".to_string(),
+                service_id: service.service_id.clone(),
+                code,
+                state: state_value,
+            }),
+        )
+        .await
+        .expect("exchange plugin OAuth");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read OAuth exchange response");
+        let exchanged: PluginOAuthExchangeResponse =
+            serde_json::from_slice(&body).expect("decode OAuth exchange response");
+        assert_eq!(exchanged.session.principal.id, "user-a");
+        assert_eq!(exchanged.session.plugin_id, "mail");
+
+        headers.insert(
+            PLUGIN_SESSION_HEADER,
+            exchanged
+                .session_capability
+                .parse()
+                .expect("plugin session header"),
+        );
+        let (subject, principal) = message_request_principal(
+            &state,
+            &auth,
+            &plugin_sessions,
+            &machine,
+            &headers,
+            "default",
+        )
+        .await
+        .expect("authenticate plugin human session");
+        assert_eq!(
+            subject,
+            PolicySubject::Human {
+                user_id: "user-a".to_string()
+            }
+        );
+        assert_eq!(principal.kind, MessagePrincipalKind::Human);
+
+        plugin_sessions
+            .revoke("default", "mail", "agent-a", &exchanged.session_capability)
+            .await
+            .expect("revoke plugin human session");
+        let error = message_request_principal(
+            &state,
+            &auth,
+            &plugin_sessions,
+            &machine,
+            &headers,
+            "default",
+        )
+        .await
+        .expect_err("revoked session must fail");
+        assert_eq!(error.error.code, "plugin_session_invalid");
     }
 
     #[test]

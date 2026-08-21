@@ -5,6 +5,8 @@ mod auth;
 mod cluster;
 mod event_bus;
 mod identity;
+mod message_store;
+mod plugin_store;
 pub mod policy;
 mod state;
 mod traffic;
@@ -226,6 +228,13 @@ async fn main() -> anyhow::Result<()> {
             EventBus::in_process()
         }
     };
+    let messages = message_store::MessageStore::open(auth.pool())
+        .await
+        .context("failed to initialize Core Message storage")?;
+    let plugin_sessions = plugin_store::PluginSessionStore::open(auth.pool())
+        .await
+        .context("failed to initialize plugin session storage")?;
+    messages.spawn_outbox_dispatcher(event_bus.clone());
     let traffic = TrafficRecorder::new(auth.pool());
     traffic.spawn_flush_task();
     let state = AppState::with_backplanes_and_traffic(event_bus, cluster.clone(), traffic);
@@ -253,6 +262,8 @@ async fn main() -> anyhow::Result<()> {
         identity,
         api::BrowserAccess::new(&app_public_url)?,
         ingress.clone(),
+        messages,
+        plugin_sessions,
     )
     .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)

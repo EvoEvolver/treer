@@ -586,11 +586,12 @@ mod tests {
     async fn exercise_store(store: &MailStore) {
         let sender = principal(AppPrincipalKind::Agent, "agent-a", "builder");
         let recipient = principal(AppPrincipalKind::Human, "user-a", "Owner");
+        let reviewer = principal(AppPrincipalKind::Agent, "agent-b", "reviewer");
         let first = store
             .send_message(
                 "workspace-a",
                 &sender,
-                std::slice::from_ref(&recipient),
+                &[recipient.clone(), reviewer.clone()],
                 &[],
                 "Ready",
             )
@@ -606,22 +607,75 @@ mod tests {
             )
             .await
             .expect("send contextual message");
+        let branch = store
+            .send_message(
+                "workspace-a",
+                &reviewer,
+                std::slice::from_ref(&recipient),
+                std::slice::from_ref(&first.message_id),
+                "Independent review",
+            )
+            .await
+            .expect("send branch");
+        let merge = store
+            .send_message(
+                "workspace-a",
+                &recipient,
+                std::slice::from_ref(&sender),
+                &[first.message_id.clone(), branch.message_id.clone()],
+                "Merged response",
+            )
+            .await
+            .expect("send multi-parent response");
+        assert_eq!(
+            merge.context_ids,
+            [first.message_id.clone(), branch.message_id]
+        );
+        let invisible = store
+            .send_message(
+                "workspace-b",
+                &recipient,
+                std::slice::from_ref(&sender),
+                std::slice::from_ref(&first.message_id),
+                "Cross-workspace context",
+            )
+            .await
+            .expect_err("cross-workspace context must fail");
+        assert!(invisible.to_string().contains("not visible"));
         let inbox = store
             .unread_inbox("workspace-a", &recipient, 1)
             .await
             .expect("read bounded inbox");
         assert_eq!(inbox.deliveries.len(), 1);
-        assert_eq!(inbox.remaining_unread, 1);
+        assert_eq!(inbox.remaining_unread, 2);
         let history = store
             .recent_mailbox("workspace-a", &recipient, 100)
             .await
             .expect("read recent history");
-        assert_eq!(history.deliveries.len(), 2);
+        assert_eq!(history.deliveries.len(), 3);
         assert_eq!(history.remaining_unread, 0);
-        assert_eq!(history.deliveries[0].message.body, "Follow-up");
+        assert_eq!(history.deliveries[0].message.body, "Independent review");
         assert_eq!(
-            history.deliveries[0].message.context_ids,
+            history.deliveries[1].message.context_ids,
             [first.message_id]
         );
+    }
+
+    #[test]
+    fn migration_fixtures_capture_branched_graph_and_session_states() {
+        for fixture in [
+            include_str!("../tests/fixtures/legacy-mail-v1.sqlite.sql"),
+            include_str!("../tests/fixtures/legacy-mail-v1.postgres.sql"),
+        ] {
+            assert!(fixture.contains("legacy_branch_a"));
+            assert!(fixture.contains("legacy_branch_b"));
+            assert!(fixture.contains("('legacy_merge', 'legacy_branch_a', 0)"));
+            assert!(fixture.contains("('legacy_merge', 'legacy_branch_b', 1)"));
+            assert!(fixture.contains("active-session"));
+            assert!(fixture.contains("expired-session"));
+            assert!(fixture.contains("'agent'"));
+            assert!(fixture.contains("'human'"));
+            assert!(fixture.contains("NULL)"));
+        }
     }
 }
