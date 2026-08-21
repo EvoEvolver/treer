@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Treer Mail plugin configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["service_id", "public_url", "proxy_public_url"],
+  "properties": {
+    "listen": {
+      "type": "string",
+      "pattern": "^[^:]+:[0-9]{1,5}$",
+      "default": "127.0.0.1:8788"
+    },
+    "service_id": { "type": "string", "pattern": "^svc_[A-Za-z0-9._-]+$" },
+    "public_url": { "type": "string", "format": "uri" },
+    "proxy_public_url": { "type": "string", "format": "uri" },
+    "web_dir": { "type": "string", "minLength": 1, "default": "web/dist" }
+  }
+}

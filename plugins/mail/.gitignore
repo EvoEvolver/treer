@@ -1,0 +1,8 @@
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+__pycache__/
+tests/__pycache__/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal

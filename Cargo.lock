@@ -4370,29 +4370,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "treer-mail"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "chrono",
- "clap",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "treer-protocol",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "treer-protocol"
 version = "0.1.2"
 dependencies = [
