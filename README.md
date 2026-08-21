@@ -454,6 +454,10 @@ treer profile list
 treer profile launch reviewer --machine build-machine --name review-42
 ```
 
+The web Create Agent dialog includes a built-in Terminal option. It starts the
+machine user's interactive shell without injecting a command and is not stored
+as a launch profile.
+
 Profiles store an executable and ordered arguments rather than a shell command
 string. The web editor presents them as one quoted command line and the Create
 Agent dialog can launch any saved workspace profile. The Controller starts the

@@ -1141,6 +1141,25 @@ mod tests {
     }
 
     #[test]
+    fn empty_command_request_opens_an_unmodified_interactive_terminal() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "command".to_string(),
+            name: "terminal".to_string(),
+            cwd: ".".to_string(),
+            args: Vec::new(),
+            cols: 120,
+            rows: 36,
+        };
+
+        let launch = resolve_launch(&request).expect("resolve terminal launch");
+
+        assert!(!launch.command.is_empty());
+        assert_eq!(launch.args, ["-i"]);
+        assert!(launch.initial_writes.is_empty());
+    }
+
+    #[test]
     fn agent_proxy_urls_carry_policy_identity() {
         let url = agent_network_proxy_url("socks5h://127.0.0.1:8791", "agent-a");
         let url = url::Url::parse(&url).expect("agent proxy URL");

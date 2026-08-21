@@ -183,7 +183,9 @@ available to profiles. Argument values are preserved literally rather than
 parsed as shell syntax. The lower-level command kind continues to execute an
 argv vector directly. New workspaces start with ordinary, editable and
 deletable profiles for Codex, Claude, Pi, and OpenCode. Existing workspaces are
-not backfilled.
+not backfilled. The web application's built-in Terminal launch is not a profile:
+it sends a command-kind request with an empty argv, which the Controller maps to
+an interactive shell without initial PTY writes.
 
 Covered organization and membership mutations write their audit event in the
 same PostgreSQL transaction. Successful Agent create, rename, stop, and delete
