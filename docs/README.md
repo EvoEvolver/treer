@@ -19,6 +19,17 @@ matching the question; follow its source links for implementation detail.
 | [Root README](../README.md) | Installation, deployment, and operator command examples |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 
+## Active execution plans
+
+- The approved [Core messaging and CLI-only channel plugins plan](research/2026-08-21-core-messaging-cli-plugins-plan.md)
+  moves Message data, its context DAG, API, policy, and persistence into Core;
+  introduces the script plugin broker; migrates Mail; and adds Telegram with
+  end-to-end compatibility and recovery gates.
+
+Active plans record approved target behavior and delivery gates. Source and
+maintained current-state documents remain authoritative until each phase ships;
+the plan identifies every maintained document that must change at completion.
+
 ## Historical material
 
 - The proposed [Agent communication policy design](research/2026-08-19-agent-policy-design.md)
