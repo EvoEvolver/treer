@@ -2996,7 +2996,7 @@ fn agent_request_from_launch_profile(
     args.extend(profile.args.clone());
     Ok(CreateAgentRequest {
         server_id: request.server_id,
-        kind: "command".to_string(),
+        kind: "shell".to_string(),
         name: agent_name,
         cwd: profile.cwd.clone(),
         args,
@@ -4339,7 +4339,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_profiles_become_direct_command_requests() {
+    fn launch_profiles_become_interactive_shell_requests() {
         let timestamp = "2026-08-20T00:00:00Z".parse().expect("valid timestamp");
         let profile = AgentLaunchProfile {
             profile_id: "alp_review".to_string(),
@@ -4369,7 +4369,7 @@ mod tests {
         )
         .expect("build create request");
         assert_eq!(request.server_id.as_deref(), Some("machine-a"));
-        assert_eq!(request.kind, "command");
+        assert_eq!(request.kind, "shell");
         assert_eq!(request.name, "Reviewer");
         assert_eq!(request.cwd, "packages/api");
         assert_eq!(request.args, ["codex", "review", "--base", "main"]);

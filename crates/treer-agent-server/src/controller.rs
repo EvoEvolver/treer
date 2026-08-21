@@ -756,6 +756,14 @@ fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolE
             &request.args,
             true,
         )),
+        "shell" => Ok(request.args.split_first().map_or_else(
+            || AgentLaunch {
+                command: interactive_shell(),
+                args: vec!["-i".to_string()],
+                initial_writes: Vec::new(),
+            },
+            |(command, args)| interactive_shell_command_launch(command, args),
+        )),
         "command" => {
             let (command, args) = request.args.split_first().map_or_else(
                 || (interactive_shell(), vec!["-i".to_string()]),
@@ -783,22 +791,26 @@ fn shell_agent_launch(
     let launch_args = std::iter::once(default_arg.to_string())
         .chain(args.iter().cloned())
         .collect::<Vec<_>>();
-    let mut input = shell_join(agent_command, &launch_args).into_bytes();
-    input.push(b'\r');
-    let mut initial_writes = vec![HostWrite {
-        data: input,
-        delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
-    }];
+    let mut launch = interactive_shell_command_launch(agent_command, &launch_args);
     if confirm_workspace_trust {
-        initial_writes.push(HostWrite {
+        launch.initial_writes.push(HostWrite {
             data: vec![b'\r'],
             delay_ms: CLAUDE_TRUST_CONFIRM_DELAY.as_millis() as u64,
         });
     }
+    launch
+}
+
+fn interactive_shell_command_launch(command: &str, args: &[String]) -> AgentLaunch {
+    let mut input = shell_join(command, args).into_bytes();
+    input.push(b'\r');
     AgentLaunch {
         command: interactive_shell(),
         args: vec!["-i".to_string()],
-        initial_writes,
+        initial_writes: vec![HostWrite {
+            data: input,
+            delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
+        }],
     }
 }
 
@@ -1077,6 +1089,35 @@ mod tests {
         assert_eq!(
             launch.initial_writes[1].delay_ms,
             CLAUDE_TRUST_CONFIRM_DELAY.as_millis() as u64
+        );
+    }
+
+    #[test]
+    fn shell_commands_are_entered_after_interactive_shell_startup() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "shell".to_string(),
+            name: "profile".to_string(),
+            cwd: ".".to_string(),
+            args: vec![
+                "opencode".to_string(),
+                "--model".to_string(),
+                "provider/model name".to_string(),
+            ],
+            cols: 120,
+            rows: 36,
+        };
+
+        let launch = resolve_launch(&request).expect("resolve shell command launch");
+
+        assert!(!launch.command.is_empty());
+        assert_eq!(launch.args, ["-i"]);
+        assert_eq!(
+            launch.initial_writes,
+            [HostWrite {
+                data: b"'opencode' '--model' 'provider/model name'\r".to_vec(),
+                delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
+            }]
         );
     }
 

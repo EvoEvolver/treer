@@ -141,9 +141,11 @@ and relayed terminal and workspace virtual-host data. Optional apps expose
 their data to their own service and database operators; the Proxy no longer
 stores Mail message bodies or read state. Agent launch profiles, including their executable and argument arrays, are
 stored as plaintext and readable by workspace members and authorized managed
-Agents. Launch profiles are configuration, not a secret store; credentials and
-tokens must not be placed in their command, arguments, description, or working
-directory. The standalone Mail app permits context IDs only for same-workspace
+Agents. Profile commands run after the enrolled machine user's interactive
+shell startup files, so those local files remain part of the trusted machine
+execution environment. Launch profiles are configuration, not a secret store;
+credentials and tokens must not be placed in their command, arguments,
+description, or working directory. The standalone Mail app permits context IDs only for same-workspace
 messages the sender previously sent or received. Managed Agents may list the stable user ID, preferred name,
 and organization role of humans in their workspace organization, but the Agent
 directory does not expose member email addresses. The App bridge resolves Agent and human

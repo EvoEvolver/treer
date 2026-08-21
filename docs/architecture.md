@@ -173,14 +173,17 @@ consume the invitation and write identity state in one transaction.
 An Agent launch profile stores a display name, optional description, working
 directory, executable, and ordered argument array. It does not bind to a
 machine: the caller chooses an online machine and optional Agent name for each
-launch. The Proxy translates the profile into the existing command-kind
-`CreateAgentRequest`, so machine selection, `agent.create` authorization,
-workload credential creation, Controller routing, and Host process ownership
-remain the same as a direct create. The executable and arguments are passed as
-an argv vector; shell parsing occurs only when the profile explicitly launches
-a shell such as `sh` with `-lc`. New workspaces start with ordinary, editable
-and deletable profiles for Codex, Claude, Pi, and OpenCode. Existing workspaces
-are not backfilled.
+launch. The Proxy translates the profile into a shell-kind `CreateAgentRequest`,
+so machine selection, `agent.create` authorization, workload credential
+creation, Controller routing, and Host process ownership remain the same as a
+direct create. The Controller starts the machine user's interactive shell and
+enters the safely quoted executable and arguments through its PTY after shell
+startup; this makes commands installed or configured by `.bashrc` or `.zshrc`
+available to profiles. Argument values are preserved literally rather than
+parsed as shell syntax. The lower-level command kind continues to execute an
+argv vector directly. New workspaces start with ordinary, editable and
+deletable profiles for Codex, Claude, Pi, and OpenCode. Existing workspaces are
+not backfilled.
 
 Covered organization and membership mutations write their audit event in the
 same PostgreSQL transaction. Successful Agent create, rename, stop, and delete

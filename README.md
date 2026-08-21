@@ -456,11 +456,14 @@ treer profile launch reviewer --machine build-machine --name review-42
 
 Profiles store an executable and ordered arguments rather than a shell command
 string. The web editor presents them as one quoted command line and the Create
-Agent dialog can launch any saved workspace profile. Shell operators are not
-interpreted; use an explicit shell executable such as `sh -lc` only when shell
-expansion is required. Profiles are plaintext workspace configuration and must
-not contain secrets. New workspaces include editable and deletable Codex,
-Claude, Pi, and OpenCode profiles; existing workspaces are left unchanged.
+Agent dialog can launch any saved workspace profile. The Controller starts the
+machine user's interactive shell, waits for its startup files such as `.bashrc`
+or `.zshrc` to load, and then enters the safely quoted profile command through
+the PTY. Shell operators stored as arguments are not interpreted; use an
+explicit shell executable such as `sh` with `-lc` when shell expansion is
+required. Profiles are plaintext workspace configuration and must not contain
+secrets. New workspaces include editable and deletable Codex, Claude, Pi, and
+OpenCode profiles; existing workspaces are left unchanged.
 
 ## Host and Controller
 
@@ -472,9 +475,10 @@ It does not understand agent kinds, prompts, workspaces, or the Proxy protocol.
 commands, detects agent status, exposes the local API, and rebuilds its full
 snapshot from the Host after every restart. Mutating Host commands carry stable
 operation IDs so a reconnect or retry cannot spawn or stop an agent twice.
-Codex and Claude agents start inside the user's interactive shell before their
-commands are entered through the PTY. This loads shell configuration such as
-`.bashrc` or `.zshrc` before command lookup.
+Codex, Claude, and launch-profile agents start inside the user's interactive
+shell before their commands are entered through the PTY. This loads shell
+configuration such as `.bashrc` or `.zshrc` before command lookup. Explicit
+`command`-kind API and CLI launches remain direct argv execution.
 
 ## Workspace network
 
