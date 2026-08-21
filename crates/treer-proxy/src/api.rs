@@ -276,6 +276,7 @@ impl BrowserAccess {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn router(
     state: AppState,
     bootstrap: BootstrapConfig,
@@ -814,6 +815,7 @@ async fn exchange_workspace_app_code(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(token)).into_response())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_plugin_oauth(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -886,6 +888,7 @@ async fn start_plugin_oauth(
         .into_response())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exchange_plugin_oauth(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -1293,6 +1296,7 @@ fn resolve_app_principal(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_core_message(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -1358,6 +1362,7 @@ async fn send_core_message(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_core_message(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -1390,6 +1395,7 @@ async fn get_core_message(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_core_messages(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -1430,6 +1436,7 @@ async fn list_core_messages(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_core_messages(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -1470,6 +1477,7 @@ async fn receive_core_messages(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn acknowledge_core_messages(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,

@@ -3160,7 +3160,8 @@ fn encode_keys(keys: &[String]) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
 
     struct EnvironmentGuard {
         values: Vec<(&'static str, Option<OsString>)>,
@@ -3543,7 +3544,7 @@ mod tests {
             }) if recipients == ["agent-a", "user-b"]
                 && context_ids == ["msg-parent"]
                 && key == "telegram:update:42"
-                && path == PathBuf::from("-")
+                && path == Path::new("-")
         ));
 
         let ack = Args::try_parse_from([
@@ -3789,10 +3790,7 @@ mod tests {
     #[tokio::test]
     async fn plugin_process_environment_withholds_treer_credentials() {
         static ENVIRONMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _lock = ENVIRONMENT_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("environment lock");
+        let _lock = ENVIRONMENT_LOCK.get_or_init(|| Mutex::new(())).lock().await;
         let root = std::env::temp_dir().join(format!(
             "treer-plugin-environment-test-{}",
             uuid::Uuid::new_v4().simple()
