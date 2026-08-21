@@ -28,6 +28,11 @@ def options(arguments: list[str], name: str) -> list[str]:
     return [arguments[index + 1] for index, value in enumerate(arguments[:-1]) if value == name]
 
 
+def chrono_timestamp(delta: timedelta) -> str:
+    value = datetime.now(timezone.utc) + delta
+    return value.isoformat(timespec="microseconds").replace("+00:00", "123Z")
+
+
 def main() -> int:
     state_path = Path(os.environ["FAKE_TREER_STATE"])
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +78,7 @@ def main() -> int:
                         "state": state_value,
                     }
                 ),
-                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+                "expires_at": chrono_timestamp(timedelta(minutes=10)),
             }
         elif arguments[:3] == ["plugin", "auth", "exchange"]:
             state["revoked"] = False
@@ -89,7 +94,7 @@ def main() -> int:
                         "name": "Owner",
                         "role": "owner",
                     },
-                    "expires_at": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+                    "expires_at": chrono_timestamp(timedelta(hours=12)),
                 },
             }
         elif arguments[:3] == ["plugin", "auth", "revoke"]:

@@ -476,8 +476,6 @@ def main() -> int:
             return 0
         if os.environ.get("TREER_PLUGIN_BROKER_SOCKET"):
             raise MigrationError("migration must use an operator CLI outside a plugin broker")
-        if os.environ.get("TREER_AGENT_ID") or os.environ.get("TREER_WORKLOAD_CREDENTIAL"):
-            raise MigrationError("migration requires a local operator identity, not an Agent identity")
         for index, batch in enumerate(batches(ordered, args.batch_size)):
             operation_id = f"mailmig-{checksum[:20]}-{index:06d}"
             response = run_import(

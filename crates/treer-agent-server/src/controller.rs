@@ -986,6 +986,9 @@ fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap
     } else {
         env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
         env.insert("all_proxy".to_string(), network_proxy_url);
+        for name in ["NO_PROXY", "no_proxy"] {
+            env.insert(name.to_string(), "127.0.0.1,localhost,::1".to_string());
+        }
     }
     env
 }
@@ -1190,6 +1193,14 @@ mod tests {
 
         assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(proxy));
         assert_eq!(env.get("all_proxy").map(String::as_str), Some(proxy));
+        assert_eq!(
+            env.get("NO_PROXY").map(String::as_str),
+            Some("127.0.0.1,localhost,::1")
+        );
+        assert_eq!(
+            env.get("no_proxy").map(String::as_str),
+            Some("127.0.0.1,localhost,::1")
+        );
         assert_eq!(
             env.get("TREER_NETWORK_PROXY").map(String::as_str),
             Some(proxy)

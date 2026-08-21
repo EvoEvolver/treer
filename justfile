@@ -17,6 +17,8 @@ lint:
 
 check:
     node scripts/check-docs.mjs
+    node --test scripts/check-plugins.test.mjs
+    node scripts/check-plugins.mjs
     node --test scripts/release-r2.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
@@ -26,6 +28,8 @@ check:
     python3 -m unittest discover -s plugins/telegram/tests -p 'test_*.py' -v
     cargo run -p treer-cli -- plugin validate plugins/mail
     cargo run -p treer-cli -- plugin validate plugins/telegram
+    cargo build --workspace
+    python3 scripts/test-messaging-plugins-e2e.py
     cargo fmt --all -- --check
     cargo test --workspace
     cargo clippy --workspace --all-targets -- -D warnings
@@ -50,6 +54,14 @@ mail-test:
 
 telegram-test:
     python3 -m unittest discover -s plugins/telegram/tests -p 'test_*.py' -v
+
+plugin-boundary-test:
+    node --test scripts/check-plugins.test.mjs
+    node scripts/check-plugins.mjs
+
+messaging-e2e:
+    cargo build --workspace
+    python3 scripts/test-messaging-plugins-e2e.py
 
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}

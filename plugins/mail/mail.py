@@ -8,6 +8,7 @@ import http.cookies
 import json
 import mimetypes
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -30,6 +31,10 @@ MAX_RECIPIENTS = 32
 MAX_CONTEXTS = 32
 MAX_PAGE_SIZE = 100
 CLI_TIMEOUT_SECONDS = 125
+RFC3339_NANOSECONDS = re.compile(
+    r"^(?P<seconds>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"(?P<fraction>\.\d+)(?P<zone>Z|[+-]\d{2}:\d{2})$"
+)
 
 
 class MailError(Exception):
@@ -726,6 +731,9 @@ def _nonnegative_int(value: Any, label: str) -> int:
 
 def _timestamp(value: Any, label: str) -> float:
     text = _bounded_string(value, label, 128)
+    matched = RFC3339_NANOSECONDS.fullmatch(text)
+    if matched is not None and len(matched.group("fraction")) > 7:
+        text = matched.group("seconds") + matched.group("fraction")[:7] + matched.group("zone")
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError as error:
