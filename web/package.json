@@ -10,6 +10,7 @@
     "typecheck": "tsc -b --pretty false && wrangler types --env canary ./worker-configuration.d.ts && tsc -p tsconfig.worker.json --pretty false",
     "preview": "vite preview",
     "worker:dev": "wrangler dev --env canary",
+    "worker:upload:canary": "wrangler versions upload --env canary",
     "worker:deploy:canary": "wrangler deploy --env canary",
     "worker:deploy:production": "wrangler deploy --env production"
   },

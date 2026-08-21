@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-08-19
+- Last reviewed: 2026-08-20
 
 Treer promotes an explicit Git commit through Canary before Production. A
 release is not a branch name, a mutable `latest` label, or the contents of an
@@ -21,6 +21,50 @@ test services. Cloudflare Workers Static Assets runs the independent React App:
 The App Worker serves Vite output directly from Cloudflare. Only `/health` and
 `/config.json` invoke Worker code. Runtime configuration keeps one frontend
 bundle independent of the Proxy origin.
+
+The optional Cloudflare Workers Builds integration validates `web/` on pushes
+to the configured branch and uploads an inactive Canary version. It does not
+deploy that version to traffic. Canary and Production remain explicit operator
+promotions, so an ordinary source push cannot bypass the release gate.
+
+Workers Builds requires a one-time Cloudflare GitHub App authorization. Connect
+`EvoEvolver/treer` to `treer-app-canary` and use these settings:
+
+| Setting | Value |
+| --- | --- |
+| Production branch | `main` |
+| Root directory | `/web` |
+| Build command | `pnpm build` |
+| Deploy command | `pnpm worker:upload:canary` |
+| Build cache | Enabled |
+
+The deploy command uses `wrangler versions upload`, not `wrangler deploy`, so a
+successful source build creates evidence without changing the active Canary
+deployment.
+
+## Machine artifacts
+
+The `Build release artifacts` GitHub workflow runs only by manual dispatch or
+for a pushed `v*` tag. Its matrix uses native runners for `linux-x86_64`,
+`linux-aarch64`, `darwin-x86_64`, and `darwin-aarch64`. Each platform artifact
+contains the CLI, Host, Controller, source commit metadata, and checksums. The
+workflow has read-only repository permission and never publishes a GitHub
+Release or writes to R2.
+
+After the workflow succeeds, collect the exact commit into the ignored local
+artifact tree:
+
+```bash
+just collect-artifacts HEAD
+```
+
+This command requires authenticated `gh` and `jq`. It selects a successful run
+whose `headSha` is the requested commit, validates all four metadata files and
+checksums, restores executable permissions, and writes `dist/<platform>/`.
+Set `TREER_ARTIFACT_RUN_ID` when a manually dispatched run must be selected
+explicitly. The existing `artifacts-prepare`, `artifacts-canary`, and
+`artifacts-stable` commands then sign and distribute those bytes without
+recompiling them.
 
 ## Canary release
 

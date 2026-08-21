@@ -9,10 +9,7 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported platform $(uname -s)/$(uname -m)" >&2; exit 1 ;;
 esac
 
-cargo build --release -p treer-agent-host -p treer-agent-server -p treer-cli
+cargo build --locked --release -p treer-agent-host -p treer-agent-server -p treer-cli
 destination="dist/$platform"
-mkdir -p "$destination"
-cp target/release/treer "$destination/treer"
-cp target/release/treer-agent-server "$destination/treer-agent-server"
-cp target/release/treer-agent-host "$destination/treer-agent-host"
-echo "staged Treer artifacts in $destination"
+TREER_BUILD_COMMIT=$(git rev-parse HEAD) \
+    sh scripts/stage-release-artifacts.sh "$platform" "$destination"

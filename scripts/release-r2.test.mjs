@@ -7,13 +7,14 @@ import { createPublicKey } from "node:crypto";
 
 import {
   buildArtifactRecords,
+  buildProvenanceRecords,
   generateReleaseKey,
   normalizeVersion,
   prepareRelease,
   verifyDetachedSignature,
 } from "./release-r2.mjs";
 
-function fixture() {
+function fixture(gitCommit = "a".repeat(40), version = "1.2.3") {
   const directory = mkdtempSync(join(tmpdir(), "treer-release-test-"));
   const distDir = join(directory, "dist");
   const platform = "linux-x86_64";
@@ -23,6 +24,13 @@ function fixture() {
     writeFileSync(path, `fixture ${binary}\n`);
     chmodSync(path, 0o755);
   }
+  writeFileSync(join(distDir, platform, "build-metadata.json"), `${JSON.stringify({
+    schema_version: 1,
+    git_commit: gitCommit,
+    version,
+    platform,
+    rustc: "rustc 1.90.0 (fixture)",
+  }, null, 2)}\n`);
   const privateKeyPath = join(directory, "release-key.pem");
   const publicKeyPath = join(directory, "release-key.pub.pem");
   generateReleaseKey(privateKeyPath, publicKeyPath);
@@ -57,6 +65,13 @@ test("manifest contains sorted immutable artifact records and a valid signature"
       createdAt: "2026-08-20T00:00:00.000Z",
     });
     assert.equal(prepared.manifest.version, "v1.2.3-canary.1");
+    assert.equal(prepared.manifest.schema_version, 2);
+    assert.deepEqual(prepared.manifest.builds, [{
+      platform: data.platform,
+      version: "1.2.3",
+      git_commit: "a".repeat(40),
+      rustc: "rustc 1.90.0 (fixture)",
+    }]);
     assert.equal(prepared.manifest.artifacts.length, 3);
     assert.deepEqual(
       prepared.manifest.artifacts.map((artifact) => artifact.binary),
@@ -82,7 +97,7 @@ test("manifest contains sorted immutable artifact records and a valid signature"
 });
 
 test("prepared releases cannot be silently reused after an artifact changes", () => {
-  const data = fixture();
+  const data = fixture("b".repeat(40));
   try {
     const options = {
       version: "v1.2.3",
@@ -95,6 +110,30 @@ test("prepared releases cannot be silently reused after an artifact changes", ()
     prepareRelease(options);
     writeFileSync(join(data.distDir, data.platform, "treer"), "changed\n");
     assert.throws(() => prepareRelease(options), /does not match/);
+  } finally {
+    rmSync(data.directory, { recursive: true, force: true });
+  }
+});
+
+test("build provenance must match the release commit and platform", () => {
+  const data = fixture();
+  try {
+    const records = buildProvenanceRecords({
+      distDir: data.distDir,
+      platforms: [data.platform],
+      version: "v1.2.3",
+      gitCommit: "a".repeat(40),
+    });
+    assert.equal(records[0].rustc, "rustc 1.90.0 (fixture)");
+    assert.throws(
+      () => buildProvenanceRecords({
+        distDir: data.distDir,
+        platforms: [data.platform],
+        version: "v1.2.3",
+        gitCommit: "b".repeat(40),
+      }),
+      /does not match/,
+    );
   } finally {
     rmSync(data.directory, { recursive: true, force: true });
   }

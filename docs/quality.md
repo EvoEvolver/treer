@@ -84,7 +84,7 @@ forbids unsafe Rust workspace-wide, and treats Clippy warnings as errors.
 | Frontend | TypeScript typecheck, production build, and standalone container health/config routes | No checked-in browser workflow or visual regression test |
 | Architecture | Crate boundaries and shared protocol types | No dependency-boundary lint |
 | Documentation | Indexed maintained docs and mechanical link check | No freshness or source-claim automation |
-| Release publishing | Node tests cover version validation, complete artifact sets, deterministic manifests, detached signatures, and prepared-release immutability | No cross-platform artifact provenance, updater signature enforcement, or automated canary rollout test |
+| Release publishing | Native four-platform builds carry commit/platform metadata and checksums; Node tests cover complete artifact sets, deterministic manifests, detached signatures, and prepared-release immutability | No updater signature enforcement or automated R2 artifact rollout test |
 | Operations | Structured tracing plus buffered directional machine traffic counters | No local metrics/traces harness or end-to-end performance assertions |
 | Event and cluster distribution | Event-envelope, lease/snapshot separation, durable projection replay, and two-Proxy command/terminal/network integration tests | No crash-safe domain-event outbox or automated NATS failure CI |
 | Security | Explicit trust tier and source-level tests | Allow-all policy and no production isolation backend |

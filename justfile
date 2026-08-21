@@ -39,6 +39,9 @@ agent-server *args:
 stage-artifacts:
     sh scripts/stage-local-artifacts.sh
 
+collect-artifacts revision="HEAD":
+    sh scripts/collect-build-artifacts.sh {{revision}}
+
 test-canary:
     sh scripts/test-canary.sh
 

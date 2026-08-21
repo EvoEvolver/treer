@@ -56,11 +56,20 @@ is not present locally, the Proxy redirects to the latest Treer GitHub Release;
 override its base with `TREER_RELEASE_ARTIFACT_BASE_URL` when mirroring release
 assets elsewhere.
 
-The `Build macOS ARM64 artifacts` GitHub workflow builds `darwin-aarch64`
-binaries on a native Apple Silicon runner. Manual runs retain the files as a
-workflow artifact for 14 days. Pushing a `v*` tag creates or updates that
-GitHub Release with the three binaries and a `SHA256SUMS-darwin-aarch64.txt`
-file. Ordinary branch pushes do not run the artifact build.
+The `Build release artifacts` GitHub workflow builds `linux-x86_64`,
+`linux-aarch64`, `darwin-x86_64`, and `darwin-aarch64` on native runners. It
+runs manually or for a pushed `v*` tag and retains commit-attributed artifacts
+for 14 days. It never creates a GitHub Release or publishes to R2. After a
+successful run, collect the exact commit locally with the authenticated GitHub
+CLI:
+
+```bash
+just collect-artifacts HEAD
+```
+
+The collector rejects missing platforms, mismatched commit metadata, and
+invalid checksums before placing the files under `dist/<platform>`. Set
+`TREER_ARTIFACT_RUN_ID` to select a particular successful workflow run.
 
 ### Publish signed R2 releases
 
@@ -69,7 +78,8 @@ at `https://releases.treer.ai/`. The publisher keeps versioned objects immutable
 under `releases/<version>/` and updates the separately signed `canary` and
 `stable` pointers under `channels/`. R2 is only the distributor: every manifest
 and channel pointer has a detached Ed25519 signature, and every artifact is
-identified by its byte length and SHA-256 digest.
+identified by its byte length and SHA-256 digest. The signed version manifest
+also records each platform's source commit, package version, and Rust compiler.
 
 Generate the release key once on the trusted publishing machine:
 
@@ -85,7 +95,7 @@ paths. Neither key path nor Cloudflare credentials is written into the release
 manifest.
 
 Before publishing, collect all three binaries for every supported platform in
-the existing artifact tree:
+the artifact tree:
 
 ```text
 dist/<platform>/treer

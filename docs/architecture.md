@@ -105,8 +105,16 @@ flowchart TB
 The repository release tool treats artifact identity, distribution, and rollout
 as separate boundaries. A trusted publisher collects the three machine-facing
 binaries for each platform, records their byte lengths and SHA-256 digests in a
-versioned manifest, and signs the exact manifest bytes with an Ed25519 release
-key. Version manifests and channel pointers have separate detached signatures.
+versioned manifest together with the platform build provenance, and signs the
+exact manifest bytes with an Ed25519 release key. Version manifests and channel
+pointers have separate detached signatures.
+
+GitHub Actions builds the four supported platform sets on native Linux and
+macOS runners. Each workflow artifact carries the source commit, package
+version, platform, and checksums. The workflow cannot publish a release; an
+operator must collect one successful commit and invoke the separately
+authenticated R2 publisher. This keeps compilation credentials and the offline
+release-signing key in different trust domains.
 
 Cloudflare R2 stores immutable objects under `releases/<version>/`; mutable
 `channels/canary.json` and `channels/stable.json` identify a manifest by path and
@@ -127,6 +135,11 @@ repository. Railway release scripts set `TREER_BUILD_COMMIT` to the exact
 candidate revision and the Docker builder accepts it as a build argument, so a
 CLI source upload without `.git` still produces attributable binaries. A source
 archive built without either input reports `unknown` rather than guessing.
+
+When enabled, Cloudflare Workers Builds is only a frontend build check. Its
+production-branch command uploads an inactive Canary Worker version, but it
+does not move Canary or Production traffic. The explicit release scripts remain
+the only supported traffic-promotion path.
 
 ## Protocols and state
 

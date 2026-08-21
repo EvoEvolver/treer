@@ -1,0 +1,91 @@
+name: Build release artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+            system: Linux
+            architecture: x86_64
+          - platform: linux-aarch64
+            runner: ubuntu-22.04-arm
+            system: Linux
+            architecture: aarch64
+          - platform: darwin-x86_64
+            runner: macos-15-intel
+            system: Darwin
+            architecture: x86_64
+          - platform: darwin-aarch64
+            runner: macos-15
+            system: Darwin
+            architecture: arm64
+
+    env:
+      RUST_VERSION: 1.90.0
+      TREER_BUILD_COMMIT: ${{ github.sha }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify native runner
+        shell: bash
+        env:
+          EXPECTED_SYSTEM: ${{ matrix.system }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = "$EXPECTED_SYSTEM"
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+
+      - name: Select stable Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version --verbose
+
+      - name: Build agent binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release \
+            -p treer-cli \
+            -p treer-agent-host \
+            -p treer-agent-server
+
+      - name: Stage and verify artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/stage-release-artifacts.sh \
+            "${{ matrix.platform }}" \
+            "release-artifacts/${{ matrix.platform }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: treer-${{ matrix.platform }}
+          path: release-artifacts/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 14

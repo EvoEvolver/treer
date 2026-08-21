@@ -213,6 +213,41 @@ export function buildArtifactRecords({ distDir, platforms, version }) {
   );
 }
 
+export function buildProvenanceRecords({ distDir, platforms, version, gitCommit }) {
+  const binaryVersion = version.slice(1).split("-", 1)[0];
+  return platforms.map((platform) => {
+    if (!DEFAULT_PLATFORMS.includes(platform)) {
+      fail(`unsupported release platform ${platform}`);
+    }
+    const path = join(distDir, platform, "build-metadata.json");
+    if (!existsSync(path) || !statSync(path).isFile()) {
+      fail(`missing build provenance ${path}`);
+    }
+    let record;
+    try {
+      record = JSON.parse(readFileSync(path, "utf8"));
+    } catch (error) {
+      fail(`invalid build provenance ${path}: ${error.message}`);
+    }
+    if (
+      record.schema_version !== 1 ||
+      record.platform !== platform ||
+      record.git_commit !== gitCommit ||
+      record.version !== binaryVersion ||
+      typeof record.rustc !== "string" ||
+      !record.rustc.startsWith("rustc ")
+    ) {
+      fail(`build provenance ${path} does not match ${version} at ${gitCommit}`);
+    }
+    return {
+      platform,
+      version: record.version,
+      git_commit: record.git_commit,
+      rustc: record.rustc,
+    };
+  }).sort((left, right) => left.platform.localeCompare(right.platform));
+}
+
 function comparableArtifacts(records) {
   return records.map(({ source: _source, ...record }) => record);
 }
@@ -254,6 +289,7 @@ export function prepareRelease({
 }) {
   const privateKey = loadPrivateKey(privateKeyPath);
   const artifacts = buildArtifactRecords({ distDir, platforms, version });
+  const builds = buildProvenanceRecords({ distDir, platforms, version, gitCommit });
   mkdirSync(outputDir, { recursive: true });
   const manifestPath = join(outputDir, "manifest.json");
   const signaturePath = join(outputDir, "manifest.sig");
@@ -268,6 +304,7 @@ export function prepareRelease({
     if (
       manifest.version !== version ||
       manifest.git_commit !== gitCommit ||
+      JSON.stringify(manifest.builds) !== JSON.stringify(builds) ||
       JSON.stringify(manifest.artifacts) !== JSON.stringify(comparableArtifacts(artifacts))
     ) {
       fail(`prepared release ${outputDir} does not match the current commit or artifacts`);
@@ -277,11 +314,12 @@ export function prepareRelease({
 
   const publicKey = createPublicKey(privateKey);
   const manifest = {
-    schema_version: 1,
+    schema_version: 2,
     version,
     git_commit: gitCommit,
     created_at: createdAt,
     signing_key_id: publicKeyId(publicKey),
+    builds,
     artifacts: comparableArtifacts(artifacts),
   };
   const manifestBytes = stableJson(manifest);
@@ -358,7 +396,7 @@ async function verifyRemoteArtifact(baseUrl, artifact) {
 
 export async function verifyRemoteRelease({ baseUrl, version, publicKey }) {
   const signed = await fetchJsonWithSignature(baseUrl, `releases/${version}/manifest.json`, publicKey);
-  if (signed.value.schema_version !== 1 || signed.value.version !== version) {
+  if (signed.value.schema_version !== 2 || signed.value.version !== version) {
     fail(`remote manifest does not describe ${version}`);
   }
   if (signed.value.signing_key_id !== publicKeyId(publicKey)) {
