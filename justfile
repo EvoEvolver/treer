@@ -23,7 +23,9 @@ check:
     cd plugins/mail/web && pnpm typecheck
     cd plugins/mail/web && pnpm build
     python3 -m unittest discover -s plugins/mail/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s plugins/telegram/tests -p 'test_*.py' -v
     cargo run -p treer-cli -- plugin validate plugins/mail
+    cargo run -p treer-cli -- plugin validate plugins/telegram
     cargo fmt --all -- --check
     cargo test --workspace
     cargo clippy --workspace --all-targets -- -D warnings
@@ -45,6 +47,9 @@ mail-web:
 
 mail-test:
     python3 -m unittest discover -s plugins/mail/tests -p 'test_*.py' -v
+
+telegram-test:
+    python3 -m unittest discover -s plugins/telegram/tests -p 'test_*.py' -v
 
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}

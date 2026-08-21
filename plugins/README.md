@@ -68,5 +68,6 @@ changing versions and revoke plugin human sessions when retiring an instance.
 - Do not log Message bodies, broker tokens, human capabilities, OAuth codes, or
   channel secrets.
 
-The first shipped package is [Mail](mail/README.md). Additional channel
-adapters use the same Core Message and broker contract.
+The first shipped packages are [Mail](mail/README.md) and
+[Telegram](telegram/README.md). Additional channel adapters use the same Core
+Message and broker contract.
