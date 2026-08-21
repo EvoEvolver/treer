@@ -36,11 +36,15 @@ Workers Builds requires a one-time Cloudflare GitHub App authorization. Connect
 | Root directory | `/web` |
 | Build command | `pnpm build` |
 | Deploy command | `pnpm worker:upload:canary` |
+| Non-production branch deploy command | `pnpm worker:upload:canary` |
 | Build cache | Enabled |
 
 The deploy command uses `wrangler versions upload`, not `wrangler deploy`, so a
 successful source build creates evidence without changing the active Canary
-deployment.
+deployment. The top-level Wrangler target is also Canary so Cloudflare's default
+non-production command, `npx wrangler versions upload`, remains safe when the
+dashboard's non-production command has not yet been customized. Production is
+only selected explicitly with `--env production` during operator promotion.
 
 ## Machine artifacts
 
