@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-08-20
+- Last reviewed: 2026-08-21
 
 Treer promotes an explicit Git commit through Canary before Production. A
 release is not a branch name, a mutable `latest` label, or the contents of an
@@ -66,10 +66,26 @@ explicitly. The existing `artifacts-prepare`, `artifacts-canary`, and
 `artifacts-stable` commands then sign and distribute those bytes without
 recompiling them.
 
+## Plugin packages
+
+Mail and Telegram are source plugin packages, not additional Rust machine
+binaries and not part of the Cloudflare App artifact. `treer plugin install`
+copies one validated package version into immutable local storage on a bridge
+machine. Mail release packages must include its built `web/dist` assets; Node
+dependencies, Python bytecode, local configuration, channel secrets, and plugin
+state are never release artifacts.
+
+The current four-platform artifact workflow does not yet build, sign, or publish
+plugin archives. Until that pipeline exists, deploy a plugin from the same clean
+source commit as its compatible CLI, build Mail's static assets, validate the
+package, and retain the source revision in deployment records. Do not describe a
+binary release manifest as covering plugin bytes when it does not.
+
 ## Canary release
 
 The operator needs authenticated Railway and Wrangler CLIs, Docker, `just`,
-`pnpm`, `jq`, and `curl`. Start from a clean checkout of the candidate commit:
+`pnpm`, Python 3, PostgreSQL client tools, `jq`, and `curl`. Start from a clean
+checkout of the candidate commit:
 
 ```bash
 just release-canary HEAD
@@ -117,6 +133,18 @@ branch.
 - Add Proxy API fields before the App begins using them. Stop App use before a
   later release removes an API.
 - Use expand-first PostgreSQL changes so old and new Proxy replicas can overlap.
+- Before a legacy Mail cutover, back up its SQLite/PostgreSQL database, stop the
+  Rust Mail writer, dry-run and execute `plugins/mail/migrate.py`, compare the
+  migration report, install the Mail plugin, and require users to log in again.
+  Rollback to the old writer is safe only before any new Core Message write;
+  after that point, repair forward and keep Core authoritative.
+- Back up each plugin's versioned state before replacing or moving it. Telegram
+  needs its offset and ID-mapping SQLite state to avoid avoidable external
+  duplicates. Keep Bot tokens and Mail configuration out of source and release
+  artifacts, and provide them through the deployment secret mechanism.
+- Telegram's Bot API does not accept a client idempotency key. A lost successful
+  send response can produce a visible duplicate on retry; rollback and release
+  notes must not claim external exactly-once delivery.
 - Before the first stable release, a Controller protocol bump may deliberately
   require a coordinated Proxy rollout and machine re-enrollment. Record that
   boundary in the release notes and reset Canary as one unit. Once stable

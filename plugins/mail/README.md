@@ -11,6 +11,11 @@ nested `treer` command through the plugin broker.
 Mail runs from a dedicated managed bridge Agent on the same enrolled machine as
 its registered HTTP service. The service ID is the generic App OAuth client and
 must have a workspace ingress whose callback is `<public_url>/api/auth/callback`.
+On Linux, start that bridge Agent from a Controller configured with
+`TREER_NETWORK_MODE=proxy-env`: the Mail listener must be reachable as a
+host-network machine service, while a transparent Agent's loopback listener is
+inside its private network namespace. The Controller excludes loopback from the
+injected SOCKS proxy, so local CLI and Mail HTTP calls remain direct.
 
 Build the existing React surface before validating or packaging a source
 checkout:

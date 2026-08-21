@@ -37,6 +37,7 @@ treer machine --help
 treer service --help
 treer virtual-host --help
 treer message --help
+treer plugin --help
 ```
 
 Control commands print JSON. Read IDs and state from the response instead of
@@ -242,6 +243,22 @@ A Message does not wake or write to another Agent's terminal. When immediate
 attention is required, send the durable Message first and then use
 `treer agent prompt` with only the Message ID. `agent.prompt` is a separate,
 stronger policy action; do not copy the Message body into the prompt.
+
+An installed channel plugin may run from a dedicated managed bridge Agent:
+
+```bash
+treer plugin list
+treer plugin inspect <plugin-id>
+treer plugin run <plugin-id> --config /operator-owned/config.json
+```
+
+The plugin process must use the `TREER_CLI` nested command path supplied by the
+runner. Do not pass, print, or teach a plugin to consume raw Agent, machine, or
+operator credentials; do not bypass the private broker with Controller/Proxy
+routes, Core PostgreSQL, or Core NATS. The runner limits commands to manifest
+capabilities and ordinary workspace policy still authorizes each operation.
+Package installation, secrets, channel setup, and migration are operator
+workflows documented in the repository rather than this managed-Agent skill.
 
 Delete a machine only when it and all of its agents should be removed from the
 workspace. This revokes its credential but does not uninstall the service on

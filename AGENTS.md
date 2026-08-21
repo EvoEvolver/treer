@@ -24,6 +24,7 @@ second manual.
 | Change components or protocols | [docs/architecture.md](docs/architecture.md) |
 | Change auth, isolation, policy, or trust claims | [docs/security.md](docs/security.md) |
 | Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
+| Build or operate a channel plugin | [plugins/README.md](plugins/README.md) |
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
 
 ## Source map
@@ -37,6 +38,7 @@ second manual.
 | `crates/treer-cli` | Human and managed-agent command surface |
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
+| `plugins` | CLI-only script plugins, manifests, channel state, and plugin docs |
 | `web` | Standalone React control plane with runtime Proxy URL configuration |
 
 ## Change discipline
@@ -46,7 +48,8 @@ second manual.
    product-aware Controller logic.
 3. Update the closest documentation in the same change when behavior, trust
    assumptions, commands, or component ownership changes.
-4. Run `just check` before handing off. It checks documentation, frontend
-   type/build health, Rust formatting, tests, and Clippy.
+4. Run `just check` before handing off. It checks documentation, plugin
+   boundaries and end-to-end behavior, frontend type/build health, Rust
+   formatting, tests, and Clippy.
 5. Keep generated artifacts, dependencies, and local research checkouts out of
    commits. Reference repositories belong under the ignored `.references/`.

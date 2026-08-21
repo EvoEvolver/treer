@@ -1,7 +1,7 @@
 # Canary environment
 
 - Status: maintained
-- Last reviewed: 2026-08-19
+- Last reviewed: 2026-08-21
 
 Canary is the required deployment target before production. It uses a separate
 Railway environment, PostgreSQL database, NATS instance, and Proxy plus a
@@ -43,7 +43,7 @@ the domain verified.
 ## Deploy and test
 
 The operator needs authenticated Railway and Wrangler CLIs plus `curl`, `jq`,
-`pnpm`, Docker, and `just`:
+`pnpm`, Python 3, PostgreSQL client tools, Docker, and `just`:
 
 ```bash
 just release-canary HEAD
@@ -54,6 +54,13 @@ the current worktree to the Railway Proxy and the built App artifact to
 Cloudflare, and verifies their health endpoints. It also sets the Canary public
 URLs explicitly so this environment cannot accidentally emit Production
 installation or App links.
+
+The local gate inside `release-canary` includes first-party plugin source
+boundary checks, Mail and Telegram package tests, package validation, and the
+real-process Core Message/plugin E2E against the local test PostgreSQL service.
+The Railway black-box workflow below does not currently install a Mail bridge,
+contact Telegram, or automate a Mail browser. Do not cite it as external-channel
+canary evidence; those are separate future fixtures.
 
 `test-canary` performs a black-box workflow against the deployed Proxy:
 
@@ -81,6 +88,12 @@ mounts a persistent volume at `/workspace`; the Treer checkout, machine identity
 coding-agent state, and additional service data survive redeploys. Add complex
 fixture services to `canary/machine` and start them from its entrypoint so tests
 remain reproducible.
+
+First-party plugin packages are source artifacts under `plugins/`, not extra
+Rust machine binaries. A dedicated bridge deployment must install the exact
+package version separately, provide its operator-owned configuration and
+secret, and preserve its plugin state. The two standard Canary machines do not
+start those bridge processes during the current network-focused workflow.
 
 Normal tests deliberately reuse the image already deployed to each service. To
 publish a changed machine image while reusing its persistent identity, run:

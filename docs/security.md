@@ -1,7 +1,7 @@
 # Security model
 
 - Status: maintained
-- Last source review: 2026-08-18 at `72921f1`
+- Last source review: 2026-08-21 at `07e02cd`
 
 Treer's current security target is a personal or trusted-lab deployment. The
 product offers scoped coordination and a clear upgrade path; it does not yet
@@ -59,6 +59,18 @@ The following statements are grounded in current behavior:
   it to the Agent, machine, and workspace. Managed Agents can exchange it for a
   60-second, Ed25519-signed token bound to one registered service. The Proxy
   resolves the stable Agent, machine, workspace, and service IDs before signing.
+- Core Messages are workspace-scoped and authorize send, read, receive,
+  acknowledgement, and operator-only import independently. Context edges do not
+  grant access to a parent body, stable deliveries remain repeatable until
+  explicit acknowledgement, and body-free outbox events recover after restart.
+- The official plugin runner clears the inherited environment, keeps raw Agent,
+  machine, and operator credentials in the parent process, and exposes only a
+  private manifest-limited broker to nested `treer` commands. Policy evaluates
+  every allowed semantic command again at the Proxy.
+- Plugin browser OAuth produces a revocable capability bound to one plugin,
+  workspace, service, bridge Agent, and current human membership. Mail stores
+  only an opaque local cookie-to-capability mapping; logout revokes the Core
+  capability before deleting that mapping.
 - An HTTP machine service can be published under a generated wildcard hostname.
   Public endpoints deliberately admit anonymous internet traffic; workspace
   endpoints require a current organization member session or a workload token
@@ -81,6 +93,8 @@ Do not describe the current system as:
 - a guarantee that Agents cannot read files outside the workspace;
 - per-user isolation of Codex, Claude, or other provider subscriptions;
 - end-to-end encrypted from the central control plane;
+- protected from a malicious plugin running as the same operating-system user;
+- a claim that Telegram users are authenticated Treer human principals;
 - an enterprise sandbox or microVM runtime;
 - fully attributable or auditable per human user.
 
@@ -115,6 +129,10 @@ authenticated Agent credential is mandatory for cross-machine control.
 | Local operator credential | One installed Controller; used by the human CLI and never injected into managed-Agent environments | Stored under the same OS account, so it is not a sandbox boundary against a hostile same-account process |
 | Workload identity token | One Agent and machine in one workspace, audience-bound to one service for 60 seconds | The target application must validate it and this does not isolate hostile Agents sharing an OS account |
 | Human App identity token | One user and workspace, audience-bound to one enabled service for 12 hours | Apps own their sessions and authorization; Proxy verification rechecks current membership and service existence |
+| Plugin broker token | One `treer plugin run` process and private Unix socket | Limits access to the broker but is not usable as a Proxy/Controller credential and is not a same-UID sandbox |
+| Plugin-human capability | One user, workspace, plugin ID, service, and bridge Agent until expiry or revocation | Rechecks membership and binding; the plugin's local cookie mapping and host process remain trusted |
+| Telegram bot token | One Telegram bot, supplied only to the Telegram plugin as a declared secret | Telegram and any same-UID process able to inspect it can act as the bot; it is not a Treer identity |
+| Telegram external identity | Numeric user, chat, topic, update, and Message IDs asserted by the bridge plugin | Admission metadata only; inbound Core Messages are authored by the authenticated bridge Agent |
 | Operation ID | One mutating request | Provides retry idempotency, not a durable audit record |
 
 Codex and Claude currently inherit the authenticated CLI state of the operating
@@ -137,23 +155,40 @@ releases.
 ## Data and control-plane exposure
 
 The Proxy can observe control messages, every requested network destination,
-and relayed terminal and workspace virtual-host data. Optional apps expose
-their data to their own service and database operators; the Proxy no longer
-stores Mail message bodies or read state. Agent launch profiles, including their executable and argument arrays, are
-stored as plaintext and readable by workspace members and authorized managed
-Agents. Profile commands run after the enrolled machine user's interactive
-shell startup files, so those local files remain part of the trusted machine
-execution environment. Launch profiles are configuration, not a secret store;
-credentials and tokens must not be placed in their command, arguments,
-description, or working directory. The standalone Mail app permits context IDs only for same-workspace
-messages the sender previously sent or received. Managed Agents may list the stable user ID, preferred name,
-and organization role of humans in their workspace organization, but the Agent
-directory does not expose member email addresses. The App bridge resolves Agent and human
-IDs or unique display names through one workspace-scoped recipient namespace.
-Human App OAuth requires current membership in the workspace organization.
-The Mail app keeps its own session and database. Ordinary
-outbound TCP payload stays between the source Controller and destination; the
-Proxy authorizes its route but cannot observe its payload through Treer.
+and relayed terminal and workspace virtual-host data. Canonical Message bodies,
+recipients, context edges, and acknowledgement state are plaintext in Core
+PostgreSQL and are visible to Proxy and database operators. They are not
+end-to-end encrypted. Message bodies are deliberately excluded from ordinary
+logs, structured errors, audit payloads, domain events, and the transactional
+Message outbox; this does not protect database rows or backups.
+
+Mail no longer owns a second Message database. Its plugin-owned SQLite state
+maps opaque browser cookies to Core plugin-human capabilities; the Mail process
+can observe bodies that it renders or sends. The Telegram plugin can observe
+bridged bodies and stores external offsets, delivery hashes, errors, and
+Telegram/Core ID mappings in its own SQLite database, but canonical bodies stay
+in Core. Its Bot API token remains plugin-owned. A configured numeric Telegram
+allowlist is channel admission, not Treer authentication, and Telegram account
+compromise is outside Treer's trust boundary.
+
+Agent launch profiles, including executable and argument arrays, are plaintext
+and readable by workspace members and authorized managed Agents. Profile
+commands run after the enrolled machine user's interactive shell startup files,
+so those files remain part of the trusted execution environment. Launch
+profiles are configuration, not a secret store; credentials and tokens must not
+be placed in their command, arguments, description, or working directory.
+
+Managed Agents may list stable user IDs, preferred names, and organization roles
+for humans in their workspace organization, but the directory does not expose
+member email addresses. Message recipient resolution uses the same
+workspace-scoped Agent/human namespace. A sender may reference only an existing
+same-workspace context it can already read; the edge never expands recipient
+visibility. When no workspace policy document exists, policy currently defaults
+to allow, including Message and plugin OAuth actions.
+
+Ordinary outbound TCP payload stays between the source Controller and
+destination; the Proxy authorizes its route but cannot observe its payload
+through Treer.
 Browser-to-service tunneling strips cookies, authorization headers, proxy
 authorization, and response `Set-Cookie` before forwarding, but this is not
 end-to-end confidentiality from the Proxy.
@@ -180,6 +215,12 @@ storage outage does not cause a client to retry an already-completed runtime
 mutation. This is bounded management attribution, not end-to-end human
 attribution for every Agent action.
 
+Message mutations are the first domain operations with a transactional outbox:
+their body-free event row is committed with Message or delivery state and
+retried by a restartable dispatcher. Other runtime domain events and runtime
+audit writes remain best effort and are not covered by that Message-specific
+guarantee.
+
 The workload signing private key is stored in the Proxy PostgreSQL database. Its
 Ed25519 public key is intentionally exposed through `/.well-known/jwks.json`;
 the online verify endpoint exposes only claims already contained in a supplied
@@ -198,7 +239,8 @@ explicit:
 1. Emit append-only attribution and usage events before attempting billing.
 2. Replace allow-all policy with reviewed defaults and auditable decisions.
 3. Bind provider credentials and runtime actions to explicit owners.
-4. Add filesystem/container or microVM isolation for managed workloads.
+4. Run untrusted plugins and managed workloads under separate users, containers,
+   or microVMs with scoped secret delivery.
 5. Add durable audit, revocation UX, quotas, and incident diagnostics.
 
 Review this document with any change to authentication, credentials, policy,
@@ -206,5 +248,7 @@ networking, path handling, process launch flags, tenancy, or product security
 language. Relevant source boundaries are
 [`auth.rs`](../crates/treer-proxy/src/auth.rs),
 [`policy.rs`](../crates/treer-proxy/src/policy.rs),
+[`message_store.rs`](../crates/treer-proxy/src/message_store.rs),
+[`plugin_store.rs`](../crates/treer-proxy/src/plugin_store.rs),
 [`sandbox.rs`](../crates/treer-agent-server/src/sandbox.rs), and
 [`network.rs`](../crates/treer-agent-server/src/network.rs).

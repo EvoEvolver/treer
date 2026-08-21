@@ -1,7 +1,7 @@
 # Capability roadmap
 
 - Status: maintained
-- Last source review: 2026-08-21 at `1ba449b`
+- Last source review: 2026-08-21 at `07e02cd`
 
 ## Purpose
 
@@ -17,7 +17,7 @@ make. This roadmap owns capability categories and sequencing.
 
 ## Current baseline
 
-At `1ba449b`, Treer already provides:
+At `07e02cd`, Treer provides:
 
 - organizations, members, invitations, and organization-scoped workspaces;
 - enrolled machines with a stable Host and replaceable Controller;
@@ -28,19 +28,25 @@ At `1ba449b`, Treer already provides:
   ordinary Agent traffic;
 - per-Agent workload credentials and short-lived, service-audience-bound
   Ed25519 identity tokens;
-- a standalone Mail application with its own Message context graph, database,
-  App OAuth session, API, and React frontend;
+- durable Core Messages with per-recipient deliveries, explicit acknowledgement,
+  sender-scoped idempotency, policy actions, an ordered context DAG, a
+  transactional Message outbox, and `treer message` commands;
+- a manifest-limited CLI plugin runner and private local broker that withhold raw
+  Treer credentials from plugin scripts;
+- Mail and Telegram channel plugins whose Core integration is nested `treer`
+  commands, with channel presentation, secrets, and mapping state kept outside
+  Core;
 - a shared domain-event envelope, an in-process event adapter, optional
   JetStream publishing, and multi-Proxy command and stream routing;
 - an extensible policy evaluator whose production default currently allows all
   evaluated actions.
 
-Important gaps remain: work is terminal-oriented rather than task-oriented,
-Message is not a Core/CLI resource, there is no script plugin contract, Mail is
-a directly integrated Rust service, Message policy and reliable acknowledgement
-are absent, domain events have no transactional outbox, visibility is coarse,
-telemetry is local, and the web application is not yet a programmable workspace
-surface.
+Important gaps remain: work is still terminal- and Message-oriented rather than
+task-oriented; restrictive policy defaults and policy-management UX are absent;
+the generic domain-event publisher has no transactional outbox outside the
+Message subsystem; plugin scripts are not isolated from hostile same-UID code;
+visibility is coarse; telemetry is local; billing is absent; and the web
+application is not yet a programmable workspace surface.
 
 ## Real operating scenarios
 
@@ -134,11 +140,15 @@ because NATS is present. A personal single-Proxy deployment should remain able
 to run without an external broker through an in-process adapter implementing
 the same contracts.
 
-The first event-plane slice now provides the shared envelope, safe
+The first event-plane slice provides the shared envelope, safe
 workspace-scoped subjects, an in-process adapter, and an optional JetStream
 publisher for existing workspace mutations. It deliberately stops short of a
 database outbox: runtime retries are bounded in memory, so the database remains
-the recovery source after a Proxy crash.
+the recovery source after a Proxy crash. Core Message is the first bounded
+exception: Message creation, import, and acknowledgement write a dedicated
+outbox row in the same PostgreSQL transaction, and a restartable dispatcher
+publishes body-free events through the same event bus. This is not yet a generic
+outbox for every workspace mutation.
 
 The first horizontal-routing slice now separates small expiring Controller
 leases from change-driven live snapshots, retains current control projections
@@ -158,7 +168,7 @@ mapping state, but its only supported Treer interface is the installed `treer`
 CLI. It must not link Treer crates, call private Proxy or Controller routes,
 connect to the Proxy database, or consume NATS directly.
 
-The official runner should hold the real Treer credential and expose a local,
+The official runner holds the real Treer credential and exposes a private local,
 manifest-limited broker used by nested `treer` commands. Manifest capabilities
 set an upper bound; authenticated identity, workspace policy, and immutable Core
 guards still authorize each operation. Withholding raw credentials provides a
@@ -166,10 +176,11 @@ comprehensible capability boundary without claiming that same-UID arbitrary
 scripts are a hostile-code sandbox.
 
 Message is the first shared Core contract exercised by this plugin model. Mail
-must migrate from its standalone Rust data/API service to a script plugin over
-`treer message`; Telegram follows as the first external channel adapter. The
-approved [execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md)
-owns migration, compatibility, end-to-end, and documentation gates.
+migrated from its standalone Rust data/API service to a script plugin over
+`treer message`; Telegram is the first external channel adapter. The completed
+[execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md) records
+the migration, compatibility, end-to-end evidence, and remaining limits. The
+maintained package contract lives in [`plugins/README.md`](../plugins/README.md).
 
 ### Identity, policy, and delegation
 
@@ -354,10 +365,10 @@ inventing separate event formats.
 
 ### Phase 2: Collaborative workspace
 
-1. Promote Message and its context DAG, deliveries, acknowledgement,
+1. **Delivered:** Promote Message and its context DAG, deliveries, acknowledgement,
    idempotency, policy, persistence, and events into Core and expose them through
    `treer message`.
-2. Add the manifest-limited script plugin runner, migrate Mail to it, and add
+2. **Delivered:** Add the manifest-limited script plugin runner, migrate Mail to it, and add
    Telegram as the first external channel adapter.
 3. Add Issue, Task, Run, and Artifact records incrementally.
 4. Use Issue as the first declarative workspace component.
@@ -415,9 +426,9 @@ inventing separate event formats.
 ## Choosing the next feature
 
 Prefer work that establishes a shared contract used by several later features.
-The next approved epic is **Core messaging and CLI-only channel plugins**. It
-uses the existing event envelope, adds the missing transactional delivery and
-outbox behavior, makes the Message DAG a reusable Core object, and proves the
-boundary through independently replaceable Mail and Telegram scripts. The
-execution plan linked above is the delivery authority; Issue remains the first
-declarative workspace component after this channel boundary is established.
+The most recently delivered epic, **Core messaging and CLI-only channel
+plugins**, made the Message DAG reusable and proved the boundary through
+independently replaceable Mail and Telegram scripts. Issue remains the next
+candidate for a declarative workspace component; its implementation should
+reuse Core identity, policy, events, and Message references rather than invent a
+parallel channel or task bus.

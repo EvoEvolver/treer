@@ -1,7 +1,7 @@
 # Product direction
 
 - Status: maintained
-- Last source review: 2026-08-18 at `bd3115d`
+- Last source review: 2026-08-21 at `07e02cd`
 
 ## Purpose
 
@@ -26,9 +26,10 @@ In concrete terms:
    them to create, observe, prompt, and stop Agents through the web application
    or CLI, including a full-screen mobile terminal with touch controls for
    navigation and control keys.
-4. Managed agents and humans can use optional workspace applications through
-   audience-bound Agent identity tokens and human App OAuth. The repository's
-   standalone Mail app is one replaceable example, not a required Proxy feature.
+4. Managed Agents and humans exchange durable Core Messages with explicit
+   acknowledgement and an ordered context DAG. Mail and Telegram are
+   replaceable CLI-only script plugins over that contract rather than privileged
+   Proxy features.
 5. Agents can register and maintain long-running machine services, expose
    stable workspace aliases, and publish HTTP services through an optional
    wildcard HTTPS ingress for humans and other Agents.
@@ -50,6 +51,16 @@ The durable product is the runtime and control contract. The browser, CLI,
 voice input, richer collaboration, and future applications are clients of that
 contract. Product features should not bypass shared identities and protocols to
 become one-off UI behavior.
+
+### Core semantics, replaceable channels
+
+Canonical Message data, recipients, context edges, policy, acknowledgement,
+idempotency, and persistence belong to Core and are available through
+`treer message`. External channels own presentation, transport, secrets, and
+delivery mappings. First-party channel plugins are scripts whose only supported
+Treer dependency is the installed CLI; this keeps Mail, Telegram, and future
+adapters independently replaceable without creating parallel collaboration
+databases or private Core integrations.
 
 ### Local first, managed later
 

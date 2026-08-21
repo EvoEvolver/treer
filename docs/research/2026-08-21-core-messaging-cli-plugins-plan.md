@@ -1,8 +1,11 @@
 # Core messaging and CLI-only channel plugins execution plan
 
-- Status: planned
+- Status: completed
 - Approved direction: 2026-08-21
+- Completion date: 2026-08-21
 - Base revision: `1ba449b39be22c1f6da7f9bd56fbd8f6f5d3caac`
+- Implementation and E2E revision: `c27fda5`
+- Completion-gate revision: `07e02cd`
 - Implementation branch: `feat/plugin-system-telegram`
 
 ## Goal
@@ -697,7 +700,7 @@ whose native Telegram replies and Core DAG edges agree after plugin restarts.
 
 ## Source ownership map
 
-| Path | Planned responsibility |
+| Path | Delivered responsibility |
 | --- | --- |
 | `crates/treer-protocol` | Shared Message, delivery, plugin manifest/session, request/response, and event wire models |
 | `crates/treer-proxy` | Core Message PostgreSQL store, policy, idempotency, outbox, app/plugin sessions, and public/control routes |
@@ -848,36 +851,78 @@ Run the documentation checker after every documentation phase. Before marking
 the plan completed, compare routes, CLI help, manifests, schema, policy actions,
 test commands, and source ownership against every maintained claim.
 
-## Planned commit structure
+## Delivered commit structure
 
-Keep commits independently reviewable and do not mix generated artifacts:
+The implementation remained independently reviewable and did not commit
+generated artifacts:
 
-1. `docs: plan core messaging and CLI-only channel plugins`
-2. `feat: add durable core message contracts and storage`
-3. `feat: expose core messaging through the treer CLI`
-4. `feat: add script plugin runner and command broker`
-5. `feat: migrate mail to a CLI-only script plugin`
-6. `feat: add Telegram message bridge plugin`
-7. `test: cover channel plugins and message migration end to end`
-8. `docs: publish message and plugin operating contracts`
+1. `94e79c2 docs: plan core messaging and CLI-only channel plugins`
+2. `4609500 feat: add core messaging and CLI-only plugin broker`
+3. `fccde3b feat: migrate mail to a CLI-only script plugin`
+4. `0357162 feat: add Telegram Core Message bridge plugin`
+5. `c27fda5 test: verify CLI-only messaging plugins end to end`
+6. `07e02cd fix: satisfy plugin release and lint gates`
+7. `docs: publish message and plugin operating contracts`
 
-The exact split may change to keep builds green, but Core contracts must land
-before channel implementations and legacy Mail removal must follow successful
-migration tests.
+Core contracts landed before channel implementations, and the legacy Mail
+removal followed migration coverage.
 
 ## Progress record
 
 - [x] Product owner approved the Core Message / channel plugin boundary.
 - [x] Source baseline and current Mail/DAG/policy/CLI gaps reviewed.
 - [x] Execution plan indexed and target roadmap aligned.
-- [ ] Phase 0 contracts and legacy fixtures complete.
-- [ ] Phase 1 Core Message persistence and protocols complete.
-- [ ] Phase 2 Message CLI and embedded skill complete.
-- [ ] Phase 3 plugin runner, broker, and human sessions complete.
-- [ ] Phase 4 Mail plugin and migration complete.
-- [ ] Phase 5 Telegram plugin complete.
-- [ ] Phase 6 end-to-end, rollout, documentation, and full gate complete.
+- [x] Phase 0 contracts and legacy fixtures complete.
+- [x] Phase 1 Core Message persistence and protocols complete.
+- [x] Phase 2 Message CLI and embedded skill complete.
+- [x] Phase 3 plugin runner, broker, and human sessions complete.
+- [x] Phase 4 Mail plugin and migration complete.
+- [x] Phase 5 Telegram plugin complete.
+- [x] Phase 6 end-to-end, rollout, documentation, and full gate complete.
 
-When work finishes, replace `Status: planned` with `Status: completed`, add the
-completion date and final revision, summarize migrations and verification
-results, and move the index entry to completed historical material.
+## Completion evidence and residual limits
+
+The delivered release slice moves canonical Message, delivery, ordered context
+DAG, policy, idempotency, acknowledgement, import, and body-free transactional
+outbox state into Proxy PostgreSQL. It exposes `treer message`, adds the
+manifest-limited plugin runner and broker, removes the Rust Mail workspace
+member, preserves a legacy migration pointer, and ships Mail and Telegram as
+CLI-only Python packages. The final documentation phase also removed the stale
+Mail server path from the clean Docker build context.
+
+The following evidence passed on `feat/plugin-system-telegram`:
+
+- documentation index/link checks and 11 positive/negative first-party plugin
+  boundary checks;
+- release-tool tests, control-plane and Mail frontend typechecks/builds, Mail
+  and Telegram Python unit suites, and validation of both production manifests;
+- `cargo build --workspace`, formatting, all 210 Rust tests, and strict workspace
+  Clippy with warnings denied;
+- a clean release Docker build containing Proxy, Host, Controller, and CLI;
+- the real-process messaging E2E with authenticated Proxy, isolated PostgreSQL,
+  two Host/Controller pairs, two workspaces, five managed command Agents, both
+  plugins through the official runner, and a fake Telegram Bot API.
+
+That E2E proves Core send/reply/get/list/receive/ack, multi-turn DAG mapping,
+repeatable delivery, explicit acknowledgement, Controller restart identity,
+Proxy-restart send idempotency, workspace isolation, body-free outbox/log paths,
+SQLite and real-`psql` legacy Mail migration, Mail PKCE/OAuth/directory/send/inbox
+compatibility, Telegram policy denial, native replies/topics, and plugin restart.
+The environment did not provide the `just` executable, so the commands listed in
+the `just check` recipe were executed directly against its PostgreSQL test
+container rather than through the recipe wrapper.
+
+The broader acceptance matrix remains useful future work, but these items are
+not claimed by the completed slice:
+
+- Mail compatibility is exercised at HTTP/API level, not through a real desktop
+  or mobile browser, and there is no visual regression suite.
+- Message has no dedicated multi-Proxy/NATS E2E. Existing NATS event and routing
+  tests pass, while the changed Message path is proven with one Proxy and no
+  broker dependency.
+- Telegram uses fake Bot API coverage, not a live bot; webhook and active-active
+  modes are absent, and an ambiguous accepted `sendMessage` may duplicate on
+  retry because Telegram provides no client idempotency key.
+- Plugin uninstall, automatic state migration, signed plugin archives, hostile
+  same-UID isolation, attachments, Message retention/export/deletion, and
+  billing remain outside this release slice.
