@@ -30,8 +30,6 @@ pub const ACTION_LAUNCH_PROFILE_USE: &str = "launch_profile.use";
 pub const ACTION_MACHINE_UPDATE: &str = "machine.update";
 pub const ACTION_MACHINE_DELETE: &str = "machine.delete";
 pub const ACTION_IDENTITY_TOKEN_ISSUE: &str = "identity.token.issue";
-pub const ACTION_MAIL_SEND: &str = "mail.send";
-pub const ACTION_MAIL_READ: &str = "mail.read";
 pub const ACTION_HUMAN_LIST: &str = "human.list";
 pub const ACTION_SERVICE_LIST: &str = "service.list";
 pub const ACTION_SERVICE_CREATE: &str = "service.create";
@@ -49,9 +47,7 @@ pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT: &str = "agent";
 pub const RESOURCE_AGENT_LAUNCH_PROFILE: &str = "agent.launch_profile";
 pub const RESOURCE_MACHINE: &str = "machine";
-pub const RESOURCE_AGENT_MAILBOX: &str = "agent.mailbox";
 pub const RESOURCE_HUMAN_DIRECTORY: &str = "human.directory";
-pub const RESOURCE_HUMAN_MAILBOX: &str = "human.mailbox";
 pub const RESOURCE_MACHINE_SERVICE: &str = "machine.service";
 pub const RESOURCE_VIRTUAL_HOST: &str = "virtual_host";
 pub const RESOURCE_SERVICE_INGRESS: &str = "service.ingress";
@@ -406,9 +402,8 @@ fn subject_parts(subject: &PolicySubject) -> (PolicyPrincipalKind, &str, &str) {
 
 fn resource_principal(resource: &PolicyResource) -> Option<(PolicyPrincipalKind, &str)> {
     match resource.kind.as_str() {
-        RESOURCE_AGENT | RESOURCE_AGENT_MAILBOX => Some((PolicyPrincipalKind::Agent, &resource.id)),
+        RESOURCE_AGENT => Some((PolicyPrincipalKind::Agent, &resource.id)),
         RESOURCE_MACHINE => Some((PolicyPrincipalKind::Machine, &resource.id)),
-        RESOURCE_HUMAN_MAILBOX => Some((PolicyPrincipalKind::Human, &resource.id)),
         _ => None,
     }
 }

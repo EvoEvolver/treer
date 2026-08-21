@@ -219,74 +219,11 @@ pub struct WorkspacePolicy {
     pub updated_by: PolicyPrincipalRef,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MailAddressKind {
-    Agent,
-    Human,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MailAddress {
-    pub kind: MailAddressKind,
-    pub id: String,
-    pub name: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceHuman {
     pub user_id: String,
     pub preferred_name: String,
     pub role: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentMailMessage {
-    pub message_id: String,
-    pub workspace_id: String,
-    pub sender: MailAddress,
-    pub recipients: Vec<MailAddress>,
-    #[serde(default)]
-    pub context_ids: Vec<String>,
-    pub body: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SendAgentMailRequest {
-    #[serde(default)]
-    pub recipients: Vec<String>,
-    #[serde(default)]
-    pub context_ids: Vec<String>,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SendAgentMailResponse {
-    pub message: AgentMailMessage,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentInboxRequest {
-    pub limit: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentInboxResponse {
-    pub messages: Vec<AgentMailMessage>,
-    pub remaining_unread: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MailDelivery {
-    pub message: AgentMailMessage,
-    pub unread: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MailboxResponse {
-    pub deliveries: Vec<MailDelivery>,
-    pub remaining_unread: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +264,74 @@ pub struct WorkloadIdentityVerifyResponse {
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claims: Option<WorkloadIdentityClaims>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppPrincipalKind {
+    Agent,
+    Human,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppPrincipal {
+    pub kind: AppPrincipalKind,
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppIdentityClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub workspace_id: String,
+    pub service_id: String,
+    pub principal_kind: AppPrincipalKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppIdentityTokenResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
+    pub expires_at: DateTime<Utc>,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppIdentityVerifyRequest {
+    pub token: String,
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppIdentityVerifyResponse {
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims: Option<AppIdentityClaims>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAppRecipientsRequest {
+    #[serde(default)]
+    pub recipients: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAppRecipientsResponse {
+    pub sender: AppPrincipal,
+    pub recipients: Vec<AppPrincipal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1305,39 +1310,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_mail_requests_have_stable_wire_shapes() {
-        let request = SendAgentMailRequest {
-            recipients: vec![
-                "reviewer".to_string(),
-                "agent_2".to_string(),
-                "usr_1".to_string(),
-            ],
-            context_ids: vec!["msg_parent".to_string()],
-            body: "Review complete.".to_string(),
-        };
-        assert_eq!(
-            serde_json::to_value(request).expect("serialize mail request"),
-            serde_json::json!({
-                "recipients": ["reviewer", "agent_2", "usr_1"],
-                "context_ids": ["msg_parent"],
-                "body": "Review complete."
-            })
-        );
-        assert_eq!(
-            serde_json::to_value(AgentInboxRequest { limit: 50 }).expect("serialize inbox request"),
-            serde_json::json!({ "limit": 50 })
-        );
-        assert_eq!(
-            serde_json::to_value(MailboxResponse {
-                deliveries: vec![],
-                remaining_unread: 3,
-            })
-            .expect("serialize mailbox response"),
-            serde_json::json!({ "deliveries": [], "remaining_unread": 3 })
-        );
-    }
-
-    #[test]
     fn domain_event_envelope_has_a_stable_wire_shape() {
         let event = DomainEventEnvelope {
             event_id: "evt_123".to_string(),
@@ -1483,10 +1455,10 @@ mod tests {
     fn workspace_policy_document_has_a_stable_json_shape() {
         let document = WorkspacePolicyDocument {
             schema_version: POLICY_SCHEMA_VERSION,
-            defaults: BTreeMap::from([("mail.send".to_string(), PolicyEffect::Deny)]),
+            defaults: BTreeMap::from([("agent.prompt".to_string(), PolicyEffect::Deny)]),
             groups: BTreeMap::new(),
             rules: vec![WorkspacePolicyRule {
-                id: "self-inbox".to_string(),
+                id: "self-read".to_string(),
                 priority: 100,
                 effect: PolicyEffect::Allow,
                 subjects: vec![PolicySubjectSelector {
@@ -1496,9 +1468,9 @@ mod tests {
                     group: None,
                     is_self: true,
                 }],
-                actions: vec!["mail.read".to_string()],
+                actions: vec!["agent.metadata.read".to_string()],
                 resources: vec![PolicyResourceSelector {
-                    kind: Some("agent.mailbox".to_string()),
+                    kind: Some("agent".to_string()),
                     id: None,
                     principal_group: None,
                 }],
@@ -1509,15 +1481,15 @@ mod tests {
             value,
             serde_json::json!({
                 "schema_version": 1,
-                "defaults": {"mail.send": "deny"},
+                "defaults": {"agent.prompt": "deny"},
                 "groups": {},
                 "rules": [{
-                    "id": "self-inbox",
+                    "id": "self-read",
                     "priority": 100,
                     "effect": "allow",
                     "subjects": [{"kind": "agent", "self": true}],
-                    "actions": ["mail.read"],
-                    "resources": [{"kind": "agent.mailbox"}]
+                    "actions": ["agent.metadata.read"],
+                    "resources": [{"kind": "agent"}]
                 }]
             })
         );

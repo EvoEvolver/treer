@@ -16,13 +16,13 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
-    AgentInboxRequest, AgentInfo, AgentStatus, CreateAgentLaunchProfileRequest, CreateAgentRequest,
+    AgentInfo, AgentStatus, CreateAgentLaunchProfileRequest, CreateAgentRequest,
     CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
     InputAgentRequest, LaunchAgentProfileRequest, MachineServiceProtocol, RenameRequest,
-    SendAgentMailRequest, ServerInfo, ServiceIngressAccess, TerminalClientMessage,
-    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
-    WorkspaceSnapshot, AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    ServerInfo, ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
+    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
+    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -98,19 +98,6 @@ enum Command {
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
     Discover,
-    #[command(about = "Send durable mail without interrupting recipient agents")]
-    Mail {
-        #[arg(short = 't', long = "to")]
-        recipients: Vec<String>,
-        #[arg(short = 'c', long = "context")]
-        context_ids: Vec<String>,
-        body: String,
-    },
-    #[command(about = "Read and mark the current agent's unread mail")]
-    Inbox {
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
-        limit: u16,
-    },
     #[command(about = "List agents (compatibility alias for `agent list`)")]
     List,
     #[command(about = "Create an agent")]
@@ -577,37 +564,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Whoami => whoami(&client).await?,
         Command::Discover => discover(&client).await?,
-        Command::Mail {
-            recipients,
-            context_ids,
-            body,
-        } => {
-            validate_mail_recipients(&recipients)?;
-            let recipients = recipients
-                .into_iter()
-                .map(|target| normalize_target(&target))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            client
-                .value(
-                    Method::POST,
-                    "api/mail",
-                    Some(serde_json::to_value(SendAgentMailRequest {
-                        recipients,
-                        context_ids,
-                        body,
-                    })?),
-                )
-                .await?
-        }
-        Command::Inbox { limit } => {
-            client
-                .value(
-                    Method::POST,
-                    "api/inbox",
-                    Some(serde_json::to_value(AgentInboxRequest { limit })?),
-                )
-                .await?
-        }
         Command::List => client.value(Method::GET, "api/agents", None).await?,
         Command::Create {
             server,
@@ -1362,13 +1318,6 @@ fn normalize_target(target: &str) -> anyhow::Result<String> {
     Ok(target.to_string())
 }
 
-fn validate_mail_recipients(recipients: &[String]) -> anyhow::Result<()> {
-    if recipients.is_empty() {
-        bail!("mail requires at least one --to recipient");
-    }
-    Ok(())
-}
-
 fn path_segment(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
@@ -1776,46 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn mail_and_inbox_commands_parse_agent_friendly_repeated_options() {
-        let mail = Args::try_parse_from([
-            "treer",
-            "mail",
-            "--to",
-            "reviewer",
-            "-t",
-            "tester",
-            "--context",
-            "msg_one",
-            "-c",
-            "msg_two",
-            "Review complete.",
-        ])
-        .expect("mail command should parse");
-        assert!(matches!(
-            mail.command,
-            Some(Command::Mail {
-                recipients,
-                context_ids,
-                body,
-            }) if recipients == ["reviewer", "tester"]
-                && context_ids == ["msg_one", "msg_two"]
-                && body == "Review complete."
-        ));
-        let no_recipient = Args::try_parse_from(["treer", "mail", "no recipient"])
-            .expect("recipient validation happens after parsing");
-        let Some(Command::Mail { recipients, .. }) = no_recipient.command else {
-            panic!("expected mail command");
-        };
-        assert!(validate_mail_recipients(&recipients).is_err());
-
-        let human_mail =
-            Args::try_parse_from(["treer", "mail", "--to", "usr_123", "Human update."])
-                .expect("human mail should parse through the common recipient option");
-        assert!(matches!(
-            human_mail.command,
-            Some(Command::Mail { recipients, .. }) if recipients == ["usr_123"]
-        ));
-
+    fn human_directory_command_parses() {
         let humans =
             Args::try_parse_from(["treer", "human", "list"]).expect("human list should parse");
         assert!(matches!(
@@ -1824,10 +1734,5 @@ mod tests {
                 command: HumanCommand::List
             })
         ));
-
-        let inbox = Args::try_parse_from(["treer", "inbox", "--limit", "100"])
-            .expect("inbox command should parse");
-        assert!(matches!(inbox.command, Some(Command::Inbox { limit: 100 })));
-        assert!(Args::try_parse_from(["treer", "inbox", "--limit", "101"]).is_err());
     }
 }

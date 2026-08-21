@@ -8,6 +8,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use treer_protocol::{
+    AppIdentityClaims, AppIdentityTokenResponse, AppIdentityVerifyResponse, AppPrincipalKind,
     WorkloadIdentityClaims, WorkloadIdentityTokenResponse, WorkloadIdentityVerifyResponse,
 };
 use url::Url;
@@ -17,6 +18,7 @@ use crate::auth::AuthStore;
 
 const SIGNING_KEY_SECRET_NAME: &str = "workload_identity_ed25519_v1";
 const TOKEN_TTL_SECONDS: i64 = 60;
+const APP_HUMAN_TOKEN_TTL_SECONDS: i64 = 12 * 60 * 60;
 const MAX_CLOCK_SKEW_SECONDS: i64 = 5;
 
 #[derive(Clone)]
@@ -76,19 +78,7 @@ impl IdentityIssuer {
             exp: expires_at.timestamp(),
             jti: format!("wit_{}", Uuid::new_v4().simple()),
         };
-        let header = JwtHeader {
-            alg: "EdDSA".to_string(),
-            typ: "JWT".to_string(),
-            kid: self.key_id.to_string(),
-        };
-        let encoded_header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
-        let encoded_claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
-        let signing_input = format!("{encoded_header}.{encoded_claims}");
-        let signature = self.signing_key.sign(signing_input.as_bytes());
-        let access_token = format!(
-            "{signing_input}.{}",
-            URL_SAFE_NO_PAD.encode(signature.to_bytes())
-        );
+        let access_token = self.sign_claims(&claims)?;
         Ok(WorkloadIdentityTokenResponse {
             access_token,
             token_type: "Bearer".to_string(),
@@ -98,9 +88,57 @@ impl IdentityIssuer {
         })
     }
 
+    pub fn issue_human(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        preferred_name: &str,
+        role: &str,
+        service_id: &str,
+    ) -> anyhow::Result<AppIdentityTokenResponse> {
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(APP_HUMAN_TOKEN_TTL_SECONDS);
+        let claims = AppIdentityClaims {
+            iss: self.issuer.to_string(),
+            sub: user_id.to_string(),
+            aud: service_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            service_id: service_id.to_string(),
+            principal_kind: AppPrincipalKind::Human,
+            name: preferred_name.to_string(),
+            role: Some(role.to_string()),
+            machine_id: None,
+            iat: now.timestamp(),
+            exp: expires_at.timestamp(),
+            jti: format!("ait_{}", Uuid::new_v4().simple()),
+        };
+        Ok(AppIdentityTokenResponse {
+            access_token: self.sign_claims(&claims)?,
+            token_type: "Bearer".to_string(),
+            expires_in: APP_HUMAN_TOKEN_TTL_SECONDS as u64,
+            expires_at,
+            scope: "workspace:app".to_string(),
+        })
+    }
+
     pub fn verify(&self, token: &str, audience: &str) -> WorkloadIdentityVerifyResponse {
         let claims = self.verify_at(token, audience, Utc::now()).ok();
         WorkloadIdentityVerifyResponse {
+            active: claims.is_some(),
+            claims,
+        }
+    }
+
+    pub fn verify_app(&self, token: &str, audience: &str) -> AppIdentityVerifyResponse {
+        let now = Utc::now();
+        let claims = self
+            .verify_app_at(token, audience, now)
+            .or_else(|_| {
+                self.verify_at(token, audience, now)
+                    .map(workload_claims_for_app)
+            })
+            .ok();
+        AppIdentityVerifyResponse {
             active: claims.is_some(),
             claims,
         }
@@ -165,6 +203,89 @@ impl IdentityIssuer {
         }
         Ok(claims)
     }
+
+    fn verify_app_at(
+        &self,
+        token: &str,
+        audience: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<AppIdentityClaims> {
+        let encoded_claims = self.verify_signature(token)?;
+        let claims: AppIdentityClaims = serde_json::from_slice(&encoded_claims)?;
+        if claims.iss != self.issuer.as_ref()
+            || claims.aud != audience
+            || claims.service_id != audience
+            || claims.exp <= now.timestamp()
+            || claims.iat > now.timestamp() + MAX_CLOCK_SKEW_SECONDS
+        {
+            return Err(anyhow!("JWT claims are not valid for this request"));
+        }
+        Ok(claims)
+    }
+
+    fn sign_claims(&self, claims: &impl Serialize) -> anyhow::Result<String> {
+        let header = JwtHeader {
+            alg: "EdDSA".to_string(),
+            typ: "JWT".to_string(),
+            kid: self.key_id.to_string(),
+        };
+        let encoded_header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
+        let encoded_claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims)?);
+        let signing_input = format!("{encoded_header}.{encoded_claims}");
+        let signature = self.signing_key.sign(signing_input.as_bytes());
+        Ok(format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        ))
+    }
+
+    fn verify_signature(&self, token: &str) -> anyhow::Result<Vec<u8>> {
+        let mut parts = token.split('.');
+        let encoded_header = parts.next().context("missing JWT header")?;
+        let encoded_claims = parts.next().context("missing JWT claims")?;
+        let encoded_signature = parts.next().context("missing JWT signature")?;
+        if parts.next().is_some() {
+            return Err(anyhow!("JWT has too many segments"));
+        }
+        let header: JwtHeader = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(encoded_header)
+                .context("invalid JWT header encoding")?,
+        )?;
+        if header.alg != "EdDSA" || header.typ != "JWT" || header.kid != self.key_id.as_ref() {
+            return Err(anyhow!("JWT header does not match this issuer"));
+        }
+        let signature = Signature::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(encoded_signature)
+                .context("invalid JWT signature encoding")?,
+        )?;
+        let signing_input = format!("{encoded_header}.{encoded_claims}");
+        self.signing_key
+            .verifying_key()
+            .verify(signing_input.as_bytes(), &signature)
+            .context("invalid JWT signature")?;
+        URL_SAFE_NO_PAD
+            .decode(encoded_claims)
+            .context("invalid JWT claims encoding")
+    }
+}
+
+fn workload_claims_for_app(claims: WorkloadIdentityClaims) -> AppIdentityClaims {
+    AppIdentityClaims {
+        iss: claims.iss,
+        sub: claims.sub.clone(),
+        aud: claims.aud,
+        workspace_id: claims.workspace_id,
+        service_id: claims.service_id,
+        principal_kind: AppPrincipalKind::Agent,
+        name: claims.sub,
+        role: None,
+        machine_id: Some(claims.machine_id),
+        iat: claims.iat,
+        exp: claims.exp,
+        jti: claims.jti,
+    }
 }
 
 fn random_signing_key() -> [u8; 32] {
@@ -226,5 +347,37 @@ mod tests {
         assert!(issuer
             .verify_at(&token.access_token, "service-a", future)
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn human_app_tokens_are_audience_bound_and_agent_tokens_share_verification() {
+        let auth = AuthStore::for_test("admin").await;
+        let issuer = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://treer.example/").expect("public URL"),
+        )
+        .await
+        .expect("issuer");
+        let human = issuer
+            .issue_human("workspace-a", "user-a", "Ada", "owner", "service-a")
+            .expect("issue human app token");
+        let human_claims = issuer
+            .verify_app(&human.access_token, "service-a")
+            .claims
+            .expect("verify human app token");
+        assert_eq!(human_claims.principal_kind, AppPrincipalKind::Human);
+        assert_eq!(human_claims.name, "Ada");
+        assert_eq!(human_claims.role.as_deref(), Some("owner"));
+        assert!(!issuer.verify_app(&human.access_token, "service-b").active);
+
+        let agent = issuer
+            .issue("workspace-a", "machine-a", "agent-a", "service-a")
+            .expect("issue agent workload token");
+        let agent_claims = issuer
+            .verify_app(&agent.access_token, "service-a")
+            .claims
+            .expect("verify agent app token");
+        assert_eq!(agent_claims.principal_kind, AppPrincipalKind::Agent);
+        assert_eq!(agent_claims.machine_id.as_deref(), Some("machine-a"));
     }
 }

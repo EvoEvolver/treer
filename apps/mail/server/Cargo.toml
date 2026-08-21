@@ -1,0 +1,27 @@
+[package]
+name = "treer-mail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+treer-protocol = { path = "../../../crates/treer-protocol" }
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

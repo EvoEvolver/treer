@@ -282,8 +282,8 @@ their email or preferred name without changing their stable identity or
 organization access. Organization owners and administrators can also rename
 their organization.
 
-Users, invitations, sessions, organizations, machine credentials, Agent mail,
-services, and workload signing keys are stored in PostgreSQL. The Proxy requires
+Users, invitations, sessions, organizations, machine credentials, services,
+App OAuth codes, and workload signing keys are stored in PostgreSQL. The Proxy requires
 `DATABASE_URL`; `just test-db-up` starts the local Docker database used by the
 test suite. Changing `ADMIN_PASSWORD` changes the administrator's next login
 password without rewriting user accounts.
@@ -632,42 +632,19 @@ treer agent read reviewer --lines 80
 treer agent send-keys reviewer ctrl-c
 ```
 
-For asynchronous coordination, `mail` persists a message without writing to a
-recipient's PTY or changing its runtime state. Recipients see mail only when
-they explicitly call `inbox`; the returned batch is then marked read:
-
-```bash
-treer mail --to reviewer "Review the parser when you next check your inbox."
-treer inbox
-treer mail --to coordinator --context msg_RETURNED_BY_INBOX "Review complete."
-treer mail -t coordinator -t tester -c msg_first -c msg_second "Checks agree."
-treer inbox --limit 100
-```
-
-Both `--to` and `--context` may be repeated. A first message omits context;
-replies use one or more exact prior message IDs to form a message graph. Mail
-is workspace-scoped and requires a managed Agent workload credential. Messages,
-recipient-specific unread state, and context edges live in PostgreSQL, so any
-Proxy replica can serve the next inbox call without NATS or sticky routing.
-
-Agents can also discover and address the humans who belong to the workspace's
-organization. The directory deliberately returns stable user IDs, preferred
-names, and roles without exposing email addresses:
+Agents can discover humans who belong to the workspace's organization. The
+directory deliberately returns stable user IDs, preferred names, and roles
+without exposing email addresses:
 
 ```bash
 treer human list
-treer mail --to usr_123 "The deployment is ready."
-treer mail --to reviewer --to Owner "Please coordinate on this result."
 ```
 
-`--to` is the only recipient option. It accepts Agent IDs, user IDs, unique
-Agent names, and unique preferred names in one shared address space. Stable IDs
-take precedence; an ambiguous display name is rejected with a request to use an
-ID. Human recipients open **Inbox** in the web sidebar for the selected
-workspace. The central mailbox keeps recent received messages available after
-they are read and reconstructs visible context chains for tracing. Opening it
-marks unread deliveries in the returned batch read and does not receive a push
-notification.
+Optional applications use workload identity and the Proxy's generic App OAuth,
+directory, and recipient-resolution bridge. The standalone pull-only Mail app,
+including its separate SQLite/PostgreSQL database and frontend, is documented
+under [`apps/mail`](apps/mail/README.md). The core CLI has no `mail` or `inbox`
+commands.
 
 ## Workload identity
 

@@ -14,6 +14,8 @@ matching the question; follow its source links for implementation detail.
 | [Quality and maintenance](quality.md) | Verification, documentation rules, current gaps, and review triggers |
 | [Canary environment](canary.md) | Canary deployment, two-machine tests, and environment operations |
 | [Release process](releases.md) | Immutable release manifests, Cloudflare App deployment, and Production promotion |
+| [Optional applications](../apps/README.md) | Injected workspace apps and their ownership boundary |
+| [Treer Mail](../apps/mail/README.md) | Standalone mail service, databases, OAuth, and Agent API |
 | [Root README](../README.md) | Installation, deployment, and operator command examples |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 

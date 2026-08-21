@@ -304,10 +304,10 @@ mod tests {
     fn document() -> WorkspacePolicyDocument {
         WorkspacePolicyDocument {
             schema_version: POLICY_SCHEMA_VERSION,
-            defaults: BTreeMap::from([("mail.send".to_string(), PolicyEffect::Deny)]),
+            defaults: BTreeMap::from([("agent.prompt".to_string(), PolicyEffect::Deny)]),
             groups: BTreeMap::new(),
             rules: vec![WorkspacePolicyRule {
-                id: "allow-self-inbox".to_string(),
+                id: "allow-self-read".to_string(),
                 priority: 100,
                 effect: PolicyEffect::Allow,
                 subjects: vec![PolicySubjectSelector {
@@ -317,9 +317,9 @@ mod tests {
                     group: None,
                     is_self: true,
                 }],
-                actions: vec!["mail.read".to_string()],
+                actions: vec!["agent.metadata.read".to_string()],
                 resources: vec![PolicyResourceSelector {
-                    kind: Some("agent.mailbox".to_string()),
+                    kind: Some("agent".to_string()),
                     id: None,
                     principal_group: None,
                 }],

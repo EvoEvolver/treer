@@ -10,6 +10,8 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,14 +20,13 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use subtle::ConstantTimeEq;
 use treer_protocol::{
-    format_machine_enrollment_key, parse_machine_enrollment_key, AgentInboxResponse,
-    AgentLaunchProfile, AgentMailMessage, AgentServerSnapshot, ApiError,
-    CreateAgentLaunchProfileRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
-    CreateVirtualNetworkHostRequest, MachineService, MachineServiceProtocol, MailAddress,
-    MailAddressKind, MailDelivery, MailboxResponse, OrganizationAuditEvent, ProtocolError,
-    ServerInfo, ServiceIngress, ServiceIngressAccess, UpdateAgentLaunchProfileRequest,
-    UpdateMachineServiceRequest, UpdateServiceIngressRequest, VirtualNetworkHost, WorkspaceHuman,
-    WorkspaceInfo, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    format_machine_enrollment_key, parse_machine_enrollment_key, AgentLaunchProfile,
+    AgentServerSnapshot, ApiError, CreateAgentLaunchProfileRequest, CreateMachineServiceRequest,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, MachineService,
+    MachineServiceProtocol, OrganizationAuditEvent, ProtocolError, ServerInfo, ServiceIngress,
+    ServiceIngressAccess, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
+    AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -42,12 +43,9 @@ const PASSWORD_RESET_RATE_LIMIT_SECONDS: i64 = 60;
 const OAUTH_STATE_TTL_MINUTES: i64 = 10;
 const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
 const AGENT_CREDENTIAL_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
-const MAX_MAIL_BODY_BYTES: usize = 32 * 1024;
-const MAX_MAIL_RECIPIENTS: usize = 32;
-const MAX_MAIL_CONTEXTS: usize = 32;
-const MAX_INBOX_LIMIT: u16 = 100;
 const INGRESS_AUTH_CODE_TTL_MINUTES: i64 = 5;
 const INGRESS_SESSION_TTL_HOURS: i64 = 12;
+const APP_OAUTH_CODE_TTL_MINUTES: i64 = 5;
 const MAX_LAUNCH_PROFILE_DESCRIPTION_CHARS: usize = 1_000;
 const MAX_LAUNCH_PROFILE_COMMAND_BYTES: usize = 4_096;
 const MAX_LAUNCH_PROFILE_CWD_BYTES: usize = 4_096;
@@ -96,6 +94,15 @@ pub(crate) struct ResolvedServiceIngress {
 pub(crate) struct ConsumedIngressAuthorization {
     pub session_token: String,
     pub return_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AppOAuthGrant {
+    pub workspace_id: String,
+    pub service_id: String,
+    pub user_id: String,
+    pub preferred_name: String,
+    pub role: String,
 }
 
 pub struct CloudflareEmailConfig {
@@ -875,6 +882,15 @@ impl AuthStore {
         workspace_id: &str,
         user_id: &str,
     ) -> Result<(), AuthFailure> {
+        self.workspace_member_role(workspace_id, user_id).await?;
+        Ok(())
+    }
+
+    pub async fn workspace_member_role(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Result<String, AuthFailure> {
         let organization_id = sqlx::query_scalar::<_, String>(
             "SELECT organization_id FROM workspaces WHERE workspace_id = $1",
         )
@@ -884,8 +900,7 @@ impl AuthStore {
         .map_err(AuthFailure::database)?
         .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
         self.require_organization_member(&organization_id, user_id)
-            .await?;
-        Ok(())
+            .await
     }
 
     pub async fn list_members(
@@ -1942,6 +1957,116 @@ impl AuthStore {
         Ok(Some(user_id))
     }
 
+    pub async fn create_app_oauth_code(
+        &self,
+        grant: &AppOAuthGrant,
+        redirect_uri: &str,
+        code_challenge: &str,
+    ) -> Result<String, AuthFailure> {
+        if !valid_pkce_challenge(code_challenge) {
+            return Err(AuthFailure::bad_request(
+                "invalid_code_challenge",
+                "app OAuth requires a valid S256 PKCE code challenge",
+            ));
+        }
+        if !matches!(grant.role.as_str(), "owner" | "admin" | "member") {
+            return Err(AuthFailure::bad_request(
+                "invalid_app_identity",
+                "app OAuth role is invalid",
+            ));
+        }
+        let code = format!("aoc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let now = Utc::now();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM app_oauth_codes WHERE expires_at <= $1 OR used_at IS NOT NULL")
+            .bind(now.to_rfc3339())
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO app_oauth_codes(\
+             code_hash, workspace_id, service_id, user_id, preferred_name, role, redirect_uri, \
+             code_challenge, created_at, expires_at) \
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(fast_secret_hash(&code))
+        .bind(&grant.workspace_id)
+        .bind(&grant.service_id)
+        .bind(&grant.user_id)
+        .bind(&grant.preferred_name)
+        .bind(&grant.role)
+        .bind(redirect_uri)
+        .bind(code_challenge)
+        .bind(now.to_rfc3339())
+        .bind((now + Duration::minutes(APP_OAUTH_CODE_TTL_MINUTES)).to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(code)
+    }
+
+    pub async fn consume_app_oauth_code(
+        &self,
+        code: &str,
+        service_id: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+    ) -> Result<AppOAuthGrant, AuthFailure> {
+        if !valid_pkce_verifier(code_verifier) {
+            return Err(invalid_app_oauth_code());
+        }
+        let now = Utc::now();
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let row = sqlx::query(
+            "SELECT workspace_id, service_id, user_id, preferred_name, role, code_challenge \
+             FROM app_oauth_codes WHERE code_hash = $1 AND service_id = $2 \
+             AND redirect_uri = $3 AND used_at IS NULL AND expires_at > $4 FOR UPDATE",
+        )
+        .bind(fast_secret_hash(code))
+        .bind(service_id)
+        .bind(redirect_uri)
+        .bind(now.to_rfc3339())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(invalid_app_oauth_code)?;
+        let expected_challenge: String = row.get("code_challenge");
+        let actual_challenge = pkce_challenge(code_verifier);
+        if actual_challenge.len() != expected_challenge.len()
+            || actual_challenge
+                .as_bytes()
+                .ct_eq(expected_challenge.as_bytes())
+                .unwrap_u8()
+                != 1
+        {
+            return Err(invalid_app_oauth_code());
+        }
+        let result = sqlx::query(
+            "UPDATE app_oauth_codes SET used_at = $1 \
+             WHERE code_hash = $2 AND used_at IS NULL",
+        )
+        .bind(now.to_rfc3339())
+        .bind(fast_secret_hash(code))
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if result.rows_affected() != 1 {
+            return Err(invalid_app_oauth_code());
+        }
+        let grant = AppOAuthGrant {
+            workspace_id: row.get("workspace_id"),
+            service_id: row.get("service_id"),
+            user_id: row.get("user_id"),
+            preferred_name: row.get("preferred_name"),
+            role: row.get("role"),
+        };
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        self.require_workspace_member(&grant.workspace_id, &grant.user_id)
+            .await?;
+        Ok(grant)
+    }
+
     pub(crate) fn authentication_disabled(&self) -> bool {
         self.disabled
     }
@@ -2034,393 +2159,6 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         Ok(())
-    }
-
-    pub async fn send_agent_mail(
-        &self,
-        workspace_id: &str,
-        sender: MailAddress,
-        recipients: Vec<MailAddress>,
-        context_ids: Vec<String>,
-        body: &str,
-    ) -> Result<AgentMailMessage, AuthFailure> {
-        if body.trim().is_empty() || body.len() > MAX_MAIL_BODY_BYTES {
-            return Err(AuthFailure::bad_request(
-                "invalid_mail_body",
-                "mail body must contain 1-32768 bytes",
-            ));
-        }
-        if recipients.is_empty() || recipients.len() > MAX_MAIL_RECIPIENTS {
-            return Err(AuthFailure::bad_request(
-                "invalid_mail_recipients",
-                "mail must have 1-32 unique recipients",
-            ));
-        }
-        if context_ids.len() > MAX_MAIL_CONTEXTS {
-            return Err(AuthFailure::bad_request(
-                "invalid_mail_context",
-                "mail may reference at most 32 context messages",
-            ));
-        }
-
-        let message_id = format!("msg_{}", Uuid::new_v4().simple());
-        let created_at = Utc::now();
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        for context_id in &context_ids {
-            let accessible = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM mail_messages m \
-                 WHERE m.message_id = $1 AND m.workspace_id = $2 \
-                 AND ((m.sender_kind = 'agent' AND m.sender_id = $3) OR EXISTS(\
-                     SELECT 1 FROM mail_recipients r \
-                     WHERE r.message_id = m.message_id \
-                       AND r.recipient_kind = 'agent' AND r.recipient_id = $3)))",
-            )
-            .bind(context_id)
-            .bind(workspace_id)
-            .bind(&sender.id)
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-            if !accessible {
-                return Err(AuthFailure::bad_request(
-                    "invalid_mail_context",
-                    "context message does not exist or is not visible to the sender",
-                ));
-            }
-        }
-
-        sqlx::query(
-            "INSERT INTO mail_messages(\
-                message_id, workspace_id, sender_kind, sender_id, sender_name, body, created_at\
-             ) VALUES($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(&message_id)
-        .bind(workspace_id)
-        .bind(match sender.kind {
-            MailAddressKind::Agent => "agent",
-            MailAddressKind::Human => "human",
-        })
-        .bind(&sender.id)
-        .bind(&sender.name)
-        .bind(body)
-        .bind(created_at.to_rfc3339())
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        for (position, recipient) in recipients.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO mail_recipients(\
-                    message_id, workspace_id, recipient_kind, recipient_id, recipient_name, \
-                    position, created_at\
-                 ) VALUES($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind(&message_id)
-            .bind(workspace_id)
-            .bind(match recipient.kind {
-                MailAddressKind::Agent => "agent",
-                MailAddressKind::Human => "human",
-            })
-            .bind(&recipient.id)
-            .bind(&recipient.name)
-            .bind(position as i64)
-            .bind(created_at.to_rfc3339())
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-        }
-        for (position, context_id) in context_ids.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO mail_contexts(message_id, context_message_id, position) \
-                 VALUES($1, $2, $3)",
-            )
-            .bind(&message_id)
-            .bind(context_id)
-            .bind(position as i64)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                if error
-                    .as_database_error()
-                    .is_some_and(|error| error.is_unique_violation())
-                {
-                    AuthFailure::bad_request(
-                        "invalid_mail_context",
-                        "mail context messages must be unique",
-                    )
-                } else {
-                    AuthFailure::database(error)
-                }
-            })?;
-        }
-        transaction.commit().await.map_err(AuthFailure::database)?;
-
-        Ok(AgentMailMessage {
-            message_id,
-            workspace_id: workspace_id.to_string(),
-            sender,
-            recipients,
-            context_ids,
-            body: body.to_string(),
-            created_at,
-        })
-    }
-
-    pub async fn read_agent_inbox(
-        &self,
-        workspace_id: &str,
-        recipient_agent_id: &str,
-        limit: u16,
-    ) -> Result<AgentInboxResponse, AuthFailure> {
-        if limit == 0 || limit > MAX_INBOX_LIMIT {
-            return Err(AuthFailure::bad_request(
-                "invalid_inbox_limit",
-                "inbox limit must be between 1 and 100",
-            ));
-        }
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let rows = sqlx::query(
-            "SELECT m.message_id, m.workspace_id, m.sender_kind, m.sender_id, m.sender_name, \
-                    m.body, m.created_at \
-             FROM mail_recipients r \
-             JOIN mail_messages m ON m.message_id = r.message_id \
-             WHERE r.workspace_id = $1 AND r.recipient_kind = 'agent' \
-               AND r.recipient_id = $2 AND r.read_at IS NULL \
-             ORDER BY r.created_at, r.message_id LIMIT $3 \
-             FOR UPDATE OF r SKIP LOCKED",
-        )
-        .bind(workspace_id)
-        .bind(recipient_agent_id)
-        .bind(i64::from(limit))
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        let message_ids: Vec<String> = rows.iter().map(|row| row.get("message_id")).collect();
-        let mut recipients_by_message = HashMap::<String, Vec<MailAddress>>::new();
-        let mut contexts_by_message = HashMap::<String, Vec<String>>::new();
-        if !message_ids.is_empty() {
-            let recipient_rows = sqlx::query(
-                "SELECT message_id, recipient_kind, recipient_id, recipient_name \
-                 FROM mail_recipients WHERE message_id = ANY($1) \
-                 ORDER BY message_id, position",
-            )
-            .bind(&message_ids)
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-            for row in recipient_rows {
-                recipients_by_message
-                    .entry(row.get("message_id"))
-                    .or_default()
-                    .push(MailAddress {
-                        kind: if row.get::<String, _>("recipient_kind") == "agent" {
-                            MailAddressKind::Agent
-                        } else {
-                            MailAddressKind::Human
-                        },
-                        id: row.get("recipient_id"),
-                        name: row.get("recipient_name"),
-                    });
-            }
-            let context_rows = sqlx::query(
-                "SELECT message_id, context_message_id FROM mail_contexts \
-                 WHERE message_id = ANY($1) ORDER BY message_id, position",
-            )
-            .bind(&message_ids)
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-            for row in context_rows {
-                contexts_by_message
-                    .entry(row.get("message_id"))
-                    .or_default()
-                    .push(row.get("context_message_id"));
-            }
-        }
-
-        let mut messages = Vec::with_capacity(rows.len());
-        for row in rows {
-            let message_id: String = row.get("message_id");
-            messages.push(AgentMailMessage {
-                message_id: message_id.clone(),
-                workspace_id: row.get("workspace_id"),
-                sender: MailAddress {
-                    kind: if row.get::<String, _>("sender_kind") == "agent" {
-                        MailAddressKind::Agent
-                    } else {
-                        MailAddressKind::Human
-                    },
-                    id: row.get("sender_id"),
-                    name: row.get("sender_name"),
-                },
-                recipients: recipients_by_message
-                    .remove(&message_id)
-                    .unwrap_or_default(),
-                context_ids: contexts_by_message.remove(&message_id).unwrap_or_default(),
-                body: row.get("body"),
-                created_at: parse_database_timestamp(&row, "created_at", "agent message")?,
-            });
-        }
-        if !message_ids.is_empty() {
-            sqlx::query(
-                "UPDATE mail_recipients SET read_at = $1 \
-                 WHERE workspace_id = $2 AND recipient_kind = 'agent' AND recipient_id = $3 \
-                   AND message_id = ANY($4) AND read_at IS NULL",
-            )
-            .bind(Utc::now().to_rfc3339())
-            .bind(workspace_id)
-            .bind(recipient_agent_id)
-            .bind(&message_ids)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-        }
-        let remaining = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM mail_recipients \
-             WHERE workspace_id = $1 AND recipient_kind = 'agent' \
-               AND recipient_id = $2 AND read_at IS NULL",
-        )
-        .bind(workspace_id)
-        .bind(recipient_agent_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        transaction.commit().await.map_err(AuthFailure::database)?;
-        Ok(AgentInboxResponse {
-            messages,
-            remaining_unread: u64::try_from(remaining).unwrap_or(0),
-        })
-    }
-
-    pub async fn read_human_mailbox(
-        &self,
-        workspace_id: &str,
-        recipient_user_id: &str,
-        limit: u16,
-    ) -> Result<MailboxResponse, AuthFailure> {
-        if limit == 0 || limit > MAX_INBOX_LIMIT {
-            return Err(AuthFailure::bad_request(
-                "invalid_inbox_limit",
-                "inbox limit must be between 1 and 100",
-            ));
-        }
-        self.require_workspace_member(workspace_id, recipient_user_id)
-            .await?;
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let rows = sqlx::query(
-            "SELECT m.message_id, m.workspace_id, m.sender_kind, m.sender_id, m.sender_name, \
-                    m.body, m.created_at, r.read_at \
-             FROM mail_recipients r \
-             JOIN mail_messages m ON m.message_id = r.message_id \
-             WHERE r.workspace_id = $1 AND r.recipient_kind = 'human' \
-               AND r.recipient_id = $2 \
-             ORDER BY r.created_at DESC, r.message_id DESC LIMIT $3 \
-             FOR UPDATE OF r",
-        )
-        .bind(workspace_id)
-        .bind(recipient_user_id)
-        .bind(i64::from(limit))
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        let message_ids: Vec<String> = rows.iter().map(|row| row.get("message_id")).collect();
-        let mut recipients_by_message = HashMap::<String, Vec<MailAddress>>::new();
-        let mut contexts_by_message = HashMap::<String, Vec<String>>::new();
-        if !message_ids.is_empty() {
-            let recipient_rows = sqlx::query(
-                "SELECT message_id, recipient_kind, recipient_id, recipient_name \
-                 FROM mail_recipients WHERE message_id = ANY($1) \
-                 ORDER BY message_id, position",
-            )
-            .bind(&message_ids)
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-            for row in recipient_rows {
-                recipients_by_message
-                    .entry(row.get("message_id"))
-                    .or_default()
-                    .push(MailAddress {
-                        kind: if row.get::<String, _>("recipient_kind") == "agent" {
-                            MailAddressKind::Agent
-                        } else {
-                            MailAddressKind::Human
-                        },
-                        id: row.get("recipient_id"),
-                        name: row.get("recipient_name"),
-                    });
-            }
-            let context_rows = sqlx::query(
-                "SELECT message_id, context_message_id FROM mail_contexts \
-                 WHERE message_id = ANY($1) ORDER BY message_id, position",
-            )
-            .bind(&message_ids)
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-            for row in context_rows {
-                contexts_by_message
-                    .entry(row.get("message_id"))
-                    .or_default()
-                    .push(row.get("context_message_id"));
-            }
-        }
-
-        let mut deliveries = Vec::with_capacity(rows.len());
-        for row in rows {
-            let message_id: String = row.get("message_id");
-            let unread = row.get::<Option<String>, _>("read_at").is_none();
-            deliveries.push(MailDelivery {
-                unread,
-                message: AgentMailMessage {
-                    message_id: message_id.clone(),
-                    workspace_id: row.get("workspace_id"),
-                    sender: MailAddress {
-                        kind: if row.get::<String, _>("sender_kind") == "agent" {
-                            MailAddressKind::Agent
-                        } else {
-                            MailAddressKind::Human
-                        },
-                        id: row.get("sender_id"),
-                        name: row.get("sender_name"),
-                    },
-                    recipients: recipients_by_message
-                        .remove(&message_id)
-                        .unwrap_or_default(),
-                    context_ids: contexts_by_message.remove(&message_id).unwrap_or_default(),
-                    body: row.get("body"),
-                    created_at: parse_database_timestamp(&row, "created_at", "agent message")?,
-                },
-            });
-        }
-        if !message_ids.is_empty() {
-            sqlx::query(
-                "UPDATE mail_recipients SET read_at = $1 \
-                 WHERE workspace_id = $2 AND recipient_kind = 'human' AND recipient_id = $3 \
-                   AND message_id = ANY($4) AND read_at IS NULL",
-            )
-            .bind(Utc::now().to_rfc3339())
-            .bind(workspace_id)
-            .bind(recipient_user_id)
-            .bind(&message_ids)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-        }
-        let remaining = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM mail_recipients \
-             WHERE workspace_id = $1 AND recipient_kind = 'human' \
-               AND recipient_id = $2 AND read_at IS NULL",
-        )
-        .bind(workspace_id)
-        .bind(recipient_user_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        transaction.commit().await.map_err(AuthFailure::database)?;
-        Ok(MailboxResponse {
-            deliveries,
-            remaining_unread: u64::try_from(remaining).unwrap_or(0),
-        })
     }
 
     pub async fn apply_server_name(&self, server: &mut ServerInfo) -> Result<(), AuthFailure> {
@@ -4596,6 +4334,24 @@ fn fast_secret_hash(secret: &str) -> String {
     format!("{:x}", Sha256::digest(secret.as_bytes()))
 }
 
+fn valid_pkce_verifier(value: &str) -> bool {
+    (43..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
+fn valid_pkce_challenge(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
 fn fast_secret_matches(secret: &str, expected_hash: &str) -> bool {
     let actual = fast_secret_hash(secret);
     actual.len() == expected_hash.len()
@@ -4722,6 +4478,13 @@ fn invalid_ingress_authorization() -> AuthFailure {
     AuthFailure::unauthorized(
         "invalid_ingress_authorization",
         "ingress authorization is invalid or expired",
+    )
+}
+
+fn invalid_app_oauth_code() -> AuthFailure {
+    AuthFailure::unauthorized(
+        "invalid_app_oauth_code",
+        "app OAuth code is invalid, expired, or already used",
     )
 }
 
@@ -5386,155 +5149,82 @@ mod tests {
             .expect("owner registration")
     }
 
-    fn mail_address(agent_id: &str, name: &str) -> MailAddress {
-        MailAddress {
-            kind: MailAddressKind::Agent,
-            id: agent_id.to_string(),
-            name: name.to_string(),
-        }
-    }
-
     #[tokio::test]
-    async fn workspace_humans_are_discoverable_and_receive_independent_mail() {
-        let store = AuthStore::for_test("owner-password").await;
-        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
-        let organization = store
-            .list_organizations(&owner.user_id)
-            .await
-            .expect("list organizations")
-            .remove(0);
-        store
-            .create_workspace(
-                &organization.organization_id,
-                "human-mail",
-                "Human mail",
-                &owner.user_id,
+    async fn app_oauth_codes_require_pkce_and_are_single_use() {
+        let store = AuthStore::for_test("admin-password").await;
+        store.seed_test_workspace("app-oauth").await;
+        let owner = bootstrap_owner(&store, "ada@example.com", "Ada").await;
+        sqlx::query(
+            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+             VALUES($1, $2, 'owner', $3)",
+        )
+        .bind("org_app-oauth")
+        .bind(&owner.user_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("add app workspace member");
+        sqlx::query(
+            "INSERT INTO machine_services(\
+             service_id, workspace_id, server_id, name, target_host, target_port, protocol, \
+             created_at, created_by, updated_at, updated_by\
+             ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $9)",
+        )
+        .bind("service-mail")
+        .bind("app-oauth")
+        .bind("machine-a")
+        .bind("Mail")
+        .bind("127.0.0.1")
+        .bind(8788_i64)
+        .bind("http")
+        .bind(Utc::now().to_rfc3339())
+        .bind("user-a")
+        .execute(&store.pool)
+        .await
+        .expect("insert app service");
+        let verifier = "v".repeat(64);
+        let code = store
+            .create_app_oauth_code(
+                &AppOAuthGrant {
+                    workspace_id: "app-oauth".to_string(),
+                    service_id: "service-mail".to_string(),
+                    user_id: owner.user_id.clone(),
+                    preferred_name: "Ada".to_string(),
+                    role: "owner".to_string(),
+                },
+                "https://mail.example/api/auth/callback",
+                &pkce_challenge(&verifier),
             )
             .await
-            .expect("create workspace");
-        let humans = store
-            .list_workspace_humans("human-mail")
-            .await
-            .expect("list workspace humans");
-        assert_eq!(
-            humans,
-            [WorkspaceHuman {
-                user_id: owner.user_id.clone(),
-                preferred_name: "Owner".to_string(),
-                role: "owner".to_string(),
-            }]
-        );
-        let human = MailAddress {
-            kind: MailAddressKind::Human,
-            id: owner.user_id.clone(),
-            name: owner.preferred_name.clone(),
-        };
-        let agent = mail_address("agent-b", "reviewer");
-        let sent = store
-            .send_agent_mail(
-                "human-mail",
-                mail_address("agent-a", "builder"),
-                vec![agent.clone(), human.clone()],
-                vec![],
-                "Deployment is ready.",
-            )
-            .await
-            .expect("send human mail");
-        assert_eq!(sent.recipients, [agent.clone(), human]);
-
-        let mailbox = store
-            .read_human_mailbox("human-mail", &owner.user_id, 50)
-            .await
-            .expect("read human mailbox");
-        assert_eq!(mailbox.deliveries.len(), 1);
-        assert!(mailbox.deliveries[0].unread);
-        assert_eq!(mailbox.deliveries[0].message, sent);
-        let agent_inbox = store
-            .read_agent_inbox("human-mail", &agent.id, 50)
-            .await
-            .expect("read agent inbox independently");
-        assert_eq!(agent_inbox.messages, [sent]);
-        let reread = store
-            .read_human_mailbox("human-mail", &owner.user_id, 50)
-            .await
-            .expect("reread human mailbox");
-        assert_eq!(reread.deliveries.len(), 1);
-        assert!(!reread.deliveries[0].unread);
-
-        let outsider = bootstrap_owner(&store, "outsider@example.com", "Outsider").await;
-        let error = store
-            .read_human_mailbox("human-mail", &outsider.user_id, 50)
-            .await
-            .expect_err("non-member cannot read human inbox");
-        assert_eq!(error.into_parts().1.code, "organization_access_denied");
-    }
-
-    #[tokio::test]
-    async fn agent_mail_is_durable_scoped_threaded_and_marked_read_per_recipient() {
-        let store = AuthStore::for_test("owner-password").await;
-        store.seed_test_workspace("default").await;
-        let alice = mail_address("agent-alice", "alice");
-        let bob = mail_address("agent-bob", "bob");
-        let charlie = mail_address("agent-charlie", "charlie");
-        let root = store
-            .send_agent_mail(
-                "default",
-                alice.clone(),
-                vec![bob.clone(), charlie.clone()],
-                vec![],
-                "Please review the parser.",
-            )
-            .await
-            .expect("send root message");
-        assert!(root.message_id.starts_with("msg_"));
-        assert_eq!(root.recipients, [bob.clone(), charlie.clone()]);
-
-        let bob_inbox = store
-            .read_agent_inbox("default", &bob.id, 100)
-            .await
-            .expect("read bob inbox");
-        assert_eq!(bob_inbox.messages, std::slice::from_ref(&root));
-        assert_eq!(bob_inbox.remaining_unread, 0);
+            .expect("create OAuth code");
         assert!(store
-            .read_agent_inbox("default", &bob.id, 100)
-            .await
-            .expect("reread bob inbox")
-            .messages
-            .is_empty());
-
-        let charlie_inbox = store
-            .read_agent_inbox("default", &charlie.id, 100)
-            .await
-            .expect("read charlie inbox");
-        assert_eq!(charlie_inbox.messages, std::slice::from_ref(&root));
-
-        let reply = store
-            .send_agent_mail(
-                "default",
-                bob.clone(),
-                vec![alice.clone()],
-                vec![root.message_id.clone()],
-                "Review complete.",
+            .consume_app_oauth_code(
+                &code,
+                "service-mail",
+                "https://mail.example/api/auth/callback",
+                &"x".repeat(64),
             )
             .await
-            .expect("send threaded reply");
-        let alice_inbox = store
-            .read_agent_inbox("default", &alice.id, 100)
-            .await
-            .expect("read alice inbox");
-        assert_eq!(alice_inbox.messages, [reply]);
-
-        let error = store
-            .send_agent_mail(
-                "default",
-                mail_address("agent-outsider", "outsider"),
-                vec![alice],
-                vec![root.message_id],
-                "Forge a reply.",
+            .is_err());
+        let grant = store
+            .consume_app_oauth_code(
+                &code,
+                "service-mail",
+                "https://mail.example/api/auth/callback",
+                &verifier,
             )
             .await
-            .expect_err("unrelated sender cannot reference context");
-        assert_eq!(error.into_parts().1.code, "invalid_mail_context");
+            .expect("consume OAuth code");
+        assert_eq!(grant.user_id, owner.user_id);
+        assert!(store
+            .consume_app_oauth_code(
+                &code,
+                "service-mail",
+                "https://mail.example/api/auth/callback",
+                &verifier,
+            )
+            .await
+            .is_err());
     }
 
     #[tokio::test]

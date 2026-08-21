@@ -249,45 +249,6 @@ CREATE TABLE IF NOT EXISTS agent_names (
 );
 CREATE INDEX IF NOT EXISTS agent_names_workspace_id ON agent_names(workspace_id);
 
-CREATE TABLE IF NOT EXISTS mail_messages (
-    message_id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    sender_kind TEXT NOT NULL CHECK(sender_kind IN ('agent', 'human')),
-    sender_id TEXT NOT NULL,
-    sender_name TEXT NOT NULL,
-    body TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS mail_messages_workspace_created
-    ON mail_messages(workspace_id, created_at, message_id);
-
-CREATE TABLE IF NOT EXISTS mail_recipients (
-    message_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    recipient_kind TEXT NOT NULL CHECK(recipient_kind IN ('agent', 'human')),
-    recipient_id TEXT NOT NULL,
-    recipient_name TEXT NOT NULL,
-    position BIGINT NOT NULL,
-    created_at TEXT NOT NULL,
-    read_at TEXT,
-    PRIMARY KEY(message_id, recipient_kind, recipient_id),
-    FOREIGN KEY(message_id) REFERENCES mail_messages(message_id) ON DELETE CASCADE,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS mail_recipients_unread
-    ON mail_recipients(
-        workspace_id, recipient_kind, recipient_id, created_at, message_id
-    ) WHERE read_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS mail_contexts (
-    message_id TEXT NOT NULL,
-    context_message_id TEXT NOT NULL,
-    position BIGINT NOT NULL,
-    PRIMARY KEY(message_id, context_message_id),
-    FOREIGN KEY(message_id) REFERENCES mail_messages(message_id) ON DELETE CASCADE,
-    FOREIGN KEY(context_message_id) REFERENCES mail_messages(message_id) ON DELETE CASCADE
-);
 
 CREATE TABLE IF NOT EXISTS deleted_agents (
     agent_id TEXT PRIMARY KEY,
@@ -368,6 +329,23 @@ CREATE TABLE IF NOT EXISTS ingress_sessions (
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ingress_sessions_expiry ON ingress_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS app_oauth_codes (
+    code_hash TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    preferred_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')),
+    redirect_uri TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS app_oauth_codes_expiry ON app_oauth_codes(expires_at);
 
 CREATE TABLE IF NOT EXISTS machine_traffic_hourly (
     workspace_id TEXT NOT NULL,
