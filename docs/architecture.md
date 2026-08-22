@@ -89,6 +89,12 @@ Controller-to-Host protocol is a local length-prefixed bincode socket. Browser
 terminal and service streams route through the Proxy; ordinary virtual-network
 payload travels between Controllers after Proxy authorization.
 
+Browser terminal attach is revisioned. The Host keeps a bounded PTY output ring
+keyed by stream epoch. Reconnects send the client's last cursor; the Host
+returns only later chunks and a gap flag when the ring has slid past that
+cursor. Live Controller lag resyncs from the same Host read instead of dropping
+bytes. This is opaque byte replay, not Agent-protocol item storage.
+
 PostgreSQL is the durable source for accounts, organizations, workspaces,
 machine credentials, services, ingresses, App OAuth codes, policy, audit,
 traffic counters, and Core Message. NATS supplies events and cross-Proxy live

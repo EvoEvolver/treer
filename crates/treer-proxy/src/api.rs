@@ -26,10 +26,10 @@ use treer_protocol::{
     MachineEnrollmentResponse, MachineService, MessagePrincipal, MessagePrincipalKind,
     PromptAgentRequest, ProtocolError, ReceiveMessagesRequest, RenameRequest,
     ResolveAppRecipientsRequest, ResolveAppRecipientsResponse, SendMessageRequest, ServiceIngress,
-    ServiceIngressAccess, SetAgentUiRequest, TerminalClientMessage, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    ServiceIngressAccess, SetAgentUiRequest, TerminalClientMessage, TerminalCursor,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
+    WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -4572,6 +4572,10 @@ struct TerminalQuery {
     cols: u16,
     #[serde(default = "default_terminal_rows")]
     rows: u16,
+    #[serde(default)]
+    stream_epoch: Option<String>,
+    #[serde(default)]
+    since_revision: Option<u64>,
 }
 
 const fn default_terminal_cols() -> u16 {
@@ -4580,6 +4584,19 @@ const fn default_terminal_cols() -> u16 {
 
 const fn default_terminal_rows() -> u16 {
     36
+}
+
+impl TerminalQuery {
+    fn cursor(&self) -> Option<TerminalCursor> {
+        let stream_epoch = self.stream_epoch.as_deref()?.trim();
+        if stream_epoch.is_empty() {
+            return None;
+        }
+        Some(TerminalCursor {
+            stream_epoch: stream_epoch.to_string(),
+            revision: self.since_revision.unwrap_or(0),
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4619,6 +4636,7 @@ async fn agent_terminal(
             agent_id,
             query.cols,
             query.rows,
+            query.cursor(),
         )
     }))
 }
@@ -4630,11 +4648,12 @@ async fn stream_terminal(
     agent_id: String,
     cols: u16,
     rows: u16,
+    cursor: Option<TerminalCursor>,
 ) {
     let (mut outgoing, mut incoming) = socket.split();
     let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<SocketFrame>();
     let attached = state
-        .attach_terminal(&workspace_id, &agent_id, cols, rows, terminal_tx)
+        .attach_terminal(&workspace_id, &agent_id, cols, rows, cursor, terminal_tx)
         .await;
     let session_id = match attached {
         Ok(session_id) => session_id,

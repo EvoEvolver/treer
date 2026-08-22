@@ -1607,7 +1607,8 @@ async fn relay_terminal(
                     }
                     Message::Text(text) => match serde_json::from_str::<TerminalServerMessage>(&text)
                         .context("invalid terminal server message")? {
-                        TerminalServerMessage::Ready { .. } => {}
+                        TerminalServerMessage::Ready { .. }
+                        | TerminalServerMessage::Cursor { .. } => {}
                         TerminalServerMessage::Closed { reason: closed_reason, exit_code: closed_exit_code } => {
                             break (
                                 closed_reason.unwrap_or_else(|| "remote terminal closed".to_string()),

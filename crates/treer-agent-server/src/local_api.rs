@@ -912,6 +912,10 @@ struct TerminalQuery {
     cols: u16,
     #[serde(default = "default_terminal_rows")]
     rows: u16,
+    #[serde(default)]
+    stream_epoch: Option<String>,
+    #[serde(default)]
+    since_revision: Option<u64>,
 }
 
 const fn default_terminal_cols() -> u16 {
@@ -935,6 +939,21 @@ async fn agent_terminal(
         .query_pairs_mut()
         .append_pair("cols", &query.cols.max(1).to_string())
         .append_pair("rows", &query.rows.max(1).to_string());
+    if let Some(stream_epoch) = query
+        .stream_epoch
+        .as_deref()
+        .map(str::trim)
+        .filter(|epoch| !epoch.is_empty())
+    {
+        upstream
+            .query_pairs_mut()
+            .append_pair("stream_epoch", stream_epoch);
+        if let Some(revision) = query.since_revision {
+            upstream
+                .query_pairs_mut()
+                .append_pair("since_revision", &revision.to_string());
+        }
+    }
     Ok(ws.on_upgrade(move |socket| relay_terminal(socket, state, upstream, source_agent)))
 }
 

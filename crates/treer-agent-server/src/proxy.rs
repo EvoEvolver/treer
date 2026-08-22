@@ -15,18 +15,20 @@ use tracing::{info, warn};
 use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
     NetworkBinaryFrame, ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame,
-    TerminalBinaryKind, PROTOCOL_VERSION,
+    TerminalBinaryKind, TerminalCursor, PROTOCOL_VERSION,
 };
 use url::Url;
 
-use crate::controller::ControllerRuntime;
+use crate::controller::{ControllerRuntime, TerminalSnapshot};
 use crate::network::NetworkRuntime;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const RESULT_CACHE_LIMIT: usize = 256;
 
+#[derive(Clone)]
 struct TerminalRelay {
     process_id: String,
+    stream_epoch: String,
     last_revision: u64,
 }
 
@@ -176,7 +178,40 @@ impl ProxyClient {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                        warn!(count, "terminal output relay lagged");
+                        warn!(count, "terminal output relay lagged; resyncing from host");
+                        let sessions = terminal_sessions
+                            .iter()
+                            .map(|(session_id, relay)| (session_id.clone(), relay.clone()))
+                            .collect::<Vec<_>>();
+                        for (session_id, relay) in sessions {
+                            let cursor = TerminalCursor {
+                                stream_epoch: relay.stream_epoch,
+                                revision: relay.last_revision,
+                            };
+                            match self
+                                .runtime
+                                .terminal_snapshot(&relay.process_id, Some(&cursor))
+                                .await
+                            {
+                                Ok(snapshot) => {
+                                    if snapshot.data.is_empty() && !snapshot.gap {
+                                        continue;
+                                    }
+                                    if let Some(relay) = terminal_sessions.get_mut(&session_id) {
+                                        relay.stream_epoch = snapshot.stream_epoch.clone();
+                                        relay.last_revision = snapshot.revision;
+                                    }
+                                    publish_terminal_replay(&mut outgoing, session_id, snapshot)
+                                        .await?;
+                                }
+                                Err(error) => warn!(
+                                    code = %error.code,
+                                    message = %error.message,
+                                    %session_id,
+                                    "failed to resync lagged terminal"
+                                ),
+                            }
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return Err(anyhow!("terminal event channel closed"));
@@ -308,25 +343,21 @@ impl ProxyClient {
                             let result = self.execute(envelope).await;
                             send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
                         }
-                        ProxyMessage::TerminalAttach { session_id, agent_id, cols, rows } => {
+                        ProxyMessage::TerminalAttach { session_id, agent_id, cols, rows, cursor } => {
                             let operation_id = format!("{session_id}:attach");
-                            match self.runtime.terminal_snapshot(&agent_id).await {
-                                Ok(replay) => {
+                            match self.runtime.terminal_snapshot(&agent_id, cursor.as_ref()).await {
+                                Ok(snapshot) => {
                                     match self.runtime.resize(&operation_id, &agent_id, cols, rows).await {
                                         Ok(()) => {
                                             terminal_sessions.insert(
                                                 session_id.clone(),
                                                 TerminalRelay {
                                                     process_id: agent_id,
-                                                    last_revision: replay.revision,
+                                                    stream_epoch: snapshot.stream_epoch.clone(),
+                                                    last_revision: snapshot.revision,
                                                 },
                                             );
-                                            send_binary(&mut outgoing, TerminalBinaryFrame {
-                                                kind: TerminalBinaryKind::Ready,
-                                                session_id,
-                                                revision: replay.revision,
-                                                payload: replay.data,
-                                            }).await?;
+                                            publish_terminal_replay(&mut outgoing, session_id, snapshot).await?;
                                         }
                                         Err(error) => {
                                             send(&mut outgoing, &AgentServerMessage::TerminalClosed {
@@ -515,6 +546,37 @@ pub fn server_info(
         connected_at: now,
         last_seen_at: now,
     }
+}
+
+async fn publish_terminal_replay<S>(
+    outgoing: &mut S,
+    session_id: String,
+    snapshot: TerminalSnapshot,
+) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    send(
+        outgoing,
+        &AgentServerMessage::TerminalReady {
+            session_id: session_id.clone(),
+            stream_epoch: snapshot.stream_epoch,
+            revision: snapshot.revision,
+            gap: snapshot.gap,
+        },
+    )
+    .await?;
+    send_binary(
+        outgoing,
+        TerminalBinaryFrame {
+            kind: TerminalBinaryKind::Ready,
+            session_id,
+            revision: snapshot.revision,
+            payload: snapshot.data,
+        },
+    )
+    .await
 }
 
 async fn send<S>(outgoing: &mut S, message: &AgentServerMessage) -> anyhow::Result<()>
