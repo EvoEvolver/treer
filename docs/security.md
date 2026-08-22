@@ -129,10 +129,12 @@ manifests and mutable channel pointers, and records SHA-256 and byte length for
 every binary plus the commit, version, platform, and Rust compiler for every
 build. Cloudflare account access can publish or replace objects, but it does not
 possess the release private key. This separation is not yet enforced by running
-machines: the current updater consumes unsigned flat Proxy artifact URLs. Do
-not claim supply-chain verification until the Controller embeds the release
-public key and rejects unsigned, mismatched, downgraded, or incompatible
-releases.
+machines: the current updater consumes unsigned flat Proxy artifact URLs. Its
+optional `--proxy` value directly selects that unverified binary source; without
+the option, the source comes from the first locally installed service after
+stable server-ID ordering. Do not claim supply-chain verification until the
+Controller embeds the release public key and rejects unsigned, mismatched,
+downgraded, or incompatible releases.
 
 ## Data and control-plane exposure
 
