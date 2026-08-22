@@ -855,7 +855,7 @@ fn runtime_dir() -> Result<PathBuf> {
         .to_string();
     #[cfg(target_os = "linux")]
     {
-        return Ok(PathBuf::from("/run/user").join(uid).join("treer"));
+        Ok(PathBuf::from("/run/user").join(uid).join("treer"))
     }
     #[cfg(not(target_os = "linux"))]
     Ok(env::temp_dir().join(format!("treer-{uid}")))

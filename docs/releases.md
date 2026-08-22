@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-08-20
+- Last reviewed: 2026-08-21 at `239f9c6`
 
 Treer promotes an explicit Git commit through Canary before Production. A
 release is not a branch name, a mutable `latest` label, or the contents of an
@@ -33,14 +33,25 @@ Workers Builds requires a one-time Cloudflare GitHub App authorization. Connect
 | Setting | Value |
 | --- | --- |
 | Production branch | `main` |
-| Root directory | `/web` |
-| Build command | `pnpm build` |
-| Deploy command | `pnpm worker:upload:canary` |
+| Root directory | `/` |
+| Build command | Empty |
+| Deploy command | `pnpm --dir web install --frozen-lockfile && pnpm --dir web build && pnpm --dir web worker:upload:canary` |
+| Non-production/version command | Same as the deploy command |
+| Build watch include path | `web/**` |
 | Build cache | Enabled |
 
-The deploy command uses `wrangler versions upload`, not `wrangler deploy`, so a
-successful source build creates evidence without changing the active Canary
-deployment.
+The self-contained command is intentional: Workers Builds may invoke a version
+or deploy command without a separate dependency-install/build phase. Its final
+step uses `wrangler versions upload`, not `wrangler deploy`, so a successful
+source build uploads an inactive Canary version without changing active Canary
+or Production traffic. Production is only selected explicitly with
+`--env production` during operator promotion.
+
+Canary version and branch-alias Preview URLs are public internet endpoints.
+They make an uploaded frontend candidate inspectable while the base
+`treer-app-canary.<account>.workers.dev` route remains disabled. Preview URLs
+use Canary runtime configuration and are build evidence only: they do not
+deploy the Railway Proxy, Core Message code, or Mail/Telegram plugin bridges.
 
 ## Machine artifacts
 
@@ -66,10 +77,31 @@ explicitly. The existing `artifacts-prepare`, `artifacts-canary`, and
 `artifacts-stable` commands then sign and distribute those bytes without
 recompiling them.
 
+## Plugin packages
+
+Mail and Telegram are source plugin packages, not additional Rust machine
+binaries and not part of the Cloudflare App artifact. `treer plugin install`
+copies one validated package version into immutable local storage on a bridge
+machine. Mail release packages must include its built `web/dist` assets; Node
+dependencies, Python bytecode, local configuration, channel secrets, and plugin
+state are never release artifacts.
+
+The current four-platform artifact workflow does not yet build, sign, or publish
+plugin archives. Until that pipeline exists, deploy a plugin from the same clean
+source commit as its compatible CLI, build Mail's static assets, validate the
+package, and retain the source revision in deployment records. Do not describe a
+binary release manifest as covering plugin bytes when it does not.
+
+`treer plugin uninstall <id>` revokes matching Core human sessions and removes
+all local package versions, but it preserves the versioned state tree. Back up
+and remove that state through a separate operator procedure. There is no
+automatic state migration or signed plugin distribution in this release flow.
+
 ## Canary release
 
 The operator needs authenticated Railway and Wrangler CLIs, Docker, `just`,
-`pnpm`, `jq`, and `curl`. Start from a clean checkout of the candidate commit:
+`pnpm`, Python 3, PostgreSQL client tools, `jq`, and `curl`. Start from a clean
+checkout of the candidate commit:
 
 ```bash
 just release-canary HEAD
@@ -92,6 +124,13 @@ The deployment scripts also set `TREER_BUILD_COMMIT` on the Railway Proxy
 service before each build. The Docker builder embeds that candidate commit in
 the Proxy-bundled Host, Controller, and CLI artifacts; it is release metadata,
 not a mutable runtime version override.
+
+Canary and Production Proxy deployment scripts explicitly set
+`TREER_ENABLE_CORE_MESSAGES=true` and
+`TREER_ENABLE_PLUGIN_SESSIONS=true`. Both default off outside those scripts.
+`TREER_ENABLE_PLUGIN_EXECUTION=true` is machine-local CLI configuration and must
+be set separately by each bridge process supervisor after its package, config,
+secret, state backup, and Policy are ready.
 
 ## Production promotion
 
@@ -117,6 +156,24 @@ branch.
 - Add Proxy API fields before the App begins using them. Stop App use before a
   later release removes an API.
 - Use expand-first PostgreSQL changes so old and new Proxy replicas can overlap.
+- Before a legacy Mail cutover, back up its SQLite/PostgreSQL database, stop the
+  Rust Mail writer, dry-run and execute `plugins/mail/migrate.py` with a required
+  `--actor` identity, compare and retain the checksum/checkpoint report, install
+  the Mail plugin, and require users to log in again.
+  Rollback to the old writer is safe only before any new Core Message write;
+  after that point, repair forward and keep Core authoritative.
+- Back up each plugin's versioned state before replacing or moving it. Telegram
+  needs its offset and ID-mapping SQLite state to avoid avoidable external
+  duplicates. Keep Bot tokens and Mail configuration out of source and release
+  artifacts, and provide them through the deployment secret mechanism.
+- Telegram's Bot API does not accept a client idempotency key. A lost successful
+  send response can produce a visible duplicate on retry; rollback and release
+  notes must not claim external exactly-once delivery.
+- To stop channel traffic, first stop bridge processes or remove their local
+  plugin-execution gate, then revoke plugin sessions. Do not turn off Core
+  Message routes while a bridge still has an unacknowledged external delivery.
+  Disabling plugin-session creation/exchange leaves revocation and uninstall
+  available; none of the gates deletes Message rows or plugin state.
 - Before the first stable release, a Controller protocol bump may deliberately
   require a coordinated Proxy rollout and machine re-enrollment. Record that
   boundary in the release notes and reset Canary as one unit. Once stable

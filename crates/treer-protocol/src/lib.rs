@@ -7,10 +7,22 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
+pub const MESSAGE_SCHEMA_VERSION: u32 = 1;
+pub const PLUGIN_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const MAX_MESSAGE_BODY_BYTES: usize = 32 * 1024;
+pub const MAX_MESSAGE_RECIPIENTS: usize = 32;
+pub const MAX_MESSAGE_CONTEXTS: usize = 32;
+pub const MAX_MESSAGE_PAGE_SIZE: u16 = 100;
+pub const MAX_MESSAGE_WAIT_MILLISECONDS: u64 = 30_000;
+pub const MAX_MESSAGE_IDEMPOTENCY_KEY_BYTES: usize = 256;
+pub const MAX_MESSAGE_EXTERNAL_METADATA_ENTRIES: usize = 16;
+pub const MAX_PLUGIN_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
 pub const WORKLOAD_CREDENTIAL_HEADER: &str = "x-treer-workload-credential";
 pub const OPERATOR_CREDENTIAL_HEADER: &str = "x-treer-operator-credential";
+pub const PLUGIN_ID_HEADER: &str = "x-treer-plugin-id";
+pub const PLUGIN_SESSION_HEADER: &str = "x-treer-plugin-session";
 pub const TERMINAL_BINARY_VERSION: u8 = 1;
 const TERMINAL_BINARY_HEADER_LEN: usize = 12;
 pub const NETWORK_BINARY_VERSION: u8 = 1;
@@ -280,6 +292,330 @@ pub struct AppPrincipal {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+}
+
+/// Stable identity attached to a Core Message.
+///
+/// `name` and `role` are immutable display snapshots. Authorization always uses
+/// `kind` and `id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePrincipalKind {
+    Agent,
+    Human,
+    Machine,
+    Service,
+}
+
+impl MessagePrincipalKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Human => "human",
+            Self::Machine => "machine",
+            Self::Service => "service",
+        }
+    }
+}
+
+impl From<AppPrincipalKind> for MessagePrincipalKind {
+    fn from(value: AppPrincipalKind) -> Self {
+        match value {
+            AppPrincipalKind::Agent => Self::Agent,
+            AppPrincipalKind::Human => Self::Human,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessagePrincipal {
+    pub kind: MessagePrincipalKind,
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+impl From<AppPrincipal> for MessagePrincipal {
+    fn from(value: AppPrincipal) -> Self {
+        Self {
+            kind: value.kind.into(),
+            id: value.id,
+            name: value.name,
+            role: value.role,
+        }
+    }
+}
+
+/// Channel-neutral, sender-asserted source data. Core never treats these values
+/// as an authenticated Treer identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageExternalSource {
+    pub channel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub conversation_id: String,
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreMessage {
+    pub schema_version: u32,
+    pub message_id: String,
+    pub workspace_id: String,
+    pub sender: MessagePrincipal,
+    pub recipients: Vec<MessagePrincipal>,
+    #[serde(default)]
+    pub context_ids: Vec<String>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_source: Option<MessageExternalSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageDelivery {
+    pub delivery_id: String,
+    pub message: CoreMessage,
+    pub recipient: MessagePrincipal,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendMessageRequest {
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub context_ids: Vec<String>,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_source: Option<MessageExternalSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendMessageResponse {
+    pub message: CoreMessage,
+    pub delivery_ids: Vec<String>,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetMessageResponse {
+    pub message: CoreMessage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessagePage {
+    pub messages: Vec<CoreMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub remaining_unacknowledged: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListMessagesQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(default = "default_message_page_size")]
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiveMessagesRequest {
+    #[serde(default = "default_message_page_size")]
+    pub limit: u16,
+    #[serde(default)]
+    pub wait_milliseconds: u64,
+}
+
+const fn default_message_page_size() -> u16 {
+    50
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiveMessagesResponse {
+    pub deliveries: Vec<MessageDelivery>,
+    pub remaining_unacknowledged: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcknowledgeMessagesRequest {
+    pub delivery_ids: Vec<String>,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcknowledgeMessagesResponse {
+    pub acknowledged_delivery_ids: Vec<String>,
+    pub already_acknowledged_delivery_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyMailRecipient {
+    pub principal: MessagePrincipal,
+    pub position: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyMailMessage {
+    pub message_id: String,
+    pub workspace_id: String,
+    pub sender: MessagePrincipal,
+    pub recipients: Vec<LegacyMailRecipient>,
+    #[serde(default)]
+    pub context_ids: Vec<String>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportMessagesRequest {
+    pub format: String,
+    pub operation_id: String,
+    pub messages: Vec<LegacyMailMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportMessagesResponse {
+    pub imported: u64,
+    pub existing: u64,
+    pub message_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginEntrypoint {
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub operating_systems: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginHttpService {
+    pub health_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_environment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginManifest {
+    pub schema_version: u32,
+    pub id: String,
+    pub display_name: String,
+    pub version: String,
+    pub minimum_treer_version: String,
+    pub entrypoint: PluginEntrypoint,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub configuration: Vec<String>,
+    #[serde(default)]
+    pub secrets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_service: Option<PluginHttpService>,
+    pub state_version: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checksums: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginOAuthStartRequest {
+    pub plugin_id: String,
+    pub service_id: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginOAuthStartResponse {
+    pub authorize_url: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginOAuthExchangeRequest {
+    pub plugin_id: String,
+    pub service_id: String,
+    pub code: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginHumanSession {
+    pub plugin_id: String,
+    pub workspace_id: String,
+    pub service_id: String,
+    pub principal: MessagePrincipal,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginOAuthExchangeResponse {
+    pub session_capability: String,
+    pub session: PluginHumanSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokePluginSessionRequest {
+    pub plugin_id: String,
+    pub session_capability: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokePluginSessionsRequest {
+    pub plugin_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokePluginSessionsResponse {
+    pub revoked: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1501,6 +1837,139 @@ mod tests {
         assert!(
             serde_json::from_value::<WorkspacePolicyDocument>(serde_json::json!({
                 "schema_version": 1,
+                "unexpected": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn core_message_wire_shape_round_trips_ordered_contexts() {
+        let message = CoreMessage {
+            schema_version: MESSAGE_SCHEMA_VERSION,
+            message_id: "msg_1".to_string(),
+            workspace_id: "ws_1".to_string(),
+            sender: MessagePrincipal {
+                kind: MessagePrincipalKind::Agent,
+                id: "agent_1".to_string(),
+                name: "builder".to_string(),
+                role: None,
+            },
+            recipients: vec![MessagePrincipal {
+                kind: MessagePrincipalKind::Human,
+                id: "user_1".to_string(),
+                name: "Owner".to_string(),
+                role: Some("owner".to_string()),
+            }],
+            context_ids: vec!["msg_parent_a".to_string(), "msg_parent_b".to_string()],
+            body: "ready\nwith details".to_string(),
+            created_at: "2026-08-21T12:00:00Z".parse().expect("timestamp"),
+            expires_at: None,
+            correlation_id: Some("task_1".to_string()),
+            trace_id: None,
+            external_source: Some(MessageExternalSource {
+                channel: "telegram".to_string(),
+                account_id: Some("bot_7".to_string()),
+                conversation_id: "-10042:9".to_string(),
+                message_id: "100".to_string(),
+                metadata: BTreeMap::from([("user_id".to_string(), "1234".to_string())]),
+            }),
+        };
+
+        let encoded = serde_json::to_value(&message).expect("serialize message");
+        assert_eq!(encoded["schema_version"], MESSAGE_SCHEMA_VERSION);
+        assert_eq!(
+            encoded["context_ids"],
+            serde_json::json!(["msg_parent_a", "msg_parent_b"])
+        );
+        assert_eq!(
+            serde_json::from_value::<CoreMessage>(encoded).expect("deserialize message"),
+            message
+        );
+    }
+
+    #[test]
+    fn message_requests_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<SendMessageRequest>(serde_json::json!({
+                "recipients": ["agent_1"],
+                "body": "hello",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::from_value::<ReceiveMessagesRequest>(serde_json::json!({}))
+                .expect("default receive request"),
+            ReceiveMessagesRequest {
+                limit: 50,
+                wait_milliseconds: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn plugin_manifest_wire_shape_is_strict() {
+        let manifest = PluginManifest {
+            schema_version: PLUGIN_MANIFEST_SCHEMA_VERSION,
+            id: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
+            version: "0.1.0".to_string(),
+            minimum_treer_version: "0.1.2".to_string(),
+            entrypoint: PluginEntrypoint {
+                argv: vec!["python3".to_string(), "telegram.py".to_string()],
+                operating_systems: vec!["linux".to_string(), "macos".to_string()],
+            },
+            capabilities: vec![
+                "message.send".to_string(),
+                "message.receive".to_string(),
+                "message.ack".to_string(),
+            ],
+            configuration: vec!["TREER_TELEGRAM_CONFIG".to_string()],
+            secrets: vec!["TELEGRAM_BOT_TOKEN".to_string()],
+            http_service: None,
+            state_version: 1,
+            checksums: BTreeMap::new(),
+        };
+        let encoded = serde_json::to_value(&manifest).expect("serialize manifest");
+        assert_eq!(
+            serde_json::from_value::<PluginManifest>(encoded).expect("deserialize manifest"),
+            manifest
+        );
+        assert!(serde_json::from_value::<PluginManifest>(serde_json::json!({
+            "schema_version": 1,
+            "id": "telegram",
+            "display_name": "Telegram",
+            "version": "0.1.0",
+            "minimum_treer_version": "0.1.2",
+            "entrypoint": {"argv": ["telegram.py"]},
+            "state_version": 1,
+            "install_hook": "./run-me"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn plugin_human_session_wire_contract_is_strict() {
+        let request = PluginOAuthExchangeRequest {
+            plugin_id: "mail".to_string(),
+            service_id: "svc_mail".to_string(),
+            code: "aoc_code".to_string(),
+            state: "pos_state".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize plugin exchange"),
+            serde_json::json!({
+                "plugin_id": "mail",
+                "service_id": "svc_mail",
+                "code": "aoc_code",
+                "state": "pos_state"
+            })
+        );
+        assert!(
+            serde_json::from_value::<RevokePluginSessionRequest>(serde_json::json!({
+                "plugin_id": "mail",
+                "session_capability": "phs_id.secret",
                 "unexpected": true
             }))
             .is_err()

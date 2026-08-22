@@ -6,7 +6,7 @@ use async_nats::jetstream;
 use async_nats::jetstream::message::PublishMessage;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 use treer_protocol::DomainEventEnvelope;
 
@@ -55,7 +55,12 @@ impl EventBusConfig {
 #[derive(Clone)]
 pub struct EventBus {
     local: broadcast::Sender<DomainEventEnvelope>,
-    nats: Option<mpsc::Sender<DomainEventEnvelope>>,
+    nats: Option<mpsc::Sender<NatsPublishRequest>>,
+}
+
+struct NatsPublishRequest {
+    event: DomainEventEnvelope,
+    persisted: Option<oneshot::Sender<Result<(), EventBusPublishError>>>,
 }
 
 impl EventBus {
@@ -131,10 +136,36 @@ impl EventBus {
         let Some(nats) = &self.nats else {
             return Ok(());
         };
-        nats.try_send(event).map_err(|error| match error {
+        nats.try_send(NatsPublishRequest {
+            event,
+            persisted: None,
+        })
+        .map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => EventBusPublishError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => EventBusPublishError::PublisherStopped,
         })
+    }
+
+    pub async fn publish_confirmed(
+        &self,
+        event: DomainEventEnvelope,
+    ) -> Result<(), EventBusPublishError> {
+        let _ = self.local.send(event.clone());
+        let Some(nats) = &self.nats else {
+            return Ok(());
+        };
+        let (persisted, confirmation) = oneshot::channel();
+        nats.try_send(NatsPublishRequest {
+            event,
+            persisted: Some(persisted),
+        })
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => EventBusPublishError::QueueFull,
+            mpsc::error::TrySendError::Closed(_) => EventBusPublishError::PublisherStopped,
+        })?;
+        confirmation
+            .await
+            .unwrap_or(Err(EventBusPublishError::PublisherStopped))
     }
 
     #[cfg(test)]
@@ -153,6 +184,7 @@ impl Default for EventBus {
 pub enum EventBusPublishError {
     QueueFull,
     PublisherStopped,
+    EncodingFailed,
 }
 
 impl fmt::Display for EventBusPublishError {
@@ -160,6 +192,7 @@ impl fmt::Display for EventBusPublishError {
         match self {
             Self::QueueFull => formatter.write_str("NATS event publish queue is full"),
             Self::PublisherStopped => formatter.write_str("NATS event publisher has stopped"),
+            Self::EncodingFailed => formatter.write_str("domain event encoding failed"),
         }
     }
 }
@@ -167,15 +200,19 @@ impl fmt::Display for EventBusPublishError {
 async fn run_nats_publisher(
     jetstream: jetstream::Context,
     subject_prefix: String,
-    mut receiver: mpsc::Receiver<DomainEventEnvelope>,
+    mut receiver: mpsc::Receiver<NatsPublishRequest>,
 ) {
-    while let Some(event) = receiver.recv().await {
+    while let Some(request) = receiver.recv().await {
+        let NatsPublishRequest { event, persisted } = request;
         let subject = event_subject(&subject_prefix, &event.workspace_id, &event.action);
         let event_id = event.event_id.clone();
         let payload = match serde_json::to_vec(&event) {
             Ok(payload) => payload,
             Err(error) => {
                 warn!(%event_id, %error, "failed to encode domain event");
+                if let Some(persisted) = persisted {
+                    let _ = persisted.send(Err(EventBusPublishError::EncodingFailed));
+                }
                 continue;
             }
         };
@@ -195,7 +232,12 @@ async fn run_nats_publisher(
             })
             .await;
             match result {
-                Ok(Ok(())) => break,
+                Ok(Ok(())) => {
+                    if let Some(persisted) = persisted {
+                        let _ = persisted.send(Ok(()));
+                    }
+                    break;
+                }
                 Ok(Err(error)) => {
                     warn!(%event_id, %subject, %error, ?retry_delay, "NATS event publish failed; retrying");
                 }
@@ -342,8 +384,12 @@ mod tests {
             payload: json!({"server_id": "server-1"}),
         };
 
-        bus.publish(event.clone()).expect("first publish");
-        bus.publish(event.clone()).expect("duplicate publish");
+        bus.publish_confirmed(event.clone())
+            .await
+            .expect("first persisted publish");
+        bus.publish_confirmed(event.clone())
+            .await
+            .expect("duplicate persisted publish");
 
         let client = async_nats::connect(&nats_url).await.expect("NATS client");
         let context = jetstream::new(client);

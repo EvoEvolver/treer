@@ -8,7 +8,6 @@ members = [
   "crates/treer-host-protocol",
   "crates/treer-protocol",
   "crates/treer-proxy",
-  "apps/mail/server",
 ]
 resolver = "2"
 

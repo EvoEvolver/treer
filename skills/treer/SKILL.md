@@ -36,6 +36,8 @@ treer profile --help
 treer machine --help
 treer service --help
 treer virtual-host --help
+treer message --help
+treer plugin --help
 ```
 
 Control commands print JSON. Read IDs and state from the response instead of
@@ -184,6 +186,88 @@ is needed. Do not print, log, persist, or send the injected
 expire after 60 seconds, so request one immediately before use. Treer does not
 automatically add the token to virtual-network requests, and services that do
 not implement Treer identity continue to work unchanged.
+
+## Exchange durable Messages
+
+Use Core Messages for asynchronous collaboration that must survive Agent,
+Controller, or Proxy restarts. A Message is immutable and may reference one or
+more earlier visible Messages through ordered `context_ids`; those edges form a
+workspace-scoped DAG.
+
+Inspect unacknowledged deliveries without changing their state:
+
+```bash
+treer message receive --wait 30000 --limit 50
+```
+
+Record the returned `delivery_id` and `message.message_id`. The same delivery
+will be returned again until it is explicitly acknowledged. Process and durably
+record any external effect before acknowledging:
+
+```bash
+treer message ack <delivery-id> --operation-id <stable-operation-id>
+```
+
+Send a new Message using a stable recipient ID or unique name. Prefer stdin for
+multiline or generated content so the body is not exposed in process arguments:
+
+```bash
+printf '%s\n' 'Review is complete.' | \
+  treer message send --to coordinator --idempotency-key task-42-result --body-file -
+```
+
+Use a sender-scoped idempotency key whenever a send may be retried. Repeating an
+identical request returns the original Message; reusing the key with different
+content fails. Reply by stable Message ID to preserve conversational context:
+
+```bash
+printf '%s\n' 'I addressed both findings.' | \
+  treer message reply <message-id> --to sender --body-file -
+```
+
+`reply` reads the parent first, uses its sender when `--to` is omitted or is
+`sender`, and creates an ordinary `message.send` operation with the parent as
+the first context. Read history without acknowledging deliveries:
+
+```bash
+treer message get <message-id>
+treer message list --limit 50
+```
+
+Context edges do not grant access to a parent's body. A missing and an invisible
+Message produce the same external error. Message policy actions are separate:
+`message.send`, `message.read`, `message.receive`, and `message.ack`. Import is
+reserved for a local operator performing an explicit migration.
+
+A Message does not wake or write to another Agent's terminal. When immediate
+attention is required, send the durable Message first and then use
+`treer agent prompt` with only the Message ID. `agent.prompt` is a separate,
+stronger policy action; do not copy the Message body into the prompt.
+
+An installed channel plugin may run from a dedicated managed bridge Agent:
+
+```bash
+treer plugin list
+treer plugin inspect <plugin-id>
+TREER_ENABLE_PLUGIN_EXECUTION=true \
+  treer plugin run <plugin-id> --config /operator-owned/config.json
+```
+
+Core Message routes, creation of plugin-bound human sessions, and plugin
+execution each have an operator-controlled rollout gate and default off. A
+`core_messages_disabled`, `plugin_sessions_disabled`, or
+`plugin_execution_disabled` result means the deployment is not enabled for the
+workflow; report it instead of inventing another integration path.
+
+The plugin process must use the `TREER_CLI` nested command path supplied by the
+runner. Do not pass, print, or teach a plugin to consume raw Agent, machine, or
+operator credentials; do not bypass the private broker with Controller/Proxy
+routes, Core PostgreSQL, or Core NATS. The runner limits commands to manifest
+capabilities and ordinary workspace policy still authorizes each operation.
+Package installation, secrets, channel setup, and migration are operator
+workflows documented in the repository rather than this managed-Agent skill.
+Plugin uninstall is also a local-operator workflow: it revokes Core human
+sessions, removes installed package versions, and preserves plugin state.
 
 Delete a machine only when it and all of its agents should be removed from the
 workspace. This revokes its credential but does not uninstall the service on

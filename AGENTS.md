@@ -21,22 +21,24 @@ second manual.
 | --- | --- |
 | Understand product scope | [docs/product.md](docs/product.md) |
 | Classify or sequence future capabilities | [docs/roadmap.md](docs/roadmap.md) |
-| Change components or protocols | [docs/architecture.md](docs/architecture.md) |
+| Change components, Core Message, or protocols | [docs/architecture.md](docs/architecture.md) |
 | Change auth, isolation, policy, or trust claims | [docs/security.md](docs/security.md) |
 | Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
+| Build or operate a channel plugin | [plugins/README.md](plugins/README.md) |
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
 
 ## Source map
 
 | Path | Responsibility |
 | --- | --- |
-| `crates/treer-proxy` | Public API, auth, durable metadata, workspace routing |
+| `crates/treer-proxy` | Public API, auth, policy, Core Message/DAG/outbox, plugin sessions, workspace routing |
 | `crates/treer-agent-server` | Machine Controller, local API, Proxy link, networking |
 | `crates/treer-agent-host` | Stable local process ownership and idempotent mutations |
 | `crates/treer-agent-runtime` | PTY lifecycle, output replay, working-directory boundary |
-| `crates/treer-cli` | Human and managed-agent command surface |
+| `crates/treer-cli` | Human/agent commands, Core Message surface, plugin lifecycle and CLI broker |
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
+| `plugins` | CLI-only scripts, manifests, channel presentation, secrets, state, and docs |
 | `web` | Standalone React control plane with runtime Proxy URL configuration |
 
 ## Change discipline
@@ -46,7 +48,8 @@ second manual.
    product-aware Controller logic.
 3. Update the closest documentation in the same change when behavior, trust
    assumptions, commands, or component ownership changes.
-4. Run `just check` before handing off. It checks documentation, frontend
-   type/build health, Rust formatting, tests, and Clippy.
+4. Run `just check` before handing off. It checks documentation, plugin
+   boundaries and end-to-end behavior, frontend type/build health, Rust
+   formatting, tests, and Clippy.
 5. Keep generated artifacts, dependencies, and local research checkouts out of
    commits. Reference repositories belong under the ignored `.references/`.

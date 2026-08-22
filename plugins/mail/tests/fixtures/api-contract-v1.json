@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "routes": {
+    "GET /api/health": { "status": "ok", "service": "treer-mail" },
+    "GET /api/config": {
+      "service_id": "svc_mail",
+      "proxy_public_url": "https://proxy.example/"
+    },
+    "GET /api/auth/start": { "response": "302", "query": ["return_to"] },
+    "GET /api/auth/callback": { "response": "302+Set-Cookie", "query": ["code", "state"] },
+    "GET /api/auth/session": {
+      "workspace_id": "workspace-a",
+      "service_id": "svc_mail",
+      "user": { "kind": "human", "id": "user-a", "name": "Owner", "role": "owner" }
+    },
+    "POST /api/auth/logout": { "response": "204+expired-cookie" },
+    "GET /api/directory": { "principals": [] },
+    "POST /api/messages": {
+      "request": { "recipients": ["agent-a"], "context_ids": ["msg-parent"], "body": "text" },
+      "response": { "message": "Message" }
+    },
+    "GET /api/messages": {
+      "query": ["limit"],
+      "response": { "deliveries": [], "remaining_unread": 0 },
+      "side_effect": "marks returned unread deliveries read"
+    },
+    "POST /api/inbox": {
+      "request": { "limit": 50 },
+      "response": { "deliveries": [], "remaining_unread": 0 },
+      "side_effect": "atomically claims and marks returned deliveries read"
+    }
+  }
+}

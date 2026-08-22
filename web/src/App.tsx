@@ -79,13 +79,14 @@ function buildLabel(build: Machine["controller_build"]) {
   return `${build.version}@${commit}`
 }
 
-function ingressReturnUrl() {
+function authorizationReturnUrl() {
   const value = new URLSearchParams(window.location.search).get("return_to")
   if (!value) return null
   try {
     const candidate = new URL(value)
-    const authorize = new URL(proxyUrl("/.treer/ingress/authorize"))
-    return candidate.origin === authorize.origin && candidate.pathname === authorize.pathname ? candidate.toString() : null
+    const proxy = new URL(proxyUrl("/"))
+    const allowedPaths = new Set(["/.treer/ingress/authorize", "/api/apps/oauth/authorize"])
+    return candidate.origin === proxy.origin && allowedPaths.has(candidate.pathname) ? candidate.toString() : null
   } catch {
     return null
   }
@@ -165,7 +166,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
       const path = registering ? "/api/auth/register" : "/api/auth/login"
       const body = registering ? { invite, email, preferred_name: preferredName, password } : { email, password }
       const user = await api<User>(path, { method: "POST", body: JSON.stringify(body) })
-      const returnTo = ingressReturnUrl()
+      const returnTo = authorizationReturnUrl()
       if (returnTo) {
         window.location.assign(returnTo)
         return
@@ -421,7 +422,7 @@ function WorkspaceApp() {
 
   useEffect(() => {
     if (!user) return
-    const returnTo = ingressReturnUrl()
+    const returnTo = authorizationReturnUrl()
     if (returnTo) window.location.assign(returnTo)
   }, [user])
 

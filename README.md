@@ -5,7 +5,10 @@ Treer is a distributed runtime and control plane for coding agents.
 Each machine runs a stable Treer Host that owns local agent processes, PTYs, and
 terminal history. A hot-updatable Controller connects that Host to the central
 Proxy, which groups machines into logical workspaces and routes discovery and
-control commands between them.
+control commands between them. Core also stores durable workspace Messages,
+per-recipient delivery state, and an ordered context DAG. External channels such
+as Mail and Telegram are CLI-only script plugins rather than privileged Proxy
+integrations.
 
 The Proxy is designed to be internet-facing. Browser users authenticate with
 sessions, while machines enroll with short-lived one-time links and then use a
@@ -31,6 +34,8 @@ Start the proxy and web control plane:
 ```bash
 just test-db-up
 export DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
+export TREER_ENABLE_CORE_MESSAGES=true
+export TREER_ENABLE_PLUGIN_SESSIONS=true
 just stage-artifacts
 cargo run -p treer-proxy -- \
   --disable-auth \
@@ -46,6 +51,12 @@ pnpm dev
 `--disable-auth` is intended for local testing. It skips the login screen and
 uses a synthetic local user. Omit it and set `ADMIN_PASSWORD` for shared or
 deployed servers.
+
+Core Message routes and creation/exchange of plugin-bound human sessions are
+rollout-gated and default off. Enable the two Proxy gates above only after the
+database migration and policy defaults are ready. Plugin process execution has
+a separate machine-local gate, `TREER_ENABLE_PLUGIN_EXECUTION=true`; it is read
+by the CLI that starts a plugin and is not a security sandbox.
 
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
 places the current platform's `treer-agent-host`, `treer-agent-server`, and
@@ -518,8 +529,13 @@ agent network namespace and normal application traffic must enter the TUN
 adapter. `TREER_NETWORK_PROXY` remains available for diagnostics. Set
 `TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
 transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
-`all_proxy` instead. Native macOS currently uses this compatibility mode; use a
-Linux container when transparent capture is required.
+`all_proxy` instead. In this mode, `NO_PROXY` and `no_proxy` contain
+`127.0.0.1,localhost,::1`, so Controller and plugin loopback calls do not enter
+the SOCKS path. Native macOS currently uses this compatibility mode; use a Linux
+container when transparent capture is required. A Mail plugin that registers
+its listener as a host-network machine service currently requires
+`proxy-env`; a transparent Agent's namespace-local loopback listener is not a
+host-network endpoint.
 
 Managed agents reach the Controller's local API through the reserved TEST-NET-1
 address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
@@ -657,11 +673,104 @@ without exposing email addresses:
 treer human list
 ```
 
-Optional applications use workload identity and the Proxy's generic App OAuth,
-directory, and recipient-resolution bridge. The standalone pull-only Mail app,
-including its separate SQLite/PostgreSQL database and frontend, is documented
-under [`apps/mail`](apps/mail/README.md). The core CLI has no `mail` or `inbox`
-commands.
+### Durable Core Messages
+
+Message data, recipient deliveries, policy, idempotency, acknowledgement, and
+ordered context edges are Core capabilities. Managed Agents use the local CLI;
+history reads do not acknowledge inbox delivery, and `receive` repeats a stable
+delivery until `ack` succeeds:
+
+```bash
+treer message receive --wait 30000 --limit 50
+treer message get <message-id>
+treer message list --limit 50
+
+printf '%s\n' 'Review is ready.' | \
+  treer message send \
+    --to coordinator \
+    --idempotency-key review-42-ready \
+    --body-file -
+
+printf '%s\n' 'I addressed the comments.' | \
+  treer message reply <message-id> --to sender --body-file -
+
+treer message ack <delivery-id> --operation-id ack-review-42
+```
+
+Use stable recipient IDs or unique names and a sender-scoped idempotency key for
+retryable sends. A reply creates an ordinary immutable Message whose first
+`context_id` is the parent; contexts can have several ordered parents and form a
+workspace-scoped DAG. An edge never grants access to an otherwise invisible
+parent. Message policy actions are `message.send`, `message.read`,
+`message.receive`, and `message.ack`; `message.import` is reserved for a local
+operator running an explicit migration.
+
+A Message does not wake an Agent. Send the durable Message first, then use
+`treer agent prompt <agent> <message-id>` only when immediate attention is
+needed. Prompting has its own stronger policy action, and the body should not be
+copied into the terminal prompt.
+
+### CLI-only channel plugins
+
+First-party channel plugins are executable scripts. Their only supported Treer
+interface is a nested `treer` command through the runner's private broker. They
+do not link Treer crates, call private Controller/Proxy routes, read Core
+PostgreSQL, consume Core NATS, or receive raw Treer credentials. Validate and
+install one immutable package version before running it:
+
+```bash
+treer plugin validate plugins/mail
+treer plugin validate plugins/telegram
+treer plugin install plugins/mail
+treer plugin install plugins/telegram
+treer plugin list
+treer plugin inspect mail
+```
+
+New Message/session traffic and plugin execution are disabled by default. The
+Proxy must run with `TREER_ENABLE_CORE_MESSAGES=true` and
+`TREER_ENABLE_PLUGIN_SESSIONS=true`; the bridge process supervisor must set
+`TREER_ENABLE_PLUGIN_EXECUTION=true` for `treer plugin run`.
+
+Run each channel from a dedicated managed bridge Agent. Mail preserves the
+browser mailbox and uses a registered HTTP service plus generic plugin OAuth:
+
+```bash
+TREER_ENABLE_PLUGIN_EXECUTION=true \
+  treer plugin run mail --config /etc/treer/mail.json
+```
+
+Build the Mail frontend before installing from a source checkout, and follow
+the [Mail plugin guide](plugins/mail/README.md) for service ingress, exact JSON
+configuration, SQLite/PostgreSQL legacy migration, backup, re-login, and
+roll-forward rules. The removed Rust service survives only as a migration
+pointer under `apps/mail`.
+
+Telegram uses the official Bot API, numeric user/chat/topic bindings, native
+reply mapping, and plugin-owned SQLite offset/mapping state:
+
+```bash
+TELEGRAM_BOT_TOKEN='<BotFather token>' \
+  TREER_ENABLE_PLUGIN_EXECUTION=true \
+  treer plugin run telegram --config /etc/treer/telegram.json
+```
+
+The [Telegram plugin guide](plugins/telegram/README.md) covers BotFather setup,
+allowlists, topics, reply behavior, rate limits, and recovery. Telegram users do
+not become Treer human principals; inbound Core Messages are authored by the
+bridge Agent with external-source metadata. Telegram does not support a client
+idempotency key, so a lost successful send response can produce a visible
+duplicate on retry.
+
+The manifest/broker boundary limits semantic commands and keeps credentials out
+of the plugin environment, but it is not a hostile same-UID sandbox. Run
+untrusted code under a separate operating-system user, container, or microVM.
+`treer plugin uninstall <id>` first revokes every Core human session for that
+workspace/plugin, then removes all locally installed package versions. It
+deliberately preserves versioned plugin state for recovery or audited cleanup;
+automatic state migration and state deletion are not provided.
+The maintained package contract and development rules are in
+[plugins/README.md](plugins/README.md).
 
 ## Workload identity
 
@@ -723,12 +832,16 @@ CLI version that prints them.
 ## Checks
 
 ```bash
-cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+just test-db-up
+just check
 ```
 
-The same sequence is available as `just check` when `just` is installed.
+The complete gate checks documentation links, first-party plugin boundaries,
+release tooling, both React builds, Mail and Telegram package tests, plugin
+manifests, the full Rust workspace, and a real-process Core Message/plugin E2E
+against PostgreSQL. While iterating on this subsystem, use
+`just plugin-boundary-test` and `just messaging-e2e`; run the complete gate
+before handoff.
 
 ## License
 

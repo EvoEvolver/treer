@@ -15,12 +15,25 @@ matching the question; follow its source links for implementation detail.
 | [Canary environment](canary.md) | Canary deployment, two-machine tests, and environment operations |
 | [Release process](releases.md) | Immutable release manifests, Cloudflare App deployment, and Production promotion |
 | [Optional applications](../apps/README.md) | Injected workspace apps and their ownership boundary |
-| [Treer Mail](../apps/mail/README.md) | Standalone mail service, databases, OAuth, and Agent API |
+| [Script plugin contract](../plugins/README.md) | Manifest, CLI-only boundary, installation, state, secrets, and development rules |
+| [Treer Mail plugin](../plugins/mail/README.md) | Mail setup, browser OAuth, legacy migration, backup, and limits |
+| [Treer Telegram plugin](../plugins/telegram/README.md) | Telegram setup, bindings, reply mapping, recovery, and limits |
 | [Root README](../README.md) | Installation, deployment, and operator command examples |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 
+## Active execution plans
+
+Active plans record approved target behavior and delivery gates. Source and
+maintained current-state documents remain authoritative until each phase ships;
+the plan identifies every maintained document that must change at completion.
+There are no active repository-wide execution plans at this revision.
+
 ## Historical material
 
+- The completed [Core messaging and CLI-only channel plugins plan](research/2026-08-21-core-messaging-cli-plugins-plan.md)
+  records the Core Message boundary, script broker, Mail migration, Telegram
+  adapter, rollout controls, browser and multi-Proxy evidence, and remaining
+  limits.
 - The proposed [Agent communication policy design](research/2026-08-19-agent-policy-design.md)
   defines the identity propagation, policy document, cache, and rollout needed
   to govern Agent discovery, mail, prompt injection, and terminal control.

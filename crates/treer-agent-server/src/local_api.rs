@@ -15,12 +15,16 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
-    ApiError, BuildInfo, CreateAgentLaunchProfileRequest, CreateAgentRequest,
-    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
-    InputAgentRequest, LaunchAgentProfileRequest, PromptAgentRequest, ProtocolError, RenameRequest,
+    AcknowledgeMessagesRequest, ApiError, BuildInfo, CreateAgentLaunchProfileRequest,
+    CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
+    CreateVirtualNetworkHostRequest, ImportMessagesRequest, InputAgentRequest,
+    LaunchAgentProfileRequest, ListMessagesQuery, PluginOAuthExchangeRequest,
+    PluginOAuthStartRequest, PromptAgentRequest, ProtocolError, ReceiveMessagesRequest,
+    RenameRequest, RevokePluginSessionRequest, RevokePluginSessionsRequest, SendMessageRequest,
     TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
     UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
-    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    OPERATOR_CREDENTIAL_HEADER, PLUGIN_ID_HEADER, PLUGIN_SESSION_HEADER,
+    WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -103,6 +107,12 @@ impl LocalApiState {
             request = request
                 .header(AGENT_ID_HEADER, &agent.agent_id)
                 .header(WORKLOAD_CREDENTIAL_HEADER, &agent.workload_credential);
+            if let Some(plugin_id) = &agent.plugin_id {
+                request = request.header(PLUGIN_ID_HEADER, plugin_id);
+            }
+            if let Some(plugin_session) = &agent.plugin_session {
+                request = request.header(PLUGIN_SESSION_HEADER, plugin_session);
+            }
         }
         if let Some(body) = body {
             request = request.json(body);
@@ -216,6 +226,22 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
         .route("/api/agents/{agent_id}/stop", post(stop_agent))
+        .route(
+            "/api/messages",
+            get(list_core_messages).post(send_core_message),
+        )
+        .route("/api/messages/receive", post(receive_core_messages))
+        .route("/api/messages/ack", post(acknowledge_core_messages))
+        .route("/api/messages/import", post(import_core_messages))
+        .route("/api/messages/{message_id}", get(get_core_message))
+        .route("/api/plugins/oauth/start", post(start_plugin_oauth))
+        .route("/api/plugins/oauth/exchange", post(exchange_plugin_oauth))
+        .route("/api/plugins/sessions/revoke", post(revoke_plugin_session))
+        .route(
+            "/api/plugins/sessions/revoke-all",
+            post(revoke_plugin_sessions),
+        )
+        .route("/api/plugins/{plugin_id}/uninstall", post(uninstall_plugin))
         .with_state(state)
 }
 
@@ -263,6 +289,182 @@ async fn list_humans(
 ) -> Result<Json<Value>, LocalApiError> {
     let agent_id = required_validated_source_agent(&state, &headers)?;
     Ok(Json(state.get_as("humans", Some(&agent_id)).await?))
+}
+
+async fn send_core_message(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<SendMessageRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(state.post_as("messages", &body, Some(&agent)).await?))
+}
+
+async fn get_core_message(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(
+                &format!("messages/{}", encode_path_segment(&message_id)),
+                Some(&agent),
+            )
+            .await?,
+    ))
+}
+
+async fn list_core_messages(
+    State(state): State<LocalApiState>,
+    Query(query): Query<ListMessagesQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let suffix = encode_message_list_suffix(&query);
+    Ok(Json(state.get_as(&suffix, Some(&agent)).await?))
+}
+
+fn encode_message_list_suffix(query: &ListMessagesQuery) -> String {
+    let mut encoded = url::form_urlencoded::Serializer::new(String::new());
+    encoded.append_pair("limit", &query.limit.to_string());
+    if let Some(before) = &query.before {
+        encoded.append_pair("before", before);
+    }
+    format!("messages?{}", encoded.finish())
+}
+
+async fn receive_core_messages(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ReceiveMessagesRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("messages/receive", &body, Some(&agent))
+            .await?,
+    ))
+}
+
+async fn acknowledge_core_messages(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<AcknowledgeMessagesRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state.post_as("messages/ack", &body, Some(&agent)).await?,
+    ))
+}
+
+async fn import_core_messages(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ImportMessagesRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    if validated_source_agent(&state, &headers)?.is_some() {
+        return Err(LocalApiError::unauthorized(ProtocolError::new(
+            "message_import_denied",
+            "message import requires a local operator",
+        )));
+    }
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(state.post_as("messages/import", &body, None).await?))
+}
+
+async fn start_plugin_oauth(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<PluginOAuthStartRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("plugins/oauth/start", &body, Some(&agent))
+            .await?,
+    ))
+}
+
+async fn exchange_plugin_oauth(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<PluginOAuthExchangeRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("plugins/oauth/exchange", &body, Some(&agent))
+            .await?,
+    ))
+}
+
+async fn revoke_plugin_session(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<RevokePluginSessionRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("plugins/sessions/revoke", &body, Some(&agent))
+            .await?,
+    ))
+}
+
+async fn revoke_plugin_sessions(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<RevokePluginSessionsRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("plugins/sessions/revoke-all", &body, Some(&agent))
+            .await?,
+    ))
+}
+
+async fn uninstall_plugin(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    if validated_source_agent(&state, &headers)?.is_some() {
+        return Err(LocalApiError::unauthorized(ProtocolError::new(
+            "plugin_uninstall_denied",
+            "plugin uninstall requires a local operator",
+        )));
+    }
+    Ok(Json(
+        state
+            .post_as(
+                &format!("plugins/{}/uninstall", encode_path_segment(&plugin_id)),
+                &json!({}),
+                None,
+            )
+            .await?,
+    ))
+}
+
+fn encode_path_segment(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 async fn list_agents(
@@ -505,6 +707,8 @@ fn optional_workload_identity(headers: &HeaderMap) -> Result<Option<(&str, &str)
 struct ValidatedAgent {
     agent_id: String,
     workload_credential: String,
+    plugin_id: Option<String>,
+    plugin_session: Option<String>,
 }
 
 fn authenticate_operator(state: &LocalApiState, headers: &HeaderMap) -> Result<(), LocalApiError> {
@@ -540,7 +744,14 @@ fn validated_source_agent(
     state: &LocalApiState,
     headers: &HeaderMap,
 ) -> Result<Option<ValidatedAgent>, LocalApiError> {
+    let (plugin_id, plugin_session) = validated_plugin_context(headers)?;
     let Some((agent_id, workload_credential)) = optional_workload_identity(headers)? else {
+        if plugin_id.is_some() || plugin_session.is_some() {
+            return Err(LocalApiError::unauthorized(ProtocolError::new(
+                "plugin_bridge_agent_required",
+                "plugin commands require a managed bridge Agent identity",
+            )));
+        }
         authenticate_operator(state, headers)?;
         return Ok(None);
     };
@@ -551,7 +762,59 @@ fn validated_source_agent(
     Ok(Some(ValidatedAgent {
         agent_id: agent_id.to_string(),
         workload_credential: workload_credential.to_string(),
+        plugin_id,
+        plugin_session,
     }))
+}
+
+fn validated_plugin_context(
+    headers: &HeaderMap,
+) -> Result<(Option<String>, Option<String>), LocalApiError> {
+    let plugin_id = optional_bounded_header(headers, PLUGIN_ID_HEADER, 63)?;
+    let plugin_session = optional_bounded_header(headers, PLUGIN_SESSION_HEADER, 512)?;
+    if plugin_session.is_some() && plugin_id.is_none() {
+        return Err(LocalApiError::unauthorized(ProtocolError::new(
+            "plugin_context_invalid",
+            "plugin human session requires a plugin broker identity",
+        )));
+    }
+    if let Some(plugin_id) = plugin_id.as_deref() {
+        let valid = plugin_id.as_bytes()[0].is_ascii_lowercase()
+            && plugin_id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        if !valid {
+            return Err(LocalApiError::unauthorized(ProtocolError::new(
+                "plugin_context_invalid",
+                "plugin broker identity is invalid",
+            )));
+        }
+    }
+    Ok((plugin_id, plugin_session))
+}
+
+fn optional_bounded_header(
+    headers: &HeaderMap,
+    name: &'static str,
+    maximum: usize,
+) -> Result<Option<String>, LocalApiError> {
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| {
+        LocalApiError::unauthorized(ProtocolError::new(
+            "plugin_context_invalid",
+            "plugin broker header is invalid",
+        ))
+    })?;
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
+        return Err(LocalApiError::unauthorized(ProtocolError::new(
+            "plugin_context_invalid",
+            "plugin broker header is invalid",
+        )));
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn required_validated_source_agent(
@@ -1084,5 +1347,28 @@ mod tests {
             "opc_secret".parse().expect("operator header"),
         );
         assert!(operator_credential_matches("opc_secret", &headers));
+    }
+
+    #[test]
+    fn plugin_context_requires_a_bounded_id_and_paired_session() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            PLUGIN_SESSION_HEADER,
+            "phs_session.secret".parse().expect("session header"),
+        );
+        let error = validated_plugin_context(&headers).expect_err("session requires plugin ID");
+        assert_eq!(error.error.code, "plugin_context_invalid");
+
+        headers.insert(PLUGIN_ID_HEADER, "mail".parse().expect("plugin header"));
+        let (plugin_id, session) =
+            validated_plugin_context(&headers).expect("valid plugin context");
+        assert_eq!(plugin_id.as_deref(), Some("mail"));
+        assert_eq!(session.as_deref(), Some("phs_session.secret"));
+
+        headers.insert(
+            PLUGIN_ID_HEADER,
+            "Mail".parse().expect("invalid plugin header value"),
+        );
+        assert!(validated_plugin_context(&headers).is_err());
     }
 }

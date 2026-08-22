@@ -1,8 +1,10 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "treer-app",
+  "name": "treer-app-canary",
   "main": "./worker/index.ts",
   "compatibility_date": "2026-08-19",
+  "workers_dev": false,
+  "preview_urls": true,
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
@@ -15,6 +17,10 @@
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
+  },
+  "vars": {
+    "TREER_ENVIRONMENT": "canary",
+    "TREER_PROXY_PUBLIC_URL": "https://proxy.canary.treer.ai/"
   },
   "env": {
     "canary": {

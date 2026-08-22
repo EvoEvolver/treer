@@ -1,0 +1,16 @@
+Exchange durable contextual Messages
+
+Usage: treer message <COMMAND>
+
+Commands:
+  send     Send a durable Message
+  reply    Reply with a context edge to an existing Message
+  get      Get one visible Message by stable ID
+  list     List visible Message history without acknowledging it
+  receive  Receive unacknowledged deliveries
+  ack      Explicitly acknowledge one or more deliveries
+  import   Import a bounded operator-authorized legacy Message batch
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help

@@ -12,7 +12,15 @@ const requiredFiles = [
   "docs/architecture.md",
   "docs/security.md",
   "docs/quality.md",
+  "docs/releases.md",
+  "docs/canary.md",
   "docs/research/2026-08-18-project-review.md",
+  "docs/research/2026-08-21-core-messaging-cli-plugins-plan.md",
+  "apps/README.md",
+  "apps/mail/README.md",
+  "plugins/README.md",
+  "plugins/mail/README.md",
+  "plugins/telegram/README.md",
   "skills/treer/SKILL.md",
 ];
 const excludedDirectories = new Set([
@@ -43,8 +51,15 @@ function requireText(file, text) {
 }
 
 requireText("README.md", "docs/README.md");
+requireText("README.md", "plugins/mail/README.md");
+requireText("README.md", "plugins/telegram/README.md");
 requireText("AGENTS.md", "docs/README.md");
+requireText("AGENTS.md", "plugins/README.md");
 requireText("AGENTS.md", "skills/treer/SKILL.md");
+requireText("docs/README.md", "../plugins/README.md");
+requireText("docs/README.md", "../plugins/mail/README.md");
+requireText("docs/README.md", "../plugins/telegram/README.md");
+requireText("docs/README.md", "../apps/README.md");
 requireText(
   "crates/treer-cli/src/main.rs",
   'include_str!("../../../skills/treer/SKILL.md")',

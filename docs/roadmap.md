@@ -1,7 +1,7 @@
 # Capability roadmap
 
 - Status: maintained
-- Last source review: 2026-08-18 at `bd3115d`
+- Last source review: 2026-08-21 at `239f9c6`
 
 ## Purpose
 
@@ -17,7 +17,7 @@ make. This roadmap owns capability categories and sequencing.
 
 ## Current baseline
 
-At `bd3115d`, Treer already provides:
+At `239f9c6`, Treer provides:
 
 - organizations, members, invitations, and organization-scoped workspaces;
 - enrolled machines with a stable Host and replaceable Controller;
@@ -28,13 +28,28 @@ At `bd3115d`, Treer already provides:
   ordinary Agent traffic;
 - per-Agent workload credentials and short-lived, service-audience-bound
   Ed25519 identity tokens;
+- durable Core Messages with per-recipient deliveries, explicit acknowledgement,
+  sender-scoped idempotency, policy actions, an ordered context DAG, a
+  transactional Message outbox, and `treer message` commands;
+- a manifest-limited CLI plugin runner and private local broker that withhold raw
+  Treer credentials from plugin scripts, enforce bounded requests/runtime/output,
+  and support session-revoking package uninstall while preserving channel state;
+- Mail and Telegram channel plugins whose Core integration is nested `treer`
+  commands, with channel presentation, secrets, and mapping state kept outside
+  Core;
+- a shared domain-event envelope, an in-process event adapter, optional
+  JetStream publishing, and multi-Proxy command and stream routing;
 - an extensible policy evaluator whose production default currently allows all
   evaluated actions.
 
-Important gaps remain: work is terminal-oriented rather than task-oriented,
-Proxy live routing assumes one instance, policy rules and audit events are not
-durable, visibility is coarse, telemetry is local, and the web application is
-not yet a programmable workspace surface.
+Important gaps remain: work is still terminal- and Message-oriented rather than
+task-oriented; restrictive policy defaults and policy-management UX are absent;
+the generic domain-event publisher has no transactional outbox outside the
+Message subsystem; plugin scripts are not isolated from hostile same-UID code;
+automatic plugin state migration and signed distribution are absent; Message
+attachments and operator retention/export/deletion policy are absent;
+visibility is coarse; telemetry is local; billing is absent; and the web
+application is not yet a programmable workspace surface.
 
 ## Real operating scenarios
 
@@ -82,8 +97,11 @@ Issue: why the work matters
       -> Artifact: a durable output or reference
 ```
 
-- A **Message** communicates information and supports recipients, correlation,
-  acknowledgement, and optional expiry.
+- A **Message** is a Core workspace object. It communicates information and
+  supports recipients, an immutable directed-acyclic context graph,
+  correlation, acknowledgement, idempotency, and optional expiry. Mail,
+  Telegram, Slack, and other channels present or transport Messages without
+  owning their canonical data or authorization semantics.
 - An **Issue** is a durable problem, request, or decision with status, labels,
   comments, dependencies, and human or Agent assignees.
 - A **Task** is executable work with requirements, claim state, lease, timeout,
@@ -125,11 +143,15 @@ because NATS is present. A personal single-Proxy deployment should remain able
 to run without an external broker through an in-process adapter implementing
 the same contracts.
 
-The first event-plane slice now provides the shared envelope, safe
+The first event-plane slice provides the shared envelope, safe
 workspace-scoped subjects, an in-process adapter, and an optional JetStream
 publisher for existing workspace mutations. It deliberately stops short of a
 database outbox: runtime retries are bounded in memory, so the database remains
-the recovery source after a Proxy crash.
+the recovery source after a Proxy crash. Core Message is the first bounded
+exception: Message creation, import, and acknowledgement write a dedicated
+outbox row in the same PostgreSQL transaction, and a restartable dispatcher
+publishes body-free events through the same event bus. This is not yet a generic
+outbox for every workspace mutation.
 
 The first horizontal-routing slice now separates small expiring Controller
 leases from change-driven live snapshots, retains current control projections
@@ -140,6 +162,31 @@ PostgreSQL/NATS pair; multi-region broker topology, transactional domain-event
 outboxes, exact billing-grade traffic accounting, telemetry export, and load
 testing remain later work. The current Proxy records approximate hourly payload
 totals for machine-to-machine relay directions using buffered atomic counters.
+
+### CLI-only channel plugins
+
+Channel integrations use executable script plugins. A plugin may call its
+external service and own channel-specific configuration, secrets, and delivery
+mapping state, but its only supported Treer interface is the installed `treer`
+CLI. It must not link Treer crates, call private Proxy or Controller routes,
+connect to the Proxy database, or consume NATS directly.
+
+The official runner holds the real Treer credential and exposes a private local,
+manifest-limited broker used by nested `treer` commands. Manifest capabilities
+set an upper bound; authenticated identity, workspace policy, and immutable Core
+guards still authorize each operation. Withholding raw credentials provides a
+comprehensible capability boundary without claiming that same-UID arbitrary
+scripts are a hostile-code sandbox. New plugin process execution is an explicit,
+default-off CLI rollout gate. Package uninstall revokes plugin-human sessions
+before removing immutable package versions and deliberately preserves the
+separate versioned state tree.
+
+Message is the first shared Core contract exercised by this plugin model. Mail
+migrated from its standalone Rust data/API service to a script plugin over
+`treer message`; Telegram is the first external channel adapter. The completed
+[execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md) records
+the compatibility, browser, multi-Proxy, rollout, and full-gate evidence. The
+maintained package contract lives in [`plugins/README.md`](../plugins/README.md).
 
 ### Identity, policy, and delegation
 
@@ -195,8 +242,11 @@ an end-to-end trace from a UI or CLI action to its target process or service.
 ### Programmable workspace experience
 
 Agents should be able to create useful workspace interfaces without modifying
-or redeploying the central React application. The first extension model should
-be declarative rather than arbitrary injected JavaScript.
+or redeploying the central React application. The first programmable-UI
+extension model should be declarative rather than arbitrary injected JavaScript.
+This UI model is separate from CLI-only channel plugins: a component describes
+Core-rendered workspace presentation, while a channel plugin is an external
+script process translating between Core commands and another service.
 
 A workspace component document can use Proxy-rendered primitives such as:
 
@@ -288,6 +338,10 @@ flowchart LR
     Event --> Audit[Audit and usage]
     Event --> Components[Programmable components]
     Event --> Broker[NATS adapters]
+    Message[Core Message DAG] --> Channels[CLI-only channel plugins]
+    Identity --> Message
+    Policy --> Message
+    Event --> Message
     Work[Issue, Task, Run, Artifact] --> Components
     Work --> Scheduler[Queues and scheduling]
     Policy --> Network[Service and network enforcement]
@@ -307,7 +361,7 @@ instead of deriving them from broker subjects, log text, or UI state.
 ### Phase 1: Workspace event spine
 
 1. Define the versioned event envelope and actor/resource references.
-2. Add an SQLite transactional outbox and idempotent local event dispatcher.
+2. Add a PostgreSQL transactional outbox and idempotent local event dispatcher.
 3. Propagate trace, causation, and correlation IDs through current commands.
 4. Ship a user-facing Workspace Activity feed and basic operator diagnostics.
 5. Define the broker interface without requiring NATS for a single Proxy.
@@ -317,11 +371,16 @@ inventing separate event formats.
 
 ### Phase 2: Collaborative workspace
 
-1. Add Issue, Message, Task, Run, and Artifact records incrementally.
-2. Use Issue as the first declarative workspace component.
-3. Add assignment, comments, mentions, dependencies, and notifications.
-4. Add task claim, lease, retry, result, and cancellation semantics.
-5. Keep terminal prompt as an interactive fallback, not the durable task bus.
+1. **Delivered:** Promote Message and its context DAG, deliveries, acknowledgement,
+   idempotency, policy, persistence, and events into Core and expose them through
+   `treer message`.
+2. **Delivered:** Add the manifest-limited script plugin runner, migrate Mail to it, and add
+   Telegram as the first external channel adapter.
+3. Add Issue, Task, Run, and Artifact records incrementally.
+4. Use Issue as the first declarative workspace component.
+5. Add assignment, comments, mentions, dependencies, and notifications.
+6. Add task claim, lease, retry, result, and cancellation semantics.
+7. Keep terminal prompt as an interactive fallback, not the durable task bus.
 
 ### Phase 3: Governed workspace
 
@@ -351,12 +410,18 @@ inventing separate event formats.
 ## Cross-cutting invariants
 
 - Durable workspace state must outlive the Agent that created it.
+- Core owns canonical Message data and context edges; channel plugins own only
+  presentation, transport, and external delivery mappings.
+- First-party channel plugins are scripts whose only supported Treer dependency
+  is the versioned CLI contract.
 - Visibility, authorization, placement, and ownership are separate decisions.
 - Stable IDs drive policy and relationships; names remain mutable labels.
 - Domain events are versioned facts, not arbitrary log lines.
 - Database state and published events use an outbox or an equivalent atomic
   consistency mechanism.
 - Consumers, commands, tasks, and UI actions are idempotent under retry.
+- External channel identities and labels do not become authenticated Treer
+  principals merely because a plugin records them.
 - High-volume terminal and network bytes do not become durable broker traffic.
 - Programmable UI actions use typed APIs and normal policy enforcement.
 - Policy decisions are explainable and auditable before defaults become
@@ -367,7 +432,9 @@ inventing separate event formats.
 ## Choosing the next feature
 
 Prefer work that establishes a shared contract used by several later features.
-The highest-leverage next epic is the **Workspace Event Spine** because it gives
-activity, audit, telemetry correlation, notifications, programmable components,
-NATS integration, and accounting one common foundation. An Issue application is
-the first product surface that should exercise that foundation end to end.
+The most recently delivered epic, **Core messaging and CLI-only channel
+plugins**, made the Message DAG reusable and proved the boundary through
+independently replaceable Mail and Telegram scripts. Issue remains the next
+candidate for a declarative workspace component; its implementation should
+reuse Core identity, policy, events, and Message references rather than invent a
+parallel channel or task bus.

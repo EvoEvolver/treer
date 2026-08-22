@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "mail",
+  "display_name": "Treer Mail",
+  "version": "0.1.0",
+  "minimum_treer_version": "0.1.2",
+  "entrypoint": {
+    "argv": ["python3", "mail.py"],
+    "operating_systems": ["linux", "macos"]
+  },
+  "capabilities": [
+    "plugin.oauth",
+    "human.list",
+    "agent.discover",
+    "message.send",
+    "message.read",
+    "message.receive",
+    "message.ack"
+  ],
+  "configuration": [],
+  "secrets": [],
+  "http_service": {
+    "health_path": "/api/health"
+  },
+  "state_version": 1,
+  "checksums": {}
+}

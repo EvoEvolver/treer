@@ -1,7 +1,7 @@
 # Canary environment
 
 - Status: maintained
-- Last reviewed: 2026-08-19
+- Last reviewed: 2026-08-21 at `239f9c6`
 
 Canary is the required deployment target before production. It uses a separate
 Railway environment, PostgreSQL database, NATS instance, and Proxy plus a
@@ -40,10 +40,26 @@ The verification TXT record is conditional; remove or retain it according to
 the DNS provider's normal ownership-verification policy after Railway reports
 the domain verified.
 
+## Frontend previews
+
+Cloudflare version and branch-alias Preview URLs are enabled for uploaded
+`treer-app-canary` versions. The base
+`treer-app-canary.<account>.workers.dev` route remains disabled, so an upload
+does not replace `https://app.canary.treer.ai/` or receive its traffic. Preview
+URLs are nevertheless public internet endpoints; a version ID or branch alias
+is an address, not authentication.
+
+Each preview runs the frontend Worker with Canary configuration, including
+`TREER_PROXY_PUBLIC_URL=https://proxy.canary.treer.ai/`. It can validate the
+built application, `/health`, and `/config.json`, but it does not deploy a
+candidate Railway Proxy, enable candidate Rust Core Message behavior, or start
+Mail and Telegram plugin bridges. Treat it as frontend build evidence, not as
+end-to-end evidence for the PR.
+
 ## Deploy and test
 
 The operator needs authenticated Railway and Wrangler CLIs plus `curl`, `jq`,
-`pnpm`, Docker, and `just`:
+`pnpm`, Python 3, PostgreSQL client tools, Docker, and `just`:
 
 ```bash
 just release-canary HEAD
@@ -53,7 +69,23 @@ just release-canary HEAD
 the current worktree to the Railway Proxy and the built App artifact to
 Cloudflare, and verifies their health endpoints. It also sets the Canary public
 URLs explicitly so this environment cannot accidentally emit Production
-installation or App links.
+installation or App links. The Proxy deployment explicitly enables
+`TREER_ENABLE_CORE_MESSAGES=true` and
+`TREER_ENABLE_PLUGIN_SESSIONS=true`; self-hosted launches default both gates
+off.
+
+The local gate inside `release-canary` includes first-party plugin source
+boundary checks, Mail and Telegram package tests, package validation, and the
+real-process Core Message/plugin E2E against the local test PostgreSQL service.
+That harness covers both a single Proxy without NATS and two Proxy replicas with
+shared PostgreSQL and an ephemeral JetStream, including cross-replica Message
+routing, confirmed body-free outbox publication, event-ID deduplication, and
+restart. A separate browser-assisted fixture exercises the real Mail UI at
+desktop and mobile viewports; it is audit evidence rather than part of the
+unattended `just check` recipe.
+The Railway black-box workflow below does not currently install a Mail bridge,
+contact Telegram, or automate a Mail browser. Do not cite it as external-channel
+canary evidence; those are separate future fixtures.
 
 `test-canary` performs a black-box workflow against the deployed Proxy:
 
@@ -81,6 +113,13 @@ mounts a persistent volume at `/workspace`; the Treer checkout, machine identity
 coding-agent state, and additional service data survive redeploys. Add complex
 fixture services to `canary/machine` and start them from its entrypoint so tests
 remain reproducible.
+
+First-party plugin packages are source artifacts under `plugins/`, not extra
+Rust machine binaries. A dedicated bridge deployment must install the exact
+package version separately, provide its operator-owned configuration and
+secret, set `TREER_ENABLE_PLUGIN_EXECUTION=true` in its supervisor, and preserve
+its plugin state. The two standard Canary machines do not
+start those bridge processes during the current network-focused workflow.
 
 Normal tests deliberately reuse the image already deployed to each service. To
 publish a changed machine image while reusing its persistent identity, run:

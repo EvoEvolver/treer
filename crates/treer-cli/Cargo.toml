@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
@@ -17,11 +18,15 @@ percent-encoding.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+tracing.workspace = true
 treer-build-info.workspace = true
 treer-protocol = { path = "../treer-protocol" }
 url.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

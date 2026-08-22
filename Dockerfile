@@ -5,7 +5,6 @@ ENV TREER_BUILD_COMMIT=$TREER_BUILD_COMMIT
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY apps/mail/server ./apps/mail/server
 COPY skills ./skills
 RUN set -eu; \
     cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
