@@ -30,10 +30,22 @@
 
   * { @apply border-border; }
   html, body, #root { @apply h-full; }
+  html, body { overscroll-behavior: none; }
   body { @apply m-0 min-w-80 bg-background text-foreground antialiased; letter-spacing: 0; }
+  body.overflow-hidden { position: fixed; inset: 0; overflow: hidden; }
   button, input, textarea { letter-spacing: 0; }
   ::selection { background: rgba(35, 131, 226, .22); }
 }
 
 .xterm { height: 100%; }
+.xterm,
+.xterm-screen,
+.xterm-rows,
+.xterm-viewport {
+  overscroll-behavior: none;
+}
+.xterm-screen,
+.xterm-rows {
+  touch-action: none;
+}
 .xterm .xterm-viewport { scrollbar-color: #41484d #0f1215; }

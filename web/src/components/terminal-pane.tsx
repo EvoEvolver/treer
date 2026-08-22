@@ -88,7 +88,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
 
     const fitIfHostChanged = () => {
       const { width, height } = host.getBoundingClientRect()
-      if (Math.abs(width - lastHostWidth) < 0.5 && Math.abs(height - lastHostHeight) < 0.5) return
+      const widthChanged = Math.abs(width - lastHostWidth) >= 0.5
+      const heightDelta = Math.abs(height - lastHostHeight)
+      // On mobile (coarse pointer), the browser URL bar showing/hiding changes
+      // the viewport height (dvh) without changing width. Refitting on those
+      // deltas is pure noise for the PTY, so only apply small height-only
+      // changes on precise pointers; keep large ones (e.g. on-screen keyboard).
+      const coarsePointer = window.matchMedia("(pointer: coarse)").matches
+      const heightNoiseThreshold = coarsePointer ? 96 : 0
+      if (!widthChanged && (heightDelta < 0.5 || heightDelta <= heightNoiseThreshold)) return
       lastHostWidth = width
       lastHostHeight = height
       fit.fit()
