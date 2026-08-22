@@ -12,7 +12,7 @@ use treer_protocol::{
     DomainEventActor, DomainEventEnvelope, DomainEventResource, MachineTrafficRecord,
     NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest, NetworkDirectTarget,
     ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind,
-    TerminalServerMessage, WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
+    TerminalCursor, TerminalServerMessage, WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
     DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use uuid::Uuid;
@@ -81,6 +81,14 @@ struct TerminalSession {
     process_id: String,
     outgoing: mpsc::UnboundedSender<SocketFrame>,
     last_revision: Option<u64>,
+    stream_epoch: Option<String>,
+}
+
+pub(crate) struct TerminalReadyPayload {
+    pub revision: u64,
+    pub replay: Vec<u8>,
+    pub stream_epoch: Option<String>,
+    pub gap: bool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1081,6 +1089,7 @@ impl AppState {
         agent_id: &str,
         cols: u16,
         rows: u16,
+        cursor: Option<TerminalCursor>,
         outgoing: mpsc::UnboundedSender<SocketFrame>,
     ) -> Result<String, ProtocolError> {
         let agent = self.resolve_agent(workspace_id, agent_id).await?;
@@ -1094,6 +1103,7 @@ impl AppState {
                 process_id: agent.agent_id.clone(),
                 outgoing,
                 last_revision: None,
+                stream_epoch: cursor.as_ref().map(|cursor| cursor.stream_epoch.clone()),
             },
         );
         let message = ProxyMessage::TerminalAttach {
@@ -1101,6 +1111,7 @@ impl AppState {
             agent_id: agent.agent_id,
             cols: cols.max(1),
             rows: rows.max(1),
+            cursor,
         };
         if let Err(error) = self
             .send_server_frame(workspace_id, &server_id, proxy_message_frame(&message)?)
@@ -1194,13 +1205,21 @@ impl AppState {
         server_id: &str,
         connection_id: Uuid,
         session_id: &str,
-        revision: u64,
-        replay: Vec<u8>,
+        ready: TerminalReadyPayload,
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        let ready = TerminalServerMessage::Ready {
+        {
+            let mut sessions = self.inner.terminal_sessions.lock().await;
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.stream_epoch = ready.stream_epoch.clone();
+            }
+        }
+        let message = TerminalServerMessage::Ready {
             session_id: session_id.to_string(),
+            stream_epoch: ready.stream_epoch.clone(),
+            revision: Some(ready.revision),
+            gap: ready.gap,
         };
         self.deliver_session_frame(ClusterSessionDelivery {
             kind: ClusterSessionKind::Terminal,
@@ -1210,7 +1229,7 @@ impl AppState {
             revision: None,
             close: false,
             frame: SocketFrame::Text(
-                serde_json::to_string(&ready)
+                serde_json::to_string(&message)
                     .map_err(|error| ProtocolError::new("encode_error", error.to_string()))?,
             ),
         })
@@ -1220,9 +1239,9 @@ impl AppState {
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
             session_id: session_id.to_string(),
-            revision: Some(revision),
+            revision: Some(ready.revision),
             close: false,
-            frame: SocketFrame::Binary(replay),
+            frame: SocketFrame::Binary(ready.replay),
         })
         .await
     }
@@ -1238,6 +1257,21 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
+        let (stream_epoch, duplicate) = {
+            let sessions = self.inner.terminal_sessions.lock().await;
+            let session = sessions.get(session_id);
+            (
+                session.and_then(|session| session.stream_epoch.clone()),
+                session.is_some_and(|session| {
+                    session
+                        .last_revision
+                        .is_some_and(|last_revision| revision <= last_revision)
+                }),
+            )
+        };
+        if duplicate {
+            return Ok(());
+        }
         self.deliver_session_frame(ClusterSessionDelivery {
             kind: ClusterSessionKind::Terminal,
             workspace_id: workspace_id.to_string(),
@@ -1246,6 +1280,26 @@ impl AppState {
             revision: Some(revision),
             close: false,
             frame: SocketFrame::Binary(data),
+        })
+        .await?;
+        let Some(stream_epoch) = stream_epoch else {
+            return Ok(());
+        };
+        let cursor = TerminalServerMessage::Cursor {
+            stream_epoch,
+            revision,
+        };
+        self.deliver_session_frame(ClusterSessionDelivery {
+            kind: ClusterSessionKind::Terminal,
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+            session_id: session_id.to_string(),
+            revision: None,
+            close: false,
+            frame: SocketFrame::Text(
+                serde_json::to_string(&cursor)
+                    .map_err(|error| ProtocolError::new("encode_error", error.to_string()))?,
+            ),
         })
         .await
     }
@@ -2971,7 +3025,7 @@ mod tests {
 
         let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
         state
-            .attach_terminal("alpha", "agent-1", 120, 40, terminal_tx)
+            .attach_terminal("alpha", "agent-1", 120, 40, None, terminal_tx)
             .await
             .expect("attach terminal");
         let attach = server_rx.recv().await.expect("terminal attach");
@@ -3581,7 +3635,7 @@ mod tests {
         }
         let (browser_tx, mut browser_rx) = mpsc::unbounded_channel();
         let session_id = state
-            .attach_terminal("alpha", "agent-1", 120, 40, browser_tx)
+            .attach_terminal("alpha", "agent-1", 120, 40, None, browser_tx)
             .await
             .expect("attach terminal");
         let attach: ProxyMessage = serde_json::from_str(&expect_text(
@@ -3590,7 +3644,11 @@ mod tests {
         .expect("decode attach");
         assert!(matches!(
             attach,
-            ProxyMessage::TerminalAttach { session_id: ref attached, .. } if attached == &session_id
+            ProxyMessage::TerminalAttach {
+                session_id: ref attached,
+                cursor: None,
+                ..
+            } if attached == &session_id
         ));
 
         state
@@ -3599,8 +3657,12 @@ mod tests {
                 "server",
                 connection_id,
                 &session_id,
-                7,
-                b"replay".to_vec(),
+                TerminalReadyPayload {
+                    revision: 7,
+                    replay: b"replay".to_vec(),
+                    stream_epoch: Some("stream_a".to_string()),
+                    gap: false,
+                },
             )
             .await
             .expect("terminal ready");
@@ -3610,7 +3672,10 @@ mod tests {
         assert_eq!(
             ready,
             TerminalServerMessage::Ready {
-                session_id: session_id.clone()
+                session_id: session_id.clone(),
+                stream_epoch: Some("stream_a".to_string()),
+                revision: Some(7),
+                gap: false,
             }
         );
         assert_eq!(
@@ -3645,6 +3710,16 @@ mod tests {
             browser_rx.recv().await,
             Some(SocketFrame::Binary(b"live".to_vec()))
         );
+        let cursor: TerminalServerMessage =
+            serde_json::from_str(&expect_text(browser_rx.recv().await.expect("cursor frame")))
+                .expect("decode cursor");
+        assert_eq!(
+            cursor,
+            TerminalServerMessage::Cursor {
+                stream_epoch: "stream_a".to_string(),
+                revision: 8,
+            }
+        );
 
         state
             .terminal_input(&session_id, vec![0, 0xff, b'\r'])
@@ -3660,6 +3735,46 @@ mod tests {
         assert_eq!(input.kind, TerminalBinaryKind::Input);
         assert_eq!(input.session_id, session_id);
         assert_eq!(input.payload, vec![0, 0xff, b'\r']);
+    }
+
+    #[tokio::test]
+    async fn terminal_attach_forwards_a_stream_cursor() {
+        let state = AppState::new();
+        let server = test_server();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server, connection_id, server_tx)
+            .await
+            .expect("register controller");
+        {
+            let mut workspaces = state.inner.workspaces.write().await;
+            workspaces
+                .get_mut("alpha")
+                .expect("workspace")
+                .agents
+                .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
+        }
+        let (browser_tx, _browser_rx) = mpsc::unbounded_channel();
+        let cursor = TerminalCursor {
+            stream_epoch: "stream_a".to_string(),
+            revision: 12,
+        };
+        state
+            .attach_terminal("alpha", "agent-1", 80, 24, Some(cursor.clone()), browser_tx)
+            .await
+            .expect("attach terminal");
+        let attach: ProxyMessage = serde_json::from_str(&expect_text(
+            server_rx.recv().await.expect("terminal attach message"),
+        ))
+        .expect("decode attach");
+        match attach {
+            ProxyMessage::TerminalAttach {
+                cursor: Some(attached),
+                ..
+            } => assert_eq!(attached, cursor),
+            other => panic!("expected attach with cursor, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3947,7 +4062,7 @@ mod tests {
 
         let (browser_tx, mut browser_rx) = mpsc::unbounded_channel();
         let session_id = state_a
-            .attach_terminal(&workspace_id, &agent_id, 100, 30, browser_tx)
+            .attach_terminal(&workspace_id, &agent_id, 100, 30, None, browser_tx)
             .await
             .expect("attach across proxies");
         let attach: ProxyMessage = serde_json::from_str(&expect_text(
@@ -3963,8 +4078,12 @@ mod tests {
                 &destination_id,
                 destination_connection,
                 &session_id,
-                4,
-                b"replay".to_vec(),
+                TerminalReadyPayload {
+                    revision: 4,
+                    replay: b"replay".to_vec(),
+                    stream_epoch: Some("stream_b".to_string()),
+                    gap: false,
+                },
             )
             .await
             .expect("return terminal replay across proxies");

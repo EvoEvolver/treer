@@ -14,7 +14,7 @@ use treer_host_protocol::{
 };
 use treer_protocol::{
     AgentInfo, AgentStatus, CreateAgentRequest, ProtocolError, ReadAgentOutputResponse,
-    VirtualNetworkHostsSnapshot,
+    TerminalCursor, VirtualNetworkHostsSnapshot,
 };
 #[cfg(test)]
 use uuid::Uuid;
@@ -93,7 +93,9 @@ pub struct TerminalOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSnapshot {
+    pub stream_epoch: String,
     pub revision: u64,
+    pub gap: bool,
     pub data: Vec<u8>,
 }
 
@@ -445,6 +447,7 @@ impl ControllerRuntime {
     pub async fn terminal_snapshot(
         &self,
         agent_id: &str,
+        cursor: Option<&TerminalCursor>,
     ) -> Result<TerminalSnapshot, ProtocolError> {
         let response = self
             .inner
@@ -452,7 +455,10 @@ impl ControllerRuntime {
             .request(
                 HostCommand::Read {
                     process_id: agent_id.to_string(),
-                    cursor: None,
+                    cursor: cursor.map(|cursor| treer_host_protocol::OutputCursor {
+                        stream_epoch: cursor.stream_epoch.clone(),
+                        revision: cursor.revision,
+                    }),
                 },
                 None,
             )
@@ -465,7 +471,9 @@ impl ControllerRuntime {
             ));
         };
         Ok(TerminalSnapshot {
+            stream_epoch: replay.stream_epoch.clone(),
             revision: replay.next_revision.saturating_sub(1),
+            gap: replay.gap,
             data: decode_replay(&replay)?,
         })
     }

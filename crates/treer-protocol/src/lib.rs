@@ -1236,6 +1236,13 @@ pub enum AgentServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
+    TerminalReady {
+        session_id: String,
+        stream_epoch: String,
+        revision: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        gap: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1256,6 +1263,8 @@ pub enum ProxyMessage {
         agent_id: String,
         cols: u16,
         rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<TerminalCursor>,
     },
     TerminalResize {
         session_id: String,
@@ -1271,6 +1280,12 @@ pub enum ProxyMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCursor {
+    pub stream_epoch: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TerminalClientMessage {
     Resize { cols: u16, rows: u16 },
@@ -1281,6 +1296,16 @@ pub enum TerminalClientMessage {
 pub enum TerminalServerMessage {
     Ready {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_epoch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        gap: bool,
+    },
+    Cursor {
+        stream_epoch: String,
+        revision: u64,
     },
     Closed {
         reason: Option<String>,
@@ -1621,6 +1646,92 @@ mod tests {
         assert_eq!(
             serde_json::to_value(message).expect("serialize"),
             serde_json::json!({ "type": "resize", "cols": 140, "rows": 48 })
+        );
+    }
+
+    #[test]
+    fn terminal_attach_cursor_is_optional_on_the_wire() {
+        let parsed: ProxyMessage = serde_json::from_value(serde_json::json!({
+            "type": "terminal_attach",
+            "session_id": "term_1",
+            "agent_id": "agent_1",
+            "cols": 80,
+            "rows": 24
+        }))
+        .expect("legacy attach without cursor");
+        match parsed {
+            ProxyMessage::TerminalAttach { cursor, .. } => assert_eq!(cursor, None),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_ready_carries_stream_replay_metadata() {
+        let message = TerminalServerMessage::Ready {
+            session_id: "term_1".to_string(),
+            stream_epoch: Some("stream_a".to_string()),
+            revision: Some(9),
+            gap: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&message).expect("serialize"),
+            serde_json::json!({
+                "type": "ready",
+                "session_id": "term_1",
+                "stream_epoch": "stream_a",
+                "revision": 9,
+                "gap": true
+            })
+        );
+        let parsed: TerminalServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "ready",
+            "session_id": "term_1"
+        }))
+        .expect("legacy ready");
+        assert_eq!(
+            parsed,
+            TerminalServerMessage::Ready {
+                session_id: "term_1".to_string(),
+                stream_epoch: None,
+                revision: None,
+                gap: false,
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_cursor_is_a_text_control_frame() {
+        let message = TerminalServerMessage::Cursor {
+            stream_epoch: "stream_a".to_string(),
+            revision: 11,
+        };
+        assert_eq!(
+            serde_json::to_value(&message).expect("serialize"),
+            serde_json::json!({
+                "type": "cursor",
+                "stream_epoch": "stream_a",
+                "revision": 11
+            })
+        );
+    }
+
+    #[test]
+    fn controller_terminal_ready_is_additive_json() {
+        let parsed: AgentServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "terminal_ready",
+            "session_id": "term_1",
+            "stream_epoch": "stream_a",
+            "revision": 4
+        }))
+        .expect("terminal ready without gap");
+        assert_eq!(
+            parsed,
+            AgentServerMessage::TerminalReady {
+                session_id: "term_1".to_string(),
+                stream_epoch: "stream_a".to_string(),
+                revision: 4,
+                gap: false,
+            }
         );
     }
 

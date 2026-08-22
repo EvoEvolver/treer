@@ -576,6 +576,76 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Instant;
 
+    fn decoded(replay: &HostOutputReplay) -> String {
+        String::from_utf8_lossy(
+            &replay
+                .chunks
+                .iter()
+                .flat_map(|chunk| chunk.data.iter().copied())
+                .collect::<Vec<_>>(),
+        )
+        .into_owned()
+    }
+
+    fn wait_for_output(runtime: &HostRuntime, process_id: &str, needle: &str) -> HostOutputReplay {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let replay = runtime.read(process_id, None).expect("read output");
+            if decoded(&replay).contains(needle) {
+                return replay;
+            }
+            assert!(Instant::now() < deadline, "process output did not arrive");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn output_replay_is_incremental_without_a_gap() {
+        let mut output = OutputBuffer::new();
+        let first = output.push("p1", b"one");
+        let second = output.push("p1", b"two");
+        let replay = output.replay(
+            "p1",
+            Some(&OutputCursor {
+                stream_epoch: first.stream_epoch.clone(),
+                revision: first.revision,
+            }),
+        );
+        assert!(!replay.gap);
+        assert_eq!(replay.chunks, vec![second]);
+        assert_eq!(replay.stream_epoch, first.stream_epoch);
+    }
+
+    #[test]
+    fn output_replay_from_the_tip_is_empty_without_a_gap() {
+        let mut output = OutputBuffer::new();
+        let last = output.push("p1", b"one");
+        let replay = output.replay(
+            "p1",
+            Some(&OutputCursor {
+                stream_epoch: last.stream_epoch.clone(),
+                revision: last.revision,
+            }),
+        );
+        assert!(!replay.gap);
+        assert!(replay.chunks.is_empty());
+    }
+
+    #[test]
+    fn output_replay_reports_a_gap_across_epochs() {
+        let mut output = OutputBuffer::new();
+        output.push("p1", b"one");
+        let replay = output.replay(
+            "p1",
+            Some(&OutputCursor {
+                stream_epoch: "other_stream".to_string(),
+                revision: 1,
+            }),
+        );
+        assert!(replay.gap);
+        assert_eq!(decoded(&replay), "one");
+    }
+
     #[test]
     fn output_replay_reports_gaps() {
         let mut output = OutputBuffer::new();
@@ -623,18 +693,61 @@ mod tests {
                 metadata: json!({"opaque": true}).to_string(),
             })
             .expect("spawn process");
+        wait_for_output(&runtime, "p1", "host-runtime-ok");
+    }
+
+    #[test]
+    fn real_pty_replay_is_incremental_from_a_cursor() {
+        let temporary = std::env::temp_dir().join(format!(
+            "treer-host-runtime-replay-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temporary).expect("create temporary directory");
+        let runtime = HostRuntime::new(&temporary).expect("create runtime");
+        runtime
+            .spawn(HostSpawnRequest {
+                process_id: "p1".to_string(),
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "printf first-chunk; exec cat".to_string()],
+                cwd: ".".to_string(),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                metadata: json!({"opaque": true}).to_string(),
+            })
+            .expect("spawn process");
+        let first = wait_for_output(&runtime, "p1", "first-chunk");
+        let cursor = OutputCursor {
+            stream_epoch: first.stream_epoch.clone(),
+            revision: first.next_revision.saturating_sub(1),
+        };
+        runtime
+            .write(
+                "p1",
+                &[HostWrite {
+                    data: b"second-chunk\n".to_vec(),
+                    delay_ms: 0,
+                }],
+            )
+            .expect("write later output");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let replay = runtime.read("p1", None).expect("read output");
-            let decoded = replay
-                .chunks
-                .iter()
-                .flat_map(|chunk| chunk.data.iter().copied())
-                .collect::<Vec<_>>();
-            if String::from_utf8_lossy(&decoded).contains("host-runtime-ok") {
+            let replay = runtime
+                .read("p1", Some(&cursor))
+                .expect("read incremental output");
+            let text = decoded(&replay);
+            if text.contains("second-chunk") {
+                assert!(!replay.gap);
+                assert!(
+                    !text.contains("first-chunk"),
+                    "incremental replay must not repeat bytes already held by the cursor: {text:?}"
+                );
                 break;
             }
-            assert!(Instant::now() < deadline, "process output did not arrive");
+            assert!(
+                Instant::now() < deadline,
+                "incremental process output did not arrive"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }

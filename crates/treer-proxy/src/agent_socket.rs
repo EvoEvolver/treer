@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -16,7 +17,12 @@ use uuid::Uuid;
 
 use crate::auth::{AuthStore, MachineSession};
 use crate::policy::{PolicyEngine, PolicyRequest};
-use crate::state::{AppState, SocketFrame};
+use crate::state::{AppState, SocketFrame, TerminalReadyPayload};
+
+struct PendingTerminalReady {
+    stream_epoch: String,
+    gap: bool,
+}
 
 pub async fn upgrade(
     State(state): State<AppState>,
@@ -55,6 +61,7 @@ async fn handle(
     });
 
     let mut identity: Option<(String, String)> = None;
+    let mut pending_terminal_ready: HashMap<String, PendingTerminalReady> = HashMap::new();
     while let Some(message) = socket_rx.next().await {
         let Ok(message) = message else {
             break;
@@ -110,14 +117,22 @@ async fn handle(
                     };
                     let result = match frame.kind {
                         TerminalBinaryKind::Ready => {
+                            let pending = pending_terminal_ready.remove(&frame.session_id);
+                            let (stream_epoch, gap) = pending
+                                .map(|pending| (Some(pending.stream_epoch), pending.gap))
+                                .unwrap_or((None, false));
                             state
                                 .terminal_ready(
                                     workspace_id,
                                     server_id,
                                     connection_id,
                                     &frame.session_id,
-                                    frame.revision,
-                                    frame.payload,
+                                    TerminalReadyPayload {
+                                        revision: frame.revision,
+                                        replay: frame.payload,
+                                        stream_epoch,
+                                        gap,
+                                    },
                                 )
                                 .await
                         }
@@ -322,6 +337,15 @@ async fn handle(
                 } else {
                     send_error(&outgoing_tx, identity_error());
                 }
+            }
+            AgentServerMessage::TerminalReady {
+                session_id,
+                stream_epoch,
+                gap,
+                ..
+            } => {
+                pending_terminal_ready
+                    .insert(session_id, PendingTerminalReady { stream_epoch, gap });
             }
             AgentServerMessage::TerminalClosed {
                 session_id,

@@ -19,6 +19,37 @@ export interface TerminalPaneHandle {
   send: (data: string) => void
 }
 
+interface StreamCursor {
+  stream_epoch: string
+  revision: number
+}
+
+interface TerminalControlMessage {
+  type: string
+  session_id?: string
+  stream_epoch?: string
+  revision?: number
+  gap?: boolean
+  reason?: string
+  error?: { message?: string }
+}
+
+const MAX_PENDING_INPUT_BYTES = 32_768
+
+function shouldResetTerminal(cursor: StreamCursor | null, message: TerminalControlMessage) {
+  if (message.gap || !message.stream_epoch) return true
+  return cursor?.stream_epoch !== message.stream_epoch
+}
+
+function terminalUrl(workspaceId: string, agentId: string, cols: number, rows: number, cursor: StreamCursor | null) {
+  const params = new URLSearchParams({ cols: String(cols), rows: String(rows) })
+  if (cursor) {
+    params.set("stream_epoch", cursor.stream_epoch)
+    params.set("since_revision", String(cursor.revision))
+  }
+  return websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/terminal?${params}`)
+}
+
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function TerminalPane({ workspaceId, agentId, active, onStatusChange, transformInput }, ref) {
   const hostRef = useRef<HTMLDivElement>(null)
   const focusRef = useRef<() => void>(() => undefined)
@@ -46,6 +77,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     let reconnectAllowed = true
     let lastHostWidth = 0
     let lastHostHeight = 0
+    let cursor: StreamCursor | null = null
+    const pendingInput: string[] = []
+    let pendingInputBytes = 0
     const terminal = new Terminal({
       cursorBlink: false,
       cursorStyle: "block",
@@ -75,8 +109,21 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     terminal.open(host)
     focusRef.current = () => terminal.focus()
 
+    const flushPendingInput = () => {
+      if (socket?.readyState !== WebSocket.OPEN) return
+      for (const data of pendingInput) socket.send(new TextEncoder().encode(data))
+      pendingInput.length = 0
+      pendingInputBytes = 0
+    }
+
     const send = (data: string) => {
-      if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data))
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(new TextEncoder().encode(data))
+        return
+      }
+      if (pendingInputBytes + data.length > MAX_PENDING_INPUT_BYTES) return
+      pendingInput.push(data)
+      pendingInputBytes += data.length
     }
     sendRef.current = send
 
@@ -108,7 +155,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       window.clearTimeout(reconnectTimer)
       reconnectAllowed = true
       if (initial) onStatusChange("connecting")
-      socket = new WebSocket(websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/terminal?cols=${terminal.cols}&rows=${terminal.rows}`))
+      socket = new WebSocket(terminalUrl(workspaceId, agentId, terminal.cols, terminal.rows, cursor))
       socket.binaryType = "arraybuffer"
       const currentSocket = socket
       currentSocket.onmessage = (event) => {
@@ -117,12 +164,20 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
           terminal.write(new Uint8Array(event.data))
           return
         }
-        const message = JSON.parse(event.data) as { type: string; reason?: string; error?: { message?: string } }
+        const message = JSON.parse(event.data) as TerminalControlMessage
         if (message.type === "ready") {
           reconnectAttempt = 0
-          terminal.reset()
+          if (shouldResetTerminal(cursor, message)) terminal.reset()
+          if (message.stream_epoch && message.revision != null) {
+            cursor = { stream_epoch: message.stream_epoch, revision: message.revision }
+          }
           onStatusChange("live")
           terminal.focus()
+          flushPendingInput()
+        } else if (message.type === "cursor") {
+          if (message.stream_epoch && message.revision != null) {
+            cursor = { stream_epoch: message.stream_epoch, revision: message.revision }
+          }
         } else if (message.type === "closed") {
           reconnectAllowed = message.reason === "agent server disconnected"
           onStatusChange(reconnectAllowed ? "reconnecting" : "closed")
