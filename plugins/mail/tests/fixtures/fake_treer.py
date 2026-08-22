@@ -100,7 +100,7 @@ def main() -> int:
         elif arguments[:3] == ["plugin", "auth", "revoke"]:
             state["revoked"] = True
             response = {"revoked": 1}
-        elif arguments[:2] == ["human", "list"]:
+        elif arguments[:2] == ["member", "list"]:
             require_human(state)
             response = {
                 "humans": [

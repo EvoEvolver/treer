@@ -322,7 +322,7 @@ class MailApplication:
         if record is None:
             raise MailError(401, "Mail login required", "mail_login_required")
         try:
-            response = self.cli.run(["human", "list"], human_session=record.capability)
+            response = self.cli.run(["member", "list"], human_session=record.capability)
         except CliError as error:
             if error.code == "plugin_session_invalid":
                 self.sessions.delete_session(raw_token)
@@ -340,7 +340,7 @@ class MailApplication:
         raise MailError(401, "Mail login required", "mail_membership_removed")
 
     def directory(self, record: BrowserSession) -> dict[str, Any]:
-        human_response = self.cli.run(["human", "list"], human_session=record.capability)
+        human_response = self.cli.run(["member", "list"], human_session=record.capability)
         agent_response = self.cli.run(["agent", "list"], human_session=record.capability)
         principals: list[dict[str, Any]] = []
         for value in _list(agent_response.get("agents"), "Agent directory"):

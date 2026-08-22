@@ -485,8 +485,10 @@ class MachineStack:
         value = self.cli_json(
             shared_environment,
             [
+                "agent",
+                "admin",
                 "create",
-                "--server",
+                "--machine",
                 self.server_id,
                 "--kind",
                 "command",
@@ -925,7 +927,7 @@ class Harness:
         self.start_secondary_proxy()
 
     def controller_reaches_proxy(self, machine: MachineStack) -> bool:
-        value = machine.cli_json(self.shared_environment, ["discover"])
+        value = machine.cli_json(self.shared_environment, ["status"])
         return value.get("workspace", {}).get("workspace_id") == machine.workspace_id
 
     def setup_identity_and_workspaces(self) -> None:
@@ -1288,8 +1290,9 @@ class Harness:
         service = mail_bridge.run_json(
             [
                 str(TREER),
+                "network",
                 "service",
-                "register",
+                "create",
                 "E2E Mail",
                 "--machine",
                 machine.server_id,
@@ -1305,6 +1308,7 @@ class Harness:
         ingress = mail_bridge.run_json(
             [
                 str(TREER),
+                "network",
                 "publish",
                 "create",
                 service_id,
@@ -1890,7 +1894,7 @@ ON CONFLICT(workspace_id) DO UPDATE SET
         self.machines.append(remote_machine)
 
         def secondary_knows_remote_machine() -> bool:
-            discovery = remote_machine.cli_json(self.shared_environment, ["discover"])
+            discovery = remote_machine.cli_json(self.shared_environment, ["status"])
             return any(
                 machine.get("server_id") == remote_machine.server_id
                 and machine.get("status") == "online"
@@ -1909,7 +1913,7 @@ ON CONFLICT(workspace_id) DO UPDATE SET
         )
 
         def primary_knows_remote() -> bool:
-            discovery = sender.run_json([str(TREER), "discover"])
+            discovery = sender.run_json([str(TREER), "status"])
             return any(
                 agent.get("agent_id") == remote.agent_id
                 for agent in discovery.get("agents", [])
