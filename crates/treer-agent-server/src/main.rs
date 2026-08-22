@@ -66,8 +66,10 @@ enum Command {
 
 #[derive(Debug, ClapArgs)]
 struct UpdateArgs {
-    #[arg(long, default_value = "default")]
-    workspace: String,
+    /// Download Controller and CLI artifacts from this Proxy instead of the
+    /// first installed machine service's Proxy.
+    #[arg(long)]
+    proxy: Option<Url>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -164,7 +166,7 @@ async fn main() -> Result<()> {
     match args.command {
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
-        Some(Command::Update(update)) => service::update(&update.workspace).await,
+        Some(Command::Update(update)) => service::update(update.proxy).await,
         Some(Command::Run { config }) => {
             let config = service::ServiceConfig::load(&config)?;
             service::require_install_hostname(&config)?;
@@ -770,14 +772,31 @@ mod tests {
     }
 
     #[test]
-    fn update_command_accepts_a_workspace() {
-        let args =
-            Args::try_parse_from(["treer-agent-server", "update", "--workspace", "workspace-a"])
-                .expect("parse update command");
+    fn update_command_accepts_a_proxy_source() {
+        let args = Args::try_parse_from([
+            "treer-agent-server",
+            "update",
+            "--proxy",
+            "https://canary.treer.example/",
+        ])
+        .expect("parse update command");
         let Some(Command::Update(update)) = args.command else {
             panic!("expected update command");
         };
-        assert_eq!(update.workspace, "workspace-a");
+        assert_eq!(
+            update.proxy.as_ref().map(Url::as_str),
+            Some("https://canary.treer.example/")
+        );
+    }
+
+    #[test]
+    fn update_command_does_not_require_service_selection() {
+        let args =
+            Args::try_parse_from(["treer-agent-server", "update"]).expect("parse update command");
+        let Some(Command::Update(update)) = args.command else {
+            panic!("expected update command");
+        };
+        assert!(update.proxy.is_none());
     }
 
     #[tokio::test]

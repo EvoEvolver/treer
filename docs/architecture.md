@@ -160,10 +160,14 @@ manifest.
 
 This publisher is ahead of the installed-machine update protocol. The current
 Controller updater still downloads flat Proxy artifact endpoints and validates
-executability before activation. A future remote rollout must verify the
-embedded release public key, signed channel, signed manifest, artifact digest,
-platform, and Host/Controller protocol compatibility before asking the Host to
-restart the Controller.
+executability before activation. An operator can select the source with
+`--proxy`; otherwise the updater uses the first installed service after stable
+server-ID ordering. Controller and CLI paths are machine-shared. A host-shell
+update activates all installed Controllers, while a managed-Agent update uses
+the injected sandbox-to-Controller URL to activate only its own Controller. A
+future remote rollout must verify the embedded release public key, signed
+channel, signed manifest, artifact digest, platform, and Host/Controller
+protocol compatibility before asking the Host to restart the Controller.
 
 Local and GitHub builds resolve the source commit from the checked-out Git
 repository. Railway release scripts set `TREER_BUILD_COMMIT` to the exact

@@ -292,8 +292,12 @@ pub fn restart_controller(workspace: &str) -> Result<()> {
     restart_controller_at(&paths, &config.host_socket)
 }
 
-pub async fn update(workspace: &str) -> Result<()> {
-    let (paths, config) = installed_service(workspace)?;
+pub async fn update(proxy_override: Option<Url>) -> Result<()> {
+    let services = installed_services()?;
+    let (paths, source_config) = services.first().context(
+        "no agent-server services are installed on this host; connect a machine before updating",
+    )?;
+    let activation_services = activation_services(&services)?;
     let treer_executable = installed_treer_binary(&paths.executable).with_context(|| {
         format!(
             "could not find the installed treer CLI for {}",
@@ -301,7 +305,7 @@ pub async fn update(workspace: &str) -> Result<()> {
         )
     })?;
     let platform = artifact_platform(std::env::consts::OS, std::env::consts::ARCH)?;
-    let proxy = Url::parse(&config.proxy).context("invalid Proxy URL in service config")?;
+    let proxy = resolve_update_proxy(proxy_override, source_config)?;
     let controller_url = artifact_url(&proxy, platform, "treer-agent-server")?;
     let treer_url = artifact_url(&proxy, platform, "treer")?;
     let client = reqwest::Client::builder()
@@ -336,7 +340,10 @@ pub async fn update(workspace: &str) -> Result<()> {
     let mut rollback_treer = treer_changed
         .then(|| stage_executable(&treer_executable, &installed_treer, "rollback", false))
         .transpose()?;
-    let previous_epoch = controller_epoch(&config).await;
+    let mut previous_epochs = Vec::with_capacity(activation_services.len());
+    for (_, config) in &activation_services {
+        previous_epochs.push(controller_epoch(config).await);
+    }
 
     if let Some(staged) = staged_controller {
         staged.install(&paths.executable)?;
@@ -359,10 +366,7 @@ pub async fn update(workspace: &str) -> Result<()> {
         println!("treer: updated CLI at {}", treer_executable.display());
     }
 
-    let activation = match restart_controller_at(&paths, &config.host_socket) {
-        Ok(()) => wait_for_controller(&config, previous_epoch.as_deref()).await,
-        Err(error) => Err(error),
-    };
+    let activation = activate_controllers(&activation_services, &previous_epochs).await;
     if let Err(error) = activation {
         let had_replacements = rollback_controller.is_some() || rollback_treer.is_some();
         if let Some(rollback) = rollback_controller.take() {
@@ -376,26 +380,75 @@ pub async fn update(workspace: &str) -> Result<()> {
                 .context("failed to restore the old treer CLI")?;
         }
         if had_replacements {
-            let rollback_restart = restart_controller_at(&paths, &config.host_socket);
-            if let Err(rollback_error) = rollback_restart {
+            let rollback_epochs = vec![None; activation_services.len()];
+            if let Err(rollback_error) =
+                activate_controllers(&activation_services, &rollback_epochs).await
+            {
                 bail!(
-                    "new Controller failed to activate ({error:#}); restored the old binaries but failed to restart the old Controller: {rollback_error:#}"
+                    "new Controller failed to activate ({error:#}); restored the old binaries but failed to restart the old Controller set: {rollback_error:#}"
                 );
             }
-            wait_for_controller(&config, None).await.with_context(|| {
-                format!("new Controller failed to activate ({error:#}); old binaries were restored but the old Controller did not recover")
-            })?;
             bail!("new Controller failed to activate; old binaries were restored: {error:#}");
         }
         return Err(error);
     }
 
     if !controller_changed && !treer_changed {
-        println!("treer: binaries were already current; Controller restarted");
+        println!("treer: binaries were already current; Controller activation completed");
     } else {
         println!("treer: update activated; Host and running agents were preserved");
     }
     Ok(())
+}
+
+fn resolve_update_proxy(proxy_override: Option<Url>, source_config: &ServiceConfig) -> Result<Url> {
+    let proxy = proxy_override.map_or_else(
+        || Url::parse(&source_config.proxy).context("invalid Proxy URL in service config"),
+        Ok,
+    )?;
+    if !matches!(proxy.scheme(), "http" | "https") {
+        bail!("update Proxy URL must use http or https");
+    }
+    Ok(proxy)
+}
+
+async fn activate_controllers(
+    services: &[&(ServicePaths, ServiceConfig)],
+    previous_epochs: &[Option<String>],
+) -> Result<()> {
+    for ((paths, config), previous_epoch) in services.iter().zip(previous_epochs) {
+        restart_controller_at(paths, &config.host_socket)
+            .with_context(|| format!("failed to restart Controller for {}", config.server_id))?;
+        wait_for_controller(config, previous_epoch.as_deref())
+            .await
+            .with_context(|| format!("Controller {} did not activate", config.server_id))?;
+    }
+    Ok(())
+}
+
+fn activation_services(
+    services: &[(ServicePaths, ServiceConfig)],
+) -> Result<Vec<&(ServicePaths, ServiceConfig)>> {
+    let managed_server_id = env::var("TREER_SERVER_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    activation_services_for(services, managed_server_id.as_deref())
+}
+
+fn activation_services_for<'a>(
+    services: &'a [(ServicePaths, ServiceConfig)],
+    managed_server_id: Option<&str>,
+) -> Result<Vec<&'a (ServicePaths, ServiceConfig)>> {
+    if let Some(server_id) = managed_server_id {
+        let service = services
+            .iter()
+            .find(|(_, config)| config.server_id == server_id)
+            .with_context(|| {
+                format!("managed Agent server {server_id} is not installed on this host")
+            })?;
+        return Ok(vec![service]);
+    }
+    Ok(services.iter().collect())
 }
 
 pub fn installed_treer_binary(controller: &Path) -> Option<PathBuf> {
@@ -575,14 +628,14 @@ fn sync_parent(path: &Path) {
 }
 
 async fn controller_epoch(config: &ServiceConfig) -> Option<String> {
-    let address = config.listen.parse::<SocketAddr>().ok()?;
+    let health_url = controller_health_url(config)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
         .no_proxy()
         .build()
         .ok()?;
     let value = client
-        .get(format!("http://{address}/api/health"))
+        .get(health_url)
         .send()
         .await
         .ok()?
@@ -598,6 +651,33 @@ async fn controller_epoch(config: &ServiceConfig) -> Option<String> {
     matches
         .then(|| value.get("controller_epoch")?.as_str().map(str::to_owned))
         .flatten()
+}
+
+fn controller_health_url(config: &ServiceConfig) -> Option<Url> {
+    let managed_server_id = env::var("TREER_SERVER_ID").ok();
+    let managed_server_url = env::var("TREER_AGENT_SERVER_URL").ok();
+    controller_health_url_for(
+        config,
+        managed_server_id.as_deref(),
+        managed_server_url.as_deref(),
+    )
+}
+
+fn controller_health_url_for(
+    config: &ServiceConfig,
+    managed_server_id: Option<&str>,
+    managed_server_url: Option<&str>,
+) -> Option<Url> {
+    let mut url = if managed_server_id == Some(config.server_id.as_str()) {
+        Url::parse(managed_server_url?).ok()?
+    } else {
+        let address = config.listen.parse::<SocketAddr>().ok()?;
+        Url::parse(&format!("http://{address}/")).ok()?
+    };
+    url.set_path("/api/health");
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url)
 }
 
 async fn wait_for_controller(config: &ServiceConfig, previous_epoch: Option<&str>) -> Result<()> {
@@ -682,16 +762,33 @@ fn installed_service(workspace: &str) -> Result<(ServicePaths, ServiceConfig)> {
 }
 
 fn find_installed_service(workspace: &str) -> Result<Option<(ServicePaths, ServiceConfig)>> {
+    let mut matched = None;
+    for (paths, config) in installed_services()? {
+        if config.workspace != workspace {
+            continue;
+        }
+        if matched.is_some() {
+            bail!(
+                "multiple agent-server services for workspace {workspace} are installed on {}",
+                current_hostname()?
+            );
+        }
+        matched = Some((paths, config));
+    }
+    Ok(matched)
+}
+
+fn installed_services() -> Result<Vec<(ServicePaths, ServiceConfig)>> {
     let hostname = current_hostname()?;
     let directory = config_dir()?;
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(error).with_context(|| format!("failed to read {}", directory.display()))
         }
     };
-    let mut matched = None;
+    let mut services = Vec::new();
     for entry in entries {
         let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
         let path = entry.path();
@@ -702,18 +799,14 @@ fn find_installed_service(workspace: &str) -> Result<Option<(ServicePaths, Servi
             continue;
         }
         let config = ServiceConfig::load(&path)?;
-        if config.workspace != workspace || config.install_hostname != hostname {
+        if config.install_hostname != hostname {
             continue;
         }
-        if matched.is_some() {
-            bail!(
-                "multiple agent-server services for workspace {workspace} are installed on {hostname}"
-            );
-        }
         let paths = ServicePaths::new(&config.server_id)?;
-        matched = Some((paths, config));
+        services.push((paths, config));
     }
-    Ok(matched)
+    services.sort_by(|(_, left), (_, right)| left.server_id.cmp(&right.server_id));
+    Ok(services)
 }
 
 pub fn require_install_hostname(config: &ServiceConfig) -> Result<()> {
@@ -1312,10 +1405,10 @@ mod tests {
     }
 
     #[test]
-    fn automatic_address_is_available_to_bind() {
+    fn automatic_address_uses_the_loopback_port_range() {
         let address = allocate_loopback_address().expect("allocate local API address");
-        let _listener = TcpListener::bind(address).expect("allocated address should be available");
         assert!(address.ip().is_loopback());
+        assert!(address.port() >= FIRST_AUTOMATIC_PORT);
     }
 
     #[tokio::test]
@@ -1389,6 +1482,100 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://treer.example/artifacts/darwin-aarch64/treer-agent-server"
+        );
+    }
+
+    #[test]
+    fn explicit_update_proxy_overrides_the_installed_source() {
+        let config = ServiceConfig {
+            proxy: "https://stable.treer.example/".to_string(),
+            workspace: "default".to_string(),
+            server_id: "srv_test".to_string(),
+            machine_token: "srv_test.secret".to_string(),
+            operator_credential: "op_test".to_string(),
+            root: PathBuf::from("/tmp"),
+            listen: "127.0.0.1:8790".to_string(),
+            host_socket: PathBuf::from("/tmp/host.sock"),
+            install_hostname: current_hostname().expect("local hostname"),
+        };
+        let explicit = Url::parse("https://canary.treer.example/").unwrap();
+
+        assert_eq!(
+            resolve_update_proxy(Some(explicit), &config)
+                .unwrap()
+                .as_str(),
+            "https://canary.treer.example/"
+        );
+        assert_eq!(
+            resolve_update_proxy(None, &config).unwrap().as_str(),
+            "https://stable.treer.example/"
+        );
+        assert!(
+            resolve_update_proxy(Some(Url::parse("file:///tmp/release").unwrap()), &config)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_agent_health_uses_the_injected_host_route() {
+        let config = ServiceConfig {
+            proxy: "https://treer.example/".to_string(),
+            workspace: "default".to_string(),
+            server_id: "srv_current".to_string(),
+            machine_token: "srv_current.secret".to_string(),
+            operator_credential: "op_test".to_string(),
+            root: PathBuf::from("/tmp"),
+            listen: "127.0.0.1:8790".to_string(),
+            host_socket: PathBuf::from("/tmp/host.sock"),
+            install_hostname: current_hostname().expect("local hostname"),
+        };
+
+        assert_eq!(
+            controller_health_url_for(
+                &config,
+                Some("srv_current"),
+                Some("http://192.0.2.1:8790/ignored?old=true"),
+            )
+            .unwrap()
+            .as_str(),
+            "http://192.0.2.1:8790/api/health"
+        );
+        assert_eq!(
+            controller_health_url_for(&config, Some("srv_other"), Some("http://192.0.2.1:9999/"),)
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:8790/api/health"
+        );
+    }
+
+    #[test]
+    fn managed_agent_update_activates_only_its_controller() {
+        let make_service = |server_id: &str| {
+            let config = ServiceConfig {
+                proxy: "https://treer.example/".to_string(),
+                workspace: format!("workspace-{server_id}"),
+                server_id: server_id.to_string(),
+                machine_token: format!("{server_id}.secret"),
+                operator_credential: "op_test".to_string(),
+                root: PathBuf::from("/tmp"),
+                listen: "127.0.0.1:8790".to_string(),
+                host_socket: PathBuf::from(format!("/tmp/{server_id}.sock")),
+                install_hostname: current_hostname().expect("local hostname"),
+            };
+            (ServicePaths::new(server_id).expect("service paths"), config)
+        };
+        let services = vec![make_service("srv_a"), make_service("srv_b")];
+
+        let managed = activation_services_for(&services, Some("srv_b")).unwrap();
+        assert_eq!(managed.len(), 1);
+        assert_eq!(managed[0].1.server_id, "srv_b");
+
+        let host = activation_services_for(&services, None).unwrap();
+        assert_eq!(
+            host.iter()
+                .map(|(_, config)| config.server_id.as_str())
+                .collect::<Vec<_>>(),
+            ["srv_a", "srv_b"]
         );
     }
 

@@ -205,15 +205,21 @@ TREER_ENROLLMENT_KEY='enr_v1_...' \
 Pull and hot-activate the latest Controller and agent-facing CLI with one command:
 
 ```bash
-treer-agent-server update --workspace default
+treer-agent-server update
+treer-agent-server update --proxy https://proxy.canary.treer.ai/
 ```
 
 `update` downloads the current platform's `treer-agent-server` and `treer`
-artifacts from the configured Proxy, validates both executables, and replaces
-them atomically. It asks the stable Host to restart only the Controller and waits
-for a new Controller epoch to become healthy. If activation fails, both binaries
-are restored and the old Controller is restarted. The Host, existing agents,
-PTYs, and buffered terminal output remain alive while the browser reconnects.
+artifacts, validates both executables, and replaces them atomically. `--proxy`
+selects an explicit download source; without it, the updater orders the
+machine's installed services by server ID and uses the first service's Proxy.
+From a normal host shell it asks every installed stable Host to restart its
+Controller. From a managed Agent sandbox it restarts only that Agent's
+Controller and checks the new epoch through `TREER_AGENT_SERVER_URL`; the shared
+binary is still available to other Controllers on their next restart. If
+activation fails, both binaries are restored and the affected Controller set is
+restarted. Hosts, existing agents, PTYs, and buffered terminal output remain
+alive while browsers reconnect.
 
 The long-lived `treer-agent-host` is deliberately not part of this hot update.
 Installing a newer Host still requires a full service restart, which terminates
@@ -231,7 +237,7 @@ The host administrator manages the service through the agent-server binary, not
 the agent-facing `treer` command:
 
 ```bash
-treer-agent-server update --workspace default
+treer-agent-server update
 treer-agent-server --tui --workspace default
 treer-agent-server service status
 treer-agent-server service logs --follow
