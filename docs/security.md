@@ -167,6 +167,14 @@ releases.
 
 ## Data and control-plane exposure
 
+Canary version and branch-alias Preview URLs are public internet endpoints.
+Version IDs and branch aliases are not authentication. Each preview exposes the
+frontend bundle plus `/health` and `/config.json`, and its runtime configuration
+points the browser at the Canary Proxy. The base Worker's `workers.dev` route
+remains disabled. Deployments that require private review must protect previews
+with Cloudflare Access or disable them; an unshared URL is not an access-control
+boundary.
+
 The Proxy can observe control messages, every requested network destination,
 and relayed terminal and workspace virtual-host data. Canonical Message bodies,
 recipients, context edges, and acknowledgement state are plaintext in Core

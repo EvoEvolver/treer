@@ -33,18 +33,25 @@ Workers Builds requires a one-time Cloudflare GitHub App authorization. Connect
 | Setting | Value |
 | --- | --- |
 | Production branch | `main` |
-| Root directory | `/web` |
-| Build command | `pnpm build` |
-| Deploy command | `pnpm worker:upload:canary` |
-| Non-production branch deploy command | `pnpm worker:upload:canary` |
+| Root directory | `/` |
+| Build command | Empty |
+| Deploy command | `pnpm --dir web install --frozen-lockfile && pnpm --dir web build && pnpm --dir web worker:upload:canary` |
+| Non-production/version command | Same as the deploy command |
+| Build watch include path | `web/**` |
 | Build cache | Enabled |
 
-The deploy command uses `wrangler versions upload`, not `wrangler deploy`, so a
-successful source build creates evidence without changing the active Canary
-deployment. The top-level Wrangler target is also Canary so Cloudflare's default
-non-production command, `npx wrangler versions upload`, remains safe when the
-dashboard's non-production command has not yet been customized. Production is
-only selected explicitly with `--env production` during operator promotion.
+The self-contained command is intentional: Workers Builds may invoke a version
+or deploy command without a separate dependency-install/build phase. Its final
+step uses `wrangler versions upload`, not `wrangler deploy`, so a successful
+source build uploads an inactive Canary version without changing active Canary
+or Production traffic. Production is only selected explicitly with
+`--env production` during operator promotion.
+
+Canary version and branch-alias Preview URLs are public internet endpoints.
+They make an uploaded frontend candidate inspectable while the base
+`treer-app-canary.<account>.workers.dev` route remains disabled. Preview URLs
+use Canary runtime configuration and are build evidence only: they do not
+deploy the Railway Proxy, Core Message code, or Mail/Telegram plugin bridges.
 
 ## Machine artifacts
 

@@ -40,6 +40,22 @@ The verification TXT record is conditional; remove or retain it according to
 the DNS provider's normal ownership-verification policy after Railway reports
 the domain verified.
 
+## Frontend previews
+
+Cloudflare version and branch-alias Preview URLs are enabled for uploaded
+`treer-app-canary` versions. The base
+`treer-app-canary.<account>.workers.dev` route remains disabled, so an upload
+does not replace `https://app.canary.treer.ai/` or receive its traffic. Preview
+URLs are nevertheless public internet endpoints; a version ID or branch alias
+is an address, not authentication.
+
+Each preview runs the frontend Worker with Canary configuration, including
+`TREER_PROXY_PUBLIC_URL=https://proxy.canary.treer.ai/`. It can validate the
+built application, `/health`, and `/config.json`, but it does not deploy a
+candidate Railway Proxy, enable candidate Rust Core Message behavior, or start
+Mail and Telegram plugin bridges. Treat it as frontend build evidence, not as
+end-to-end evidence for the PR.
+
 ## Deploy and test
 
 The operator needs authenticated Railway and Wrangler CLIs plus `curl`, `jq`,

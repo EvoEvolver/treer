@@ -3,6 +3,8 @@
   "name": "treer-app-canary",
   "main": "./worker/index.ts",
   "compatibility_date": "2026-08-19",
+  "workers_dev": false,
+  "preview_urls": true,
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
