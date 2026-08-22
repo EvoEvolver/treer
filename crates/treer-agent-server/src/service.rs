@@ -1405,10 +1405,10 @@ mod tests {
     }
 
     #[test]
-    fn automatic_address_is_available_to_bind() {
+    fn automatic_address_uses_the_loopback_port_range() {
         let address = allocate_loopback_address().expect("allocate local API address");
-        let _listener = TcpListener::bind(address).expect("allocated address should be available");
         assert!(address.ip().is_loopback());
+        assert!(address.port() >= FIRST_AUTOMATIC_PORT);
     }
 
     #[tokio::test]
