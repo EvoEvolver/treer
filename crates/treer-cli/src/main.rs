@@ -88,40 +88,25 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    #[command(about = "Manage reusable Agent launch profiles")]
-    Profile {
-        #[command(subcommand)]
-        command: ProfileCommand,
-    },
     #[command(about = "Discover human members of the workspace organization")]
-    Human {
+    Member {
         #[command(subcommand)]
-        command: HumanCommand,
+        command: MemberCommand,
     },
     #[command(about = "Manage workspace machines")]
     Machine {
         #[command(subcommand)]
         command: MachineCommand,
     },
-    #[command(about = "Manage workspace virtual hosts", visible_alias = "vhost")]
-    VirtualHost {
+    #[command(about = "Manage private networking and published services")]
+    Network {
         #[command(subcommand)]
-        command: VirtualHostCommand,
-    },
-    #[command(about = "Register and maintain long-running machine services")]
-    Service {
-        #[command(subcommand)]
-        command: ServiceCommand,
-    },
-    #[command(about = "Publish machine services through wildcard HTTPS ingress")]
-    Publish {
-        #[command(subcommand)]
-        command: PublishCommand,
+        command: NetworkCommand,
     },
     #[command(about = "Obtain a short-lived identity token for a workspace service")]
-    Identity {
+    Token {
         #[command(subcommand)]
-        command: IdentityCommand,
+        command: TokenCommand,
     },
     #[command(about = "Exchange durable contextual Messages")]
     Message {
@@ -136,47 +121,11 @@ enum Command {
     #[command(about = "Show the current managed agent identity")]
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
-    Discover,
-    #[command(about = "List agents (compatibility alias for `agent list`)")]
-    List,
-    #[command(about = "Create an agent")]
-    Create {
-        #[arg(long)]
-        server: Option<String>,
-        #[arg(long)]
-        kind: String,
-        #[arg(long)]
-        name: String,
-        #[arg(long, default_value = ".")]
-        cwd: String,
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    #[command(about = "Submit a prompt (compatibility alias for `agent prompt`)")]
-    Prompt {
-        target: String,
-        text: String,
-        #[command(flatten)]
-        wait: PromptWaitArgs,
-    },
-    #[command(about = "Read output (compatibility alias for `agent read`)")]
-    Read {
-        target: String,
-        #[arg(long, default_value_t = 100)]
-        lines: usize,
-    },
-    #[command(about = "Rename an agent (compatibility alias for `agent rename`)")]
-    Rename { target: String, name: String },
-    #[command(about = "Delete an agent (compatibility alias for `agent delete`)")]
-    Delete { target: String },
-    #[command(about = "Attach an interactive terminal (compatibility alias for `agent attach`)")]
-    Attach { target: String },
-    #[command(about = "Stop an agent (compatibility alias for `agent stop`)")]
-    Stop { target: String },
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
-enum HumanCommand {
+enum MemberCommand {
     #[command(about = "List organization members addressable from this workspace")]
     List,
 }
@@ -308,11 +257,7 @@ enum AgentCommand {
     #[command(about = "List agents in the current workspace")]
     List,
     #[command(about = "Show one agent by unique name or id")]
-    Get { target: String },
-    #[command(about = "Rename an agent")]
-    Rename { target: String, name: String },
-    #[command(about = "Stop and permanently remove an agent")]
-    Delete { target: String },
+    Show { target: String },
     #[command(about = "Attach the current terminal; press Ctrl-] to detach")]
     Attach { target: String },
     #[command(about = "Submit a prompt to another agent")]
@@ -342,8 +287,39 @@ enum AgentCommand {
         #[arg(long, value_name = "MS")]
         timeout: Option<u64>,
     },
+    #[command(about = "Manage Agent lifecycle and launch profiles")]
+    Admin {
+        #[command(subcommand)]
+        command: AgentAdminCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentAdminCommand {
+    #[command(about = "Create an agent")]
+    Create {
+        #[arg(long)]
+        machine: Option<String>,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    #[command(about = "Rename an agent")]
+    Rename { target: String, name: String },
     #[command(about = "Stop an agent")]
     Stop { target: String },
+    #[command(about = "Stop and permanently remove an agent")]
+    Delete { target: String },
+    #[command(about = "Manage reusable Agent launch profiles")]
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -351,7 +327,7 @@ enum ProfileCommand {
     #[command(about = "List launch profiles in the current workspace")]
     List,
     #[command(about = "Show a launch profile by unique name or id")]
-    Get { target: String },
+    Show { target: String },
     #[command(about = "Create a reusable command-based launch profile")]
     Create {
         name: String,
@@ -394,6 +370,10 @@ enum ProfileCommand {
 
 #[derive(Debug, Subcommand)]
 enum MachineCommand {
+    #[command(about = "List machines in the current workspace")]
+    List,
+    #[command(about = "Show one machine by unique name or id")]
+    Show { target: String },
     #[command(about = "Rename a machine")]
     Rename { target: String, name: String },
     #[command(about = "Remove a machine and revoke its credential")]
@@ -405,7 +385,7 @@ enum VirtualHostCommand {
     #[command(about = "List workspace virtual hosts")]
     List,
     #[command(about = "Map a virtual hostname to a registered service")]
-    Add { hostname: String, service: String },
+    Create { hostname: String, service: String },
     #[command(about = "Delete a workspace virtual host")]
     Delete { hostname: String },
 }
@@ -415,7 +395,7 @@ enum ServiceCommand {
     #[command(about = "List registered machine services")]
     List,
     #[command(about = "Register a long-running service")]
-    Register {
+    Create {
         name: String,
         #[arg(long)]
         machine: Option<String>,
@@ -447,13 +427,32 @@ enum ServiceCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum IdentityCommand {
-    #[command(about = "Print an audience-bound Bearer token")]
-    Token {
+enum TokenCommand {
+    #[command(about = "Create an audience-bound Bearer token")]
+    Create {
         #[arg(value_name = "SERVICE")]
         audience: String,
         #[arg(long, help = "Print the complete JSON token response")]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworkCommand {
+    #[command(about = "Manage long-running machine services")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+    #[command(about = "Manage workspace virtual hosts")]
+    Host {
+        #[command(subcommand)]
+        command: VirtualHostCommand,
+    },
+    #[command(about = "Publish services through wildcard HTTPS ingress")]
+    Publish {
+        #[command(subcommand)]
+        command: PublishCommand,
     },
 }
 
@@ -812,16 +811,13 @@ async fn run_cli() -> anyhow::Result<()> {
     );
     let value = match command {
         Command::Agent { command } => run_agent_command(&client, command).await?,
-        Command::Profile { command } => run_profile_command(&client, command).await?,
-        Command::Human { command } => match command {
-            HumanCommand::List => client.value(Method::GET, "api/humans", None).await?,
+        Command::Member { command } => match command {
+            MemberCommand::List => client.value(Method::GET, "api/humans", None).await?,
         },
         Command::Machine { command } => run_machine_command(&client, command).await?,
-        Command::VirtualHost { command } => run_virtual_host_command(&client, command).await?,
-        Command::Service { command } => run_service_command(&client, command).await?,
-        Command::Publish { command } => run_publish_command(&client, command).await?,
-        Command::Identity { command } => {
-            let IdentityCommand::Token { audience, json } = command;
+        Command::Network { command } => run_network_command(&client, command).await?,
+        Command::Token { command } => {
+            let TokenCommand::Create { audience, json } = command;
             let response: WorkloadIdentityTokenResponse = client
                 .request(
                     Method::POST,
@@ -841,39 +837,7 @@ async fn run_cli() -> anyhow::Result<()> {
         Command::Message { command } => run_message_command(&client, command).await?,
         Command::Plugin { .. } => unreachable!("plugin commands return before API client setup"),
         Command::Whoami => whoami(&client).await?,
-        Command::Discover => discover(&client).await?,
-        Command::List => client.value(Method::GET, "api/agents", None).await?,
-        Command::Create {
-            server,
-            kind,
-            name,
-            cwd,
-            args,
-        } => {
-            client
-                .value(
-                    Method::POST,
-                    "api/agents",
-                    Some(serde_json::to_value(CreateAgentRequest {
-                        server_id: server,
-                        kind,
-                        name,
-                        cwd,
-                        args,
-                        cols: 120,
-                        rows: 36,
-                    })?),
-                )
-                .await?
-        }
-        Command::Prompt { target, text, wait } => {
-            prompt_and_maybe_wait(&client, &target, text, wait).await?
-        }
-        Command::Read { target, lines } => read_agent(&client, &target, lines).await?,
-        Command::Rename { target, name } => rename_agent(&client, &target, name).await?,
-        Command::Delete { target } => delete_agent(&client, &target).await?,
-        Command::Attach { target } => attach_agent(&client, &target).await?,
-        Command::Stop { target } => stop_agent(&client, &target).await?,
+        Command::Status => status(&client).await?,
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -893,7 +857,7 @@ async fn whoami(client: &ApiClient) -> anyhow::Result<Value> {
     }))
 }
 
-async fn discover(client: &ApiClient) -> anyhow::Result<Value> {
+async fn status(client: &ApiClient) -> anyhow::Result<Value> {
     let snapshot: WorkspaceSnapshot = client.request(Method::GET, "api/discovery", None).await?;
     let agent_id = std::env::var("TREER_AGENT_ID").ok();
     let server_id = std::env::var("TREER_SERVER_ID").ok();
@@ -950,9 +914,9 @@ fn resolve_self(
 async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow::Result<Value> {
     match command {
         AgentCommand::List => client.value(Method::GET, "api/agents", None).await,
-        AgentCommand::Get { target } => Ok(serde_json::to_value(client.get_agent(&target).await?)?),
-        AgentCommand::Rename { target, name } => rename_agent(client, &target, name).await,
-        AgentCommand::Delete { target } => delete_agent(client, &target).await,
+        AgentCommand::Show { target } => {
+            Ok(serde_json::to_value(client.get_agent(&target).await?)?)
+        }
         AgentCommand::Attach { target } => attach_agent(client, &target).await,
         AgentCommand::Prompt { target, text, wait } => {
             prompt_and_maybe_wait(client, &target, text, wait).await
@@ -979,7 +943,43 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
                 client.wait_for(&target, &until, timeout, None).await?,
             )?)
         }
-        AgentCommand::Stop { target } => stop_agent(client, &target).await,
+        AgentCommand::Admin { command } => run_agent_admin_command(client, command).await,
+    }
+}
+
+async fn run_agent_admin_command(
+    client: &ApiClient,
+    command: AgentAdminCommand,
+) -> anyhow::Result<Value> {
+    match command {
+        AgentAdminCommand::Create {
+            machine,
+            kind,
+            name,
+            cwd,
+            args,
+        } => {
+            let server_id = resolve_service_machine(client, machine.as_deref()).await?;
+            client
+                .value(
+                    Method::POST,
+                    "api/agents",
+                    Some(serde_json::to_value(CreateAgentRequest {
+                        server_id: Some(server_id),
+                        kind,
+                        name,
+                        cwd,
+                        args,
+                        cols: 120,
+                        rows: 36,
+                    })?),
+                )
+                .await
+        }
+        AgentAdminCommand::Rename { target, name } => rename_agent(client, &target, name).await,
+        AgentAdminCommand::Stop { target } => stop_agent(client, &target).await,
+        AgentAdminCommand::Delete { target } => delete_agent(client, &target).await,
+        AgentAdminCommand::Profile { command } => run_profile_command(client, command).await,
     }
 }
 
@@ -2637,7 +2637,7 @@ fn broker_command_uses_stdin(argv: &[String]) -> bool {
 async fn run_profile_command(client: &ApiClient, command: ProfileCommand) -> anyhow::Result<Value> {
     match command {
         ProfileCommand::List => client.value(Method::GET, "api/launch-profiles", None).await,
-        ProfileCommand::Get { target } => {
+        ProfileCommand::Show { target } => {
             let target = normalize_target(&target)?;
             client
                 .value(
@@ -2742,8 +2742,24 @@ async fn run_profile_command(client: &ApiClient, command: ProfileCommand) -> any
 
 async fn run_machine_command(client: &ApiClient, command: MachineCommand) -> anyhow::Result<Value> {
     match command {
+        MachineCommand::List => {
+            let snapshot: WorkspaceSnapshot =
+                client.request(Method::GET, "api/discovery", None).await?;
+            Ok(serde_json::to_value(snapshot.servers)?)
+        }
+        MachineCommand::Show { target } => Ok(serde_json::to_value(
+            resolve_machine(client, &target).await?,
+        )?),
         MachineCommand::Rename { target, name } => rename_machine(client, &target, name).await,
         MachineCommand::Delete { target } => delete_machine(client, &target).await,
+    }
+}
+
+async fn run_network_command(client: &ApiClient, command: NetworkCommand) -> anyhow::Result<Value> {
+    match command {
+        NetworkCommand::Service { command } => run_service_command(client, command).await,
+        NetworkCommand::Host { command } => run_virtual_host_command(client, command).await,
+        NetworkCommand::Publish { command } => run_publish_command(client, command).await,
     }
 }
 
@@ -2753,7 +2769,7 @@ async fn run_virtual_host_command(
 ) -> anyhow::Result<Value> {
     match command {
         VirtualHostCommand::List => client.value(Method::GET, "api/virtual-hosts", None).await,
-        VirtualHostCommand::Add { hostname, service } => {
+        VirtualHostCommand::Create { hostname, service } => {
             client
                 .value(
                     Method::POST,
@@ -2780,7 +2796,7 @@ async fn run_virtual_host_command(
 async fn run_service_command(client: &ApiClient, command: ServiceCommand) -> anyhow::Result<Value> {
     match command {
         ServiceCommand::List => client.value(Method::GET, "api/services", None).await,
-        ServiceCommand::Register {
+        ServiceCommand::Create {
             name,
             machine,
             target_host,
@@ -3520,21 +3536,15 @@ mod tests {
 
     #[test]
     fn attach_commands_parse() {
-        let top_level = Args::try_parse_from(["treer", "attach", "reviewer"])
-            .expect("top-level attach should parse");
-        assert!(matches!(
-            top_level.command,
-            Some(Command::Attach { target }) if target == "reviewer"
-        ));
-
         let nested = Args::try_parse_from(["treer", "agent", "attach", "reviewer"])
-            .expect("nested attach should parse");
+            .expect("agent attach should parse");
         assert!(matches!(
             nested.command,
             Some(Command::Agent {
                 command: AgentCommand::Attach { target }
             }) if target == "reviewer"
         ));
+        assert!(Args::try_parse_from(["treer", "attach", "reviewer"]).is_err());
     }
 
     #[test]
@@ -3553,6 +3563,8 @@ mod tests {
     fn launch_profile_commands_parse_structured_arguments() {
         let create = Args::try_parse_from([
             "treer",
+            "agent",
+            "admin",
             "profile",
             "create",
             "reviewer",
@@ -3569,18 +3581,24 @@ mod tests {
         .expect("profile create should parse");
         assert!(matches!(
             create.command,
-            Some(Command::Profile {
-                command: ProfileCommand::Create {
-                    name,
-                    executable,
-                    args,
-                    ..
+            Some(Command::Agent {
+                command: AgentCommand::Admin {
+                    command: AgentAdminCommand::Profile {
+                        command: ProfileCommand::Create {
+                            name,
+                            executable,
+                            args,
+                            ..
+                        }
+                    }
                 }
             }) if name == "reviewer" && executable == "codex" && args == ["review", "--base", "main"]
         ));
 
         let update = Args::try_parse_from([
             "treer",
+            "agent",
+            "admin",
             "profile",
             "update",
             "reviewer",
@@ -3591,13 +3609,19 @@ mod tests {
         .expect("profile update should parse flags as argument values");
         assert!(matches!(
             update.command,
-            Some(Command::Profile {
-                command: ProfileCommand::Update { args, .. }
+            Some(Command::Agent {
+                command: AgentCommand::Admin {
+                    command: AgentAdminCommand::Profile {
+                        command: ProfileCommand::Update { args, .. }
+                    }
+                }
             }) if args == ["--quiet", "check"]
         ));
 
         let launch = Args::try_parse_from([
             "treer",
+            "agent",
+            "admin",
             "profile",
             "launch",
             "reviewer",
@@ -3609,39 +3633,49 @@ mod tests {
         .expect("profile launch should parse");
         assert!(matches!(
             launch.command,
-            Some(Command::Profile {
-                command: ProfileCommand::Launch { target, machine, name }
+            Some(Command::Agent {
+                command: AgentCommand::Admin {
+                    command: AgentAdminCommand::Profile {
+                        command: ProfileCommand::Launch { target, machine, name }
+                    }
+                }
             }) if target == "reviewer" && machine.as_deref() == Some("builder") && name.as_deref() == Some("review-42")
         ));
+        assert!(Args::try_parse_from(["treer", "profile", "list"]).is_err());
     }
 
     #[test]
     fn virtual_host_commands_parse() {
         let add = Args::try_parse_from([
             "treer",
-            "virtual-host",
-            "add",
+            "network",
+            "host",
+            "create",
             "api.internal",
             "api-service",
         ])
         .expect("virtual host add should parse");
         assert!(matches!(
             add.command,
-            Some(Command::VirtualHost {
-                command: VirtualHostCommand::Add {
-                    hostname,
-                    service,
+            Some(Command::Network {
+                command: NetworkCommand::Host {
+                    command: VirtualHostCommand::Create {
+                        hostname,
+                        service,
+                    }
                 }
             }) if hostname == "api.internal"
                 && service == "api-service"
         ));
 
-        let delete = Args::try_parse_from(["treer", "vhost", "delete", "api.internal"])
-            .expect("virtual host alias should parse");
+        let delete = Args::try_parse_from(["treer", "network", "host", "delete", "api.internal"])
+            .expect("network host delete should parse");
         assert!(matches!(
             delete.command,
-            Some(Command::VirtualHost {
-                command: VirtualHostCommand::Delete { hostname }
+            Some(Command::Network {
+                command: NetworkCommand::Host {
+                    command: VirtualHostCommand::Delete { hostname }
+                }
             }) if hostname == "api.internal"
         ));
     }
@@ -3650,6 +3684,7 @@ mod tests {
     fn publish_commands_parse() {
         let args = Args::try_parse_from([
             "treer",
+            "network",
             "publish",
             "create",
             "api",
@@ -3661,21 +3696,26 @@ mod tests {
         .expect("publish create should parse");
         assert!(matches!(
             args.command,
-            Some(Command::Publish {
-                command: PublishCommand::Create {
-                    service,
-                    slug: Some(slug),
-                    access: CliIngressAccess::Workspace,
+            Some(Command::Network {
+                command: NetworkCommand::Publish {
+                    command: PublishCommand::Create {
+                        service,
+                        slug: Some(slug),
+                        access: CliIngressAccess::Workspace,
+                    }
                 }
             }) if service == "api" && slug == "issue-tracker"
         ));
 
-        let args = Args::try_parse_from(["treer", "publish", "disable", "demo.apps.test"])
-            .expect("publish disable should parse");
+        let args =
+            Args::try_parse_from(["treer", "network", "publish", "disable", "demo.apps.test"])
+                .expect("network publish disable should parse");
         assert!(matches!(
             args.command,
-            Some(Command::Publish {
-                command: PublishCommand::Disable { target }
+            Some(Command::Network {
+                command: NetworkCommand::Publish {
+                    command: PublishCommand::Disable { target }
+                }
             }) if target == "demo.apps.test"
         ));
     }
@@ -3684,8 +3724,9 @@ mod tests {
     fn service_commands_parse() {
         let register = Args::try_parse_from([
             "treer",
+            "network",
             "service",
-            "register",
+            "create",
             "api",
             "--machine",
             "builder",
@@ -3697,13 +3738,15 @@ mod tests {
         .expect("service register should parse");
         assert!(matches!(
             register.command,
-            Some(Command::Service {
-                command: ServiceCommand::Register {
-                    name,
-                    machine: Some(machine),
-                    port: 8080,
-                    protocol: CliServiceProtocol::Http,
-                    ..
+            Some(Command::Network {
+                command: NetworkCommand::Service {
+                    command: ServiceCommand::Create {
+                        name,
+                        machine: Some(machine),
+                        port: 8080,
+                        protocol: CliServiceProtocol::Http,
+                        ..
+                    }
                 }
             }) if name == "api" && machine == "builder"
         ));
@@ -3711,12 +3754,12 @@ mod tests {
 
     #[test]
     fn identity_token_command_parses() {
-        let args = Args::try_parse_from(["treer", "identity", "token", "api"])
-            .expect("identity token should parse");
+        let args = Args::try_parse_from(["treer", "token", "create", "api"])
+            .expect("token create should parse");
         assert!(matches!(
             args.command,
-            Some(Command::Identity {
-                command: IdentityCommand::Token {
+            Some(Command::Token {
+                command: TokenCommand::Create {
                     audience,
                     json: false,
                 }
@@ -3725,13 +3768,13 @@ mod tests {
     }
 
     #[test]
-    fn human_directory_command_parses() {
-        let humans =
-            Args::try_parse_from(["treer", "human", "list"]).expect("human list should parse");
+    fn member_directory_command_parses() {
+        let members =
+            Args::try_parse_from(["treer", "member", "list"]).expect("member list should parse");
         assert!(matches!(
-            humans.command,
-            Some(Command::Human {
-                command: HumanCommand::List
+            members.command,
+            Some(Command::Member {
+                command: MemberCommand::List
             })
         ));
     }
@@ -4339,5 +4382,48 @@ Path("observed.json").write_text(json.dumps(dict(os.environ), sort_keys=True), e
             assert!(observed.get(required).is_some(), "{required} is missing");
         }
         fs::remove_dir_all(&root).expect("remove environment test directory");
+    }
+
+    #[test]
+    fn agent_admin_commands_parse() {
+        let create = Args::try_parse_from([
+            "treer",
+            "agent",
+            "admin",
+            "create",
+            "--machine",
+            "builder",
+            "--kind",
+            "command",
+            "--name",
+            "shell",
+            "--",
+            "/bin/sh",
+        ])
+        .expect("agent admin create should parse");
+        assert!(matches!(
+            create.command,
+            Some(Command::Agent {
+                command: AgentCommand::Admin {
+                    command: AgentAdminCommand::Create {
+                        machine: Some(machine),
+                        name,
+                        ..
+                    }
+                }
+            }) if machine == "builder" && name == "shell"
+        ));
+
+        let delete = Args::try_parse_from(["treer", "agent", "admin", "delete", "reviewer"])
+            .expect("agent admin delete should parse");
+        assert!(matches!(
+            delete.command,
+            Some(Command::Agent {
+                command: AgentCommand::Admin {
+                    command: AgentAdminCommand::Delete { target }
+                }
+            }) if target == "reviewer"
+        ));
+        assert!(Args::try_parse_from(["treer", "agent", "delete", "reviewer"]).is_err());
     }
 }

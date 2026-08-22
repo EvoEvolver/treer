@@ -469,9 +469,9 @@ CLI and should not be printed or forwarded directly.
 Workspace members and managed Agents can also save reusable launch profiles:
 
 ```bash
-treer profile create reviewer --cwd . codex -- review --base main
-treer profile list
-treer profile launch reviewer --machine build-machine --name review-42
+treer agent admin profile create reviewer --cwd . codex -- review --base main
+treer agent admin profile list
+treer agent admin profile launch reviewer --machine build-machine --name review-42
 ```
 
 The web Create Agent dialog includes a built-in Terminal option. It starts the
@@ -584,8 +584,8 @@ routing metadata and does not create another DNS record or TLS certificate:
 
 ```bash
 export TREER_INGRESS_PUBLIC_URL='https://apps.treer.ai/'
-treer publish create api --slug issue-tracker --access public
-treer publish list
+treer network publish create api --slug issue-tracker --access public
+treer network publish list
 ```
 
 `public` leaves authentication to the application. `workspace` redirects human
@@ -628,11 +628,11 @@ Managed agents can control workspace discovery records through the local Agent
 Server without receiving Proxy credentials:
 
 ```bash
-treer service register api --port 8080 --protocol http
-treer service probe api
-treer virtual-host list
-treer virtual-host add api.internal api
-treer virtual-host delete api.internal
+treer network service create api --port 8080 --protocol http
+treer network service probe api
+treer network host list
+treer network host create api.internal api
+treer network host delete api.internal
 ```
 
 The Agent Server forwards the caller identity under its machine credential, and
@@ -647,19 +647,20 @@ Docker containers with published ports.
 The `treer` binary talks to the local agent server by default. Managed agents
 receive its location in `PATH` and `TREER_BIN`, so they can discover and contact
 peers without knowing the proxy address. `treer whoami` returns the current
-workspace, agent, and machine records. `treer discover` includes those current
+workspace, agent, and machine records. `treer status` includes those current
 agent and machine records under `self` so callers can distinguish themselves
 from peers without matching names.
 
 ```bash
 treer whoami
+treer status
 treer agent list
-treer agent get reviewer
-treer agent rename reviewer code-reviewer
+treer agent show reviewer
+treer agent admin rename reviewer code-reviewer
 treer machine rename self build-machine
 treer machine delete srv_obsolete
 treer agent attach reviewer
-treer agent delete obsolete-helper
+treer agent admin delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
 treer agent send-keys reviewer ctrl-c
@@ -670,7 +671,7 @@ directory deliberately returns stable user IDs, preferred names, and roles
 without exposing email addresses:
 
 ```bash
-treer human list
+treer member list
 ```
 
 ### Durable Core Messages
@@ -779,9 +780,9 @@ registered machine service. The audience accepts a service ID or unique service
 name and is canonicalized to the stable `service_id`:
 
 ```bash
-TOKEN="$(treer identity token api)"
+TOKEN="$(treer token create api)"
 curl -H "Authorization: Bearer $TOKEN" http://api.internal/
-treer identity token api --json
+treer token create api --json
 ```
 
 Tokens use Ed25519, expire after 60 seconds, and contain the Agent, machine,
@@ -802,8 +803,7 @@ authentication exchange.
 On the machine running an Agent Server, `treer agent attach <target>` opens the
 agent's live PTY in the current native terminal. Input, colors, cursor control,
 and terminal resize are passed through directly. Press `Ctrl-]` to detach
-without stopping the agent. The shorter `treer attach <target>` alias is also
-available.
+without stopping the agent.
 
 Targets accept an agent id, a unique agent name, or `self`/`.` from inside a
 managed agent. `prompt --wait` waits for observed activity followed by `idle`,
@@ -811,11 +811,10 @@ managed agent. `prompt --wait` waits for observed activity followed by `idle`,
 other states. It is state-based coordination, not strict per-prompt turn
 correlation.
 
-The original top-level `list`, `prompt`, `read`, and `stop` commands remain as
-compatibility aliases. To create a peer:
+To create a peer:
 
 ```bash
-treer create --server SERVER_ID --kind command --name shell -- /bin/sh
+treer agent admin create --machine SERVER_ID --kind command --name shell -- /bin/sh
 ```
 
 Print the agent skill bundled with the installed binary:

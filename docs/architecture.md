@@ -369,7 +369,7 @@ and Host. The source Agent does not need the destination address or a Proxy
 credential.
 
 Each managed Agent also receives a random workload credential in its process
-environment and Host-owned metadata. For `treer identity token`, the Controller
+environment and Host-owned metadata. For `treer token create`, the Controller
 matches that credential to the Agent, forwards the request under its machine
 credential, and the Proxy resolves the requested machine service, evaluates the
 `identity.token.issue` policy action, and signs a 60-second Ed25519 JWT bound to

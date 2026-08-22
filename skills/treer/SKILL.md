@@ -20,7 +20,7 @@ treer whoami
 
 `treer whoami` returns the current workspace plus the complete `agent` and
 `machine` records. Treat those records as the caller identity; do not infer the
-caller from names. `treer discover` also includes the same two records under its
+caller from names. `treer status` also includes the same two records under its
 top-level `self` field alongside all workspace machines and agents.
 
 If the environment check fails, do not guess a proxy or local server address.
@@ -32,12 +32,14 @@ The installed binary is the authority for syntax:
 ```bash
 treer --help
 treer agent --help
-treer profile --help
+treer agent admin --help
+treer agent admin profile --help
 treer machine --help
-treer service --help
-treer virtual-host --help
 treer message --help
 treer plugin --help
+treer network --help
+treer member --help
+treer token --help
 ```
 
 Control commands print JSON. Read IDs and state from the response instead of
@@ -65,21 +67,28 @@ Discover current topology before choosing a peer or server:
 
 ```bash
 treer whoami
-treer discover
+treer status
 treer agent list
-treer agent get self
-treer agent get reviewer
+treer agent show self
+treer agent show reviewer
 ```
 
 Use stable IDs when renaming an object. `self` and `.` are accepted for both
 the current agent and its machine:
 
 ```bash
-treer agent rename self coordinator
+treer agent admin rename self coordinator
 treer machine rename self build-machine
 ```
 
 Names are workspace-visible labels; agent IDs and server IDs do not change.
+
+List organization members addressable from the workspace without exposing
+their email addresses:
+
+```bash
+treer member list
+```
 
 ## Manage machine services and virtual hosts
 
@@ -94,18 +103,18 @@ Register a service on the current Agent's machine, or select another workspace
 machine explicitly:
 
 ```bash
-treer service register api --port 8080 --protocol http
-treer service register git --machine build-machine --port 9418 --protocol tcp
-treer service list
-treer service probe api
+treer network service create api --port 8080 --protocol http
+treer network service create git --machine build-machine --port 9418 --protocol tcp
+treer network service list
+treer network service probe api
 ```
 
 Update a destination without changing its virtual hosts. Deleting a service
 also deletes aliases that reference it, but does not stop the external process:
 
 ```bash
-treer service update api --port 8081
-treer service delete git
+treer network service update api --port 8081
+treer network service delete git
 ```
 
 Virtual hosts are aliases for registered services. They let every process
@@ -116,20 +125,20 @@ derive aliases from machine names or reserve a hostname suffix.
 Inspect existing records before changing them:
 
 ```bash
-treer virtual-host list
+treer network host list
 ```
 
 Add a record using a service ID or unique service name:
 
 ```bash
-treer virtual-host add api.internal api
-treer virtual-host add git.internal git
+treer network host create api.internal api
+treer network host create git.internal git
 ```
 
 Delete only the named alias; this does not delete or stop its service:
 
 ```bash
-treer virtual-host delete api.internal
+treer network host delete api.internal
 ```
 
 These commands operate only in `TREER_WORKSPACE_ID`. Service and virtual-host
@@ -142,8 +151,8 @@ Publish a registered HTTP service through the Proxy's wildcard HTTPS domain.
 The returned URL remains stable until the ingress is deleted:
 
 ```bash
-treer publish create api --slug issue-tracker --access public
-treer publish list
+treer network publish create api --slug issue-tracker --access public
+treer network publish list
 ```
 
 `public` means Treer does not require an identity at the edge; the application
@@ -151,8 +160,8 @@ can still use its own cookies, API keys, or `Authorization` header. Use
 `workspace` to admit organization members and managed Agents only:
 
 ```bash
-treer publish access issue-tracker-a81f.apps.example workspace
-TOKEN=$(treer identity token api)
+treer network publish access issue-tracker-a81f.apps.example workspace
+TOKEN=$(treer token create api)
 curl -H "Treer-Authorization: Bearer $TOKEN" \
   https://issue-tracker-a81f.apps.example/
 ```
@@ -160,9 +169,9 @@ curl -H "Treer-Authorization: Bearer $TOKEN" \
 Pause or remove an endpoint without stopping its machine service:
 
 ```bash
-treer publish disable issue-tracker-a81f.apps.example
-treer publish enable issue-tracker-a81f.apps.example
-treer publish delete issue-tracker-a81f.apps.example
+treer network publish disable issue-tracker-a81f.apps.example
+treer network publish enable issue-tracker-a81f.apps.example
+treer network publish delete issue-tracker-a81f.apps.example
 ```
 
 An Agent may publish only services on its own machine. Publishing supports HTTP
@@ -175,12 +184,12 @@ When a registered service explicitly accepts Treer workload identity, request
 a short-lived Bearer token using its service ID or unique name:
 
 ```bash
-TOKEN="$(treer identity token api)"
+TOKEN="$(treer token create api)"
 curl -H "Authorization: Bearer $TOKEN" http://api.internal/
 ```
 
 The token audience is the stable service ID even when the command uses a name.
-Use `treer identity token api --json` only when the service ID or expiry metadata
+Use `treer token create api --json` only when the service ID or expiry metadata
 is needed. Do not print, log, persist, or send the injected
 `TREER_WORKLOAD_CREDENTIAL`; only the local Controller consumes it. Tokens
 expire after 60 seconds, so request one immediately before use. Treer does not
@@ -285,20 +294,20 @@ will be reused. Profiles are workspace-scoped and are addressable by stable ID
 or unique name:
 
 ```bash
-treer profile create reviewer --description "Review current changes" --cwd . \
+treer agent admin profile create reviewer --description "Review current changes" --cwd . \
   codex -- review --base main
-treer profile list
-treer profile get reviewer
-treer profile launch reviewer --machine <server-id> --name review-42
+treer agent admin profile list
+treer agent admin profile show reviewer
+treer agent admin profile launch reviewer --machine <server-id> --name review-42
 ```
 
 Edit individual fields without replacing the profile. Repeat `--arg` to replace
 the complete argument array, or use `--clear-args` to empty it:
 
 ```bash
-treer profile update reviewer --cwd packages/api
-treer profile update reviewer --arg review --arg=--base --arg main
-treer profile delete reviewer
+treer agent admin profile update reviewer --cwd packages/api
+treer agent admin profile update reviewer --arg review --arg=--base --arg main
+treer agent admin profile delete reviewer
 ```
 
 The command and arguments are passed directly as an argv vector. Shell syntax
@@ -313,18 +322,18 @@ Profile operations have separate `launch_profile.list`,
 also pass `agent.create` for its selected machine. Inspect a profile before
 launching it, especially when another principal last updated it.
 
-Select an online `server_id` from `treer discover`, then create the requested
+Select an online machine from `treer status`, then create the requested
 agent kind. Preserve the current working directory unless the task requires a
 different relative directory.
 
 ```bash
-treer create --server <server-id> --kind codex --name reviewer --cwd .
+treer agent admin create --machine <server-id> --kind codex --name reviewer --cwd .
 ```
 
 Native agent arguments go after `--`:
 
 ```bash
-treer create --server <server-id> --kind codex --name reviewer --cwd . -- <agent-args...>
+treer agent admin create --machine <server-id> --kind codex --name reviewer --cwd . -- <agent-args...>
 ```
 
 Submit work by unique name and wait for a settled state:
@@ -351,7 +360,7 @@ correct or complete.
 Inspect the result after a wait, especially after `blocked` or `failed`:
 
 ```bash
-treer agent get reviewer
+treer agent show reviewer
 treer agent read reviewer --lines 120
 ```
 
@@ -364,7 +373,7 @@ Delete an agent only when its process and workspace entry should both be
 removed. Deletion is persistent and is different from merely stopping it:
 
 ```bash
-treer agent delete reviewer
+treer agent admin delete reviewer
 ```
 
 ## Send terminal keys intentionally
@@ -392,7 +401,7 @@ validates every key before sending any bytes.
 - Do not use `agent attach` from an automated agent workflow; it requires a
   human-operated TTY.
 - Do not claim strict turn correlation for terminal-oriented `prompt --wait`.
-- Use `treer agent stop <target>` only when terminating that process is intended.
-- Use `treer agent delete <target>` only when permanent removal is intended.
+- Use `treer agent admin stop <target>` only when terminating that process is intended.
+- Use `treer agent admin delete <target>` only when permanent removal is intended.
 - Use `treer machine delete <server-id>` only when the user explicitly asks to
   remove that machine; it also removes every agent registered on it.
