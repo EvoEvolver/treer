@@ -1,8 +1,17 @@
-# Legacy workspace apps
+# Workspace Apps
 
-Channel applications now use the CLI-only script plugin contract under
-[`plugins`](../plugins/README.md). This directory retains migration pointers for
-operators upgrading an older deployment; it does not own current runtime code.
+Apps are ordinary services started and supervised by an operator or a managed
+Agent. Treer does not install, sandbox, or grant special trust to their code.
 
-- [`mail`](mail/README.md) points from the removed Rust Mail service to the
-  current plugin and legacy database migration procedure.
+Browser-facing Apps use the standard App OAuth endpoints and a short-lived,
+service-audience bearer token. Agent-facing Apps may use the local `treer` CLI
+with the Agent's existing Policy subject. Core rechecks Policy for every
+operation; process isolation, secrets, configuration, state, upgrades, and
+network access remain deployment concerns.
+
+- [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
+- [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
+
+Each App is source code, configuration schema, documentation, and tests. There
+is deliberately no App manifest, package installer, local command broker, or
+App-specific session capability.

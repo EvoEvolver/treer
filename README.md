@@ -7,8 +7,7 @@ terminal history. A hot-updatable Controller connects that Host to the central
 Proxy, which groups machines into logical workspaces and routes discovery and
 control commands between them. Core also stores durable workspace Messages,
 per-recipient delivery state, and an ordered context DAG. External channels such
-as Mail and Telegram are CLI-only script plugins rather than privileged Proxy
-integrations.
+as Mail and Telegram are ordinary workspace Apps over those public contracts.
 
 The Proxy is designed to be internet-facing. Browser users authenticate with
 sessions, while machines enroll with short-lived one-time links and then use a
@@ -35,7 +34,6 @@ Start the proxy and web control plane:
 just test-db-up
 export DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
 export TREER_ENABLE_CORE_MESSAGES=true
-export TREER_ENABLE_PLUGIN_SESSIONS=true
 just stage-artifacts
 cargo run -p treer-proxy -- \
   --disable-auth \
@@ -52,11 +50,10 @@ pnpm dev
 uses a synthetic local user. Omit it and set `ADMIN_PASSWORD` for shared or
 deployed servers.
 
-Core Message routes and creation/exchange of plugin-bound human sessions are
-rollout-gated and default off. Enable the two Proxy gates above only after the
-database migration and policy defaults are ready. Plugin process execution has
-a separate machine-local gate, `TREER_ENABLE_PLUGIN_EXECUTION=true`; it is read
-by the CLI that starts a plugin and is not a security sandbox.
+Core Message routes are rollout-gated and default off. Enable the Proxy gate
+above only after the database migration and policy defaults are ready. Apps are
+ordinary processes; their supervisor, operating-system account, secrets, and
+isolation are deployment responsibilities.
 
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
 places the current platform's `treer-agent-host`, `treer-agent-server`, and
@@ -530,9 +527,9 @@ adapter. `TREER_NETWORK_PROXY` remains available for diagnostics. Set
 `TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
 transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
 `all_proxy` instead. In this mode, `NO_PROXY` and `no_proxy` contain
-`127.0.0.1,localhost,::1`, so Controller and plugin loopback calls do not enter
+`127.0.0.1,localhost,::1`, so Controller and App loopback calls do not enter
 the SOCKS path. Native macOS currently uses this compatibility mode; use a Linux
-container when transparent capture is required. A Mail plugin that registers
+container when transparent capture is required. A Mail App that registers
 its listener as a host-network machine service currently requires
 `proxy-env`; a transparent Agent's namespace-local loopback listener is not a
 host-network endpoint.
@@ -714,67 +711,33 @@ A Message does not wake an Agent. Send the durable Message first, then use
 needed. Prompting has its own stronger policy action, and the body should not be
 copied into the terminal prompt.
 
-### CLI-only channel plugins
+### Workspace Apps
 
-First-party channel plugins are executable scripts. Their only supported Treer
-interface is a nested `treer` command through the runner's private broker. They
-do not link Treer crates, call private Controller/Proxy routes, read Core
-PostgreSQL, consume Core NATS, or receive raw Treer credentials. Validate and
-install one immutable package version before running it:
+Apps are regular services with no special installer, manifest, broker, or
+sandbox claim. Browser Apps authenticate with standard App OAuth and call
+service-scoped public APIs. Apps running inside a managed Agent may use the
+normal `treer` CLI and that Agent's Policy subject.
 
-```bash
-treer plugin validate plugins/mail
-treer plugin validate plugins/telegram
-treer plugin install plugins/mail
-treer plugin install plugins/telegram
-treer plugin list
-treer plugin inspect mail
-```
-
-New Message/session traffic and plugin execution are disabled by default. The
-Proxy must run with `TREER_ENABLE_CORE_MESSAGES=true` and
-`TREER_ENABLE_PLUGIN_SESSIONS=true`; the bridge process supervisor must set
-`TREER_ENABLE_PLUGIN_EXECUTION=true` for `treer plugin run`.
-
-Run each channel from a dedicated managed bridge Agent. Mail preserves the
-browser mailbox and uses a registered HTTP service plus generic plugin OAuth:
+Mail uses App OAuth plus the App directory and Message APIs. Telegram uses the
+official Bot API and runs as a dedicated managed Agent so its `treer message`
+commands carry the bridge Agent identity. Start them with ordinary process
+supervision:
 
 ```bash
-TREER_ENABLE_PLUGIN_EXECUTION=true \
-  treer plugin run mail --config /etc/treer/mail.json
-```
+TREER_APP_CONFIG=/etc/treer/mail.json \
+TREER_APP_STATE_DIR=/var/lib/treer/apps/mail \
+python3 apps/mail/mail.py
 
-Build the Mail frontend before installing from a source checkout, and follow
-the [Mail plugin guide](plugins/mail/README.md) for service ingress, exact JSON
-configuration, SQLite/PostgreSQL legacy migration, backup, re-login, and
-roll-forward rules. The removed Rust service survives only as a migration
-pointer under `apps/mail`.
-
-Telegram uses the official Bot API, numeric user/chat/topic bindings, native
-reply mapping, and plugin-owned SQLite offset/mapping state:
-
-```bash
+TREER_APP_CONFIG=/etc/treer/telegram.json \
+TREER_APP_STATE_DIR=/var/lib/treer/apps/telegram \
 TELEGRAM_BOT_TOKEN='<BotFather token>' \
-  TREER_ENABLE_PLUGIN_EXECUTION=true \
-  treer plugin run telegram --config /etc/treer/telegram.json
+python3 apps/telegram/telegram.py
 ```
 
-The [Telegram plugin guide](plugins/telegram/README.md) covers BotFather setup,
-allowlists, topics, reply behavior, rate limits, and recovery. Telegram users do
-not become Treer human principals; inbound Core Messages are authored by the
-bridge Agent with external-source metadata. Telegram does not support a client
-idempotency key, so a lost successful send response can produce a visible
-duplicate on retry.
-
-The manifest/broker boundary limits semantic commands and keeps credentials out
-of the plugin environment, but it is not a hostile same-UID sandbox. Run
-untrusted code under a separate operating-system user, container, or microVM.
-`treer plugin uninstall <id>` first revokes every Core human session for that
-workspace/plugin, then removes all locally installed package versions. It
-deliberately preserves versioned plugin state for recovery or audited cleanup;
-automatic state migration and state deletion are not provided.
-The maintained package contract and development rules are in
-[plugins/README.md](plugins/README.md).
+See the [App contract](apps/README.md), [Mail guide](apps/mail/README.md), and
+[Telegram guide](apps/telegram/README.md). The App process can use every
+credential and operating-system capability available to it. Use a separate
+account, container, VM, or stronger sandbox whenever its code is not trusted.
 
 ## Workload identity
 
@@ -838,12 +801,10 @@ just test-db-up
 just check
 ```
 
-The complete gate checks documentation links, first-party plugin boundaries,
-release tooling, both React builds, Mail and Telegram package tests, plugin
-manifests, the full Rust workspace, and a real-process Core Message/plugin E2E
-against PostgreSQL. While iterating on this subsystem, use
-`just plugin-boundary-test` and `just messaging-e2e`; run the complete gate
-before handoff.
+The complete gate checks documentation links, release tooling, both React
+builds, Mail and Telegram App tests, and the full Rust workspace. While
+iterating on messaging, use `just app-test` and `just messaging-e2e`; run the
+complete gate before handoff.
 
 ## License
 

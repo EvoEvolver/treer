@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Treer Mail plugin configuration",
+  "title": "Treer Mail App configuration",
   "type": "object",
   "additionalProperties": false,
   "required": ["service_id", "public_url", "proxy_public_url"],

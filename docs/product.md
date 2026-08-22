@@ -28,7 +28,7 @@ In concrete terms:
    navigation and control keys.
 4. Managed Agents and humans exchange durable Core Messages with explicit
    acknowledgement and an ordered context DAG. Mail and Telegram are
-   replaceable CLI-only script plugins over that contract rather than privileged
+   replaceable workspace Apps over public contracts rather than privileged
    Proxy features.
 5. Agents can register and maintain long-running machine services, expose
    stable workspace aliases, and publish HTTP services through an optional
@@ -60,10 +60,10 @@ become one-off UI behavior.
 Canonical Message data, recipients, context edges, policy, acknowledgement,
 idempotency, and persistence belong to Core and are available through
 `treer message`. External channels own presentation, transport, secrets, and
-delivery mappings. First-party channel plugins are scripts whose only supported
-Treer dependency is the installed CLI; this keeps Mail, Telegram, and future
-adapters independently replaceable without creating parallel collaboration
-databases or private Core integrations.
+delivery mappings. Browser channels use service-audience App tokens; Agent-run
+channels use the managed Agent's CLI identity. This keeps Mail, Telegram, and
+future adapters independently replaceable without creating parallel
+collaboration databases or private Core integrations.
 
 ### Local first, managed later
 
@@ -113,6 +113,6 @@ and owns detailed sequencing. At the product level, the priorities remain:
 
 Subscription credentials are not currently isolated per platform user, and
 Treer does not implement billing. Core Messages are text-only and do not yet
-have operator-facing retention, export, or deletion policy. Plugin state has no
+have operator-facing retention, export, or deletion policy. App state has no
 automatic cross-version migration. See [Security model](security.md) for the
 credential risk and [Architecture](architecture.md) for the runtime boundary.

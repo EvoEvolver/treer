@@ -9,18 +9,20 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-MAIL = PLUGIN_ROOT / "mail.py"
-MIGRATE = PLUGIN_ROOT / "migrate.py"
-FAKE_TREER = PLUGIN_ROOT / "tests/fixtures/fake_treer.py"
-FAKE_PSQL = PLUGIN_ROOT / "tests/fixtures/fake_psql.py"
-SQLITE_FIXTURE = PLUGIN_ROOT / "tests/fixtures/legacy-mail-v1.sqlite.sql"
+APP_ROOT = Path(__file__).resolve().parents[1]
+MAIL = APP_ROOT / "mail.py"
+MIGRATE = APP_ROOT / "migrate.py"
+FAKE_TREER = APP_ROOT / "tests/fixtures/fake_treer.py"
+FAKE_PSQL = APP_ROOT / "tests/fixtures/fake_psql.py"
+SQLITE_FIXTURE = APP_ROOT / "tests/fixtures/legacy-mail-v1.sqlite.sql"
 
 
 def core_message(message_id: str = "msg_inbound") -> dict[str, object]:
@@ -38,22 +40,130 @@ def core_message(message_id: str = "msg_inbound") -> dict[str, object]:
     }
 
 
+class FakeProxy(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        self.messages = [core_message()]
+        self.deliveries = [
+            {"delivery_id": "dlv_inbound", "message_id": "msg_inbound", "acked": False}
+        ]
+        self.calls: list[dict[str, object]] = []
+        super().__init__(("127.0.0.1", 0), FakeProxyHandler)
+
+
+class FakeProxyHandler(BaseHTTPRequestHandler):
+    server: FakeProxy
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/api/apps/svc_mail/directory":
+            self._require_token()
+            self._json(
+                {
+                    "principals": [
+                        {"kind": "agent", "id": "agent-a", "name": "Builder"},
+                        {"kind": "human", "id": "user-a", "name": "Owner", "role": "owner"},
+                        {"kind": "human", "id": "user-b", "name": "Reviewer", "role": "member"},
+                    ]
+                }
+            )
+        elif parsed.path == "/api/apps/svc_mail/messages":
+            self._require_token()
+            self._json({"messages": self.server.messages, "next_before": None})
+        else:
+            self.send_error(404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlsplit(self.path)
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if parsed.path == "/api/apps/oauth/token":
+            form = urllib.parse.parse_qs(raw.decode("ascii"))
+            if form.get("code") != ["fake-code"] or not form.get("code_verifier"):
+                self.send_error(400)
+                return
+            self._json(
+                {
+                    "access_token": "app-access-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "scope": "workspace:app",
+                }
+            )
+            return
+        body = json.loads(raw or b"{}")
+        if parsed.path == "/.treer/apps/identity/verify":
+            self._json(
+                {
+                    "active": body.get("token") == "app-access-token",
+                    "claims": {
+                        "workspace_id": "workspace-a",
+                        "service_id": "svc_mail",
+                        "principal_kind": "human",
+                        "sub": "user-a",
+                        "name": "Owner",
+                        "role": "owner",
+                    },
+                }
+            )
+            return
+        self._require_token()
+        self.server.calls.append({"path": parsed.path, "body": body})
+        if parsed.path == "/api/apps/svc_mail/messages":
+            message = core_message(f"msg_sent_{len(self.server.messages)}")
+            message["sender"] = {"kind": "human", "id": "user-a", "name": "Owner", "role": "owner"}
+            message["recipients"] = [
+                {"kind": "agent", "id": target, "name": "Builder"}
+                for target in body["recipients"]
+            ]
+            message["context_ids"] = body["context_ids"]
+            message["body"] = body["body"]
+            self.server.messages.append(message)
+            self._json({"message": message})
+        elif parsed.path == "/api/apps/svc_mail/messages/receive":
+            deliveries = []
+            for delivery in self.server.deliveries:
+                if not delivery["acked"]:
+                    message = next(
+                        item for item in self.server.messages if item["message_id"] == delivery["message_id"]
+                    )
+                    deliveries.append({"delivery_id": delivery["delivery_id"], "message": message})
+            self._json({"deliveries": deliveries[: body["limit"]], "remaining_unacknowledged": len(deliveries)})
+        elif parsed.path == "/api/apps/svc_mail/messages/ack":
+            wanted = set(body["delivery_ids"])
+            for delivery in self.server.deliveries:
+                if delivery["delivery_id"] in wanted:
+                    delivery["acked"] = True
+            self._json({"acknowledged": len(wanted), "already_acknowledged": 0})
+        else:
+            self.send_error(404)
+
+    def _require_token(self) -> None:
+        if self.headers.get("Authorization") != "Bearer app-access-token":
+            raise AssertionError("Mail did not use its App bearer token")
+
+    def _json(self, value: dict[str, object]) -> None:
+        body = json.dumps(value).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        pass
+
+
 class MailServerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.state = self.root / "fake-treer.json"
-        self.state.write_text(
-            json.dumps(
-                {
-                    "messages": [core_message()],
-                    "deliveries": [
-                        {"delivery_id": "dlv_inbound", "message_id": "msg_inbound", "acked": False}
-                    ],
-                }
-            ),
-            encoding="utf-8",
+        self.proxy = FakeProxy()
+        self.proxy_thread = threading.Thread(
+            target=self.proxy.serve_forever, daemon=True
         )
+        self.proxy_thread.start()
         web = self.root / "web"
         web.mkdir()
         (web / "index.html").write_text("<!doctype html><title>Treer Mail</title>", encoding="utf-8")
@@ -65,20 +175,17 @@ class MailServerTest(unittest.TestCase):
                     "listen": f"127.0.0.1:{self.port}",
                     "service_id": "svc_mail",
                     "public_url": f"http://127.0.0.1:{self.port}/",
-                    "proxy_public_url": "https://proxy.example/",
+                    "proxy_public_url": f"http://127.0.0.1:{self.proxy.server_address[1]}/",
                     "web_dir": str(web),
                 }
             ),
             encoding="utf-8",
         )
-        FAKE_TREER.chmod(0o755)
         environment = os.environ.copy()
         environment.update(
             {
-                "TREER_PLUGIN_CONFIG": str(config),
-                "TREER_PLUGIN_STATE_DIR": str(self.root / "plugin-state"),
-                "TREER_CLI": str(FAKE_TREER),
-                "FAKE_TREER_STATE": str(self.state),
+                "TREER_APP_CONFIG": str(config),
+                "TREER_APP_STATE_DIR": str(self.root / "app-state"),
             }
         )
         self.process = subprocess.Popen(
@@ -98,6 +205,9 @@ class MailServerTest(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.communicate(timeout=5)
+        self.proxy.shutdown()
+        self.proxy.server_close()
+        self.proxy_thread.join(timeout=5)
         self.temporary.cleanup()
 
     def request(
@@ -130,7 +240,7 @@ class MailServerTest(unittest.TestCase):
         self.assertIn("HttpOnly", headers["set-cookie"])
         self.cookie = headers["set-cookie"].split(";", 1)[0]
 
-    def test_browser_contract_uses_only_cli_and_preserves_mail_shapes(self) -> None:
+    def test_browser_contract_uses_app_api_and_preserves_mail_shapes(self) -> None:
         status, _, value = self.request("GET", "/api/health")
         self.assertEqual((status, value), (200, {"status": "ok", "service": "treer-mail"}))
         status, _, _ = self.request("GET", "/api/auth/session")
@@ -164,17 +274,14 @@ class MailServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(sent["message"]["context_ids"], ["msg_inbound"])
         self.assertEqual(sent["message"]["body"], body)
-        state = json.loads(self.state.read_text(encoding="utf-8"))
-        send_call = next(call for call in reversed(state["calls"]) if call["argv"][:2] == ["message", "send"])
-        self.assertNotIn(body, send_call["argv"])
-        self.assertEqual(send_call["stdin"], body)
-        self.assertTrue(send_call["human_session"])
+        send_call = self.proxy.calls[-1]
+        self.assertEqual(send_call["path"], "/api/apps/svc_mail/messages")
+        self.assertEqual(send_call["body"]["body"], body)
 
-        state["messages"].append(core_message("msg_second"))
-        state["deliveries"].append(
+        self.proxy.messages.append(core_message("msg_second"))
+        self.proxy.deliveries.append(
             {"delivery_id": "dlv_second", "message_id": "msg_second", "acked": False}
         )
-        self.state.write_text(json.dumps(state), encoding="utf-8")
         status, _, inbox = self.request("POST", "/api/inbox", {"limit": 50})
         self.assertEqual(status, 200)
         self.assertEqual([item["message"]["message_id"] for item in inbox["deliveries"]], ["msg_second"])

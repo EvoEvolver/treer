@@ -54,7 +54,6 @@ railway variable set \
     "TREER_APP_PUBLIC_URL=$app_url" \
     "TREER_INGRESS_PUBLIC_URL=${ingress_url%/}" \
     "TREER_ENABLE_CORE_MESSAGES=true" \
-    "TREER_ENABLE_PLUGIN_SESSIONS=true" \
     "TREER_BUILD_COMMIT=$commit" \
     --project "$project_id" \
     --environment "$environment" \

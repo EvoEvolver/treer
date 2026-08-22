@@ -31,12 +31,10 @@ At `239f9c6`, Treer provides:
 - durable Core Messages with per-recipient deliveries, explicit acknowledgement,
   sender-scoped idempotency, policy actions, an ordered context DAG, a
   transactional Message outbox, and `treer message` commands;
-- a manifest-limited CLI plugin runner and private local broker that withhold raw
-  Treer credentials from plugin scripts, enforce bounded requests/runtime/output,
-  and support session-revoking package uninstall while preserving channel state;
-- Mail and Telegram channel plugins whose Core integration is nested `treer`
-  commands, with channel presentation, secrets, and mapping state kept outside
-  Core;
+- App OAuth, service-audience identity, a combined human/Agent directory, and
+  App-facing Core Message routes;
+- Mail and Telegram Apps, with channel presentation, secrets, and mapping state
+  kept outside Core;
 - a shared domain-event envelope, an in-process event adapter, optional
   JetStream publishing, and multi-Proxy command and stream routing;
 - an extensible policy evaluator whose production default currently allows all
@@ -45,8 +43,8 @@ At `239f9c6`, Treer provides:
 Important gaps remain: work is still terminal- and Message-oriented rather than
 task-oriented; restrictive policy defaults and policy-management UX are absent;
 the generic domain-event publisher has no transactional outbox outside the
-Message subsystem; plugin scripts are not isolated from hostile same-UID code;
-automatic plugin state migration and signed distribution are absent; Message
+Message subsystem; App processes are not isolated from hostile same-UID code;
+automatic App state migration and signed distribution are absent; Message
 attachments and operator retention/export/deletion policy are absent;
 visibility is coarse; telemetry is local; billing is absent; and the web
 application is not yet a programmable workspace surface.
@@ -163,30 +161,18 @@ outboxes, exact billing-grade traffic accounting, telemetry export, and load
 testing remain later work. The current Proxy records approximate hourly payload
 totals for machine-to-machine relay directions using buffered atomic counters.
 
-### CLI-only channel plugins
+### Workspace Apps
 
-Channel integrations use executable script plugins. A plugin may call its
-external service and own channel-specific configuration, secrets, and delivery
-mapping state, but its only supported Treer interface is the installed `treer`
-CLI. It must not link Treer crates, call private Proxy or Controller routes,
-connect to the Proxy database, or consume NATS directly.
+Channel integrations are ordinary Apps. Browser Apps use App OAuth and
+service-audience public APIs. Agent-run Apps use the installed `treer` CLI and
+the managed Agent's identity. Apps own channel configuration, secrets,
+presentation, and external delivery mappings; Core owns canonical Message.
 
-The official runner holds the real Treer credential and exposes a private local,
-manifest-limited broker used by nested `treer` commands. Manifest capabilities
-set an upper bound; authenticated identity, workspace policy, and immutable Core
-guards still authorize each operation. Withholding raw credentials provides a
-comprehensible capability boundary without claiming that same-UID arbitrary
-scripts are a hostile-code sandbox. New plugin process execution is an explicit,
-default-off CLI rollout gate. Package uninstall revokes plugin-human sessions
-before removing immutable package versions and deliberately preserves the
-separate versioned state tree.
-
-Message is the first shared Core contract exercised by this plugin model. Mail
-migrated from its standalone Rust data/API service to a script plugin over
-`treer message`; Telegram is the first external channel adapter. The completed
-[execution plan](research/2026-08-21-core-messaging-cli-plugins-plan.md) records
-the compatibility, browser, multi-Proxy, rollout, and full-gate evidence. The
-maintained package contract lives in [`plugins/README.md`](../plugins/README.md).
+There is no App installer, manifest, broker, or same-UID isolation claim.
+Process supervision and sandboxing belong to deployment. Core still applies
+authentication, immutable scope, and workspace Policy to every request. Mail is
+the browser App; Telegram is the first managed-Agent external adapter. The
+maintained contract lives in [`apps/README.md`](../apps/README.md).
 
 ### Identity, policy, and delegation
 
@@ -244,8 +230,8 @@ an end-to-end trace from a UI or CLI action to its target process or service.
 Agents should be able to create useful workspace interfaces without modifying
 or redeploying the central React application. The first programmable-UI
 extension model should be declarative rather than arbitrary injected JavaScript.
-This UI model is separate from CLI-only channel plugins: a component describes
-Core-rendered workspace presentation, while a channel plugin is an external
+This UI model is separate from channel Apps: a component describes
+Core-rendered workspace presentation, while a channel App is an external
 script process translating between Core commands and another service.
 
 A workspace component document can use Proxy-rendered primitives such as:
@@ -338,7 +324,7 @@ flowchart LR
     Event --> Audit[Audit and usage]
     Event --> Components[Programmable components]
     Event --> Broker[NATS adapters]
-    Message[Core Message DAG] --> Channels[CLI-only channel plugins]
+    Message[Core Message DAG] --> Channels[Workspace Apps]
     Identity --> Message
     Policy --> Message
     Event --> Message
@@ -374,8 +360,8 @@ inventing separate event formats.
 1. **Delivered:** Promote Message and its context DAG, deliveries, acknowledgement,
    idempotency, policy, persistence, and events into Core and expose them through
    `treer message`.
-2. **Delivered:** Add the manifest-limited script plugin runner, migrate Mail to it, and add
-   Telegram as the first external channel adapter.
+2. **Delivered:** Add App OAuth and Message APIs, migrate Mail to an App, and add
+   Telegram as a managed-Agent external adapter.
 3. Add Issue, Task, Run, and Artifact records incrementally.
 4. Use Issue as the first declarative workspace component.
 5. Add assignment, comments, mentions, dependencies, and notifications.
@@ -410,10 +396,8 @@ inventing separate event formats.
 ## Cross-cutting invariants
 
 - Durable workspace state must outlive the Agent that created it.
-- Core owns canonical Message data and context edges; channel plugins own only
+- Core owns canonical Message data and context edges; channel Apps own only
   presentation, transport, and external delivery mappings.
-- First-party channel plugins are scripts whose only supported Treer dependency
-  is the versioned CLI contract.
 - Visibility, authorization, placement, and ownership are separate decisions.
 - Stable IDs drive policy and relationships; names remain mutable labels.
 - Domain events are versioned facts, not arbitrary log lines.
@@ -421,7 +405,7 @@ inventing separate event formats.
   consistency mechanism.
 - Consumers, commands, tasks, and UI actions are idempotent under retry.
 - External channel identities and labels do not become authenticated Treer
-  principals merely because a plugin records them.
+  principals merely because an App records them.
 - High-volume terminal and network bytes do not become durable broker traffic.
 - Programmable UI actions use typed APIs and normal policy enforcement.
 - Policy decisions are explainable and auditable before defaults become
@@ -432,9 +416,9 @@ inventing separate event formats.
 ## Choosing the next feature
 
 Prefer work that establishes a shared contract used by several later features.
-The most recently delivered epic, **Core messaging and CLI-only channel
-plugins**, made the Message DAG reusable and proved the boundary through
-independently replaceable Mail and Telegram scripts. Issue remains the next
+The most recently delivered epic, **Core messaging and workspace Apps**, made
+the Message DAG reusable and proved the boundary through independently
+replaceable Mail and Telegram services. Issue remains the next
 candidate for a declarative workspace component; its implementation should
 reuse Core identity, policy, events, and Message references rather than invent a
 parallel channel or task bus.

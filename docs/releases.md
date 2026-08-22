@@ -51,7 +51,7 @@ Canary version and branch-alias Preview URLs are public internet endpoints.
 They make an uploaded frontend candidate inspectable while the base
 `treer-app-canary.<account>.workers.dev` route remains disabled. Preview URLs
 use Canary runtime configuration and are build evidence only: they do not
-deploy the Railway Proxy, Core Message code, or Mail/Telegram plugin bridges.
+deploy the Railway Proxy, Core Message code, or Mail/Telegram App processes.
 
 ## Machine artifacts
 
@@ -77,25 +77,14 @@ explicitly. The existing `artifacts-prepare`, `artifacts-canary`, and
 `artifacts-stable` commands then sign and distribute those bytes without
 recompiling them.
 
-## Plugin packages
+## Workspace Apps
 
-Mail and Telegram are source plugin packages, not additional Rust machine
-binaries and not part of the Cloudflare App artifact. `treer plugin install`
-copies one validated package version into immutable local storage on a bridge
-machine. Mail release packages must include its built `web/dist` assets; Node
-dependencies, Python bytecode, local configuration, channel secrets, and plugin
-state are never release artifacts.
-
-The current four-platform artifact workflow does not yet build, sign, or publish
-plugin archives. Until that pipeline exists, deploy a plugin from the same clean
-source commit as its compatible CLI, build Mail's static assets, validate the
-package, and retain the source revision in deployment records. Do not describe a
-binary release manifest as covering plugin bytes when it does not.
-
-`treer plugin uninstall <id>` revokes matching Core human sessions and removes
-all local package versions, but it preserves the versioned state tree. Back up
-and remove that state through a separate operator procedure. There is no
-automatic state migration or signed plugin distribution in this release flow.
+Mail and Telegram are source Apps, not additional Rust machine binaries and not
+part of the Cloudflare control-plane artifact. Deploy them from the same clean
+source commit, build Mail's `web/dist`, and record the revision. Configuration,
+Python bytecode, channel secrets, and App state are never release artifacts.
+App supervision, rollback, state migration, and isolation use the deployment's
+normal service tooling; Treer has no App package installer.
 
 ## Canary release
 
@@ -126,11 +115,9 @@ the Proxy-bundled Host, Controller, and CLI artifacts; it is release metadata,
 not a mutable runtime version override.
 
 Canary and Production Proxy deployment scripts explicitly set
-`TREER_ENABLE_CORE_MESSAGES=true` and
-`TREER_ENABLE_PLUGIN_SESSIONS=true`. Both default off outside those scripts.
-`TREER_ENABLE_PLUGIN_EXECUTION=true` is machine-local CLI configuration and must
-be set separately by each bridge process supervisor after its package, config,
-secret, state backup, and Policy are ready.
+`TREER_ENABLE_CORE_MESSAGES=true`. It defaults off outside those scripts. App
+process supervisors are configured separately after code, config, secrets,
+state backup, and Policy are ready.
 
 ## Production promotion
 
@@ -157,23 +144,21 @@ branch.
   later release removes an API.
 - Use expand-first PostgreSQL changes so old and new Proxy replicas can overlap.
 - Before a legacy Mail cutover, back up its SQLite/PostgreSQL database, stop the
-  Rust Mail writer, dry-run and execute `plugins/mail/migrate.py` with a required
-  `--actor` identity, compare and retain the checksum/checkpoint report, install
-  the Mail plugin, and require users to log in again.
+  Rust Mail writer, dry-run and execute `apps/mail/migrate.py` with a required
+  `--actor` identity, compare and retain the checksum/checkpoint report, start
+  the Mail App, and require users to log in again.
   Rollback to the old writer is safe only before any new Core Message write;
   after that point, repair forward and keep Core authoritative.
-- Back up each plugin's versioned state before replacing or moving it. Telegram
+- Back up each App's state before replacing or moving it. Telegram
   needs its offset and ID-mapping SQLite state to avoid avoidable external
   duplicates. Keep Bot tokens and Mail configuration out of source and release
   artifacts, and provide them through the deployment secret mechanism.
 - Telegram's Bot API does not accept a client idempotency key. A lost successful
   send response can produce a visible duplicate on retry; rollback and release
   notes must not claim external exactly-once delivery.
-- To stop channel traffic, first stop bridge processes or remove their local
-  plugin-execution gate, then revoke plugin sessions. Do not turn off Core
-  Message routes while a bridge still has an unacknowledged external delivery.
-  Disabling plugin-session creation/exchange leaves revocation and uninstall
-  available; none of the gates deletes Message rows or plugin state.
+- To stop channel traffic, stop the App processes. Do not turn off Core Message
+  routes while a bridge still has an unacknowledged external delivery. Feature
+  flags do not delete Message rows or App state.
 - Before the first stable release, a Controller protocol bump may deliberately
   require a coordinated Proxy rollout and machine re-enrollment. Record that
   boundary in the release notes and reset Canary as one unit. Once stable

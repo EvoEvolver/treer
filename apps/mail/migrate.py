@@ -636,8 +636,6 @@ def main() -> int:
         if args.dry_run:
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0
-        if os.environ.get("TREER_PLUGIN_BROKER_SOCKET"):
-            raise MigrationError("migration must use an operator CLI outside a plugin broker")
         for index, batch in enumerate(ordered_batches):
             if index < len(report["batches"]):
                 continue

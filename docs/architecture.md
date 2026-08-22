@@ -1,512 +1,99 @@
 # Architecture
 
-- Status: maintained
-- Last source review: 2026-08-21 at `239f9c6`
-
-Treer separates the internet-facing control plane from machine-local process
-ownership. Shared Rust protocol crates connect the layers; the React application
-and CLI remain clients of those contracts.
-
-## System map
+Treer separates durable coordination from machine-local process ownership.
 
 ```mermaid
-flowchart TB
-    Browser[Control-plane browser] -->|HTTPS static assets| Web
-    Browser -->|Cross-origin HTTPS and WSS, session cookie| Proxy
-    AppUser[Optional-app user] -->|App OAuth + app session| Apps[Optional workspace apps]
-    MailUser[Mail browser user] -->|HTTPS service ingress| Proxy
-    TelegramUser[Telegram user] <--> Telegram
-    CLI[treer CLI] -->|loopback HTTP and WS| Controller
-    Agent[Managed agent] -->|loopback HTTP and WS| Controller
-
-    subgraph Central[Central control plane]
-        Proxy["treer-proxy replicas<br/>auth, metadata, routing"]
-        DB[(PostgreSQL<br/>Core metadata, Message DAG,<br/>delivery and Message outbox)]
-        NATS[(NATS Core + JetStream KV<br/>routing and events)]
-        Web[treer-app<br/>Cloudflare Worker + static assets]
-        Proxy <--> DB
-        Proxy --> NATS
-    end
-
-    subgraph Machine[Each enrolled machine]
-        Controller["treer-agent-server<br/>Controller"]
-        Host["treer-agent-host<br/>stable process owner"]
-        Runtime["treer-agent-runtime<br/>PTY and replay"]
-        Processes[Codex / Claude / shell]
-        Broker["treer plugin runner<br/>private CLI broker"]
-        Mail[Mail script plugin]
-        Telegram[Telegram script plugin]
-        MailState[(Mail cookie state)]
-        TelegramState[(Telegram offset and ID map)]
-        Controller <-->|Unix socket, bincode| Host
-        Host --> Runtime
-        Runtime <--> Processes
-        Mail -->|nested treer commands| Broker
-        Telegram -->|nested treer commands| Broker
-        Broker -->|loopback semantic commands| Controller
-        Mail --> MailState
-        Telegram --> TelegramState
-    end
-
-    Controller <-->|outbound authenticated WebSocket| Proxy
-    Proxy -->|published service stream| Controller
-    Controller -->|host-network HTTP| Mail
-    Apps -->|App identity verification and directory resolution| Proxy
-    Apps --> AppDB[(App-owned SQLite or PostgreSQL)]
-    Telegram <-->|official Bot API| TelegramAPI[Telegram Bot API]
+flowchart LR
+    Web[Browser control plane] --> Proxy[Proxy]
+    Proxy --> DB[(PostgreSQL)]
+    Proxy <--> NATS[(NATS)]
+    Controller[Agent Server / Controller] <--> Proxy
+    Controller <--> Host[Agent Host]
+    Host --> Runtime[Agent runtime and PTY]
+    Runtime --> Agent[Codex / Claude / shell]
+    Mail[Mail App] -->|App OAuth + bearer API| Proxy
+    Telegram[Telegram App] -->|treer CLI as managed Agent| Controller
+    Telegram <--> TG[Telegram Bot API]
 ```
 
-## Component ownership
+## Ownership
 
-| Component | Owns | Must not own |
-| --- | --- | --- |
-| [`treer-proxy`](../crates/treer-proxy/src/main.rs) | Public API, user auth, workload token signing, PostgreSQL metadata, workspace projection, command and stream routing, domain-event publication | Local process lifetime |
-| [`treer-agent-server`](../crates/treer-agent-server/src/main.rs) | Machine Controller, local API, Agent definitions, state detection, Proxy link, network bridge | Durable PTY ownership |
-| [`treer-agent-host`](../crates/treer-agent-host/src/main.rs) | Stable child processes, Controller supervision, idempotent mutation cache | Users, workspaces, Agent brands, product policy |
-| [`treer-agent-runtime`](../crates/treer-agent-runtime/src/lib.rs) | PTY lifecycle, raw input/output, bounded replay, root-relative working directories | Distributed routing or identity |
-| [`treer-cli`](../crates/treer-cli/src/main.rs) | Human and managed-Agent commands, terminal attach, Core Message surface, plugin package lifecycle, execution gate, environment sanitization, and the manifest-limited local broker | Private wire-model variants or channel-specific behavior |
-| [`treer-protocol`](../crates/treer-protocol/src/lib.rs) | Shared public and Controller protocol models and frames | Runtime implementation |
-| [`treer-host-protocol`](../crates/treer-host-protocol/src/lib.rs) | Controller-to-Host request, response, and event contract | Proxy or browser concepts |
-| [`web`](../web/src/App.tsx) | Standalone static browser application, runtime Proxy discovery, control-plane interaction, and terminal UI | Backend policy or hidden business state |
-| [`apps`](../apps/README.md) | Optional service-owned APIs, databases, and frontends using Treer identity and routing | Proxy metadata tables or machine process ownership |
-| [`plugins`](../plugins/README.md) | Script channel adapters, manifests, external API behavior, secrets, presentation, and plugin-owned mapping/session state | Treer credentials, private routes, Core PostgreSQL/NATS, or canonical Message semantics |
+| Component | Owns |
+| --- | --- |
+| `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, and distributed coordination |
+| `treer-agent-server` | Machine Controller, local authenticated API, Proxy connection, network bridge, and Agent definitions |
+| `treer-agent-host` | Stable local child-process ownership and idempotent mutations |
+| `treer-agent-runtime` | PTY lifecycle, bounded output replay, and working-directory containment |
+| `treer-cli` | Human/operator and managed-Agent commands, including Core Message |
+| `treer-protocol` | Shared public and Controller wire models |
+| `apps` | Ordinary service code, presentation, external APIs, configuration, secrets, and App-owned state |
 
-## Architectural invariants
+The Host is intentionally product-agnostic. Shared wire models live in protocol
+crates. Every distributed lookup is scoped by workspace before machine or Agent
+ID.
 
-- The Host owns local process lifetime so a Controller update does not terminate
-  active PTYs.
-- The three machine-facing binaries embed their package version and source
-  commit. Host sync reports the Host build to the Controller; Controller health
-  and Proxy machine snapshots carry separate Host and Controller identities so
-  a hot update cannot hide a stale Host.
-- Machine-local dashboards read Agent and PTY state from the Controller and
-  Host. Proxy projections provide workspace-wide discovery and metadata but do
-  not replace local runtime state when the Proxy is unavailable.
-- The Host remains product-agnostic; Agent-specific interpretation belongs in
-  the Controller.
-- Shared wire models live in protocol crates. A client and server must not grow
-  parallel copies of the same contract.
-- Every distributed lookup is scoped by workspace before machine or Agent ID.
-- Optional apps own their own storage and product behavior. The Proxy exposes
-  generic, workspace-scoped human OAuth, Agent workload identity verification,
-  a combined Agent/human directory, and stable recipient resolution. Apps do
-  not connect to the Proxy database.
-- Core owns canonical Message bodies, recipient deliveries, ordered context
-  edges, visibility, policy, idempotency, acknowledgement, and a transactional
-  body-free outbox. Channels translate those objects but do not maintain a
-  second source of Message truth.
-- First-party plugins are scripts. Their only supported Core interface is a
-  nested `treer` CLI invocation through the runner's private broker. The runner
-  withholds raw Treer credentials and limits commands to manifest capabilities;
-  workspace policy and immutable scope checks still authorize each request.
-- Plugin install is data-only. Uninstall first performs an operator-authorized
-  workspace/plugin session revocation, then removes all local immutable package
-  versions while deliberately preserving the separately rooted versioned state.
-  Automatic state migration and deletion are not part of this contract.
-- Plugin-owned state may contain browser-cookie mappings, external offsets,
-  channel Message IDs, retry state, and external credentials. It must not access
-  Core PostgreSQL, Core NATS, private Controller/Proxy routes, or Treer crates.
-- A workspace's human directory is derived from its parent organization
-  membership. Generic App directory responses expose stable IDs, preferred
-  names, and roles, but not member email addresses.
-- Enrolled machines establish outbound connections to the Proxy.
-- Persistent machine identity is scoped by installation hostname. Controller
-  and Host configurations and service-manager entries are keyed by server ID;
-  the Host socket is node-local runtime state. Linux systemd units are pinned to
-  their installation hostname so a network-mounted home directory cannot start
-  one machine identity on multiple nodes.
-- Durable identity metadata lives in PostgreSQL. With NATS configured, live
-  Controller ownership and machine snapshots are shared across Proxy replicas;
-  session and stream coordination remains in the initiating Proxy and is
-  reached through routed IDs.
-- Workspace mutations emit a shared, versioned domain-event envelope. The
-  broker-neutral event bus stays in process by default and can publish the same
-  envelope to an optional NATS JetStream.
-- JetStream carries durable domain events, durable control projections,
-  expiring ownership leases, and change-driven live snapshots. Heartbeats do
-  not republish full snapshots. PTY output, terminal input, and virtual-network
-  TCP bytes are not retained in JetStream; live
-  bytes use Core NATS only when their endpoints use different Proxy replicas.
-- The browser application is deployed independently to Cloudflare Workers
-  Static Assets. Its small Worker serves `/config.json` and `/health`; all other
-  requests use the static asset binding. The App reads the Proxy origin from
-  `/config.json` at startup, and the Proxy allows credentialed requests and
-  browser WebSockets only from its configured App origin.
-- `skills/treer/SKILL.md` is embedded into the CLI at build time and is the
-  managed-Agent operations contract.
+## Core Message
 
-## Release distribution
+Core stores immutable Message bodies, ordered context edges, recipient
+snapshots, per-recipient delivery state, idempotency records, and a body-free
+transactional outbox. `receive` repeats an unacknowledged delivery; `ack` is an
+explicit idempotent mutation. A context edge never grants visibility to its
+parent.
 
-The repository release tool treats artifact identity, distribution, and rollout
-as separate boundaries. A trusted publisher collects the three machine-facing
-binaries for each platform, records their byte lengths and SHA-256 digests in a
-versioned manifest together with the platform build provenance, and signs the
-exact manifest bytes with an Ed25519 release key. Version manifests and channel
-pointers have separate detached signatures.
+Managed Agents call the local `treer message` commands. The Controller verifies
+the Agent workload credential and forwards the request under the machine
+credential. The Proxy verifies both bindings, evaluates the workspace Policy,
+and writes Core state.
 
-GitHub Actions builds the four supported platform sets on native Linux and
-macOS runners. Each workflow artifact carries the source commit, package
-version, platform, and checksums. The workflow cannot publish a release; an
-operator must collect one successful commit and invoke the separately
-authenticated R2 publisher. This keeps compilation credentials and the offline
-release-signing key in different trust domains.
+Browser Apps call `/api/apps/{service_id}/messages...` with a standard
+service-audience App token. The Proxy rechecks the registered service and human
+membership, maps the claims to the same Policy subject and Message principal,
+then uses the same Message implementation as the Agent routes.
 
-Cloudflare R2 stores immutable objects under `releases/<version>/`; mutable
-`channels/canary.json` and `channels/stable.json` identify a manifest by path and
-digest. The public R2 custom domain and cache are distribution infrastructure,
-not the trust root. Stable promotion changes only a signed channel pointer and
-requires the version tag to identify the commit recorded in the canary
-manifest.
+`TREER_ENABLE_CORE_MESSAGES` is a rollout switch, not an authorization or
+isolation boundary.
 
-This publisher is ahead of the installed-machine update protocol. The current
-Controller updater still downloads flat Proxy artifact endpoints and validates
-executability before activation. An operator can select the source with
-`--proxy`; otherwise the updater uses the first installed service after stable
-server-ID ordering. Controller and CLI paths are machine-shared. A host-shell
-update activates all installed Controllers, while a managed-Agent update uses
-the injected sandbox-to-Controller URL to activate only its own Controller. A
-future remote rollout must verify the embedded release public key, signed
-channel, signed manifest, artifact digest, platform, and Host/Controller
-protocol compatibility before asking the Host to restart the Controller.
+## App Identity
 
-Local and GitHub builds resolve the source commit from the checked-out Git
-repository. Railway release scripts set `TREER_BUILD_COMMIT` to the exact
-candidate revision and the Docker builder accepts it as a build argument, so a
-CLI source upload without `.git` still produces attributable binaries. A source
-archive built without either input reports `unknown` rather than guessing.
+An enabled workspace service uses its stable `service_id` as OAuth client ID.
+Redirect origins come from the service ingress registry. Human authorization is
+Authorization Code with S256 PKCE. Codes are hashed, short-lived, and single
+use. The resulting signed bearer token is audience-bound to the service.
 
-When enabled, Cloudflare Workers Builds is only a frontend build check. Its
-production-branch command uploads an inactive Canary Worker version, but it
-does not move Canary or Production traffic. The explicit release scripts remain
-the only supported traffic-promotion path.
+Managed Agents can request a 60-second workload token for a registered service.
+Apps may validate tokens through `/.treer/apps/identity/verify`; verification
+also checks current service existence and, for humans, current membership.
 
-## Protocols and state
+Apps are ordinary processes. Treer does not install, sandbox, supervise, or
+grant a special capability to them. Mail stores a local cookie-to-App-token
+mapping. Telegram runs inside a dedicated managed Agent and uses that Agent's
+normal CLI identity. Telegram users remain external metadata, not Treer human
+principals.
 
-| Link | Transport and encoding | Authentication |
-| --- | --- | --- |
-| Browser to App | HTTPS static files and runtime JSON configuration | None |
-| Browser to Proxy | Cross-origin HTTP/JSON and WebSocket frames | Host-only user or admin session cookie; exact App origin allowlist |
-| Browser to optional App | HTTPS/HTTP JSON and static assets | App-owned session established through Proxy Authorization Code + S256 PKCE |
-| Optional App to Proxy | HTTP/JSON identity verification, directory, and recipient resolution | Service-audience human or Agent Bearer token |
-| Mail browser to Mail plugin | HTTPS through an HTTP service ingress, then plugin-owned HTTP/JSON and static assets | HttpOnly Mail cookie mapped to a Core plugin-human capability |
-| Telegram plugin to Telegram | Official Bot API HTTPS long polling and sends | Plugin-owned bot token plus configured numeric user/chat/topic admission |
-| Plugin script to `treer` broker | Nested CLI process over a private Unix socket using bounded JSON requests | Opaque per-run broker token; manifest capabilities, bridge Agent identity, optional plugin-human capability, and workspace policy |
-| Controller to Proxy | Persistent WebSocket, JSON and binary frames | Workspace-bound machine Bearer credential |
-| CLI or managed Agent to Controller | Loopback HTTP/JSON and WebSocket | Managed-Agent requests require the matching Agent workload credential; local CLI requests require a private operator credential stored in the owner-only Controller config |
-| Controller to Host | Length-prefixed bincode on a local Unix socket | Local socket boundary |
-| Host to child process | PTY raw bytes | Host process ownership |
-| Proxy replica to Proxy replica | Core NATS MessagePack request/reply and broadcast; JetStream KV for leases, snapshots, and durable projections | Private NATS boundary |
+## Policy
 
-PostgreSQL persists users, OAuth identities and short-lived OAuth states,
-organizations, memberships, sessions, password reset tokens, invitations,
-workspaces, enrollment records, machine credentials, the workload signing key,
-display names, workspace-scoped Agent launch profiles, machine services,
-Agent UI declarations, virtual hosts, service ingresses, App OAuth authorization codes, ingress
-authorization sessions, append-only organization audit events, hourly
-directional machine traffic counters, immutable Core Messages, recipient
-deliveries, ordered context edges, sender-scoped send idempotency records,
-Message outbox entries, plugin OAuth states, and revocable plugin-human
-capabilities. Capability use rechecks current organization membership and the
-registered service binding; removing either invalidates the session.
-Administrator invitations
-create a user-owned personal organization during registration; organization
-invitations only create membership in their target organization. Both flows
-consume the invitation and write identity state in one transaction.
+One versioned JSONB Policy document exists per workspace. The Proxy compiles
+rules into action-indexed immutable structures and caches them briefly. Updates
+use optimistic revisions and PostgreSQL notification. Multi-recipient sends and
+multi-delivery acknowledgements evaluate one pinned revision.
 
-An Agent launch profile stores a display name, optional description, working
-directory, executable, and ordered argument array. It does not bind to a
-machine: the caller chooses an online machine and optional Agent name for each
-launch. The Proxy translates the profile into a shell-kind `CreateAgentRequest`,
-so machine selection, `agent.create` authorization, workload credential
-creation, Controller routing, and Host process ownership remain the same as a
-direct create. The Controller starts the machine user's interactive shell and
-enters the safely quoted executable and arguments through its PTY after shell
-startup; this makes commands installed or configured by `.bashrc` or `.zshrc`
-available to profiles. Argument values are preserved literally rather than
-parsed as shell syntax. The lower-level command kind continues to execute an
-argv vector directly. New workspaces start with ordinary, editable and
-deletable profiles for Codex, Claude, Pi, and OpenCode. Existing workspaces are
-not backfilled. The web application's built-in Terminal launch is not a profile:
-it sends a command-kind request with an empty argv, which the Controller maps to
-an interactive shell without initial PTY writes.
+Policy covers Agent discovery/control, launch profiles, machine/service/network
+mutation, workload identity, and Message send/read/receive/ack/import. A
+workspace without a Policy document currently defaults to allow; this is an
+explicit product limitation.
 
-An Agent UI declaration maps one Agent to an HTTP machine service on that
-Agent's machine plus an absolute service path. The declaration is durable in
-PostgreSQL and is carried in the workspace snapshot; NATS control projections
-make updates visible across Proxy replicas. When present, the web application
-embeds `/api/workspaces/{workspace}/agents/{agent}/ui/proxy/` instead of mounting
-the PTY terminal. The UI tunnel and virtual-host tunnel share the same HTTP/1.1
-bridge. WebSocket Upgrade requests become bidirectional byte streams over the
-existing Controller WebSocket and network binary frames; the custom page never
-connects directly to a machine. Relative URLs are required so assets, fetches,
-and WebSocket endpoints remain beneath the Agent UI tunnel prefix. Deleting the
-service, changing it to TCP, or moving it away from the Agent's machine clears
-the declaration and restores the terminal view.
+## Routing And State
 
-Covered organization and membership mutations write their audit event in the
-same PostgreSQL transaction. Successful Agent create, rename, stop, and delete
-operations and machine rename and delete operations append runtime audit events
-after the Controller result; an audit write failure is logged without turning a
-completed runtime mutation into a retryable API failure.
+Machines connect outward to the Proxy over an authenticated WebSocket. The
+Controller-to-Host protocol is a local length-prefixed bincode socket. Browser
+terminal and service streams route through the Proxy; ordinary virtual-network
+payload travels between Controllers after Proxy authorization.
 
-OAuth authorization-code callbacks terminate at the Proxy. PostgreSQL-backed,
-single-use state makes callbacks valid across Proxy replicas. The Proxy uses the
-provider token only to fetch the current stable subject and verified email, then
-discards it. A new provider identity links to an existing user only when that
-verified email matches; subsequent logins resolve the stored provider and
-subject pair even if the provider email changes.
+PostgreSQL is the durable source for accounts, organizations, workspaces,
+machine credentials, services, ingresses, App OAuth codes, policy, audit,
+traffic counters, and Core Message. NATS supplies events and cross-Proxy live
+routing but is not Message truth. App SQLite databases contain only App-owned
+sessions or external delivery mappings.
 
-Generic optional apps authenticate Agents with the existing 60-second workload token.
-Humans authorize an enabled workspace service with Authorization Code and S256
-PKCE; the service ID is the client ID and redirect origins are derived from the
-service ingress registry. App authorization codes are hashed, short-lived,
-single-use PostgreSQL records. Human app tokens are rechecked against current
-membership, and all app tokens are rechecked against the target service. Apps
-can resolve stable Agent and human recipients through the Proxy but own their
-domain data and delivery semantics in a separate database. When login is needed
-mid-flow, the standalone control-plane App preserves `return_to` only for the
-same configured Proxy origin and the exact `/.treer/ingress/authorize` or
-`/api/apps/oauth/authorize` path; it rejects arbitrary redirect paths and
-origins.
-
-CLI-only channel plugins use a narrower path. A managed bridge Agent starts an
-installed immutable package with `treer plugin run`. The runner clears the
-environment, passes only declared configuration/secrets plus an opaque broker
-socket/token, and retains the bridge Agent workload credential itself. Nested
-CLI commands are classified against the manifest before the Controller request.
-Mail's browser OAuth exchanges a Proxy authorization code for a revocable
-capability bound to plugin ID, workspace, service, user, and bridge Agent; the
-capability may accompany only supported human-scoped broker commands. Telegram
-users never receive a Treer principal: inbound Messages remain authored by the
-bridge Agent and carry only sender-asserted external-source metadata.
-
-Three default-off rollout gates separate deployment from activation.
-`TREER_ENABLE_CORE_MESSAGES` controls every Core Message route,
-`TREER_ENABLE_PLUGIN_SESSIONS` controls creation/exchange of new plugin-human
-sessions while leaving revocation available, and the machine-local
-`TREER_ENABLE_PLUGIN_EXECUTION` controls `treer plugin run`. The first two are
-Proxy process configuration; the last is evaluated by the invoking CLI. They
-are rollout controls, not authorization or isolation boundaries.
-
-Core Message writes atomically store an immutable Message, ordered recipients
-and contexts, per-recipient delivery state, idempotency result, and body-free
-outbox event. `receive` is repeatable until explicit idempotent `ack`; history
-reads do not mutate delivery state. The outbox dispatcher retries after Proxy
-restart, marks an entry published only after the event adapter confirms it, and
-publishes through the configured in-process or JetStream event bus. JetStream
-uses the stable event ID for broker deduplication. NATS is distribution, not
-Message truth, and a single-Proxy Message deployment does not require it.
-
-The managed-Agent CLI carries its Agent ID and workload credential on discovery,
-Agent control, and terminal WebSocket requests. The Controller validates and
-forwards both values under its machine credential. The Proxy independently
-checks the workload credential's SHA-256 hash and machine/workspace binding
-before constructing the Agent principal. A request carrying only a machine
-credential may discover or control resources on that same machine; cross-machine
-Agent and machine control requires the authenticated Agent principal. Local CLI
-requests without an Agent identity require the Controller's private operator
-credential and remain machine-scoped at the Proxy.
-
-Workspace policy documents have a versioned shared wire model and one JSONB row
-per workspace in PostgreSQL. The typed store validates bounded documents, uses
-optimistic revision updates, and emits a transactional PostgreSQL notification.
-The Proxy compiles documents into action-indexed immutable rules and applies them
-to Agent discovery, inspection, creation, prompt, input, output, terminal,
-lifecycle, launch-profile CRUD/use, machine mutation, service,
-virtual-host, network, workload identity, Message send/read/receive/ack/import,
-plugin OAuth, and plugin uninstall checks. Multi-recipient Message sends and
-multi-delivery acknowledgements evaluate one batch against one pinned policy
-revision; monitor mode records the revision without denying and enforce mode
-applies its decision atomically. A per-workspace five-second cache keeps JSONB
-reads off the hot path while bounding cross-replica update and revocation
-staleness.
-
-Each Controller connection,
-pending command, browser session, terminal leg, and network route is
-owned by one Proxy process. A small expiring NATS KV lease maps a Controller to
-that process; a separate KV entry changes only when its machine snapshot
-changes. File-backed projection entries retain the latest workspace,
-rename/delete, and restoration state across replica disconnects. Routed
-terminal and network IDs encode the initiating Proxy so return
-traffic reaches its in-memory state. Connection IDs, per-process Controller
-instance IDs, and JetStream revisions fence stale owners and out-of-order
-snapshot delivery. A replacement connection closes the previous local
-connection; a remotely displaced Controller stops its automatic reconnect loop
-after the Proxy reports duplicate ownership. This prevents two processes with
-one machine credential from indefinitely stealing the lease from each other.
-Heartbeats revalidate machine revocation against PostgreSQL before renewing
-ownership.
-
-Workspace state changes also produce `DomainEventEnvelope` values containing a
-unique event ID, schema version, actor, action, resource, occurrence time,
-workspace revision, optional trace/correlation lineage, and JSON payload. When
-`TREER_NATS_URL` is configured, the Proxy provisions a file-backed JetStream
-stream and publishes these envelopes under a workspace-scoped subject. Publish
-retries use the event ID as `Nats-Msg-Id`; the database remains authoritative.
-The general publisher queue is not yet a transactional outbox. Core Message is
-the bounded exception: its mutations insert a dedicated outbox row in the same
-PostgreSQL transaction, and a restartable dispatcher marks the event delivered
-only after the event bus accepts it. Message event payloads exclude bodies.
-
-Without `TREER_NATS_URL`, the same code runs as one standalone Proxy and keeps
-all live routing in process. Horizontal replicas require a shared PostgreSQL
-database and a shared NATS server with JetStream enabled. Sticky load-balancer
-sessions are not required. NATS loss interrupts cross-replica routing; the
-Controller reconnect loop and Host-owned terminal revisions recover live state
-after the backplane returns.
-
-## Primary information flow
-
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant P as Proxy
-    participant C as Controller
-    participant H as Host
-    participant A as Agent PTY
-
-    B->>P: command with session cookie
-    P->>P: authorize organization and workspace
-    P->>C: command envelope over machine WebSocket
-    C->>H: Host request with operation ID
-    H->>A: spawn, input, resize, or stop
-    A-->>H: raw PTY output
-    H-->>C: revisioned output event
-    C-->>P: state, result, and binary stream frames
-    P-->>B: HTTP result, event, and terminal frames
-```
-
-Managed Agent coordination starts at the source machine's loopback API, crosses
-the Proxy under that machine's credential, and reaches the target Controller
-and Host. The source Agent does not need the destination address or a Proxy
-credential.
-
-Each managed Agent also receives a random workload credential in its process
-environment and Host-owned metadata. For `treer token create`, the Controller
-matches that credential to the Agent, forwards the request under its machine
-credential, and the Proxy resolves the requested machine service, evaluates the
-`identity.token.issue` policy action, and signs a 60-second Ed25519 JWT bound to
-the stable service ID. Services validate through the Proxy JWKS document or the
-online verify endpoint. Tokens are requested explicitly and are never injected
-into arbitrary virtual-network traffic.
-
-## Message and plugin information flow
-
-Managed Agents call `treer message` directly. A plugin starts the same command
-as a nested process, but broker mode replaces direct Controller access with a
-manifest-limited request to the parent runner. Both paths converge at the local
-Controller and the same Proxy policy and storage implementation:
-
-```mermaid
-sequenceDiagram
-    participant E as External channel
-    participant P as Plugin script
-    participant T as Nested treer CLI
-    participant B as Private plugin broker
-    participant C as Controller
-    participant X as Proxy
-    participant D as PostgreSQL
-
-    E->>P: channel message or browser action
-    P->>T: treer message send (body on stdin)
-    T->>B: bounded semantic command + broker token
-    B->>B: require manifest capability
-    B->>C: command as bridge Agent or bound human
-    C->>X: machine-authenticated control request
-    X->>X: authenticate identity and evaluate Policy
-    X->>D: atomic Message, delivery, DAG, idempotency, outbox
-    D-->>P: stable Message result through X, C, B, T
-    P->>P: commit external-to-Core mapping
-
-    P->>T: treer message receive
-    T->>B: brokered receive
-    B->>C: command as bridge Agent
-    C->>X: receive unacknowledged delivery
-    X->>D: repeatable delivery read
-    D-->>P: delivery and Message
-    P->>E: external send or render
-    E-->>P: external ID / accepted result
-    P->>P: persist mapping or effect
-    P->>T: treer message ack
-    T->>B: brokered idempotent ack
-    B->>C: command as bridge Agent
-    C->>X: acknowledgement
-    X->>D: atomic delivery state and outbox
-```
-
-Mail owns an HTTP UI, browser-cookie mapping, and compatibility response shapes.
-Its OAuth flow obtains a Core capability tied to one human and one running
-bridge; every directory or Message request still traverses the broker. Telegram
-owns long polling, numeric allowlists and bindings, update offsets, and
-Telegram/Core ID mappings. It commits an external send mapping before Core ack.
-Neither channel reads Core tables or subscribes to NATS.
-
-With several Proxy replicas, a Controller remains owned by one replica and a
-request may enter another. Core Message truth and idempotency remain in shared
-PostgreSQL; Core NATS routes the request to the owning replica, and the
-transactional outbox publishes one body-free event to JetStream. A reconnect or
-remote Proxy restart does not move canonical Message or acknowledgement state.
-
-## Network paths
-
-On Linux, managed Agent TCP and DNS traffic enters a per-Agent network namespace
-and TUN interface, then reaches a Controller-owned SOCKS5 boundary. Ordinary
-destinations are authorized by the Proxy and then use source-machine egress;
-only their route request and direct response cross the Controller WebSocket.
-Workspace virtual hosts are relayed through the Proxy to another Controller,
-including their TCP payload. Each alias resolves through a durable machine
-service record before routing to the target Controller. Services belong to a
-machine and outlive the Agent that registers or maintains them. The Controller
-can probe the target from the machine host network; Treer does not yet start or
-supervise the external service process. This is network containment and routing,
-not a VM or private filesystem. A private mount namespace supplies the Agent's
-resolver configuration and masks the host `nscd` socket, ensuring DNS lookups
-reach the TUN virtual resolver instead of host NSS plugins or caches. These mounts do not
-modify the host resolver files or cache service.
-
-In `proxy-env` compatibility mode, the Controller injects `ALL_PROXY` for
-ordinary Agent traffic and sets both `NO_PROXY` and `no_proxy` to
-`127.0.0.1,localhost,::1`. That loopback bypass keeps the CLI's Controller calls
-and plugin-local HTTP calls out of the SOCKS path. A Mail bridge that registers
-its own listening port as a host-network machine service currently needs this
-mode; transparent-mode Agents cannot expose a namespace-local loopback listener
-as a host-network service. Telegram needs only outbound HTTPS and works through
-either network mode.
-
-Public service ingress is a separate resource from workspace virtual hosts. A
-`ServiceIngress` points directly to one HTTP machine service and owns a generated
-single-label hostname under `TREER_INGRESS_PUBLIC_URL`. Any Proxy replica can
-resolve the request `Host` from its in-memory cache, falling back to PostgreSQL
-on a cache miss, then reuse the existing browser network stream to reach the
-target Controller. A five-second metadata refresh converges out-of-band and
-cross-replica changes. HTTP bodies remain streaming and WebSocket upgrades pin
-one route for the connection lifetime.
-
-`public` ingress performs no Treer edge authentication. `workspace` ingress
-accepts an audience-bound Agent token in `Treer-Authorization` or redirects a
-human through the Proxy session and a single-use authorization code to a
-host-only ingress cookie. The application continues to own its normal
-`Authorization`, cookies, and `Set-Cookie` semantics. The Proxy removes only
-Treer-private credentials, hop-by-hop headers, and spoofable identity headers.
-
-Machine-to-machine relay traffic is accounted at the coordinating Proxy's
-`NetworkBinaryFrame::Data` routing boundary. Stream creation resolves two
-directional counters keyed by workspace, source machine, and destination
-machine. The per-frame hot path performs only relaxed atomic additions; it does
-not lock a map or write PostgreSQL. Each Proxy drains its counters every ten
-seconds and batch-upserts hourly rows into `machine_traffic_hourly`, so replicas
-converge through additive PostgreSQL updates without routing telemetry through
-JetStream. Cross-Proxy frames are counted only after they reach the Proxy that
-owns the stream legs, avoiding double accounting at the NATS hop. Hourly rows
-are retained for 90 days and pruned once per hour.
-
-These records count relayed application payload bytes and data frames, not
-WebSocket, TLS, NATS, or TCP framing. PTY traffic, public-ingress traffic, and
-direct egress are excluded because they do not describe a machine-to-machine
-direction. A Proxy crash can lose at most its unflushed interval; traffic
-accounting is operational telemetry rather than an exact billing ledger.
-
-For route-level details and additional diagrams, use the dated
-[project review](research/2026-08-18-project-review.md). Review this document
-whenever a crate boundary, transport, persistence rule, or ownership invariant
-changes.
+See [Security](security.md) for trust claims and [Quality](quality.md) for the
+verification matrix.

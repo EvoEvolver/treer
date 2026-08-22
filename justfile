@@ -17,19 +17,14 @@ lint:
 
 check:
     node scripts/check-docs.mjs
-    node --test scripts/check-plugins.test.mjs
-    node scripts/check-plugins.mjs
     node --test scripts/release-r2.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
-    cd plugins/mail/web && pnpm typecheck
-    cd plugins/mail/web && pnpm build
-    python3 -m unittest discover -s plugins/mail/tests -p 'test_*.py' -v
-    python3 -m unittest discover -s plugins/telegram/tests -p 'test_*.py' -v
-    cargo run -p treer-cli -- plugin validate plugins/mail
-    cargo run -p treer-cli -- plugin validate plugins/telegram
+    cd apps/mail/web && pnpm typecheck
+    cd apps/mail/web && pnpm build
+    python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
     cargo build --workspace
-    python3 scripts/test-messaging-plugins-e2e.py
     cargo fmt --all -- --check
     cargo test --workspace
     cargo clippy --workspace --all-targets -- -D warnings
@@ -43,25 +38,25 @@ web:
 web-build:
     cd web && pnpm build
 
-mail config:
-    TREER_ENABLE_PLUGIN_EXECUTION=true cargo run -p treer-cli -- plugin run mail --config {{config}}
+mail config state=".treer/apps/mail":
+    TREER_APP_CONFIG={{config}} TREER_APP_STATE_DIR={{state}} python3 apps/mail/mail.py
 
 mail-web:
-    cd plugins/mail/web && pnpm dev
+    cd apps/mail/web && pnpm dev
 
 mail-test:
-    python3 -m unittest discover -s plugins/mail/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
 
 telegram-test:
-    python3 -m unittest discover -s plugins/telegram/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
 
-plugin-boundary-test:
-    node --test scripts/check-plugins.test.mjs
-    node scripts/check-plugins.mjs
+app-test:
+    python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
 
 messaging-e2e:
-    cargo build --workspace
-    python3 scripts/test-messaging-plugins-e2e.py
+    cargo test -p treer-proxy message_
+    just app-test
 
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}

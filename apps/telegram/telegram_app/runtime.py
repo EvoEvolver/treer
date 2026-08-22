@@ -25,12 +25,14 @@ from .common import (
 from .state import StateStore
 
 def load_config() -> tuple[Config, Path, str, str]:
-    config_path = os.environ.get("TREER_PLUGIN_CONFIG")
-    state_value = os.environ.get("TREER_PLUGIN_STATE_DIR")
-    cli = os.environ.get("TREER_CLI")
+    config_path = os.environ.get("TREER_APP_CONFIG")
+    state_value = os.environ.get("TREER_APP_STATE_DIR")
+    cli = os.environ.get("TREER_CLI", "treer")
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not config_path or not state_value or not cli or not token:
-        raise BridgeError("Telegram plugin must run through `treer plugin run` with its bot token")
+        raise BridgeError(
+            "TREER_APP_CONFIG, TREER_APP_STATE_DIR, and TELEGRAM_BOT_TOKEN are required"
+        )
     if len(token) > 256 or any(character.isspace() for character in token):
         raise BridgeError("TELEGRAM_BOT_TOKEN is invalid")
     with open(config_path, "rb") as handle:
@@ -159,7 +161,7 @@ def run_forever(bridge: TelegramBridge) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Treer Telegram CLI-only Message bridge")
+    parser = argparse.ArgumentParser(description="Treer Telegram Message App")
     parser.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:

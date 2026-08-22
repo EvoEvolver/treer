@@ -8,7 +8,6 @@ pub const PROTOCOL_VERSION: u32 = 3;
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MESSAGE_SCHEMA_VERSION: u32 = 1;
-pub const PLUGIN_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BODY_BYTES: usize = 32 * 1024;
 pub const MAX_MESSAGE_RECIPIENTS: usize = 32;
 pub const MAX_MESSAGE_CONTEXTS: usize = 32;
@@ -16,13 +15,10 @@ pub const MAX_MESSAGE_PAGE_SIZE: u16 = 100;
 pub const MAX_MESSAGE_WAIT_MILLISECONDS: u64 = 30_000;
 pub const MAX_MESSAGE_IDEMPOTENCY_KEY_BYTES: usize = 256;
 pub const MAX_MESSAGE_EXTERNAL_METADATA_ENTRIES: usize = 16;
-pub const MAX_PLUGIN_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
 pub const WORKLOAD_CREDENTIAL_HEADER: &str = "x-treer-workload-credential";
 pub const OPERATOR_CREDENTIAL_HEADER: &str = "x-treer-operator-credential";
-pub const PLUGIN_ID_HEADER: &str = "x-treer-plugin-id";
-pub const PLUGIN_SESSION_HEADER: &str = "x-treer-plugin-session";
 pub const TERMINAL_BINARY_VERSION: u8 = 1;
 const TERMINAL_BINARY_HEADER_LEN: usize = 12;
 pub const NETWORK_BINARY_VERSION: u8 = 1;
@@ -520,104 +516,6 @@ pub struct ImportMessagesResponse {
     pub imported: u64,
     pub existing: u64,
     pub message_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginEntrypoint {
-    pub argv: Vec<String>,
-    #[serde(default)]
-    pub operating_systems: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginHttpService {
-    pub health_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen_environment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginManifest {
-    pub schema_version: u32,
-    pub id: String,
-    pub display_name: String,
-    pub version: String,
-    pub minimum_treer_version: String,
-    pub entrypoint: PluginEntrypoint,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(default)]
-    pub configuration: Vec<String>,
-    #[serde(default)]
-    pub secrets: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_service: Option<PluginHttpService>,
-    pub state_version: u32,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub checksums: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginOAuthStartRequest {
-    pub plugin_id: String,
-    pub service_id: String,
-    pub redirect_uri: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginOAuthStartResponse {
-    pub authorize_url: String,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginOAuthExchangeRequest {
-    pub plugin_id: String,
-    pub service_id: String,
-    pub code: String,
-    pub state: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginHumanSession {
-    pub plugin_id: String,
-    pub workspace_id: String,
-    pub service_id: String,
-    pub principal: MessagePrincipal,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginOAuthExchangeResponse {
-    pub session_capability: String,
-    pub session: PluginHumanSession,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RevokePluginSessionRequest {
-    pub plugin_id: String,
-    pub session_capability: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RevokePluginSessionsRequest {
-    pub plugin_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RevokePluginSessionsResponse {
-    pub revoked: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1533,7 +1431,9 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, ProtocolError> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_value(pair[0]).ok_or_else(invalid_enrollment_key)?;
             let low = hex_value(pair[1]).ok_or_else(invalid_enrollment_key)?;
@@ -1928,74 +1828,6 @@ mod tests {
                 limit: 50,
                 wait_milliseconds: 0,
             }
-        );
-    }
-
-    #[test]
-    fn plugin_manifest_wire_shape_is_strict() {
-        let manifest = PluginManifest {
-            schema_version: PLUGIN_MANIFEST_SCHEMA_VERSION,
-            id: "telegram".to_string(),
-            display_name: "Telegram".to_string(),
-            version: "0.1.0".to_string(),
-            minimum_treer_version: "0.1.2".to_string(),
-            entrypoint: PluginEntrypoint {
-                argv: vec!["python3".to_string(), "telegram.py".to_string()],
-                operating_systems: vec!["linux".to_string(), "macos".to_string()],
-            },
-            capabilities: vec![
-                "message.send".to_string(),
-                "message.receive".to_string(),
-                "message.ack".to_string(),
-            ],
-            configuration: vec!["TREER_TELEGRAM_CONFIG".to_string()],
-            secrets: vec!["TELEGRAM_BOT_TOKEN".to_string()],
-            http_service: None,
-            state_version: 1,
-            checksums: BTreeMap::new(),
-        };
-        let encoded = serde_json::to_value(&manifest).expect("serialize manifest");
-        assert_eq!(
-            serde_json::from_value::<PluginManifest>(encoded).expect("deserialize manifest"),
-            manifest
-        );
-        assert!(serde_json::from_value::<PluginManifest>(serde_json::json!({
-            "schema_version": 1,
-            "id": "telegram",
-            "display_name": "Telegram",
-            "version": "0.1.0",
-            "minimum_treer_version": "0.1.2",
-            "entrypoint": {"argv": ["telegram.py"]},
-            "state_version": 1,
-            "install_hook": "./run-me"
-        }))
-        .is_err());
-    }
-
-    #[test]
-    fn plugin_human_session_wire_contract_is_strict() {
-        let request = PluginOAuthExchangeRequest {
-            plugin_id: "mail".to_string(),
-            service_id: "svc_mail".to_string(),
-            code: "aoc_code".to_string(),
-            state: "pos_state".to_string(),
-        };
-        assert_eq!(
-            serde_json::to_value(request).expect("serialize plugin exchange"),
-            serde_json::json!({
-                "plugin_id": "mail",
-                "service_id": "svc_mail",
-                "code": "aoc_code",
-                "state": "pos_state"
-            })
-        );
-        assert!(
-            serde_json::from_value::<RevokePluginSessionRequest>(serde_json::json!({
-                "plugin_id": "mail",
-                "session_capability": "phs_id.secret",
-                "unexpected": true
-            }))
-            .is_err()
         );
     }
 }

@@ -214,7 +214,7 @@ class TelegramBridge:
                 self.cli.run(["agent", "prompt", target, prompt])
                 self.state.finish_wake(int(wake["update_id"]), "sent")
             except CliError as error:
-                status = "failed" if error.code in {"policy_denied", "plugin_command_denied"} else "pending"
+                status = "failed" if error.code == "policy_denied" else "pending"
                 self.state.finish_wake(int(wake["update_id"]), status, error.code)
 
     def run_outbound_once(self, wait_milliseconds: int | None = None) -> int:

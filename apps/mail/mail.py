@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Treer Mail HTTP compatibility surface implemented only through treer CLI calls."""
+"""Treer Mail application backed by the Treer App and Core Message APIs."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.cookies
 import json
@@ -11,11 +12,12 @@ import os
 import re
 import secrets
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -30,7 +32,7 @@ MAX_MESSAGE_BODY_BYTES = 32 * 1024
 MAX_RECIPIENTS = 32
 MAX_CONTEXTS = 32
 MAX_PAGE_SIZE = 100
-CLI_TIMEOUT_SECONDS = 125
+API_TIMEOUT_SECONDS = 125
 RFC3339_NANOSECONDS = re.compile(
     r"^(?P<seconds>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?P<fraction>\.\d+)(?P<zone>Z|[+-]\d{2}:\d{2})$"
@@ -45,7 +47,7 @@ class MailError(Exception):
         self.code = code
 
 
-class CliError(Exception):
+class AppApiError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
@@ -74,7 +76,7 @@ class Config:
 @dataclass(frozen=True)
 class BrowserSession:
     token_hash: str
-    capability: str
+    access_token: str
     workspace_id: str
     service_id: str
     user_id: str
@@ -83,51 +85,59 @@ class BrowserSession:
     expires_at: float
 
 
-class TreerCli:
-    def __init__(self, executable: str) -> None:
-        self.executable = executable
+class TreerAppClient:
+    def __init__(self, proxy_public_url: str, service_id: str) -> None:
+        self.proxy_public_url = proxy_public_url
+        self.service_id = service_id
 
-    def run(
+    def request(
         self,
-        arguments: list[str],
+        method: str,
+        path: str,
         *,
-        stdin: str | None = None,
-        human_session: str | None = None,
+        access_token: str | None = None,
+        body: dict[str, Any] | None = None,
+        form: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        environment = os.environ.copy()
-        if human_session:
-            environment["TREER_PLUGIN_HUMAN_SESSION"] = human_session
-        else:
-            environment.pop("TREER_PLUGIN_HUMAN_SESSION", None)
+        headers = {"Accept": "application/json"}
+        data = None
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        elif form is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            data = urllib.parse.urlencode(form).encode("ascii")
+        request = urllib.request.Request(
+            urllib.parse.urljoin(self.proxy_public_url, path.lstrip("/")),
+            data=data,
+            headers=headers,
+            method=method,
+        )
         try:
-            completed = subprocess.run(
-                [self.executable, *arguments],
-                input=stdin,
-                capture_output=True,
-                text=True,
-                timeout=CLI_TIMEOUT_SECONDS,
-                check=False,
-                env=environment,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise CliError("plugin_cli_unavailable", "Treer CLI is unavailable") from error
-        if completed.returncode != 0:
-            code = "plugin_cli_failed"
+            with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
+                payload = response.read(MAX_REQUEST_BYTES)
+        except urllib.error.HTTPError as error:
+            payload = error.read(MAX_REQUEST_BYTES)
+            code = "app_api_failed"
             message = "Treer rejected the request"
             try:
-                failure = json.loads(completed.stderr.strip())
+                failure = json.loads(payload)
                 error = failure.get("error", {})
                 code = str(error.get("code") or code)
                 message = str(error.get("message") or message)
             except (TypeError, ValueError):
                 pass
-            raise CliError(code, message)
+            raise AppApiError(code, message)
+        except (OSError, urllib.error.URLError) as error:
+            raise AppApiError("app_api_unavailable", "Treer API is unavailable") from error
         try:
-            value = json.loads(completed.stdout)
+            value = json.loads(payload)
         except ValueError as error:
-            raise CliError("plugin_cli_invalid_response", "Treer CLI returned invalid JSON") from error
+            raise AppApiError("app_api_invalid_response", "Treer returned invalid JSON") from error
         if not isinstance(value, dict):
-            raise CliError("plugin_cli_invalid_response", "Treer CLI returned an invalid object")
+            raise AppApiError("app_api_invalid_response", "Treer returned an invalid object")
         return value
 
 
@@ -141,14 +151,15 @@ class SessionStore:
                 """
                 PRAGMA journal_mode = WAL;
                 PRAGMA foreign_keys = ON;
-                CREATE TABLE IF NOT EXISTS pending_oauth (
+                CREATE TABLE IF NOT EXISTS app_pending_oauth (
                     state_hash TEXT PRIMARY KEY,
+                    verifier TEXT NOT NULL,
                     return_path TEXT NOT NULL,
                     expires_at REAL NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS browser_sessions (
+                CREATE TABLE IF NOT EXISTS app_browser_sessions (
                     token_hash TEXT PRIMARY KEY,
-                    capability TEXT NOT NULL,
+                    access_token TEXT NOT NULL,
                     workspace_id TEXT NOT NULL,
                     service_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
@@ -157,8 +168,8 @@ class SessionStore:
                     expires_at REAL NOT NULL,
                     created_at REAL NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS browser_sessions_expiry
-                    ON browser_sessions(expires_at);
+                CREATE INDEX IF NOT EXISTS app_browser_sessions_expiry
+                    ON app_browser_sessions(expires_at);
                 """
             )
 
@@ -167,50 +178,50 @@ class SessionStore:
         connection.row_factory = sqlite3.Row
         return connection
 
-    def save_oauth(self, state: str, return_path: str, expires_at: float) -> None:
+    def save_oauth(self, state: str, verifier: str, return_path: str, expires_at: float) -> None:
         now = time.time()
         with self._lock, self._connect() as connection:
-            connection.execute("DELETE FROM pending_oauth WHERE expires_at <= ?", (now,))
+            connection.execute("DELETE FROM app_pending_oauth WHERE expires_at <= ?", (now,))
             connection.execute(
-                "INSERT INTO pending_oauth(state_hash, return_path, expires_at) VALUES (?, ?, ?)",
-                (_secret_hash(state), return_path, expires_at),
+                "INSERT INTO app_pending_oauth(state_hash, verifier, return_path, expires_at) VALUES (?, ?, ?, ?)",
+                (_secret_hash(state), verifier, return_path, expires_at),
             )
 
-    def consume_oauth(self, state: str) -> str | None:
+    def consume_oauth(self, state: str) -> tuple[str, str] | None:
         now = time.time()
         state_hash = _secret_hash(state)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT return_path FROM pending_oauth WHERE state_hash = ? AND expires_at > ?",
+                "SELECT verifier, return_path FROM app_pending_oauth WHERE state_hash = ? AND expires_at > ?",
                 (state_hash, now),
             ).fetchone()
-            connection.execute("DELETE FROM pending_oauth WHERE state_hash = ?", (state_hash,))
-            return str(row["return_path"]) if row else None
+            connection.execute("DELETE FROM app_pending_oauth WHERE state_hash = ?", (state_hash,))
+            return (str(row["verifier"]), str(row["return_path"])) if row else None
 
-    def save_session(self, raw_token: str, capability: str, session: dict[str, Any]) -> BrowserSession:
-        principal = _object(session.get("principal"), "OAuth session principal")
-        expires_at = _timestamp(session.get("expires_at"), "OAuth session expiry")
+    def save_session(
+        self, raw_token: str, access_token: str, claims: dict[str, Any], expires_at: float
+    ) -> BrowserSession:
         record = BrowserSession(
             token_hash=_secret_hash(raw_token),
-            capability=_bounded_string(capability, "session capability", 512),
-            workspace_id=_bounded_string(session.get("workspace_id"), "workspace ID", 256),
-            service_id=_bounded_string(session.get("service_id"), "service ID", 256),
-            user_id=_bounded_string(principal.get("id"), "user ID", 256),
-            preferred_name=_bounded_string(principal.get("name"), "user name", 256),
-            role=_bounded_string(principal.get("role") or "member", "user role", 64),
+            access_token=_bounded_string(access_token, "access token", 8192),
+            workspace_id=_bounded_string(claims.get("workspace_id"), "workspace ID", 256),
+            service_id=_bounded_string(claims.get("service_id"), "service ID", 256),
+            user_id=_bounded_string(claims.get("sub"), "user ID", 256),
+            preferred_name=_bounded_string(claims.get("name"), "user name", 256),
+            role=_bounded_string(claims.get("role") or "member", "user role", 64),
             expires_at=expires_at,
         )
         with self._lock, self._connect() as connection:
-            connection.execute("DELETE FROM browser_sessions WHERE expires_at <= ?", (time.time(),))
+            connection.execute("DELETE FROM app_browser_sessions WHERE expires_at <= ?", (time.time(),))
             connection.execute(
-                """INSERT INTO browser_sessions(
-                       token_hash, capability, workspace_id, service_id, user_id,
+                """INSERT INTO app_browser_sessions(
+                       token_hash, access_token, workspace_id, service_id, user_id,
                        preferred_name, role, expires_at, created_at
                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     record.token_hash,
-                    record.capability,
+                    record.access_token,
                     record.workspace_id,
                     record.service_id,
                     record.user_id,
@@ -225,9 +236,9 @@ class SessionStore:
     def session(self, raw_token: str) -> BrowserSession | None:
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                """SELECT token_hash, capability, workspace_id, service_id, user_id,
+                """SELECT token_hash, access_token, workspace_id, service_id, user_id,
                           preferred_name, role, expires_at
-                   FROM browser_sessions WHERE token_hash = ? AND expires_at > ?""",
+                   FROM app_browser_sessions WHERE token_hash = ? AND expires_at > ?""",
                 (_secret_hash(raw_token), time.time()),
             ).fetchone()
         return BrowserSession(**dict(row)) if row else None
@@ -235,7 +246,7 @@ class SessionStore:
     def update_principal(self, record: BrowserSession, name: str, role: str) -> BrowserSession:
         updated = BrowserSession(
             token_hash=record.token_hash,
-            capability=record.capability,
+            access_token=record.access_token,
             workspace_id=record.workspace_id,
             service_id=record.service_id,
             user_id=record.user_id,
@@ -245,7 +256,7 @@ class SessionStore:
         )
         with self._lock, self._connect() as connection:
             connection.execute(
-                "UPDATE browser_sessions SET preferred_name = ?, role = ? WHERE token_hash = ?",
+                "UPDATE app_browser_sessions SET preferred_name = ?, role = ? WHERE token_hash = ?",
                 (name, role, record.token_hash),
             )
         return updated
@@ -253,62 +264,70 @@ class SessionStore:
     def delete_session(self, raw_token: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
-                "DELETE FROM browser_sessions WHERE token_hash = ?", (_secret_hash(raw_token),)
+                "DELETE FROM app_browser_sessions WHERE token_hash = ?", (_secret_hash(raw_token),)
             )
 
 
 class MailApplication:
-    def __init__(self, config: Config, cli: TreerCli, sessions: SessionStore) -> None:
+    def __init__(self, config: Config, api: TreerAppClient, sessions: SessionStore) -> None:
         self.config = config
-        self.cli = cli
+        self.api = api
         self.sessions = sessions
 
     def start_oauth(self, return_to: str) -> str:
         return_path = _local_return_path(return_to)
-        response = self.cli.run(
-            [
-                "plugin",
-                "auth",
-                "start",
-                "--service",
-                self.config.service_id,
-                "--redirect-uri",
-                self.config.callback_url,
-            ]
+        state = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(48)
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
+        query = urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": self.config.service_id,
+                "redirect_uri": self.config.callback_url,
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            }
         )
-        authorize_url = _bounded_string(response.get("authorize_url"), "authorize URL", 8192)
-        parsed = urllib.parse.urlsplit(authorize_url)
-        state = urllib.parse.parse_qs(parsed.query).get("state", [""])[0]
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or not state:
-            raise MailError(502, "Treer returned an invalid authorization URL", "oauth_start_invalid")
-        expires_at = _timestamp(response.get("expires_at"), "OAuth state expiry")
-        self.sessions.save_oauth(state, return_path, expires_at)
-        return authorize_url
+        self.sessions.save_oauth(state, verifier, return_path, time.time() + 600)
+        return urllib.parse.urljoin(
+            self.config.proxy_public_url, f"api/apps/oauth/authorize?{query}"
+        )
 
     def finish_oauth(self, code: str, state: str) -> tuple[str, str, int]:
         code = _bounded_string(code, "OAuth code", 4096)
         state = _bounded_string(state, "OAuth state", 4096)
-        return_path = self.sessions.consume_oauth(state)
-        if return_path is None:
+        pending = self.sessions.consume_oauth(state)
+        if pending is None:
             raise MailError(401, "OAuth state is invalid or expired", "oauth_state_invalid")
-        response = self.cli.run(
-            [
-                "plugin",
-                "auth",
-                "exchange",
-                "--service",
-                self.config.service_id,
-                "--code",
-                code,
-                "--state",
-                state,
-            ]
+        verifier, return_path = pending
+        response = self.api.request(
+            "POST",
+            "/api/apps/oauth/token",
+            form={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": self.config.service_id,
+                "redirect_uri": self.config.callback_url,
+                "code_verifier": verifier,
+            },
         )
-        capability = _bounded_string(response.get("session_capability"), "session capability", 512)
+        access_token = _bounded_string(response.get("access_token"), "access token", 8192)
+        expires_at = _timestamp(response.get("expires_at"), "access token expiry")
+        verified = self.api.request(
+            "POST",
+            "/.treer/apps/identity/verify",
+            body={"token": access_token, "audience": self.config.service_id},
+        )
+        if verified.get("active") is not True:
+            raise MailError(401, "OAuth identity is inactive", "oauth_identity_invalid")
+        claims = _object(verified.get("claims"), "OAuth identity claims")
+        if claims.get("principal_kind") != "human":
+            raise MailError(401, "OAuth identity is not human", "oauth_identity_invalid")
         raw_token = "mas_" + secrets.token_urlsafe(48)
-        record = self.sessions.save_session(
-            raw_token, capability, _object(response.get("session"), "OAuth session")
-        )
+        record = self.sessions.save_session(raw_token, access_token, claims, expires_at)
         if record.service_id != self.config.service_id:
             self.sessions.delete_session(raw_token)
             raise MailError(401, "OAuth session has the wrong service", "oauth_session_invalid")
@@ -321,48 +340,30 @@ class MailApplication:
         record = self.sessions.session(raw_token)
         if record is None:
             raise MailError(401, "Mail login required", "mail_login_required")
-        try:
-            response = self.cli.run(["member", "list"], human_session=record.capability)
-        except CliError as error:
-            if error.code == "plugin_session_invalid":
-                self.sessions.delete_session(raw_token)
-            raise
-        humans = _list(response.get("humans"), "human directory")
-        for item in humans:
-            human = _object(item, "human directory item")
-            if human.get("user_id") == record.user_id:
-                name = _bounded_string(human.get("preferred_name"), "user name", 256)
-                role = _bounded_string(human.get("role"), "user role", 64)
-                if name != record.preferred_name or role != record.role:
-                    return self.sessions.update_principal(record, name, role)
-                return record
-        self.sessions.delete_session(raw_token)
-        raise MailError(401, "Mail login required", "mail_membership_removed")
+        verified = self.api.request(
+            "POST",
+            "/.treer/apps/identity/verify",
+            body={"token": record.access_token, "audience": self.config.service_id},
+        )
+        if verified.get("active") is not True:
+            self.sessions.delete_session(raw_token)
+            raise MailError(401, "Mail login required", "mail_identity_inactive")
+        claims = _object(verified.get("claims"), "App identity claims")
+        name = _bounded_string(claims.get("name"), "user name", 256)
+        role = _bounded_string(claims.get("role") or "member", "user role", 64)
+        if claims.get("sub") != record.user_id or claims.get("service_id") != record.service_id:
+            self.sessions.delete_session(raw_token)
+            raise MailError(401, "Mail login required", "mail_identity_changed")
+        if name != record.preferred_name or role != record.role:
+            return self.sessions.update_principal(record, name, role)
+        return record
 
     def directory(self, record: BrowserSession) -> dict[str, Any]:
-        human_response = self.cli.run(["member", "list"], human_session=record.capability)
-        agent_response = self.cli.run(["agent", "list"], human_session=record.capability)
-        principals: list[dict[str, Any]] = []
-        for value in _list(agent_response.get("agents"), "Agent directory"):
-            agent = _object(value, "Agent directory item")
-            principals.append(
-                {
-                    "kind": "agent",
-                    "id": _bounded_string(agent.get("agent_id"), "Agent ID", 256),
-                    "name": _bounded_string(agent.get("name"), "Agent name", 256),
-                }
-            )
-        for value in _list(human_response.get("humans"), "human directory"):
-            human = _object(value, "human directory item")
-            principals.append(
-                {
-                    "kind": "human",
-                    "id": _bounded_string(human.get("user_id"), "user ID", 256),
-                    "name": _bounded_string(human.get("preferred_name"), "user name", 256),
-                    "role": _bounded_string(human.get("role"), "user role", 64),
-                }
-            )
-        return {"principals": principals}
+        return self.api.request(
+            "GET",
+            f"/api/apps/{self.config.service_id}/directory",
+            access_token=record.access_token,
+        )
 
     def send_message(self, record: BrowserSession, request: dict[str, Any], key: str | None) -> dict[str, Any]:
         recipients = _string_list(request.get("recipients", []), "recipients", MAX_RECIPIENTS)
@@ -374,19 +375,25 @@ class MailApplication:
             raise MailError(400, "message requires 1-32 recipients", "message_recipients_invalid")
         idempotency_key = key or "mail-web-" + secrets.token_hex(16)
         _bounded_string(idempotency_key, "idempotency key", 256)
-        arguments = ["message", "send"]
-        for recipient in recipients:
-            arguments.extend(["--to", recipient])
-        for context in contexts:
-            arguments.extend(["--context", context])
-        arguments.extend(["--idempotency-key", idempotency_key, "--body-file", "-"])
-        response = self.cli.run(arguments, stdin=body, human_session=record.capability)
+        response = self.api.request(
+            "POST",
+            f"/api/apps/{self.config.service_id}/messages",
+            access_token=record.access_token,
+            body={
+                "recipients": recipients,
+                "context_ids": contexts,
+                "body": body,
+                "idempotency_key": idempotency_key,
+            },
+        )
         return {"message": _object(response.get("message"), "sent Message")}
 
     def recent_messages(self, record: BrowserSession, limit: int) -> dict[str, Any]:
         limit = _page_limit(limit)
-        history = self.cli.run(
-            ["message", "list", "--limit", str(limit)], human_session=record.capability
+        history = self.api.request(
+            "GET",
+            f"/api/apps/{self.config.service_id}/messages?limit={limit}",
+            access_token=record.access_token,
         )
         messages = [
             _object(value, "Message")
@@ -402,9 +409,11 @@ class MailApplication:
                 for recipient in message.get("recipients", [])
             )
         ]
-        received = self.cli.run(
-            ["message", "receive", "--limit", str(MAX_PAGE_SIZE)],
-            human_session=record.capability,
+        received = self.api.request(
+            "POST",
+            f"/api/apps/{self.config.service_id}/messages/receive",
+            access_token=record.access_token,
+            body={"limit": MAX_PAGE_SIZE, "wait_milliseconds": 0},
         )
         visible_ids = {str(message.get("message_id")) for message in messages}
         delivery_ids: list[str] = []
@@ -430,8 +439,11 @@ class MailApplication:
 
     def unread_inbox(self, record: BrowserSession, limit: int) -> dict[str, Any]:
         limit = _page_limit(limit)
-        response = self.cli.run(
-            ["message", "receive", "--limit", str(limit)], human_session=record.capability
+        response = self.api.request(
+            "POST",
+            f"/api/apps/{self.config.service_id}/messages/receive",
+            access_token=record.access_token,
+            body={"limit": limit, "wait_milliseconds": 0},
         )
         deliveries = [_object(value, "Message delivery") for value in _list(response.get("deliveries"), "Message deliveries")]
         delivery_ids = [
@@ -453,27 +465,19 @@ class MailApplication:
     def _ack(self, record: BrowserSession, delivery_ids: list[str]) -> None:
         if not delivery_ids:
             return
-        self.cli.run(
-            [
-                "message",
-                "ack",
-                *delivery_ids,
-                "--operation-id",
-                "mail-read-" + secrets.token_hex(16),
-            ],
-            human_session=record.capability,
+        self.api.request(
+            "POST",
+            f"/api/apps/{self.config.service_id}/messages/ack",
+            access_token=record.access_token,
+            body={
+                "delivery_ids": delivery_ids,
+                "operation_id": "mail-read-" + secrets.token_hex(16),
+            },
         )
 
     def logout(self, raw_token: str | None) -> None:
         if not raw_token:
             return
-        record = self.sessions.session(raw_token)
-        if record is not None:
-            try:
-                self.cli.run(["plugin", "auth", "revoke", record.capability])
-            except CliError as error:
-                if error.code != "plugin_session_invalid":
-                    raise
         self.sessions.delete_session(raw_token)
 
 
@@ -555,8 +559,8 @@ class MailHandler(BaseHTTPRequestHandler):
                 self._static(path, head=method == "HEAD")
             else:
                 raise MailError(405, "method not allowed", "method_not_allowed")
-        except CliError as error:
-            self._error(_cli_mail_error(error))
+        except AppApiError as error:
+            self._error(_app_api_mail_error(error))
         except MailError as error:
             self._error(error)
         except (BrokenPipeError, ConnectionResetError):
@@ -680,14 +684,14 @@ def _session_response(record: BrowserSession) -> dict[str, Any]:
     }
 
 
-def _cli_mail_error(error: CliError) -> MailError:
-    if error.code in {"plugin_session_invalid", "plugin_bridge_agent_required"}:
+def _app_api_mail_error(error: AppApiError) -> MailError:
+    if error.code == "app_authentication_required":
         return MailError(401, "Mail login required", error.code)
-    if error.code in {"policy_denied", "plugin_session_command_denied", "plugin_command_denied"}:
+    if error.code == "policy_denied":
         return MailError(403, error.message, error.code)
     if error.code.endswith("_not_found") or error.code in {"message_recipient_unavailable"}:
         return MailError(404, error.message, error.code)
-    if error.code.startswith("message_") or error.code.startswith("plugin_oauth_"):
+    if error.code.startswith("message_") or error.code.startswith("app_oauth_"):
         return MailError(400, error.message, error.code)
     return MailError(502, "Treer control plane is unavailable", error.code)
 
@@ -698,13 +702,13 @@ def _secret_hash(value: str) -> str:
 
 def _object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise MailError(502, f"Treer returned an invalid {label}", "plugin_cli_invalid_response")
+        raise MailError(502, f"Treer returned an invalid {label}", "app_api_invalid_response")
     return value
 
 
 def _list(value: Any, label: str) -> list[Any]:
     if not isinstance(value, list):
-        raise MailError(502, f"Treer returned an invalid {label}", "plugin_cli_invalid_response")
+        raise MailError(502, f"Treer returned an invalid {label}", "app_api_invalid_response")
     return value
 
 
@@ -725,7 +729,7 @@ def _string_list(value: Any, label: str, maximum: int) -> list[str]:
 
 def _nonnegative_int(value: Any, label: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise MailError(502, f"Treer returned an invalid {label}", "plugin_cli_invalid_response")
+        raise MailError(502, f"Treer returned an invalid {label}", "app_api_invalid_response")
     return value
 
 
@@ -737,7 +741,7 @@ def _timestamp(value: Any, label: str) -> float:
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError as error:
-        raise MailError(502, f"Treer returned an invalid {label}", "plugin_cli_invalid_response") from error
+        raise MailError(502, f"Treer returned an invalid {label}", "app_api_invalid_response") from error
 
 
 def _page_limit(value: Any) -> int:
@@ -784,15 +788,14 @@ def _listen(value: Any) -> tuple[str, int]:
 
 
 def load_config() -> Config:
-    config_path = os.environ.get("TREER_PLUGIN_CONFIG")
-    state_dir = os.environ.get("TREER_PLUGIN_STATE_DIR")
-    cli = os.environ.get("TREER_CLI")
-    if not config_path or not state_dir or not cli:
-        raise ValueError("mail plugin must run through `treer plugin run`")
+    config_path = os.environ.get("TREER_APP_CONFIG")
+    state_dir = os.environ.get("TREER_APP_STATE_DIR")
+    if not config_path or not state_dir:
+        raise ValueError("TREER_APP_CONFIG and TREER_APP_STATE_DIR are required")
     with open(config_path, "rb") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
-        raise ValueError("plugin config must contain a JSON object")
+        raise ValueError("App config must contain a JSON object")
     host, port = _listen(value.get("listen", "127.0.0.1:8788"))
     package = Path(__file__).resolve().parent
     web_value = value.get("web_dir", "web/dist")
@@ -820,7 +823,7 @@ def main() -> int:
         config = load_config()
         application = MailApplication(
             config,
-            TreerCli(os.environ["TREER_CLI"]),
+            TreerAppClient(config.proxy_public_url, config.service_id),
             SessionStore(config.database_path),
         )
         server = MailServer((config.listen_host, config.listen_port), application)

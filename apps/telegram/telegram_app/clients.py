@@ -35,9 +35,9 @@ class TreerCli:
                 env=os.environ.copy(),
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            raise CliError("plugin_cli_unavailable", "Treer CLI is unavailable") from error
+            raise CliError("app_cli_unavailable", "Treer CLI is unavailable") from error
         if completed.returncode != 0:
-            code = "plugin_cli_failed"
+            code = "app_cli_failed"
             message = "Treer rejected the request"
             try:
                 value = json.loads(completed.stderr.strip())
@@ -50,9 +50,9 @@ class TreerCli:
         try:
             value = json.loads(completed.stdout)
         except ValueError as error:
-            raise CliError("plugin_cli_invalid_response", "Treer CLI returned invalid JSON") from error
+            raise CliError("app_cli_invalid_response", "Treer CLI returned invalid JSON") from error
         if not isinstance(value, dict):
-            raise CliError("plugin_cli_invalid_response", "Treer CLI returned an invalid object")
+            raise CliError("app_cli_invalid_response", "Treer CLI returned an invalid object")
         return value
 
 

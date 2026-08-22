@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-FAKE_TREER = PLUGIN_ROOT / "tests/fixtures/fake_treer.py"
-SPEC = importlib.util.spec_from_file_location("treer_telegram_plugin", PLUGIN_ROOT / "telegram.py")
+APP_ROOT = Path(__file__).resolve().parents[1]
+FAKE_TREER = APP_ROOT / "tests/fixtures/fake_treer.py"
+SPEC = importlib.util.spec_from_file_location("treer_telegram_app", APP_ROOT / "telegram.py")
 telegram = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = telegram
@@ -107,9 +107,9 @@ class TelegramBridgeTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.cli_state = self.root / "fake-treer.json"
         self.cli_state.write_text("{}", encoding="utf-8")
-        self.plugin_state = self.root / "plugin-state"
-        self.plugin_state.mkdir()
-        self.database = self.plugin_state / "telegram-state.sqlite3"
+        self.app_state = self.root / "app-state"
+        self.app_state.mkdir()
+        self.database = self.app_state / "telegram-state.sqlite3"
         FAKE_TREER.chmod(0o755)
         os.environ["FAKE_TREER_STATE"] = str(self.cli_state)
         os.environ["FAKE_TELEGRAM_ACK_GUARD_DB"] = str(self.database)
@@ -157,7 +157,7 @@ class TelegramBridgeTest(unittest.TestCase):
             telegram.TreerCli(str(FAKE_TREER)),
             telegram.BotApi(self.config.api_base_url, "999:test", timeout_seconds=2),
             "999",
-            self.plugin_state,
+            self.app_state,
         )
 
     def inbound(self, update_id: int, message_id: int, text: str, *, reply_to: int | None = None, user_id: int = 1234) -> dict[str, Any]:

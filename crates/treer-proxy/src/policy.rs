@@ -50,8 +50,6 @@ pub const ACTION_MESSAGE_READ: &str = "message.read";
 pub const ACTION_MESSAGE_RECEIVE: &str = "message.receive";
 pub const ACTION_MESSAGE_ACK: &str = "message.ack";
 pub const ACTION_MESSAGE_IMPORT: &str = "message.import";
-pub const ACTION_PLUGIN_OAUTH: &str = "plugin.oauth";
-pub const ACTION_PLUGIN_UNINSTALL: &str = "plugin.uninstall";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT: &str = "agent";
 pub const RESOURCE_AGENT_LAUNCH_PROFILE: &str = "agent.launch_profile";
@@ -65,8 +63,6 @@ pub const RESOURCE_MESSAGE: &str = "message";
 pub const RESOURCE_MESSAGE_MAILBOX: &str = "message.mailbox";
 pub const RESOURCE_MESSAGE_DELIVERY: &str = "message.delivery";
 pub const RESOURCE_MESSAGE_IMPORT: &str = "message.import";
-pub const RESOURCE_PLUGIN_SESSION: &str = "plugin.session";
-pub const RESOURCE_PLUGIN_PACKAGE: &str = "plugin.package";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySubject {

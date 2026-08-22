@@ -1,15 +1,31 @@
-# Legacy Treer Mail service
+# Treer Mail App
 
-The Rust `treer-mail` service was replaced by the CLI-only
-[Mail plugin](../../plugins/mail/README.md). Canonical Message data, context
-edges, deliveries, and acknowledgements now live in Treer Core; this directory
-is retained only so links from older deployment notes reach the migration
-procedure.
+Mail is a small HTTP service and React frontend over Core Message. It uses
+Treer's standard App OAuth flow; the local HttpOnly cookie maps to the returned
+short-lived App access token. Core remains the canonical store for Messages,
+contexts, deliveries, and acknowledgements.
 
-Do not start the old service after cutover. Back up its SQLite or PostgreSQL
-database, stop writes, and follow the plugin's documented `migrate.py` workflow.
-The migration requires an explicit `--actor`, preserves source/structural
-checksums and resumable batch checkpoints, and never deletes or modifies the
-source database. Legacy browser
-sessions require one new login because their broad App token cannot be safely
-converted into a plugin-bound human capability.
+Build the frontend:
+
+```sh
+cd apps/mail/web
+pnpm install --frozen-lockfile
+pnpm build
+```
+
+Create a JSON config matching `config.schema.json`, then run:
+
+```sh
+TREER_APP_CONFIG=/etc/treer/mail.json \
+TREER_APP_STATE_DIR=/var/lib/treer/apps/mail \
+python3 apps/mail/mail.py
+```
+
+`service_id` must identify the registered HTTP service and `public_url` must be
+an enabled workspace ingress for it. `proxy_public_url` is the public Proxy URL.
+The state directory stores only pending PKCE requests and browser cookie/token
+mappings; protect and back it up like any application credential store.
+
+For a legacy Mail database, stop old writes, back it up, and run `migrate.py`
+with an operator-authenticated `treer` CLI. The import is resumable and does not
+modify the source database. Existing browser sessions require a new login.

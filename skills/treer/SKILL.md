@@ -36,7 +36,6 @@ treer agent admin --help
 treer agent admin profile --help
 treer machine --help
 treer message --help
-treer plugin --help
 treer network --help
 treer ui --help
 treer member --help
@@ -285,30 +284,16 @@ attention is required, send the durable Message first and then use
 `treer agent prompt` with only the Message ID. `agent.prompt` is a separate,
 stronger policy action; do not copy the Message body into the prompt.
 
-An installed channel plugin may run from a dedicated managed bridge Agent:
+An operator may run a channel App inside a dedicated managed Agent. Such a
+process uses the same `treer` CLI and identity as the Agent; there is no App
+installer, broker, or sandbox exposed through this skill. Core still evaluates
+the Agent's workspace Policy for each command. App configuration, secrets,
+state, supervision, and isolation are operator workflows documented under
+`apps/`.
 
-```bash
-treer plugin list
-treer plugin inspect <plugin-id>
-TREER_ENABLE_PLUGIN_EXECUTION=true \
-  treer plugin run <plugin-id> --config /operator-owned/config.json
-```
-
-Core Message routes, creation of plugin-bound human sessions, and plugin
-execution each have an operator-controlled rollout gate and default off. A
-`core_messages_disabled`, `plugin_sessions_disabled`, or
-`plugin_execution_disabled` result means the deployment is not enabled for the
+Core Message routes have an operator-controlled rollout gate and default off. A
+`core_messages_disabled` result means the deployment is not enabled for the
 workflow; report it instead of inventing another integration path.
-
-The plugin process must use the `TREER_CLI` nested command path supplied by the
-runner. Do not pass, print, or teach a plugin to consume raw Agent, machine, or
-operator credentials; do not bypass the private broker with Controller/Proxy
-routes, Core PostgreSQL, or Core NATS. The runner limits commands to manifest
-capabilities and ordinary workspace policy still authorizes each operation.
-Package installation, secrets, channel setup, and migration are operator
-workflows documented in the repository rather than this managed-Agent skill.
-Plugin uninstall is also a local-operator workflow: it revokes Core human
-sessions, removes installed package versions, and preserves plugin state.
 
 Delete a machine only when it and all of its agents should be removed from the
 workspace. This revokes its credential but does not uninstall the service on

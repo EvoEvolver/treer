@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Treer Telegram plugin configuration",
+  "title": "Treer Telegram App configuration",
   "type": "object",
   "additionalProperties": false,
   "required": ["allowed_user_ids", "bindings"],

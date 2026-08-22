@@ -6,7 +6,6 @@ mod cluster;
 mod event_bus;
 mod identity;
 mod message_store;
-mod plugin_store;
 pub mod policy;
 mod state;
 mod traffic;
@@ -129,13 +128,6 @@ struct Args {
         help = "Enable Core Message API routes after schema and policy rollout"
     )]
     enable_core_messages: bool,
-    #[arg(
-        long,
-        env = "TREER_ENABLE_PLUGIN_SESSIONS",
-        default_value_t = false,
-        help = "Enable creation and exchange of plugin-bound human sessions"
-    )]
-    enable_plugin_sessions: bool,
     #[arg(long, env = "RAILWAY_PUBLIC_DOMAIN", hide = true)]
     railway_public_domain: Option<String>,
     #[arg(long, env = "RAILWAY_REPLICA_ID", hide = true)]
@@ -245,9 +237,6 @@ async fn main() -> anyhow::Result<()> {
     let messages = message_store::MessageStore::open(auth.pool())
         .await
         .context("failed to initialize Core Message storage")?;
-    let plugin_sessions = plugin_store::PluginSessionStore::open(auth.pool())
-        .await
-        .context("failed to initialize plugin session storage")?;
     messages.spawn_outbox_dispatcher(event_bus.clone());
     let traffic = TrafficRecorder::new(auth.pool());
     traffic.spawn_flush_task();
@@ -284,14 +273,13 @@ async fn main() -> anyhow::Result<()> {
         api::BrowserAccess::new(&app_public_url, &proxy_public_url)?,
         ingress.clone(),
         messages,
-        plugin_sessions,
-        api::CapabilityRollout::new(args.enable_core_messages, args.enable_plugin_sessions),
+        api::CapabilityRollout::new(args.enable_core_messages),
     )
     .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
-    info!(address = %listen, %proxy_public_url, %app_public_url, ingress = ?ingress.public_url(), %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, core_messages_enabled = args.enable_core_messages, plugin_sessions_enabled = args.enable_plugin_sessions, "treer proxy listening");
+    info!(address = %listen, %proxy_public_url, %app_public_url, ingress = ?ingress.public_url(), %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, core_messages_enabled = args.enable_core_messages, "treer proxy listening");
     axum::serve(listener, app)
         .await
         .context("proxy server failed")
