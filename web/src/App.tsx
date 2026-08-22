@@ -6,6 +6,8 @@ import {
   ArrowRight,
   ArrowUp,
   Activity,
+  ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CirclePlus,
   Copy,
@@ -17,6 +19,7 @@ import {
   GitBranch,
   KeyRound,
   Keyboard,
+  ListChecks,
   LogOut,
   Mail,
   Maximize2,
@@ -514,6 +517,7 @@ function WorkspaceApp() {
   const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)
   const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen && !selectedAgentUi
+  const mobileSidebarHidden = isMobile && mainView !== "terminal"
 
   const transformTerminalInput = useCallback((data: string) => {
     if (!ctrlArmedRef.current) return data
@@ -695,6 +699,10 @@ function WorkspaceApp() {
 
   function openLaunchProfiles() {
     setMainView("profiles")
+  }
+
+  function closeMainView() {
+    setMainView("terminal")
   }
 
   function openNewLaunchProfile() {
@@ -1038,12 +1046,12 @@ function WorkspaceApp() {
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
   return <TooltipProvider delayDuration={350}>
-    <main className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[272px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", mobileTerminalIdle ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
-      <aside className="flex min-h-0 flex-col border-b bg-[#f7f7f5] md:border-b-0 md:border-r">
+      <main className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[272px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
+        <aside className={cn("flex min-h-0 flex-col border-b bg-[#f7f7f5] md:border-b-0 md:border-r", mobileSidebarHidden && "hidden md:flex")}>
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
           <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={setOrganizationId}><SelectTrigger className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-black/[.04]"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
-          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
@@ -1051,9 +1059,11 @@ function WorkspaceApp() {
           <IconButton label="Create workspace" disabled={!organizationId} onClick={() => setCreateWorkspaceOpen(true)}><Plus /></IconButton>
         </div>
         <div className="px-2 pb-2">
-          <Button variant={mainView === "profiles" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openLaunchProfiles} disabled={!workspaceId}><Rocket className="size-3.5" />Profiles</Button>
-          <Button variant={mainView === "network" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openNetwork} disabled={!workspaceId}><Network className="size-3.5" />Network</Button>
-          {canManageMembers && <Button variant={mainView === "audit" ? "secondary" : "ghost"} className="h-8 w-full justify-start px-2 text-xs font-normal" onClick={openAudit} disabled={!workspaceId}><ScrollText className="size-3.5" />Audit</Button>}
+          <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className={cn("h-8 w-full justify-start gap-2 px-2 text-xs font-normal", mainView !== "terminal" && "bg-black/[.06]")} aria-label="Workspace views"><ListChecks className="size-3.5" />{mainView === "profiles" ? "Profiles" : mainView === "network" ? "Network" : "Workspace"}<ChevronDown className="ml-auto size-3.5 text-muted-foreground" /></Button></DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuItem onSelect={openLaunchProfiles} disabled={!workspaceId}><Rocket />Profiles</DropdownMenuItem>
+              <DropdownMenuItem onSelect={openNetwork} disabled={!workspaceId}><Network />Network</DropdownMenuItem>
+            </DropdownMenuContent></DropdownMenu>
         </div>
 
         <Tabs defaultValue="agents" className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -1082,17 +1092,18 @@ function WorkspaceApp() {
         </Tabs>
 
         <div className="shrink-0 border-t p-2">
-          <Button variant="ghost" className="h-8 w-full justify-start px-2 text-xs font-normal text-muted-foreground" onClick={openMembers} disabled={!organizationId}><Users className="size-3.5" />Members</Button>
           <DropdownMenu>
-            <DropdownMenuTrigger asChild><button className="mt-1 grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-black/[.05]"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { setPreferredName(user.preferred_name); setProfileEmail(user.email); setProfileOpen(true) }}><Pencil />Edit profile</DropdownMenuItem><DropdownMenuItem onSelect={openMembers}><Users />Members</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
+            <DropdownMenuTrigger asChild><button className="grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-black/[.05]"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
+            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { setPreferredName(user.preferred_name); setProfileEmail(user.email); setProfileOpen(true) }}><Pencil />Edit profile</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
           </DropdownMenu>
         </div>
       </aside>
 
       <section className={cn("min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]", mobileTerminalIdle ? "hidden md:grid" : "grid")}>
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
-          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground"><span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "profiles" ? "Profiles" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
+            {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={closeMainView}><ChevronLeft /></IconButton>}
+            <span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "profiles" ? "Profiles" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             {!selectedAgentUi && <IconButton label="Open full-screen terminal" className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>}
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
