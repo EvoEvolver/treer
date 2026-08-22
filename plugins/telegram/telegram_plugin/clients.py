@@ -146,4 +146,3 @@ class BotApi:
                 "allow_sending_without_reply": True,
             }
         return _object(self.call("sendMessage", payload, sending=True), "sendMessage result")
-

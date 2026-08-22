@@ -442,5 +442,3 @@ class StateStore:
                 created_at,
             ),
         )
-
-

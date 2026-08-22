@@ -156,4 +156,3 @@ def _http_url(value: Any) -> str:
     if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
         raise BridgeError("non-loopback Telegram API URLs must use HTTPS")
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
-

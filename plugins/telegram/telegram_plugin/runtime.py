@@ -176,4 +176,3 @@ def main() -> int:
         code = getattr(error, "code", type(error).__name__)
         print(f"Treer Telegram stopped: {code}", file=sys.stderr)
         return 1
-
