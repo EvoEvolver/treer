@@ -25,6 +25,24 @@ acknowledgements remain Core-owned.
 Version 1 uses `getUpdates` long polling. It needs outbound HTTPS access but no
 public webhook, inbound machine port, or Telegram-specific Core route.
 
+## Implementation layout
+
+`telegram.py` is a stable, thin process entrypoint. Implementation ownership is
+split under `telegram_plugin/`:
+
+- `common.py` owns bounded value parsing, shared errors, configuration models,
+  and Telegram text splitting;
+- `clients.py` owns the nested Treer CLI and Telegram Bot API clients;
+- `state.py` owns the SQLite schema, transactions, mappings, retry intents, and
+  restart recovery;
+- `bridge.py` owns inbound and outbound Message orchestration;
+- `runtime.py` owns environment/configuration loading, dependency assembly,
+  signal handling, and worker threads.
+
+Keep Core access behind `TreerCli`, Telegram HTTP behind `BotApi`, and durable
+plugin state behind `StateStore`. The entrypoint re-exports those public types
+for tests but must not accumulate channel behavior or database queries.
+
 ## Treer setup
 
 Run the plugin from a dedicated managed bridge Agent. Inbound Telegram text is
