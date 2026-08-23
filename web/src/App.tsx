@@ -57,7 +57,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
-type MainView = "terminal" | "profiles" | "network" | "audit"
+type MainView = "terminal" | "profiles" | "network" | "audit" | "machine"
 type AuthMode = "login" | "register" | "forgot" | "reset"
 type AuthConfig = { github: boolean; google: boolean; invitation_required: boolean }
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
@@ -346,6 +346,7 @@ function WorkspaceApp() {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionState>("connecting")
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
   const [agentUiRevision, setAgentUiRevision] = useState(0)
@@ -518,6 +519,7 @@ function WorkspaceApp() {
   const canManageMembers = ["owner", "admin"].includes(currentRole)
   const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen && !selectedAgentUi
   const mobileSidebarHidden = isMobile && mainView !== "terminal"
+  const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
 
   const transformTerminalInput = useCallback((data: string) => {
     if (!ctrlArmedRef.current) return data
@@ -864,6 +866,11 @@ function WorkspaceApp() {
     if (mainView === "network") loadNetwork().catch(showError)
   }, [mainView, loadNetwork, showError])
 
+  function showMachineOverview(serverId: string) {
+    setSelectedMachineId(serverId)
+    setMainView("machine")
+  }
+
   function openNetwork() {
     setMainView("network")
   }
@@ -889,7 +896,8 @@ function WorkspaceApp() {
 
   useEffect(() => {
     if (mainView === "audit") loadAudit().catch(showError)
-  }, [mainView, loadAudit, showError])
+    if (mainView === "machine") { loadNetwork().catch(showError); loadAudit().catch(showError) }
+  }, [mainView, loadAudit, loadNetwork, showError])
 
   function openAudit() {
     setMainView("audit")
@@ -1075,7 +1083,7 @@ function WorkspaceApp() {
             <div className="flex h-full min-h-0 flex-col">
               <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
-                {snapshot?.servers.map((machine) => <MachineItem key={machine.server_id} machine={machine} onRename={() => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDelete={() => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} />)}
+                {snapshot?.servers.map((machine) => <MachineItem key={machine.server_id} machine={machine} selected={mainView === "machine" && machine.server_id === selectedMachineId} onClick={() => showMachineOverview(machine.server_id)} onRename={() => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDelete={() => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} />)}
                 {snapshot && !snapshot.servers.length && <EmptyState icon={<Server />} label="No machines connected" />}
               </div>
             </div>
@@ -1139,7 +1147,7 @@ function WorkspaceApp() {
               </div>
             </div>}
           </div>
-        </div> : mainView === "profiles" ? <LaunchProfilesView profiles={launchProfiles} loading={launchProfilesLoading} onEdit={openEditLaunchProfile} onLaunch={openLaunchProfile} onDelete={setDeletingProfile} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} machines={snapshot?.servers ?? []} loading={auditLoading} /> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
+        </div> : mainView === "profiles" ? <LaunchProfilesView profiles={launchProfiles} loading={launchProfilesLoading} onEdit={openEditLaunchProfile} onLaunch={openLaunchProfile} onDelete={setDeletingProfile} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} onOpenAgent={showAgentTerminal} onClose={closeMainView} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} machines={snapshot?.servers ?? []} loading={auditLoading} /> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
       </section>
     </main>
 
@@ -1211,10 +1219,105 @@ function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {
   return <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[11px] text-muted-foreground"><span className="[&_svg]:size-4 [&_svg]:opacity-50">{icon}</span>{label}</div>
 }
 
-function MachineItem({ machine, onRename, onDelete }: { machine: Machine; onRename: () => void; onDelete: () => void }) {
+function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, onOpenAgent, onClose }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; onOpenAgent: (agentId: string) => void; onClose: () => void }) {
+  const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
+  const outBytes = traffic.filter((t) => t.source_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
+  const inBytes = traffic.filter((t) => t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
+  const peers = Array.from(new Set(
+    traffic
+      .filter((t) => t.source_server_id === machine?.server_id || t.destination_server_id === machine?.server_id)
+      .map((t) => (t.source_server_id === machine?.server_id ? t.destination_server_id : t.source_server_id)),
+  )).map((id) => machines.find((item) => item.server_id === id)).filter((item): item is Machine => Boolean(item))
+
+  async function probe(serviceId: string) {
+    try {
+      await api(`/api/services/${encodeURIComponent(serviceId)}/probe`, { method: "POST", body: "{}" })
+      setLocalHealth((current) => ({ ...current, [serviceId]: "healthy" }))
+    } catch {
+      setLocalHealth((current) => ({ ...current, [serviceId]: "unreachable" }))
+    }
+  }
+
+  if (!machine) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">Machine not found (or disconnected). <Button variant="outline" className="mt-3" onClick={onClose}>Back</Button></div>
+  const controller = buildLabel(machine.controller_build)
+  const host = buildLabel(machine.host_build)
+
+  return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
+    <div className="mb-8 flex items-start justify-between gap-4">
+      <div>
+        <div className="mb-3 flex items-center gap-3">
+          <span className={cn("inline-flex size-2.5 rounded-full", machine.status === "online" ? "bg-emerald-500" : "bg-zinc-400")} />
+          <h1 className="truncate text-2xl font-semibold">{machineName(machine)}</h1>
+          <span className="text-xs uppercase text-muted-foreground">{machine.status}</span>
+        </div>
+        <p className="font-mono text-xs text-muted-foreground">{machine.server_id}</p>
+        {machine.hostname && <p className="mt-1 font-mono text-xs text-muted-foreground">{machine.hostname}</p>}
+        <p className="mt-2 max-w-2xl break-all font-mono text-[11px] text-muted-foreground" title={machine.root}>{machine.root}</p>
+      </div>
+      <Button variant="outline" className="shrink-0" onClick={onClose}>Close</Button>
+    </div>
+
+    <div className="grid gap-10 md:grid-cols-2">
+      <section className="space-y-3 rounded-md border p-4">
+        <h2 className="text-sm font-semibold">Build</h2>
+        <dl className="grid gap-2 text-xs">
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Controller</dt><dd className="truncate font-mono">{controller}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Host</dt><dd className="truncate font-mono">{host}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Controller commit</dt><dd className="truncate font-mono">{machine.controller_build.git_commit.slice(0, 10)}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Host commit</dt><dd className="truncate font-mono">{machine.host_build.git_commit.slice(0, 10)}</dd></div>
+        </dl>
+      </section>
+
+      <section className="space-y-3 rounded-md border p-4">
+        <h2 className="text-sm font-semibold">Network (last 24h)</h2>
+        <dl className="grid gap-2 text-xs">
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Data sent</dt><dd className="font-mono">{formatBytes(outBytes)}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Data received</dt><dd className="font-mono">{formatBytes(inBytes)}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Peers</dt><dd className="font-mono">{peers.length}</dd></div>
+        </dl>
+        {peers.length > 0 && <div className="flex flex-wrap gap-1.5 pt-2">{peers.map((peer) => <span key={peer.server_id} className="rounded-full bg-black/[.05] px-2 py-1 text-[10px] font-medium">{machineName(peer)}</span>)}</div>}
+      </section>
+    </div>
+
+    <section className="mt-10">
+      <h2 className="mb-3 text-sm font-semibold">Agents on this machine</h2>
+      {agents.length ? <div className="border-y">{agents.map((agent) => <div key={agent.agent_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b py-3 last:border-b-0">
+        <div className="min-w-0">
+          <div className="truncate text-xs font-medium">{agent.name}</div>
+          <div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{agent.kind} · {agent.agent_id}</div>
+        </div>
+        <div className="flex items-center gap-2"><Status value={agent.status} /><Button size="sm" variant="outline" onClick={() => onOpenAgent(agent.agent_id)}>Terminal</Button></div>
+      </div>)}</div> : <EmptyState icon={<TerminalSquare />} label="No agents running on this machine" />}
+    </section>
+
+    <section className="mt-10">
+      <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">Registered services</h2><span className="text-[10px] text-muted-foreground">HTTP / TCP endpoints</span></div>
+      {services.length ? <div className="border-y">{services.map((service) => { const health = localHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b py-3 last:border-b-0">
+        <div className="min-w-0">
+          <div className="truncate text-xs font-medium">{service.name} <span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</div>
+          <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{service.target_host}:{service.target_port} · updated {new Date(service.updated_at).toLocaleString()}</div>
+        </div>
+        <Button size="sm" variant="ghost" onClick={() => probe(service.service_id)} disabled={machine.status !== "online"}>Probe</Button>
+      </div>})}</div> : <EmptyState icon={<Server />} label="No services registered for this machine" />}
+    </section>
+
+    <section className="mt-10">
+      <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">Virtual hosts</h2><span className="text-[10px] text-muted-foreground">Public hostnames targeting this machine</span></div>
+      {virtualHosts.length ? <div className="border-y">{virtualHosts.map((host) => { const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b py-3 last:border-b-0">
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs font-medium">{host.hostname}</div>
+          <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{service?.name ?? host.service_id} · {host.target_host}{host.target_port ? `:${host.target_port}` : ""}</div>
+        </div>
+        <Button size="icon" variant="ghost" aria-label={`Open ${host.hostname}`} onClick={() => window.open(`https://${host.hostname}`, "_blank", "noopener")} disabled={service?.protocol !== "http"}><ExternalLink /></Button>
+      </div>})}</div> : <EmptyState icon={<Network />} label="No virtual hosts routed to this machine" />}
+    </section>
+  </div></div>
+}
+
+function MachineItem({ machine, selected, onClick, onRename, onDelete }: { machine: Machine; selected?: boolean; onClick?: () => void; onRename: () => void; onDelete: () => void }) {
   const builds = `Controller ${buildLabel(machine.controller_build)} · Host ${buildLabel(machine.host_build)}`
   const buildTitle = `Controller ${machine.controller_build.version} (${machine.controller_build.git_commit})\nHost ${machine.host_build.version} (${machine.host_build.git_commit})`
-  return <div className="group flex min-h-[68px] items-start gap-2 rounded-[5px] px-2.5 py-2 hover:bg-black/[.045]"><span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-400", machine.status === "online" && "bg-emerald-500")} /><div className="min-w-0 flex-1"><div className="truncate text-xs font-medium">{machineName(machine)}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{machine.root}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={buildTitle}>{builds}</div></div><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0 opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100" aria-label={`Actions for ${machineName(machine)}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+  return <div className={cn("group flex min-h-[68px] items-start gap-2 rounded-[5px] px-2.5 py-2 hover:bg-black/[.045]", selected && "bg-black/[.075] hover:bg-black/[.075]")}><button type="button" onClick={onClick} className="flex min-w-0 flex-1 items-start gap-2 text-left"><span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-400", machine.status === "online" && "bg-emerald-500")} /><div className="min-w-0 flex-1"><div className="truncate text-xs font-medium">{machineName(machine)}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{machine.root}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={buildTitle}>{builds}</div></div></button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0 opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100" aria-label={`Actions for ${machineName(machine)}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
 }
 
 function AgentItem({ agent, machine, selected, onClick }: { agent: Agent; machine?: Machine; selected: boolean; onClick: () => void }) {
