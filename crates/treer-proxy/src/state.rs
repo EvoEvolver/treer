@@ -1316,6 +1316,7 @@ impl AppState {
         &self,
         workspace_id: &str,
         destination_server_id: &str,
+        destination_agent_id: Option<&str>,
         host: &str,
         port: u16,
     ) -> Result<DuplexStream, ProtocolError> {
@@ -1334,6 +1335,7 @@ impl AppState {
         let request = NetworkConnectRequest {
             source_server_id: "browser".to_string(),
             source_agent_id: None,
+            destination_agent_id: destination_agent_id.map(str::to_string),
             host: host.to_string(),
             port,
         };
@@ -3484,7 +3486,7 @@ mod tests {
         let opening_state = state.clone();
         let opening = tokio::spawn(async move {
             opening_state
-                .open_browser_network_stream("alpha", "server", "127.0.0.1", 8080)
+                .open_browser_network_stream("alpha", "server", Some("agent-a"), "127.0.0.1", 8080)
                 .await
         });
         let open = expect_network(server_rx.recv().await.expect("browser open frame"));
@@ -3494,6 +3496,7 @@ mod tests {
         assert_eq!(request.host, "127.0.0.1");
         assert_eq!(request.port, 8080);
         assert_eq!(request.source_server_id, "browser");
+        assert_eq!(request.destination_agent_id.as_deref(), Some("agent-a"));
 
         state
             .relay_network_frame(

@@ -714,6 +714,8 @@ pub enum AgentCommand {
         host: String,
         port: u16,
         timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_agent_id: Option<String>,
     },
     ShutdownMachine,
 }
@@ -995,6 +997,8 @@ pub struct NetworkConnectRequest {
     pub source_server_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_agent_id: Option<String>,
     pub host: String,
     pub port: u16,
 }
@@ -1018,6 +1022,8 @@ pub struct MachineService {
     pub workspace_id: String,
     pub name: String,
     pub server_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     pub target_host: String,
     pub target_port: u16,
     pub protocol: MachineServiceProtocol,
@@ -1052,6 +1058,8 @@ fn default_agent_ui_path() -> String {
 pub struct CreateMachineServiceRequest {
     pub name: String,
     pub server_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     #[serde(default = "default_network_target_host")]
     pub target_host: String,
     pub target_port: u16,
@@ -1084,6 +1092,8 @@ pub struct VirtualNetworkHost {
     pub service_id: String,
     pub service_protocol: MachineServiceProtocol,
     pub destination_server_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_agent_id: Option<String>,
     pub target_host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_port: Option<u16>,
@@ -1526,6 +1536,7 @@ mod tests {
                     host: "127.0.0.1".to_string(),
                     port: 8080,
                     timeout_ms: 3_000,
+                    target_agent_id: None,
                 },
             },
         };

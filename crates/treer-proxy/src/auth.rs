@@ -1247,7 +1247,7 @@ impl AuthStore {
         workspace_id: &str,
     ) -> Result<Vec<MachineService>, AuthFailure> {
         let rows = sqlx::query(
-            "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
+            "SELECT service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, \
              protocol, created_at, created_by, updated_at, updated_by \
              FROM machine_services WHERE workspace_id = $1 \
              ORDER BY lower(name), service_id",
@@ -1265,7 +1265,7 @@ impl AuthStore {
         target: &str,
     ) -> Result<MachineService, AuthFailure> {
         let row = sqlx::query(
-            "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
+            "SELECT service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, \
              protocol, created_at, created_by, updated_at, updated_by \
              FROM machine_services WHERE workspace_id = $1 AND service_id = $2",
         )
@@ -1277,7 +1277,7 @@ impl AuthStore {
         let row = match row {
             Some(row) => row,
             None => sqlx::query(
-                "SELECT service_id, workspace_id, name, server_id, target_host, target_port, \
+                "SELECT service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, \
                  protocol, created_at, created_by, updated_at, updated_by \
                  FROM machine_services WHERE workspace_id = $1 AND lower(name) = lower($2)",
             )
@@ -1396,7 +1396,16 @@ impl AuthStore {
         request: CreateMachineServiceRequest,
     ) -> Result<MachineService, AuthFailure> {
         let name = validate_resource_name(&request.name, "service")?;
-        let target_host = validate_service_target_host(&request.target_host)?;
+        let target_agent_id = request
+            .target_agent_id
+            .as_deref()
+            .map(validate_service_target_agent_id)
+            .transpose()?;
+        let target_host = if target_agent_id.is_some() {
+            validate_agent_service_target_host(&request.target_host)?
+        } else {
+            validate_service_target_host(&request.target_host)?
+        };
         if request.target_port == 0 {
             return Err(AuthFailure::bad_request(
                 "invalid_service",
@@ -1409,6 +1418,7 @@ impl AuthStore {
             workspace_id: workspace_id.to_string(),
             name,
             server_id: request.server_id,
+            target_agent_id,
             target_host,
             target_port: request.target_port,
             protocol: request.protocol,
@@ -1419,13 +1429,14 @@ impl AuthStore {
         };
         sqlx::query(
             "INSERT INTO machine_services(\
-             service_id, workspace_id, name, server_id, target_host, target_port, protocol, \
-             created_at, created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, protocol, \
+             created_at, created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(&service.service_id)
         .bind(&service.workspace_id)
         .bind(&service.name)
         .bind(&service.server_id)
+        .bind(&service.target_agent_id)
         .bind(&service.target_host)
         .bind(i64::from(service.target_port))
         .bind(machine_service_protocol_str(service.protocol))
@@ -1457,6 +1468,21 @@ impl AuthStore {
     ) -> Result<MachineService, AuthFailure> {
         let _update = self.virtual_hosts_update.lock().await;
         let current = self.resolve_machine_service(workspace_id, target).await?;
+        if current.target_agent_id.is_some() {
+            if request
+                .server_id
+                .as_ref()
+                .is_some_and(|server_id| server_id != &current.server_id)
+            {
+                return Err(AuthFailure::bad_request(
+                    "agent_service_scope_immutable",
+                    "an Agent service cannot be moved to another machine",
+                ));
+            }
+            if let Some(host) = request.target_host.as_deref() {
+                validate_agent_service_target_host(host)?;
+            }
+        }
         let service = MachineService {
             name: request
                 .name
@@ -1516,6 +1542,8 @@ impl AuthStore {
             {
                 host.service_protocol = service.protocol;
                 host.destination_server_id.clone_from(&service.server_id);
+                host.destination_agent_id
+                    .clone_from(&service.target_agent_id);
                 host.target_host.clone_from(&service.target_host);
                 host.target_port = Some(service.target_port);
             }
@@ -1594,6 +1622,7 @@ impl AuthStore {
             service_id: service.service_id,
             service_protocol: service.protocol,
             destination_server_id: service.server_id,
+            destination_agent_id: service.target_agent_id,
             target_host: service.target_host,
             target_port: Some(service.target_port),
             created_at: Utc::now(),
@@ -1667,7 +1696,8 @@ impl AuthStore {
         let _update = self.virtual_hosts_update.lock().await;
         let rows = sqlx::query(
             "SELECT v.workspace_id, v.hostname, v.service_id, s.protocol AS service_protocol, \
-             s.server_id AS destination_server_id, s.target_host, s.target_port, v.created_at, v.created_by \
+             s.server_id AS destination_server_id, s.target_agent_id AS destination_agent_id, \
+             s.target_host, s.target_port, v.created_at, v.created_by \
              FROM virtual_network_hosts v JOIN machine_services s ON s.service_id = v.service_id",
         )
         .fetch_all(&self.pool)
@@ -1758,7 +1788,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
-             s.name AS service_name, s.server_id, s.target_host, s.target_port, \
+             s.name AS service_name, s.server_id, s.target_agent_id, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \
@@ -1916,7 +1946,7 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
-             s.name AS service_name, s.server_id, s.target_host, s.target_port, \
+             s.name AS service_name, s.server_id, s.target_agent_id, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \
@@ -2338,6 +2368,14 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "DELETE FROM machine_services WHERE workspace_id = $1 AND target_agent_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(agent_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         sqlx::query(
             "UPDATE agent_credentials SET revoked_at = $1 \
              WHERE agent_id = $2 AND workspace_id = $3 AND revoked_at IS NULL",
@@ -4884,6 +4922,7 @@ fn machine_service_from_row(row: sqlx::postgres::PgRow) -> Result<MachineService
         workspace_id: row.get("workspace_id"),
         name: row.get("name"),
         server_id: row.get("server_id"),
+        target_agent_id: row.get("target_agent_id"),
         target_host: row.get("target_host"),
         target_port,
         protocol,
@@ -4932,6 +4971,33 @@ fn validate_service_target_host(value: &str) -> Result<String, AuthFailure> {
         ));
     }
     Ok(value.to_string())
+}
+
+fn validate_service_target_agent_id(value: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 255
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_service",
+            "target_agent_id must be a non-empty Agent identifier",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_agent_service_target_host(value: &str) -> Result<String, AuthFailure> {
+    let value = value.trim();
+    if !matches!(value, "127.0.0.1" | "localhost" | "::1") {
+        return Err(AuthFailure::bad_request(
+            "invalid_agent_service_target",
+            "Agent services may only target the Agent loopback interface",
+        ));
+    }
+    Ok("127.0.0.1".to_string())
 }
 
 fn validate_agent_ui_path(value: &str) -> Result<String, AuthFailure> {
@@ -5044,6 +5110,7 @@ fn resolved_service_ingress_from_row(
         workspace_id: ingress.workspace_id.clone(),
         name: row.get("service_name"),
         server_id: row.get("server_id"),
+        target_agent_id: row.get("target_agent_id"),
         target_host: row.get("target_host"),
         target_port,
         protocol: match row.get::<String, _>("service_protocol").as_str() {
@@ -5123,6 +5190,7 @@ fn virtual_network_host_from_row(
             }
         },
         destination_server_id: row.get("destination_server_id"),
+        destination_agent_id: row.get("destination_agent_id"),
         target_host: row.get("target_host"),
         target_port,
         created_at,
@@ -5374,6 +5442,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "development API".to_string(),
                     server_id: "destination".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 8080,
                     protocol: MachineServiceProtocol::Http,
@@ -5471,6 +5540,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "web".to_string(),
                     server_id: "machine-a".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 3000,
                     protocol: MachineServiceProtocol::Http,
@@ -5552,6 +5622,75 @@ mod tests {
             .await
             .expect("resolve cascaded Agent UI")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_services_keep_their_scope_and_delete_with_the_agent() {
+        let store = AuthStore::for_test("owner-password").await;
+        store.seed_test_workspace("default").await;
+        let service = store
+            .create_machine_service(
+                "default",
+                "agent:agent-a",
+                CreateMachineServiceRequest {
+                    name: "Agent app".to_string(),
+                    server_id: "machine-a".to_string(),
+                    target_agent_id: Some("agent-a".to_string()),
+                    target_host: "localhost".to_string(),
+                    target_port: 3000,
+                    protocol: MachineServiceProtocol::Http,
+                },
+            )
+            .await
+            .expect("create Agent service");
+        assert_eq!(service.target_agent_id.as_deref(), Some("agent-a"));
+        assert_eq!(service.target_host, "127.0.0.1");
+
+        let host = store
+            .create_virtual_network_host(
+                "default",
+                "agent:agent-a",
+                CreateVirtualNetworkHostRequest {
+                    hostname: "agent-app.internal".to_string(),
+                    service_id: service.service_id.clone(),
+                },
+            )
+            .await
+            .expect("create Agent virtual host");
+        assert_eq!(host.destination_agent_id.as_deref(), Some("agent-a"));
+
+        let error = store
+            .update_machine_service(
+                "default",
+                &service.service_id,
+                "agent:agent-a",
+                UpdateMachineServiceRequest {
+                    server_id: Some("machine-b".to_string()),
+                    ..UpdateMachineServiceRequest::default()
+                },
+            )
+            .await
+            .expect_err("Agent service scope must be immutable");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        store
+            .delete_agent("default", "agent-a")
+            .await
+            .expect("delete Agent");
+        store
+            .refresh_virtual_network_hosts()
+            .await
+            .expect("refresh virtual hosts");
+        assert!(store
+            .resolve_machine_service("default", &service.service_id)
+            .await
+            .is_err());
+        assert!(store
+            .virtual_network_hosts_snapshot("default")
+            .await
+            .expect("virtual hosts")
+            .hosts
+            .is_empty());
     }
 
     #[tokio::test]
@@ -6376,6 +6515,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "Issue Tracker".to_string(),
                     server_id: "machine-a".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 3000,
                     protocol: MachineServiceProtocol::Http,

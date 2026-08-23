@@ -122,6 +122,7 @@ impl PolicyRequest {
         source_server_id: &str,
         source_agent_id: Option<&str>,
         destination_server_id: &str,
+        destination_agent_id: Option<&str>,
         host: &str,
         port: u16,
     ) -> Self {
@@ -130,6 +131,9 @@ impl PolicyRequest {
             "destination_server_id".to_string(),
             destination_server_id.to_string(),
         );
+        if let Some(agent_id) = destination_agent_id {
+            attributes.insert("destination_agent_id".to_string(), agent_id.to_string());
+        }
         attributes.insert("host".to_string(), host.to_string());
         attributes.insert("port".to_string(), port.to_string());
         let subject = source_agent_id.map_or_else(
@@ -639,6 +643,7 @@ mod tests {
             "source-machine",
             Some("agent-a"),
             "destination-machine",
+            Some("agent-b"),
             "127.0.0.1",
             8080,
         )
@@ -726,6 +731,10 @@ mod tests {
         assert_eq!(request.resource.kind, RESOURCE_NETWORK_ENDPOINT);
         assert_eq!(request.resource.attributes["port"], "8080");
         assert_eq!(
+            request.resource.attributes["destination_agent_id"],
+            "agent-b"
+        );
+        assert_eq!(
             request.subject,
             PolicySubject::Agent {
                 server_id: "source-machine".to_string(),
@@ -741,6 +750,7 @@ mod tests {
             "source-machine",
             None,
             "destination-machine",
+            None,
             "127.0.0.1",
             8080,
         );

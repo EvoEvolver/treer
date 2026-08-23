@@ -262,6 +262,7 @@ CREATE TABLE IF NOT EXISTS machine_services (
     workspace_id TEXT NOT NULL,
     name TEXT NOT NULL,
     server_id TEXT NOT NULL,
+    target_agent_id TEXT,
     target_host TEXT NOT NULL,
     target_port BIGINT NOT NULL CHECK(target_port BETWEEN 1 AND 65535),
     protocol TEXT NOT NULL CHECK(protocol IN ('tcp', 'http')),
@@ -271,10 +272,15 @@ CREATE TABLE IF NOT EXISTS machine_services (
     updated_by TEXT NOT NULL,
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
 );
+ALTER TABLE machine_services
+    ADD COLUMN IF NOT EXISTS target_agent_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS machine_services_workspace_name_lower
     ON machine_services(workspace_id, lower(name));
 CREATE INDEX IF NOT EXISTS machine_services_server
     ON machine_services(workspace_id, server_id);
+CREATE INDEX IF NOT EXISTS machine_services_target_agent
+    ON machine_services(workspace_id, target_agent_id)
+    WHERE target_agent_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS agent_uis (
     workspace_id TEXT NOT NULL,

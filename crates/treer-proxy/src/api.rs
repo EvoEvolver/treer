@@ -1710,6 +1710,7 @@ async fn agent_issue_identity_token(
                 &service.service_id,
                 &service.name,
                 &service.server_id,
+                service.target_agent_id.as_deref(),
                 &service.target_host,
                 service.target_port,
             ),
@@ -2143,10 +2144,16 @@ async fn create_machine_service(
     Path(workspace_id): Path<String>,
     Json(mut request): Json<CreateMachineServiceRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    request.server_id = state
-        .resolve_server(&workspace_id, &request.server_id)
-        .await?
-        .server_id;
+    if let Some(target) = request.target_agent_id.as_deref() {
+        let agent = state.resolve_agent(&workspace_id, target).await?;
+        request.target_agent_id = Some(agent.agent_id);
+        request.server_id = agent.server_id;
+    } else {
+        request.server_id = state
+            .resolve_server(&workspace_id, &request.server_id)
+            .await?
+            .server_id;
+    }
     let service = auth
         .create_machine_service(&workspace_id, &session.user_id, request)
         .await?;
@@ -2219,6 +2226,7 @@ async fn probe_machine_service(
                 host: service.target_host.clone(),
                 port: service.target_port,
                 timeout_ms: 3_000,
+                target_agent_id: service.target_agent_id.clone(),
             },
         )
         .await?;
@@ -2238,7 +2246,13 @@ async fn reconcile_agent_uis_for_service(
             && state
                 .resolve_agent(&service.workspace_id, &ui.agent_id)
                 .await
-                .is_ok_and(|agent| agent.server_id == service.server_id);
+                .is_ok_and(|agent| {
+                    agent.server_id == service.server_id
+                        && service
+                            .target_agent_id
+                            .as_ref()
+                            .is_none_or(|target| target == &agent.agent_id)
+                });
         if !valid {
             auth.clear_agent_ui(&service.workspace_id, &ui.agent_id)
                 .await?;
@@ -2498,6 +2512,7 @@ async fn proxy_service_ingress(
         state,
         &resolved.ingress.workspace_id,
         &resolved.service.server_id,
+        resolved.service.target_agent_id.as_deref(),
         &resolved.service.target_host,
         resolved.service.target_port,
         request,
@@ -2668,6 +2683,7 @@ async fn proxy_virtual_network_host(
         state,
         &workspace_id,
         &host.destination_server_id,
+        host.destination_agent_id.as_deref(),
         &host.target_host,
         host.target_port.unwrap_or(80),
         request,
@@ -2737,6 +2753,16 @@ async fn proxy_agent_ui(
             "Agent UI service no longer belongs to the Agent machine",
         ));
     }
+    if service
+        .target_agent_id
+        .as_ref()
+        .is_some_and(|target| target != &agent.agent_id)
+    {
+        return Err(ApiFailure::bad_request(
+            "agent_ui_target_mismatch",
+            "Agent UI service belongs to another Agent",
+        ));
+    }
 
     let target_path = if path.is_empty() {
         ui.path.clone()
@@ -2759,6 +2785,7 @@ async fn proxy_agent_ui(
         state,
         &workspace_id,
         &service.server_id,
+        service.target_agent_id.as_deref(),
         &service.target_host,
         service.target_port,
         request,
@@ -2773,6 +2800,7 @@ async fn tunnel_http_request(
     state: AppState,
     workspace_id: &str,
     server_id: &str,
+    target_agent_id: Option<&str>,
     target_host: &str,
     target_port: u16,
     mut request: Request<Body>,
@@ -2780,7 +2808,13 @@ async fn tunnel_http_request(
     route_kind: &'static str,
 ) -> Result<Response, ApiFailure> {
     let stream = state
-        .open_browser_network_stream(workspace_id, server_id, target_host, target_port)
+        .open_browser_network_stream(
+            workspace_id,
+            server_id,
+            target_agent_id,
+            target_host,
+            target_port,
+        )
         .await?;
     let upgraded = request.headers().contains_key(header::UPGRADE);
     let downstream_upgrade = upgraded.then(|| hyper::upgrade::on(&mut request));
@@ -3014,6 +3048,16 @@ async fn agent_set_ui(
             "Agent UI service must belong to the current Agent machine",
         ));
     }
+    if service
+        .target_agent_id
+        .as_ref()
+        .is_some_and(|target| target != agent_id)
+    {
+        return Err(ApiFailure::bad_request(
+            "agent_ui_target_mismatch",
+            "Agent UI service must belong to the current Agent",
+        ));
+    }
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -3072,14 +3116,44 @@ async fn agent_create_machine_service(
     Json(mut request): Json<CreateMachineServiceRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    request.server_id = state
-        .resolve_server(&workspace_id, &request.server_id)
-        .await?
-        .server_id;
+    let PolicySubject::Agent {
+        server_id,
+        agent_id,
+    } = &subject
+    else {
+        unreachable!("managed Agent route always produces an Agent subject")
+    };
+    if let Some(target) = request.target_agent_id.as_deref() {
+        let target = if target == "self" {
+            state.resolve_agent(&workspace_id, agent_id).await?
+        } else {
+            state.resolve_agent(&workspace_id, target).await?
+        };
+        if target.agent_id != *agent_id {
+            return Err(ApiFailure::forbidden(
+                "agent_service_target_forbidden",
+                "an Agent may register an Agent service only for itself",
+            ));
+        }
+        request.target_agent_id = Some(target.agent_id);
+        request.server_id = target.server_id;
+    } else {
+        request.server_id = state
+            .resolve_server(&workspace_id, &request.server_id)
+            .await?
+            .server_id;
+        if request.server_id != *server_id {
+            return Err(ApiFailure::forbidden(
+                "service_machine_forbidden",
+                "an Agent may register a machine service only on its own machine",
+            ));
+        }
+    }
     let resource = machine_service_policy_resource(
         &format!("new:{}", request.name.trim().to_ascii_lowercase()),
         &request.name,
         &request.server_id,
+        request.target_agent_id.as_deref(),
         &request.target_host,
         request.target_port,
     );
@@ -3110,13 +3184,26 @@ async fn agent_update_machine_service(
     let current = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
+    require_agent_owns_service(&subject, &current)?;
     if let Some(server_id) = request.server_id.as_deref() {
-        request.server_id = Some(
-            state
-                .resolve_server(&workspace_id, server_id)
-                .await?
-                .server_id,
-        );
+        let resolved = state
+            .resolve_server(&workspace_id, server_id)
+            .await?
+            .server_id;
+        let PolicySubject::Agent {
+            server_id: own_server_id,
+            ..
+        } = &subject
+        else {
+            unreachable!("managed Agent route always produces an Agent subject")
+        };
+        if &resolved != own_server_id {
+            return Err(ApiFailure::forbidden(
+                "service_machine_forbidden",
+                "an Agent may move a machine service only within its own machine",
+            ));
+        }
+        request.server_id = Some(resolved);
     }
     policy
         .authorize(&PolicyRequest::new(
@@ -3127,6 +3214,7 @@ async fn agent_update_machine_service(
                 &current.service_id,
                 &current.name,
                 &current.server_id,
+                current.target_agent_id.as_deref(),
                 &current.target_host,
                 current.target_port,
             ),
@@ -3158,6 +3246,7 @@ async fn agent_delete_machine_service(
     let service = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
+    require_agent_owns_service(&subject, &service)?;
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -3167,6 +3256,7 @@ async fn agent_delete_machine_service(
                 &service.service_id,
                 &service.name,
                 &service.server_id,
+                service.target_agent_id.as_deref(),
                 &service.target_host,
                 service.target_port,
             ),
@@ -3202,6 +3292,7 @@ async fn agent_probe_machine_service(
     let service = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
+    require_agent_owns_service(&subject, &service)?;
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -3211,6 +3302,7 @@ async fn agent_probe_machine_service(
                 &service.service_id,
                 &service.name,
                 &service.server_id,
+                service.target_agent_id.as_deref(),
                 &service.target_host,
                 service.target_port,
             ),
@@ -3224,6 +3316,7 @@ async fn agent_probe_machine_service(
                 host: service.target_host.clone(),
                 port: service.target_port,
                 timeout_ms: 3_000,
+                target_agent_id: service.target_agent_id.clone(),
             },
         )
         .await?;
@@ -3653,11 +3746,16 @@ fn profile_actor_label(
 }
 
 fn virtual_host_policy_resource(hostname: &str, service: &MachineService) -> PolicyResource {
-    PolicyResource::new(RESOURCE_VIRTUAL_HOST, hostname)
+    let resource = PolicyResource::new(RESOURCE_VIRTUAL_HOST, hostname)
         .with_attribute("service_id", &service.service_id)
         .with_attribute("destination_server_id", &service.server_id)
         .with_attribute("target_host", &service.target_host)
-        .with_attribute("target_port", service.target_port.to_string())
+        .with_attribute("target_port", service.target_port.to_string());
+    if let Some(agent_id) = service.target_agent_id.as_deref() {
+        resource.with_attribute("destination_agent_id", agent_id)
+    } else {
+        resource
+    }
 }
 
 fn service_ingress_policy_resource(
@@ -3665,10 +3763,15 @@ fn service_ingress_policy_resource(
     access: ServiceIngressAccess,
     service: &MachineService,
 ) -> PolicyResource {
-    PolicyResource::new(RESOURCE_SERVICE_INGRESS, ingress_id)
+    let resource = PolicyResource::new(RESOURCE_SERVICE_INGRESS, ingress_id)
         .with_attribute("service_id", &service.service_id)
         .with_attribute("destination_server_id", &service.server_id)
-        .with_attribute("access", service_ingress_access_name(access))
+        .with_attribute("access", service_ingress_access_name(access));
+    if let Some(agent_id) = service.target_agent_id.as_deref() {
+        resource.with_attribute("destination_agent_id", agent_id)
+    } else {
+        resource
+    }
 }
 
 fn require_agent_owns_service(
@@ -3676,10 +3779,20 @@ fn require_agent_owns_service(
     service: &MachineService,
 ) -> Result<(), ApiFailure> {
     match subject {
-        PolicySubject::Agent { server_id, .. } if server_id == &service.server_id => Ok(()),
+        PolicySubject::Agent {
+            server_id,
+            agent_id,
+        } if server_id == &service.server_id
+            && service
+                .target_agent_id
+                .as_ref()
+                .is_none_or(|target| target == agent_id) =>
+        {
+            Ok(())
+        }
         PolicySubject::Agent { .. } => Err(ApiFailure::forbidden(
-            "ingress_service_not_owned",
-            "agents may publish only services registered on their own machine",
+            "service_not_owned",
+            "agents may manage only services in their own machine or Agent scope",
         )),
         PolicySubject::Machine { .. }
         | PolicySubject::Human { .. }
@@ -3701,14 +3814,20 @@ fn machine_service_policy_resource(
     service_id: &str,
     name: &str,
     server_id: &str,
+    target_agent_id: Option<&str>,
     target_host: &str,
     target_port: u16,
 ) -> PolicyResource {
-    PolicyResource::new(RESOURCE_MACHINE_SERVICE, service_id)
+    let resource = PolicyResource::new(RESOURCE_MACHINE_SERVICE, service_id)
         .with_attribute("name", name)
         .with_attribute("server_id", server_id)
         .with_attribute("target_host", target_host)
-        .with_attribute("target_port", target_port.to_string())
+        .with_attribute("target_port", target_port.to_string());
+    if let Some(agent_id) = target_agent_id {
+        resource.with_attribute("target_agent_id", agent_id)
+    } else {
+        resource
+    }
 }
 
 async fn list_agent_launch_profiles(
@@ -4271,6 +4390,13 @@ async fn delete_agent(
             .await?;
     }
     auth.delete_agent(&workspace_id, &agent.agent_id).await?;
+    auth.refresh_virtual_network_hosts()
+        .await
+        .map_err(|error| {
+            ApiFailure::internal("virtual_host_refresh_failed", &format!("{error:#}"))
+        })?;
+    refresh_service_ingress_routes(&auth).await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     state.clear_agent_ui(&workspace_id, &agent.agent_id).await?;
     let deleted = state.delete_agent(&workspace_id, &agent.agent_id).await?;
     let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
@@ -5132,6 +5258,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "private app".to_string(),
                     server_id: "machine-a".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 8080,
                     protocol: treer_protocol::MachineServiceProtocol::Http,
@@ -5543,6 +5670,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "api".to_string(),
                     server_id: "machine-a".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 8080,
                     protocol: treer_protocol::MachineServiceProtocol::Http,
@@ -5832,6 +5960,26 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
 
+        let forbidden = agent_create_machine_service(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(machine.clone()),
+            headers.clone(),
+            Path("default".to_string()),
+            Json(CreateMachineServiceRequest {
+                name: "Other Agent API".to_string(),
+                server_id: "machine-a".to_string(),
+                target_agent_id: Some("agent-b".to_string()),
+                target_host: "127.0.0.1".to_string(),
+                target_port: 8081,
+                protocol: treer_protocol::MachineServiceProtocol::Http,
+            }),
+        )
+        .await
+        .expect_err("Agent must not register another Agent's service");
+        assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+
         let service = agent_create_machine_service(
             State(state.clone()),
             Extension(auth.clone()),
@@ -5842,6 +5990,7 @@ mod tests {
             Json(CreateMachineServiceRequest {
                 name: "API".to_string(),
                 server_id: "machine-a".to_string(),
+                target_agent_id: Some("self".to_string()),
                 target_host: "127.0.0.1".to_string(),
                 target_port: 8080,
                 protocol: treer_protocol::MachineServiceProtocol::Http,
@@ -5854,6 +6003,7 @@ mod tests {
             .expect("service id")
             .to_string();
         assert_eq!(service.0["service"]["created_by"], "agent:agent-a");
+        assert_eq!(service.0["service"]["target_agent_id"], "agent-a");
 
         let created = agent_create_virtual_network_host(
             State(state.clone()),
@@ -5921,6 +6071,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "database".to_string(),
                     server_id: "machine-a".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 5432,
                     protocol: treer_protocol::MachineServiceProtocol::Tcp,
@@ -5992,6 +6143,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "app".to_string(),
                     server_id: "machine-a".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 8080,
                     protocol: treer_protocol::MachineServiceProtocol::Http,
@@ -6141,6 +6293,7 @@ mod tests {
                 CreateMachineServiceRequest {
                     name: "public app".to_string(),
                     server_id: "machine-a".to_string(),
+                    target_agent_id: None,
                     target_host: "127.0.0.1".to_string(),
                     target_port: 8080,
                     protocol: treer_protocol::MachineServiceProtocol::Http,
