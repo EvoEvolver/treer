@@ -61,6 +61,7 @@ export interface AgentLaunchProfile {
 
 export interface Snapshot {
   revision: number
+  workspace: Workspace
   servers: Machine[]
   agents: Agent[]
   agent_uis: AgentUi[]

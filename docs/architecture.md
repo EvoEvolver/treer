@@ -89,6 +89,12 @@ Controller-to-Host protocol is a local length-prefixed bincode socket. Browser
 terminal and service streams route through the Proxy; ordinary virtual-network
 payload travels between Controllers after Proxy authorization.
 
+Covered organization, workspace, and membership mutations write their audit
+event in the same PostgreSQL transaction. Successful Agent create, rename, stop,
+and delete operations and machine rename and delete operations append runtime
+audit events after the Controller result; an audit write failure is logged
+without turning a completed runtime mutation into a retryable API failure.
+
 PostgreSQL is the durable source for accounts, organizations, workspaces,
 machine credentials, services, ingresses, App OAuth codes, policy, audit,
 traffic counters, and Core Message. NATS supplies events and cross-Proxy live

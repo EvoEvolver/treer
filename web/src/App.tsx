@@ -69,6 +69,12 @@ function initials(value: string) {
   return value.trim().slice(0, 2).toUpperCase() || "T"
 }
 
+function replaceWorkspace(items: Workspace[], updated: Workspace) {
+  return items
+    .map((item) => item.workspace_id === updated.workspace_id ? updated : item)
+    .sort((left, right) => left.name.localeCompare(right.name) || left.workspace_id.localeCompare(right.workspace_id))
+}
+
 function defaultAgentName(kind: string) {
   const now = new Date()
   const month = String(now.getMonth() + 1).padStart(2, "0")
@@ -284,6 +290,7 @@ const auditActionLabels: Record<string, string> = {
   "organization.created": "created the organization",
   "organization.renamed": "renamed the organization",
   "workspace.created": "created a workspace",
+  "workspace.renamed": "renamed a workspace",
   "invitation.created": "created a member invitation",
   "member.role_updated": "changed a member role",
   "member.removed": "removed a member",
@@ -359,6 +366,7 @@ function WorkspaceApp() {
   const [error, setError] = useState<string | null>(null)
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
+  const [renameWorkspaceOpen, setRenameWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
   const [editingLaunchProfile, setEditingLaunchProfile] = useState<AgentLaunchProfile | null>(null)
@@ -465,6 +473,7 @@ function WorkspaceApp() {
     if (!workspaceId) return
     const data = await api<Snapshot>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`)
     setSnapshot(data)
+    setWorkspaces((items) => replaceWorkspace(items, data.workspace))
   }, [workspaceId])
 
   useEffect(() => {
@@ -485,8 +494,16 @@ function WorkspaceApp() {
       socket.onopen = () => { if (!disposed) setConnection("live") }
       socket.onmessage = (event) => {
         if (disposed) return
-        const message = JSON.parse(event.data) as { event: string; data?: Snapshot }
-        if (message.event === "workspace.snapshot" && message.data) setSnapshot(message.data)
+        const message = JSON.parse(event.data) as { event: string; data?: Snapshot | Workspace }
+        if (message.event === "workspace.snapshot" && message.data) {
+          const next = message.data as Snapshot
+          setSnapshot(next)
+          setWorkspaces((items) => replaceWorkspace(items, next.workspace))
+        } else if (message.event === "workspace.renamed" && message.data) {
+          const updated = message.data as Workspace
+          setWorkspaces((items) => replaceWorkspace(items, updated))
+          setSnapshot((current) => current?.workspace.workspace_id === updated.workspace_id ? { ...current, workspace: updated } : current)
+        }
         else refreshSnapshot().catch(showError)
       }
       socket.onclose = () => {
@@ -611,6 +628,17 @@ function WorkspaceApp() {
     try {
       await api(`/api/organizations/${encodeURIComponent(organizationId)}`, { method: "PATCH", body: JSON.stringify({ name: organizationName }) })
       setRenameOrganizationOpen(false); await loadOrganizations(organizationId)
+    } catch (reason) { showError(reason) }
+  }
+
+  async function renameWorkspace(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId) return
+    try {
+      const data = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: "PATCH", body: JSON.stringify({ name: workspaceName }) })
+      setWorkspaces((items) => replaceWorkspace(items, data.workspace))
+      setSnapshot((current) => current?.workspace.workspace_id === data.workspace.workspace_id ? { ...current, workspace: data.workspace } : current)
+      setRenameWorkspaceOpen(false); setWorkspaceName("")
     } catch (reason) { showError(reason) }
   }
 
@@ -1061,10 +1089,13 @@ function WorkspaceApp() {
           <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={setOrganizationId}><SelectTrigger className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-black/[.04]"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
           <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
         </div>
-        <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5">
+        <div className="grid grid-cols-[20px_minmax(0,1fr)_64px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
           <Select value={workspaceId ?? undefined} onValueChange={setWorkspaceId} disabled={!organizationId}><SelectTrigger className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-black/[.04]"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
-          <IconButton label="Create workspace" disabled={!organizationId} onClick={() => setCreateWorkspaceOpen(true)}><Plus /></IconButton>
+          <div className="flex">
+            <IconButton label="Rename workspace" disabled={!workspace} onClick={() => { if (workspace) { setWorkspaceName(workspace.name); setRenameWorkspaceOpen(true) } }}><Pencil /></IconButton>
+            <IconButton label="Create workspace" disabled={!organizationId} onClick={() => { setWorkspaceName(""); setCreateWorkspaceOpen(true) }}><Plus /></IconButton>
+          </div>
         </div>
         <div className="px-2 pb-2">
           <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className={cn("h-8 w-full justify-start gap-2 px-2 text-xs font-normal", mainView !== "terminal" && "bg-black/[.06]")} aria-label="Workspace views"><ListChecks className="size-3.5" />{mainView === "profiles" ? "Profiles" : mainView === "network" ? "Network" : "Workspace"}<ChevronDown className="ml-auto size-3.5 text-muted-foreground" /></Button></DropdownMenuTrigger>
@@ -1155,6 +1186,7 @@ function WorkspaceApp() {
 
     <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={organizationName} onValueChange={setOrganizationName} onSubmit={createOrganization} />
     <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={createWorkspace} />
+    <SimpleNameDialog open={renameWorkspaceOpen} onOpenChange={setRenameWorkspaceOpen} title="Rename workspace" description="Update the workspace name shown to organization members." label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={renameWorkspace} />
 
     <Dialog open={renameOrganizationOpen} onOpenChange={setRenameOrganizationOpen}><DialogContent><form onSubmit={renameOrganization}><DialogHeader><DialogTitle>Rename organization</DialogTitle><DialogDescription>Update the organization name shown to its members.</DialogDescription></DialogHeader><div className="my-5"><Field label="Organization name"><Input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameOrganizationOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
 

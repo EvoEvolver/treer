@@ -294,7 +294,8 @@ organization; it does not create another personal organization. Users sign in
 with email/password or a configured GitHub or Google account, and can update
 their email or preferred name without changing their stable identity or
 organization access. Organization owners and administrators can also rename
-their organization.
+their organization. Organization members can create and rename workspaces;
+renaming keeps the workspace ID, enrolled machines, Agents, and services intact.
 
 Users, invitations, sessions, organizations, machine credentials, services,
 App OAuth codes, and workload signing keys are stored in PostgreSQL. The Proxy requires

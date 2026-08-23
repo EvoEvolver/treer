@@ -1037,6 +1037,61 @@ impl AuthStore {
         })
     }
 
+    pub async fn rename_workspace(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        name: &str,
+    ) -> Result<WorkspaceInfo, AuthFailure> {
+        self.require_workspace_member(workspace_id, user_id).await?;
+        let name = validate_resource_name(name, "workspace")?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let row = sqlx::query(
+            "SELECT organization_id, name FROM workspaces WHERE workspace_id = $1 FOR UPDATE",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
+        let organization_id: String = row.get("organization_id");
+        let old_name: String = row.get("name");
+        sqlx::query("UPDATE workspaces SET name = $1 WHERE workspace_id = $2")
+            .bind(&name)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id: &organization_id,
+                workspace_id: Some(workspace_id),
+                actor_kind: "user",
+                actor_id: Some(user_id),
+                source: "api",
+                action: "workspace.renamed",
+                resource_kind: "workspace",
+                resource_id: workspace_id,
+                resource_name: Some(&name),
+                payload: json!({ "old_name": old_name, "new_name": name }),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        let info = workspace_from_row(
+            sqlx::query(
+                "SELECT workspace_id, name, created_at FROM workspaces WHERE workspace_id = $1",
+            )
+            .bind(workspace_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?,
+        )?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(info)
+    }
+
     pub async fn list_agent_launch_profiles(
         &self,
         workspace_id: &str,
@@ -6232,6 +6287,20 @@ mod tests {
             .await
             .expect("member workspaces");
         assert_eq!(workspaces[0].workspace_id, "ws_engineering");
+        let renamed_workspace = store
+            .rename_workspace("ws_engineering", &alice.user_id, "Platform")
+            .await
+            .expect("members may rename workspaces");
+        assert_eq!(renamed_workspace.workspace_id, "ws_engineering");
+        assert_eq!(renamed_workspace.name, "Platform");
+        assert_eq!(
+            store
+                .list_workspaces(&organization.organization_id, &alice.user_id)
+                .await
+                .expect("renamed workspace remains visible")[0]
+                .name,
+            "Platform"
+        );
         store
             .create_workspace(
                 &organization.organization_id,
@@ -6301,6 +6370,11 @@ mod tests {
         assert!(audit_events
             .iter()
             .any(|event| event.action == "workspace.created"));
+        assert!(audit_events.iter().any(|event| {
+            event.action == "workspace.renamed"
+                && event.payload["old_name"] == "Engineering"
+                && event.payload["new_name"] == "Platform"
+        }));
         assert!(audit_events
             .iter()
             .any(|event| event.action == "member.role_updated"));

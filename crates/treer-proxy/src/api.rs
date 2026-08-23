@@ -542,6 +542,10 @@ pub fn router(
             get(list_workspaces).post(create_workspace),
         )
         .route(
+            "/api/workspaces/{workspace_id}",
+            axum::routing::patch(rename_workspace),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/snapshot",
             get(workspace_snapshot),
         )
@@ -2041,6 +2045,20 @@ async fn create_workspace(
         )
         .await?;
     state.create_workspace_info(info.clone()).await?;
+    Ok(Json(json!({ "workspace": info })))
+}
+
+async fn rename_workspace(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<RenameRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let info = auth
+        .rename_workspace(&workspace_id, &session.user_id, &request.name)
+        .await?;
+    state.rename_workspace_info(info.clone()).await?;
     Ok(Json(json!({ "workspace": info })))
 }
 

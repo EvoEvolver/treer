@@ -16,8 +16,9 @@ workspace members. It is not a safe multi-tenant execution sandbox.
   separately. Context edges do not expand visibility.
 - Message bodies stay out of ordinary logs, audit payloads, domain events, and
   outbox envelopes. They remain plaintext in Core PostgreSQL.
-- Organization management and successful lifecycle mutations produce
-  append-only audit events without prompts, terminal data, commands, or secrets.
+- Organization and workspace management plus successful lifecycle mutations
+  produce append-only audit events without prompts, terminal data, commands, or
+  secrets.
 
 ## Unsupported Claims
 
