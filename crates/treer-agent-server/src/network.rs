@@ -292,13 +292,13 @@ async fn connect_destination(
     target_agent_id: Option<&str>,
     transparent_networking: bool,
 ) -> anyhow::Result<Box<dyn DestinationStream>> {
-    if let Some(agent_id) = target_agent_id {
+    if let Some(_agent_id) = target_agent_id {
         if transparent_networking {
             #[cfg(target_os = "linux")]
             {
-                let path = agent_service_socket_path(agent_id);
+                let path = agent_service_socket_path(_agent_id);
                 let mut socket = UnixStream::connect(&path).await.with_context(|| {
-                    format!("Agent {agent_id} is offline or its service bridge is unavailable")
+                    format!("Agent {_agent_id} is offline or its service bridge is unavailable")
                 })?;
                 socket
                     .write_u16(port)
