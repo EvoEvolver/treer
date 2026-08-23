@@ -234,6 +234,12 @@ enum AgentAdminCommand {
         name: String,
         #[arg(long, default_value = ".")]
         cwd: String,
+        #[arg(
+            long = "publish",
+            value_name = "PORT",
+            help = "Publish a Linux network-sandbox TCP port on 127.0.0.1"
+        )]
+        publish_ports: Vec<u16>,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -823,6 +829,7 @@ async fn run_agent_admin_command(
             kind,
             name,
             cwd,
+            publish_ports,
             args,
         } => {
             let server_id = resolve_service_machine(client, machine.as_deref()).await?;
@@ -838,6 +845,7 @@ async fn run_agent_admin_command(
                         args,
                         cols: 120,
                         rows: 36,
+                        publish_ports,
                     })?),
                 )
                 .await
@@ -2292,5 +2300,34 @@ mod tests {
             }) if target == "reviewer"
         ));
         assert!(Args::try_parse_from(["treer", "agent", "delete", "reviewer"]).is_err());
+
+        let publish = Args::try_parse_from([
+            "treer",
+            "agent",
+            "admin",
+            "create",
+            "--machine",
+            "builder",
+            "--kind",
+            "command",
+            "--name",
+            "codex-ui",
+            "--publish",
+            "4173",
+            "--",
+            "/opt/codex-agent-ui/scripts/treer-agent.sh",
+        ])
+        .expect("agent admin create --publish should parse");
+        assert!(matches!(
+            publish.command,
+            Some(Command::Agent {
+                command: AgentCommand::Admin {
+                    command: AgentAdminCommand::Create {
+                        publish_ports,
+                        ..
+                    }
+                }
+            }) if publish_ports == vec![4173]
+        ));
     }
 }

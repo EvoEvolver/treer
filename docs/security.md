@@ -69,6 +69,10 @@ Workspace ingress requires a current member session or service-audience token.
 The Proxy strips gateway credentials and Treer headers before forwarding, but
 it remains in the browser-to-service data path.
 
+Linux `publish_ports` maps a namespace TCP port onto the machine loopback. It
+is not an internet listener. Any process on that machine that can reach
+`127.0.0.1` can reach the published service.
+
 ## Policy And Rollout
 
 Policy is authoritative only after authentication establishes an immutable

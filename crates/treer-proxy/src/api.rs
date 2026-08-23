@@ -3965,6 +3965,7 @@ fn agent_request_from_launch_profile(
         args,
         cols: request.cols,
         rows: request.rows,
+        publish_ports: Vec::new(),
     })
 }
 

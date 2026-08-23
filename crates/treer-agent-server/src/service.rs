@@ -264,7 +264,9 @@ fn require_host_binary(paths: &ServicePaths) -> Result<()> {
 
 pub fn host_socket_path(server_id: &str) -> Result<PathBuf> {
     validate_server_id(server_id)?;
-    Ok(runtime_dir()?.join(format!("host-{}.sock", component_key(server_id))))
+    let name = host_socket_filename(server_id);
+    let path = fit_unix_socket_path(runtime_dir()?.join(&name), &name)?;
+    Ok(path)
 }
 
 pub fn start(workspace: &str) -> Result<()> {
@@ -844,21 +846,73 @@ fn runtime_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("XDG_RUNTIME_DIR") {
         return Ok(PathBuf::from(path).join("treer"));
     }
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .context("failed to determine the current user id")?;
-    require_success(output.status, "id -u")?;
-    let uid = String::from_utf8(output.stdout)
-        .context("id -u returned non-UTF-8 output")?
-        .trim()
-        .to_string();
+    let uid = current_uid()?;
     #[cfg(target_os = "linux")]
     {
         Ok(PathBuf::from("/run/user").join(uid).join("treer"))
     }
     #[cfg(not(target_os = "linux"))]
     Ok(env::temp_dir().join(format!("treer-{uid}")))
+}
+
+fn current_uid() -> Result<String> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .context("failed to determine the current user id")?;
+    require_success(output.status, "id -u")?;
+    Ok(String::from_utf8(output.stdout)
+        .context("id -u returned non-UTF-8 output")?
+        .trim()
+        .to_string())
+}
+
+fn host_socket_filename(server_id: &str) -> String {
+    format!("h-{:016x}.sock", fnv1a64(server_id.as_bytes()))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Usable `sun_path` bytes, excluding the trailing NUL.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+
+fn fit_unix_socket_path(preferred: PathBuf, filename: &str) -> Result<PathBuf> {
+    if unix_path_byte_len(&preferred) <= MAX_UNIX_SOCKET_PATH_BYTES {
+        return Ok(preferred);
+    }
+    let fallback = PathBuf::from("/tmp")
+        .join(format!("treer-{}", current_uid()?))
+        .join(filename);
+    if unix_path_byte_len(&fallback) <= MAX_UNIX_SOCKET_PATH_BYTES {
+        return Ok(fallback);
+    }
+    bail!(
+        "host socket path exceeds the unix sockaddr limit ({} bytes): {}",
+        MAX_UNIX_SOCKET_PATH_BYTES,
+        fallback.display()
+    )
+}
+
+fn unix_path_byte_len(path: &Path) -> usize {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().len()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().len()
+    }
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -1399,9 +1453,50 @@ mod tests {
         let socket = host_socket_path("srv_0123456789abcdef").expect("host socket path");
         assert_eq!(
             socket.file_name().and_then(|name| name.to_str()),
-            Some("host-srv_0123456789abcdef.sock")
+            Some("h-bc326bb4e71ef28b.sock")
         );
+        assert_eq!(
+            socket.file_name(),
+            host_socket_path("srv_0123456789abcdef")
+                .expect("same server")
+                .file_name()
+        );
+        assert_ne!(
+            host_socket_path("srv_0123456789abcdef")
+                .expect("first server")
+                .file_name(),
+            host_socket_path("srv_fedcba9876543210")
+                .expect("second server")
+                .file_name()
+        );
+        assert!(unix_path_byte_len(&socket) <= MAX_UNIX_SOCKET_PATH_BYTES);
         assert!(!socket.starts_with(state_dir().expect("state directory")));
+    }
+
+    #[test]
+    fn host_socket_filename_is_a_stable_short_hash() {
+        assert_eq!(
+            host_socket_filename("srv_0123456789abcdef"),
+            "h-bc326bb4e71ef28b.sock"
+        );
+        assert_eq!(
+            host_socket_filename("srv_0123456789abcdef").len(),
+            "h-0123456789abcdef.sock".len()
+        );
+    }
+
+    #[test]
+    fn host_socket_falls_back_when_the_runtime_directory_is_too_long() {
+        let filename = host_socket_filename("srv_0123456789abcdef");
+        let too_long =
+            PathBuf::from(format!("/{}", "a".repeat(MAX_UNIX_SOCKET_PATH_BYTES))).join(&filename);
+        let fitted = fit_unix_socket_path(too_long, &filename).expect("fallback");
+        assert!(unix_path_byte_len(&fitted) <= MAX_UNIX_SOCKET_PATH_BYTES);
+        assert_eq!(
+            fitted.file_name().and_then(|name| name.to_str()),
+            Some(filename.as_str())
+        );
+        assert!(fitted.starts_with("/tmp"));
     }
 
     #[test]

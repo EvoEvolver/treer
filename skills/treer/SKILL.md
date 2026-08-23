@@ -94,10 +94,18 @@ treer member list
 
 Machine services are durable records for long-running processes reachable from
 a machine's host network. They outlive the managed Agent that registers or
-maintains them. A server started directly inside a Linux managed Agent remains
-in that Agent's private network namespace; run long-lived services through a
-host facility such as systemd or a Docker published port before registering
-them.
+maintains them.
+
+A server started directly inside a Linux managed Agent remains in that Agent's
+private network namespace; outbound TCP uses the transparent TUN/SOCKS path.
+Host loopback and internet listeners on the machine do not see that bind. To
+present an HTTP Agent UI from inside the namespace, create the Agent with
+`--publish <port>` (`publish_ports` on the API). Treer then maps
+`127.0.0.1:<port>` on the machine into the namespace. Register the **host**
+loopback port as the machine service and run `treer ui set`.
+
+Without `--publish`, keep long-lived services on a host facility such as
+systemd or a Docker published port before registering them.
 
 Register a service on the current Agent's machine, or select another workspace
 machine explicitly:
@@ -345,6 +353,10 @@ different relative directory.
 
 ```bash
 treer agent admin create --machine <server-id> --kind codex --name reviewer --cwd .
+```
+
+```bash
+treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . --publish 4173 -- /path/to/codex-agent-ui/scripts/treer-agent.sh
 ```
 
 Native agent arguments go after `--`:

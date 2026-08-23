@@ -532,7 +532,12 @@ the SOCKS path. Native macOS currently uses this compatibility mode; use a Linux
 container when transparent capture is required. A Mail App that registers
 its listener as a host-network machine service currently requires
 `proxy-env`; a transparent Agent's namespace-local loopback listener is not a
-host-network endpoint.
+host-network endpoint. Create the Agent with `--publish <port>`
+(`publish_ports`) when the HTTP Agent UI must listen inside the namespace:
+the Controller binds `127.0.0.1:<port>` on the machine and splices accepted
+connections into the sandbox. Register that host loopback port as the machine
+service. The mapping is inbound host-loopback only, not a public internet
+listener.
 
 Managed agents reach the Controller's local API through the reserved TEST-NET-1
 address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local

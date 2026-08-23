@@ -32,6 +32,7 @@ struct AgentLaunch {
     command: String,
     args: Vec<String>,
     initial_writes: Vec<HostWrite>,
+    publish_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -751,43 +752,67 @@ fn workload_credential_matches(expected: &str, supplied: &str) -> bool {
 }
 
 fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolError> {
-    match request.kind.as_str() {
-        "codex" => Ok(shell_agent_launch(
+    let mut launch = match request.kind.as_str() {
+        "codex" => shell_agent_launch(
             "codex",
             "--dangerously-bypass-approvals-and-sandbox",
             &request.args,
             false,
-        )),
-        "claude" => Ok(shell_agent_launch(
+        ),
+        "claude" => shell_agent_launch(
             "claude",
             "--dangerously-skip-permissions",
             &request.args,
             true,
-        )),
-        "shell" => Ok(request.args.split_first().map_or_else(
+        ),
+        "shell" => request.args.split_first().map_or_else(
             || AgentLaunch {
                 command: interactive_shell(),
                 args: vec!["-i".to_string()],
                 initial_writes: Vec::new(),
+                publish_ports: Vec::new(),
             },
             |(command, args)| interactive_shell_command_launch(command, args),
-        )),
+        ),
         "command" => {
             let (command, args) = request.args.split_first().map_or_else(
                 || (interactive_shell(), vec!["-i".to_string()]),
                 |(command, args)| (command.clone(), args.to_vec()),
             );
-            Ok(AgentLaunch {
+            AgentLaunch {
                 command,
                 args,
                 initial_writes: Vec::new(),
-            })
+                publish_ports: Vec::new(),
+            }
         }
-        other => Err(ProtocolError::new(
+        other => {
+            return Err(ProtocolError::new(
+                "invalid_request",
+                format!("unsupported agent kind {other}"),
+            ))
+        }
+    };
+    launch.publish_ports = validate_publish_ports(&request.publish_ports)?;
+    Ok(launch)
+}
+
+fn validate_publish_ports(ports: &[u16]) -> Result<Vec<u16>, ProtocolError> {
+    if ports.len() > 32 {
+        return Err(ProtocolError::new(
             "invalid_request",
-            format!("unsupported agent kind {other}"),
-        )),
+            "at most 32 sandbox publish ports are allowed",
+        ));
     }
+    for port in ports {
+        if *port == 0 {
+            return Err(ProtocolError::new(
+                "invalid_request",
+                "sandbox publish port must not be 0",
+            ));
+        }
+    }
+    Ok(ports.to_vec())
 }
 
 fn shell_agent_launch(
@@ -819,6 +844,7 @@ fn interactive_shell_command_launch(command: &str, args: &[String]) -> AgentLaun
             data: input,
             delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
         }],
+        publish_ports: Vec::new(),
     }
 }
 
@@ -834,14 +860,19 @@ fn sandbox_launch(
         "sandbox-exec".to_string(),
         "--network-proxy".to_string(),
         network_proxy_url.to_string(),
-        "--".to_string(),
-        launch.command,
     ];
+    for port in &launch.publish_ports {
+        args.push("--publish".to_string());
+        args.push(port.to_string());
+    }
+    args.push("--".to_string());
+    args.push(launch.command);
     args.extend(launch.args);
     AgentLaunch {
         command: executable.display().to_string(),
         args,
         initial_writes: launch.initial_writes,
+        publish_ports: launch.publish_ports,
     }
 }
 
@@ -1087,6 +1118,7 @@ mod tests {
             args: vec!["--model".to_string(), "sonnet".to_string()],
             cols: 120,
             rows: 36,
+            publish_ports: Vec::new(),
         };
 
         let launch = resolve_launch(&request).expect("resolve claude launch");
@@ -1117,6 +1149,7 @@ mod tests {
             ],
             cols: 120,
             rows: 36,
+            publish_ports: Vec::new(),
         };
 
         let launch = resolve_launch(&request).expect("resolve shell command launch");
@@ -1142,6 +1175,7 @@ mod tests {
             args: vec!["/bin/sh".to_string(), "-c".to_string(), "pwd".to_string()],
             cols: 120,
             rows: 36,
+            publish_ports: Vec::new(),
         };
 
         let launch = resolve_launch(&request).expect("resolve command launch");
@@ -1161,6 +1195,7 @@ mod tests {
             args: Vec::new(),
             cols: 120,
             rows: 36,
+            publish_ports: Vec::new(),
         };
 
         let launch = resolve_launch(&request).expect("resolve terminal launch");
@@ -1228,6 +1263,7 @@ mod tests {
                 command: "/bin/bash".to_string(),
                 args: vec!["-i".to_string()],
                 initial_writes: initial_writes.clone(),
+                publish_ports: Vec::new(),
             },
         );
 
@@ -1244,6 +1280,33 @@ mod tests {
             ]
         );
         assert_eq!(launch.initial_writes, initial_writes);
+    }
+
+    #[test]
+    fn transparent_sandbox_publishes_requested_namespace_ports() {
+        let launch = sandbox_launch(
+            Some(std::path::Path::new("/opt/treer-agent-server")),
+            "socks5h://127.0.0.1:8791",
+            AgentLaunch {
+                command: "/bin/bash".to_string(),
+                args: vec!["-i".to_string()],
+                initial_writes: Vec::new(),
+                publish_ports: vec![4173],
+            },
+        );
+        assert_eq!(
+            launch.args,
+            [
+                "sandbox-exec",
+                "--network-proxy",
+                "socks5h://127.0.0.1:8791",
+                "--publish",
+                "4173",
+                "--",
+                "/bin/bash",
+                "-i"
+            ]
+        );
     }
 
     #[test]

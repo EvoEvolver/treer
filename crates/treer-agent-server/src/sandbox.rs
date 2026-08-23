@@ -1,8 +1,11 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::io::{self};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream as StdTcpStream};
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::Args as ClapArgs;
@@ -10,7 +13,7 @@ use futures_util::TryStreamExt;
 use rtnetlink::{LinkUnspec, RouteMessageBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::process::Command;
 use tun2proxy::{ArgDns, ArgProxy, ArgVerbosity, CancellationToken};
 use uuid::Uuid;
@@ -19,6 +22,10 @@ use uuid::Uuid;
 pub struct ExecArgs {
     #[arg(long)]
     network_proxy: String,
+    /// Publish a namespace TCP port on 127.0.0.1 so Agent UI can reach a
+    /// server that listens inside the Linux network sandbox.
+    #[arg(long = "publish", value_name = "PORT")]
+    publish: Vec<u16>,
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
@@ -37,6 +44,10 @@ pub struct ChildArgs {
     resolv_conf: PathBuf,
     #[arg(long)]
     nscd_mask: PathBuf,
+    #[arg(long)]
+    publish_dir: Option<PathBuf>,
+    #[arg(long = "publish", value_name = "PORT")]
+    publish: Vec<u16>,
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
@@ -70,6 +81,19 @@ pub async fn run(args: ExecArgs) -> Result<()> {
     let (transfer_socket, remote_fd) = tun2proxy::socket_transfer::create_transfer_socket_pair()
         .await
         .context("failed to create sandbox network socket channel")?;
+    let publish_dir = sandbox_dir.path().to_path_buf();
+    let mut publish_listeners = Vec::new();
+    for port in &args.publish {
+        if *port == 0 {
+            bail!("sandbox publish port must not be 0");
+        }
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, *port)))
+            .await
+            .with_context(|| {
+                format!("failed to publish sandbox port 127.0.0.1:{port} on the host loopback")
+            })?;
+        publish_listeners.push((*port, listener));
+    }
     let executable = std::env::current_exe().context("failed to locate sandbox executable")?;
     let mut child = Command::new("unshare");
     child
@@ -95,10 +119,21 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         .arg("--resolv-conf")
         .arg(&resolv_conf)
         .arg("--nscd-mask")
-        .arg(&nscd_mask)
-        .arg("--")
-        .args(&args.command)
-        .kill_on_drop(true);
+        .arg(&nscd_mask);
+    if !args.publish.is_empty() {
+        child.arg("--publish-dir").arg(&publish_dir);
+        for port in &args.publish {
+            child.arg("--publish").arg(port.to_string());
+        }
+        let published = args
+            .publish
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        child.env("TREER_SANDBOX_PUBLISHED", published);
+    }
+    child.arg("--").args(&args.command).kill_on_drop(true);
     let mut child = child.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             anyhow::anyhow!(
@@ -109,6 +144,13 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         }
     })?;
     drop(remote_fd);
+    for (port, listener) in publish_listeners {
+        tokio::spawn(publish_host_port(
+            publish_socket_path(&publish_dir, port),
+            port,
+            listener,
+        ));
+    }
 
     let shutdown = CancellationToken::new();
     let transfer_socket = Arc::new(transfer_socket);
@@ -120,25 +162,29 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         }
     });
 
-    let outcome = tokio::select! {
-        accepted = listener.accept() => {
-            let (mut stream, _) = accepted.context("failed to accept sandbox agent notifier")?;
-            let mut payload = Vec::new();
-            stream.read_to_end(&mut payload).await.context("failed to read sandbox agent result")?;
-            serde_json::from_slice::<AgentOutcome>(&payload)
-                .context("sandbox agent returned an invalid result")?
+    let outcome = async {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (mut stream, _) = accepted.context("failed to accept sandbox agent notifier")?;
+                let mut payload = Vec::new();
+                stream.read_to_end(&mut payload).await.context("failed to read sandbox agent result")?;
+                serde_json::from_slice::<AgentOutcome>(&payload)
+                    .context("sandbox agent returned an invalid result")
+            }
+            status = child.wait() => {
+                let status = status.context("failed to wait for Linux network namespace")?;
+                bail!("network sandbox exited before the agent started: {status}");
+            }
         }
-        status = child.wait() => {
-            let status = status.context("failed to wait for Linux network namespace")?;
-            bail!("network sandbox exited before the agent started: {status}");
-        }
-    };
+    }
+    .await;
 
     let _ = child.kill().await;
     shutdown.cancel();
     let _ = transfer_task.await;
     drop(listener);
     sandbox_dir.cleanup();
+    let outcome = outcome?;
     if let Some(error) = outcome.error {
         bail!("failed to start sandboxed agent: {error}");
     }
@@ -148,9 +194,162 @@ pub async fn run(args: ExecArgs) -> Result<()> {
     Ok(())
 }
 
+fn publish_socket_path(dir: &Path, port: u16) -> PathBuf {
+    dir.join(format!("p-{port}.sock"))
+}
+
+async fn publish_host_port(path: PathBuf, port: u16, listener: TcpListener) {
+    loop {
+        let Ok((incoming, _)) = listener.accept().await else {
+            return;
+        };
+        let path = path.clone();
+        tokio::spawn(async move {
+            let Ok(host) = incoming.into_std() else {
+                return;
+            };
+            match connect_unix_with_retry(&path).await {
+                Ok(guest) => {
+                    std::thread::Builder::new()
+                        .name(format!("sandbox-publish-{port}"))
+                        .spawn(move || {
+                            if let Err(error) = splice_host_to_namespace(host, guest) {
+                                tracing::debug!(%error, port, "sandbox publish stream closed");
+                            }
+                        })
+                        .ok();
+                }
+                Err(error) => {
+                    tracing::debug!(%error, port, "sandbox publish unix connect failed");
+                }
+            }
+        });
+    }
+}
+
+async fn connect_unix_with_retry(path: &Path) -> io::Result<StdUnixStream> {
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "sandbox publish socket missing");
+    for _ in 0..400 {
+        match UnixStream::connect(path).await {
+            Ok(stream) => return stream.into_std(),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.kind() == io::ErrorKind::ConnectionRefused =>
+            {
+                last = error;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last)
+}
+
+fn splice_host_to_namespace(mut host: StdTcpStream, mut guest: StdUnixStream) -> io::Result<()> {
+    host.set_nonblocking(false)?;
+    guest.set_nonblocking(false)?;
+    host.set_nodelay(true).ok();
+    let mut host_read = host.try_clone()?;
+    let mut guest_write = guest.try_clone()?;
+    let to_guest = std::thread::spawn(move || std::io::copy(&mut host_read, &mut guest_write));
+    join_copy(to_guest, std::io::copy(&mut guest, &mut host))
+}
+
+fn splice_namespace_to_host(mut unix: StdUnixStream, mut tcp: StdTcpStream) -> io::Result<()> {
+    unix.set_nonblocking(false)?;
+    tcp.set_nonblocking(false)?;
+    tcp.set_nodelay(true).ok();
+    let mut unix_read = unix.try_clone()?;
+    let mut tcp_write = tcp.try_clone()?;
+    let to_tcp = std::thread::spawn(move || std::io::copy(&mut unix_read, &mut tcp_write));
+    join_copy(to_tcp, std::io::copy(&mut tcp, &mut unix))
+}
+
+fn join_copy(
+    other: std::thread::JoinHandle<io::Result<u64>>,
+    local: io::Result<u64>,
+) -> io::Result<()> {
+    let other = other
+        .join()
+        .map_err(|_| io::Error::other("sandbox publish copy thread panicked"))?;
+    other?;
+    local?;
+    Ok(())
+}
+
+async fn start_namespace_publishers(dir: PathBuf, ports: &[u16]) -> Result<()> {
+    for port in ports {
+        if *port == 0 {
+            bail!("sandbox publish port must not be 0");
+        }
+        let path = publish_socket_path(&dir, *port);
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).with_context(|| {
+            format!(
+                "failed to listen on sandbox publish socket {}",
+                path.display()
+            )
+        })?;
+        tokio::spawn(accept_namespace_publish(listener, *port));
+    }
+    Ok(())
+}
+
+async fn accept_namespace_publish(listener: UnixListener, port: u16) {
+    loop {
+        let Ok((incoming, _)) = listener.accept().await else {
+            return;
+        };
+        tokio::spawn(async move {
+            let Ok(unix) = incoming.into_std() else {
+                return;
+            };
+            std::thread::Builder::new()
+                .name(format!("sandbox-ns-publish-{port}"))
+                .spawn(move || {
+                    if let Err(error) = splice_namespace_connection(unix, port) {
+                        tracing::debug!(%error, port, "sandbox namespace publish stream closed");
+                    }
+                })
+                .ok();
+        });
+    }
+}
+
+fn splice_namespace_connection(unix: StdUnixStream, port: u16) -> io::Result<()> {
+    let tcp = connect_namespace_tcp_with_retry(port)?;
+    splice_namespace_to_host(unix, tcp)
+}
+
+fn connect_namespace_tcp_with_retry(port: u16) -> io::Result<StdTcpStream> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut last = io::Error::other("sandbox publish connect failed");
+    for _ in 0..400 {
+        match StdTcpStream::connect(addr) {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if error.kind() == io::ErrorKind::ConnectionRefused
+                    || error.kind() == io::ErrorKind::AddrNotAvailable =>
+            {
+                last = error;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last)
+}
+
 pub async fn run_child(args: ChildArgs) -> Result<()> {
     require_command(&args.command)?;
     mount_namespace_resolver_files(&args.nsswitch, &args.resolv_conf, &args.nscd_mask).await?;
+    if !args.publish.is_empty() {
+        let dir = args
+            .publish_dir
+            .clone()
+            .context("sandbox-child --publish-dir is required when publishing namespace ports")?;
+        start_namespace_publishers(dir, &args.publish).await?;
+    }
     let mut proxy = args.network_proxy;
     if let Some(rest) = proxy.strip_prefix("socks5h://") {
         proxy = format!("socks5://{rest}");
@@ -381,6 +580,15 @@ impl SandboxDirectory {
         let _ = std::fs::remove_file(self.path.join("agent.sock"));
         let _ = std::fs::remove_file(self.path.join("nsswitch.conf"));
         let _ = std::fs::remove_file(self.path.join("resolv.conf"));
+        if let Ok(entries) = std::fs::read_dir(&self.path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("p-") && name.ends_with(".sock") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         let _ = std::fs::remove_dir(self.path.join("nscd-mask"));
         let _ = std::fs::remove_dir(&self.path);
         self.cleaned = true;
@@ -414,6 +622,14 @@ mod tests {
         assert_eq!(
             sandbox_nsswitch("passwd: files\n"),
             "passwd: files\nhosts: files dns\n"
+        );
+    }
+
+    #[test]
+    fn publish_socket_path_is_stable_per_port() {
+        assert_eq!(
+            publish_socket_path(Path::new("/tmp/sandbox"), 4173),
+            PathBuf::from("/tmp/sandbox/p-4173.sock")
         );
     }
 }

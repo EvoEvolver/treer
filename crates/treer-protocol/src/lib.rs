@@ -591,6 +591,10 @@ pub struct CreateAgentRequest {
     pub cols: u16,
     #[serde(default = "default_rows")]
     pub rows: u16,
+    /// Linux network-sandbox ports to publish on the machine loopback.
+    /// Each value is both the namespace listen port and the host publish port.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

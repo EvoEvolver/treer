@@ -85,9 +85,19 @@ explicit product limitation.
 ## Routing And State
 
 Machines connect outward to the Proxy over an authenticated WebSocket. The
-Controller-to-Host protocol is a local length-prefixed bincode socket. Browser
-terminal and service streams route through the Proxy; ordinary virtual-network
-payload travels between Controllers after Proxy authorization.
+Controller-to-Host protocol is a local length-prefixed bincode socket. The
+socket filename is a 16-hex FNV-1a hash of the machine id (`h-<hash>.sock`)
+so the full path stays inside `sockaddr_un` limits on macOS, where the default
+runtime directory under `$TMPDIR` is already long. Browser terminal and service
+streams route through the Proxy; ordinary virtual-network payload travels
+between Controllers after Proxy authorization.
+
+Linux managed Agents run in a private network namespace. Outbound TCP is
+captured onto the Controller SOCKS path. An Agent UI HTTP server that listens
+inside that namespace is reached from the host loopback only when the create
+request includes `publish_ports` (`sandbox-exec --publish`). The Controller
+binds `127.0.0.1:<port>` on the machine and splices each connection over a
+pathname Unix socket into the namespace, where the Agent's server is listening.
 
 Browser terminal attach is revisioned. The Host keeps a bounded PTY output ring
 keyed by stream epoch. Reconnects send the client's last cursor; the Host
