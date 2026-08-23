@@ -462,6 +462,7 @@ async fn route_network_open(
         source_server_id,
         request.source_agent_id.as_deref(),
         &destination.server_id,
+        route.destination_agent_id(),
         route.host(),
         route.port(),
     );
@@ -482,12 +483,14 @@ async fn route_network_open(
             .map_err(|error| (stream_id, error)),
         ResolvedNetworkRoute::Relay {
             destination_server_id,
+            destination_agent_id,
             host,
             port,
         } => {
             frame.payload = serde_json::to_vec(&NetworkConnectRequest {
                 source_server_id: source_server_id.to_string(),
                 source_agent_id: request.source_agent_id,
+                destination_agent_id,
                 host,
                 port,
             })
@@ -519,6 +522,7 @@ enum ResolvedNetworkRoute {
     },
     Relay {
         destination_server_id: String,
+        destination_agent_id: Option<String>,
         host: String,
         port: u16,
     },
@@ -541,6 +545,16 @@ impl ResolvedNetworkRoute {
         }
     }
 
+    fn destination_agent_id(&self) -> Option<&str> {
+        match self {
+            Self::Direct { .. } => None,
+            Self::Relay {
+                destination_agent_id,
+                ..
+            } => destination_agent_id.as_deref(),
+        }
+    }
+
     fn port(&self) -> u16 {
         match self {
             Self::Direct { port, .. } | Self::Relay { port, .. } => *port,
@@ -559,6 +573,7 @@ fn resolve_network_route(
         },
         |record| ResolvedNetworkRoute::Relay {
             destination_server_id: record.destination_server_id,
+            destination_agent_id: record.destination_agent_id,
             host: record.target_host,
             port: record.target_port.unwrap_or(request.port),
         },
@@ -617,6 +632,7 @@ mod tests {
             service_id: "svc_api".to_string(),
             service_protocol: treer_protocol::MachineServiceProtocol::Http,
             destination_server_id: "server-b".to_string(),
+            destination_agent_id: Some("agent-b".to_string()),
             target_host: "localhost".to_string(),
             target_port: Some(8080),
             created_at: Utc::now(),
@@ -626,6 +642,7 @@ mod tests {
             resolve_network_route(&request, Some(record)),
             ResolvedNetworkRoute::Relay {
                 destination_server_id: "server-b".to_string(),
+                destination_agent_id: Some("agent-b".to_string()),
                 host: "localhost".to_string(),
                 port: 8080,
             }

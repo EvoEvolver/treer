@@ -250,11 +250,20 @@ impl AppState {
     }
 
     pub async fn ensure_workspace_info(&self, info: WorkspaceInfo) -> WorkspaceInfo {
+        self.upsert_workspace_info(info, false).await
+    }
+
+    async fn upsert_workspace_info(
+        &self,
+        info: WorkspaceInfo,
+        publish_change: bool,
+    ) -> WorkspaceInfo {
+        let mut event = None;
         let mut workspaces = self.inner.workspaces.write().await;
-        workspaces
+        let workspace = workspaces
             .entry(info.workspace_id.clone())
             .or_insert_with(|| WorkspaceState {
-                info,
+                info: info.clone(),
                 revision: 0,
                 servers: HashMap::new(),
                 agents: HashMap::new(),
@@ -263,9 +272,23 @@ impl AppState {
                 agent_names: HashMap::new(),
                 deleted_servers: HashSet::new(),
                 deleted_agents: HashSet::new(),
-            })
-            .info
-            .clone()
+            });
+        if publish_change && workspace.info != info {
+            workspace.info = info.clone();
+            workspace.revision = workspace.revision.saturating_add(1);
+            event = Some(WorkspaceEvent {
+                revision: workspace.revision,
+                workspace_id: info.workspace_id.clone(),
+                event: "workspace.renamed".to_string(),
+                data: serde_json::to_value(&info).unwrap_or(Value::Null),
+            });
+        }
+        let current = workspace.info.clone();
+        drop(workspaces);
+        if let Some(event) = event {
+            self.publish_workspace_event(event);
+        }
+        current
     }
 
     pub async fn create_workspace_info(
@@ -295,6 +318,18 @@ impl AppState {
                 },
             );
         }
+        self.broadcast_projection(ClusterProjectionUpdate::WorkspaceUpsert {
+            workspace: info.clone(),
+        })
+        .await?;
+        Ok(info)
+    }
+
+    pub async fn rename_workspace_info(
+        &self,
+        info: WorkspaceInfo,
+    ) -> Result<WorkspaceInfo, ProtocolError> {
+        self.upsert_workspace_info(info.clone(), true).await;
         self.broadcast_projection(ClusterProjectionUpdate::WorkspaceUpsert {
             workspace: info.clone(),
         })
@@ -1370,6 +1405,7 @@ impl AppState {
         &self,
         workspace_id: &str,
         destination_server_id: &str,
+        destination_agent_id: Option<&str>,
         host: &str,
         port: u16,
     ) -> Result<DuplexStream, ProtocolError> {
@@ -1388,6 +1424,7 @@ impl AppState {
         let request = NetworkConnectRequest {
             source_server_id: "browser".to_string(),
             source_agent_id: None,
+            destination_agent_id: destination_agent_id.map(str::to_string),
             host: host.to_string(),
             port,
         };
@@ -2218,7 +2255,7 @@ impl AppState {
     pub(crate) async fn apply_cluster_projection(&self, update: ClusterProjectionUpdate) {
         match update {
             ClusterProjectionUpdate::WorkspaceUpsert { workspace } => {
-                self.ensure_workspace_info(workspace).await;
+                self.upsert_workspace_info(workspace, true).await;
             }
             ClusterProjectionUpdate::ServerRenamed {
                 workspace_id,
@@ -2677,6 +2714,56 @@ mod tests {
             connected_at: now,
             last_seen_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_renames_update_snapshots_and_live_events() {
+        let state = AppState::new();
+        let original = state.ensure_workspace("alpha", "Original").await;
+        let mut events = state.subscribe();
+        let renamed = WorkspaceInfo {
+            name: "Renamed".to_string(),
+            ..original
+        };
+
+        state
+            .rename_workspace_info(renamed.clone())
+            .await
+            .expect("rename workspace");
+        assert_eq!(
+            state.snapshot("alpha").await.expect("snapshot").workspace,
+            renamed
+        );
+        let event = events.recv().await.expect("workspace rename event");
+        assert_eq!(event.event, "workspace.renamed");
+        assert_eq!(event.data["name"], "Renamed");
+        state.ensure_workspace("alpha", "alpha").await;
+        assert_eq!(
+            state
+                .snapshot("alpha")
+                .await
+                .expect("snapshot after runtime ensure")
+                .workspace,
+            renamed
+        );
+
+        let replicated = WorkspaceInfo {
+            name: "Replicated".to_string(),
+            ..renamed
+        };
+        state
+            .apply_cluster_projection(ClusterProjectionUpdate::WorkspaceUpsert {
+                workspace: replicated.clone(),
+            })
+            .await;
+        assert_eq!(
+            state.snapshot("alpha").await.expect("snapshot").workspace,
+            replicated
+        );
+        assert_eq!(
+            events.recv().await.expect("replicated rename event").event,
+            "workspace.renamed"
+        );
     }
 
     #[tokio::test]
@@ -3538,7 +3625,7 @@ mod tests {
         let opening_state = state.clone();
         let opening = tokio::spawn(async move {
             opening_state
-                .open_browser_network_stream("alpha", "server", "127.0.0.1", 8080)
+                .open_browser_network_stream("alpha", "server", Some("agent-a"), "127.0.0.1", 8080)
                 .await
         });
         let open = expect_network(server_rx.recv().await.expect("browser open frame"));
@@ -3548,6 +3635,7 @@ mod tests {
         assert_eq!(request.host, "127.0.0.1");
         assert_eq!(request.port, 8080);
         assert_eq!(request.source_server_id, "browser");
+        assert_eq!(request.destination_agent_id.as_deref(), Some("agent-a"));
 
         state
             .relay_network_frame(

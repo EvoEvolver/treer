@@ -326,13 +326,17 @@ enum VirtualHostCommand {
 
 #[derive(Debug, Subcommand)]
 enum ServiceCommand {
-    #[command(about = "List registered machine services")]
+    #[command(about = "List registered services")]
     List,
     #[command(about = "Register a long-running service")]
     Create {
         name: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "agent")]
         machine: Option<String>,
+        /// Bind the service to a managed Agent's private loopback. Use "self"
+        /// when running inside that Agent.
+        #[arg(long, conflicts_with = "machine")]
+        agent: Option<String>,
         #[arg(long, default_value = "127.0.0.1")]
         target_host: String,
         #[arg(long)]
@@ -375,7 +379,7 @@ enum TokenCommand {
 enum UiCommand {
     #[command(about = "Show the current custom interface declaration")]
     Show,
-    #[command(about = "Use an HTTP machine service as this Agent's interface")]
+    #[command(about = "Use an HTTP service as this Agent's interface")]
     Set {
         service: String,
         #[arg(long, default_value = "/")]
@@ -387,7 +391,7 @@ enum UiCommand {
 
 #[derive(Debug, Subcommand)]
 enum NetworkCommand {
-    #[command(about = "Manage long-running machine services")]
+    #[command(about = "Manage long-running services")]
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -1273,6 +1277,7 @@ async fn run_service_command(client: &ApiClient, command: ServiceCommand) -> any
         ServiceCommand::Create {
             name,
             machine,
+            agent,
             target_host,
             port,
             protocol,
@@ -1285,6 +1290,7 @@ async fn run_service_command(client: &ApiClient, command: ServiceCommand) -> any
                     Some(serde_json::to_value(CreateMachineServiceRequest {
                         name,
                         server_id,
+                        target_agent_id: agent,
                         target_host,
                         target_port: port,
                         protocol: protocol.into(),
@@ -2153,6 +2159,23 @@ mod tests {
                     }
                 }
             }) if name == "api" && machine == "builder"
+        ));
+
+        let agent_service = Args::try_parse_from([
+            "treer", "network", "service", "create", "api", "--agent", "self", "--port", "8080",
+        ])
+        .expect("Agent service should parse");
+        assert!(matches!(
+            agent_service.command,
+            Some(Command::Network {
+                command: NetworkCommand::Service {
+                    command: ServiceCommand::Create {
+                        machine: None,
+                        agent: Some(agent),
+                        ..
+                    }
+                }
+            }) if agent == "self"
         ));
     }
 

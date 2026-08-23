@@ -93,17 +93,25 @@ streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
 
 Linux managed Agents run in a private network namespace. Outbound TCP is
-captured onto the Controller SOCKS path. An Agent UI HTTP server that listens
-inside that namespace is reached from the host loopback only when the create
-request includes `publish_ports` (`sandbox-exec --publish`). The Controller
-binds `127.0.0.1:<port>` on the machine and splices each connection over a
-pathname Unix socket into the namespace, where the Agent's server is listening.
+captured onto the Controller SOCKS path. Agent-scoped services use a Unix
+bridge (`sandbox-exec --service-socket`) so the Controller can reach a
+namespace-local loopback listener without publishing a host TCP port. An Agent
+UI HTTP server that must be reachable from the host loopback also needs
+`publish_ports` (`sandbox-exec --publish`): the Controller binds
+`127.0.0.1:<port>` on the machine and splices each connection over a pathname
+Unix socket into the namespace, where the Agent's server is listening.
 
 Browser terminal attach is revisioned. The Host keeps a bounded PTY output ring
 keyed by stream epoch. Reconnects send the client's last cursor; the Host
 returns only later chunks and a gap flag when the ring has slid past that
 cursor. Live Controller lag resyncs from the same Host read instead of dropping
 bytes. This is opaque byte replay, not Agent-protocol item storage.
+
+Covered organization, workspace, and membership mutations write their audit
+event in the same PostgreSQL transaction. Successful Agent create, rename, stop,
+and delete operations and machine rename and delete operations append runtime
+audit events after the Controller result; an audit write failure is logged
+without turning a completed runtime mutation into a retryable API failure.
 
 PostgreSQL is the durable source for accounts, organizations, workspaces,
 machine credentials, services, ingresses, App OAuth codes, policy, audit,

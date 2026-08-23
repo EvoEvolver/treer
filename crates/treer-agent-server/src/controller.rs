@@ -241,6 +241,7 @@ impl ControllerRuntime {
         let launch = sandbox_launch(
             self.inner.sandbox_executable.as_deref(),
             &agent_network_proxy_url(&self.inner.network_proxy_url, &agent_id),
+            &agent_id,
             launch,
         );
         let response = self
@@ -851,6 +852,7 @@ fn interactive_shell_command_launch(command: &str, args: &[String]) -> AgentLaun
 fn sandbox_launch(
     executable: Option<&std::path::Path>,
     network_proxy_url: &str,
+    agent_id: &str,
     launch: AgentLaunch,
 ) -> AgentLaunch {
     let Some(executable) = executable else {
@@ -860,6 +862,10 @@ fn sandbox_launch(
         "sandbox-exec".to_string(),
         "--network-proxy".to_string(),
         network_proxy_url.to_string(),
+        "--service-socket".to_string(),
+        crate::network::agent_service_socket_path(agent_id)
+            .display()
+            .to_string(),
     ];
     for port in &launch.publish_ports {
         args.push("--publish".to_string());
@@ -1259,6 +1265,7 @@ mod tests {
         let launch = sandbox_launch(
             Some(std::path::Path::new("/opt/treer-agent-server")),
             "socks5h://agent-a:treer@127.0.0.1:8791",
+            "agent-a",
             AgentLaunch {
                 command: "/bin/bash".to_string(),
                 args: vec!["-i".to_string()],
@@ -1274,6 +1281,11 @@ mod tests {
                 "sandbox-exec",
                 "--network-proxy",
                 "socks5h://agent-a:treer@127.0.0.1:8791",
+                "--service-socket",
+                crate::network::agent_service_socket_path("agent-a")
+                    .display()
+                    .to_string()
+                    .as_str(),
                 "--",
                 "/bin/bash",
                 "-i"
@@ -1287,6 +1299,7 @@ mod tests {
         let launch = sandbox_launch(
             Some(std::path::Path::new("/opt/treer-agent-server")),
             "socks5h://127.0.0.1:8791",
+            "agent-a",
             AgentLaunch {
                 command: "/bin/bash".to_string(),
                 args: vec!["-i".to_string()],
@@ -1300,6 +1313,11 @@ mod tests {
                 "sandbox-exec",
                 "--network-proxy",
                 "socks5h://127.0.0.1:8791",
+                "--service-socket",
+                crate::network::agent_service_socket_path("agent-a")
+                    .display()
+                    .to_string()
+                    .as_str(),
                 "--publish",
                 "4173",
                 "--",

@@ -211,10 +211,10 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind local API at {}", args.listen))?;
     let listen_address = listener.local_addr()?;
-    let network = network::NetworkRuntime::bind_near(listen_address)
+    let sandbox_executable = transparent_network_executable()?;
+    let network = network::NetworkRuntime::bind_near(listen_address, sandbox_executable.is_some())
         .await
         .context("failed to bind local network proxy")?;
-    let sandbox_executable = transparent_network_executable()?;
     let agent_server_url = agent_server_url(listen_address, sandbox_executable.is_some());
     let (host, host_events) = HostClient::connect(&args.host_socket).await?;
     let sync = host.sync(std::collections::BTreeMap::new()).await?;

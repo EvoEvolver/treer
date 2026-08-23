@@ -92,20 +92,24 @@ treer member list
 
 ## Manage machine services and virtual hosts
 
-Machine services are durable records for long-running processes reachable from
-a machine's host network. They outlive the managed Agent that registers or
-maintains them.
+Machine services are durable records for long-running processes. Host-network
+services outlive the managed Agent that registers them. Agent-scoped services
+target a managed Agent's private loopback and are deleted with that Agent.
 
 A server started directly inside a Linux managed Agent remains in that Agent's
 private network namespace; outbound TCP uses the transparent TUN/SOCKS path.
-Host loopback and internet listeners on the machine do not see that bind. To
-present an HTTP Agent UI from inside the namespace, create the Agent with
+Host loopback and internet listeners on the machine do not see that bind.
+Register an Agent-scoped service so Treer's workspace network can reach it
+without a host TCP port:
+
+```bash
+treer network service create api --agent self --port 8080 --protocol http
+```
+
+To present an HTTP Agent UI from inside the namespace, create the Agent with
 `--publish <port>` (`publish_ports` on the API). Treer then maps
 `127.0.0.1:<port>` on the machine into the namespace. Register the **host**
-loopback port as the machine service and run `treer ui set`.
-
-Without `--publish`, keep long-lived services on a host facility such as
-systemd or a Docker published port before registering them.
+loopback port as a machine service (not `--agent`) and run `treer ui set`.
 
 Register a service on the current Agent's machine, or select another workspace
 machine explicitly:

@@ -61,6 +61,7 @@ export interface AgentLaunchProfile {
 
 export interface Snapshot {
   revision: number
+  workspace: Workspace
   servers: Machine[]
   agents: Agent[]
   agent_uis: AgentUi[]
@@ -83,6 +84,7 @@ export interface VirtualNetworkHost {
   service_id: string
   service_protocol: "tcp" | "http"
   destination_server_id: string
+  destination_agent_id?: string
   target_host: string
   target_port?: number
 }
@@ -91,6 +93,7 @@ export interface MachineService {
   service_id: string
   name: string
   server_id: string
+  target_agent_id?: string
   target_host: string
   target_port: number
   protocol: "tcp" | "http"

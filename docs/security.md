@@ -16,8 +16,9 @@ workspace members. It is not a safe multi-tenant execution sandbox.
   separately. Context edges do not expand visibility.
 - Message bodies stay out of ordinary logs, audit payloads, domain events, and
   outbox envelopes. They remain plaintext in Core PostgreSQL.
-- Organization management and successful lifecycle mutations produce
-  append-only audit events without prompts, terminal data, commands, or secrets.
+- Organization and workspace management plus successful lifecycle mutations
+  produce append-only audit events without prompts, terminal data, commands, or
+  secrets.
 
 ## Unsupported Claims
 
@@ -71,7 +72,8 @@ it remains in the browser-to-service data path.
 
 Linux `publish_ports` maps a namespace TCP port onto the machine loopback. It
 is not an internet listener. Any process on that machine that can reach
-`127.0.0.1` can reach the published service.
+`127.0.0.1` can reach the published service. Agent-scoped services use a
+separate Unix bridge into the same namespace and do not open a host TCP port.
 
 ## Policy And Rollout
 

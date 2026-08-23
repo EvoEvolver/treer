@@ -294,7 +294,8 @@ organization; it does not create another personal organization. Users sign in
 with email/password or a configured GitHub or Google account, and can update
 their email or preferred name without changing their stable identity or
 organization access. Organization owners and administrators can also rename
-their organization.
+their organization. Organization members can create and rename workspaces;
+renaming keeps the workspace ID, enrolled machines, Agents, and services intact.
 
 Users, invitations, sessions, organizations, machine credentials, services,
 App OAuth codes, and workload signing keys are stored in PostgreSQL. The Proxy requires
@@ -529,15 +530,14 @@ transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
 `all_proxy` instead. In this mode, `NO_PROXY` and `no_proxy` contain
 `127.0.0.1,localhost,::1`, so Controller and App loopback calls do not enter
 the SOCKS path. Native macOS currently uses this compatibility mode; use a Linux
-container when transparent capture is required. A Mail App that registers
-its listener as a host-network machine service currently requires
-`proxy-env`; a transparent Agent's namespace-local loopback listener is not a
-host-network endpoint. Create the Agent with `--publish <port>`
-(`publish_ports`) when the HTTP Agent UI must listen inside the namespace:
-the Controller binds `127.0.0.1:<port>` on the machine and splices accepted
-connections into the sandbox. Register that host loopback port as the machine
-service. The mapping is inbound host-loopback only, not a public internet
-listener.
+container when transparent capture is required. A transparent Agent can expose
+a namespace-local loopback listener by registering an Agent-scoped service; the
+Controller reaches it through the sandbox's Unix bridge. Create the Agent with
+`--publish <port>` (`publish_ports`) when a host-loopback client such as the
+HTTP Agent UI tunnel must reach that listener: the Controller binds
+`127.0.0.1:<port>` on the machine and splices accepted connections into the
+sandbox. Register that host loopback port as a machine service. The mapping is
+inbound host-loopback only, not a public internet listener.
 
 Managed agents reach the Controller's local API through the reserved TEST-NET-1
 address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
@@ -555,23 +555,26 @@ target machines need no inbound port. Each relayed stream has an independent
 flow-control window, and terminal and relayed network frames share the same
 authenticated connection.
 
-Network access is allowed by default. A machine service is a durable record for
-a long-running host-network process: machine, target host, target port, and TCP
-or HTTP protocol. Virtual hosts are independent aliases that map any valid
-hostname to a service. Both are managed from the Network view. For example,
-registering `build-machine` port `8080` as `api`, then mapping `api.internal` to
-that service, makes this work without exposing port 8080:
+Network access is allowed by default. A service is a durable record for either a
+long-running host-network process or a managed Agent's private loopback: machine,
+optional Agent, target host, target port, and TCP or HTTP protocol. Agent-scoped
+services always target loopback and cannot be moved to another Agent or machine.
+Virtual hosts are independent aliases that map any valid hostname to a service.
+Both are managed from the Network view. For example, registering an Agent's port
+`8080` as `api`, then mapping `api.internal` to that service, makes this work
+without publishing port 8080 on the host:
 
 ```bash
 curl http://api.internal/
 ```
 
 Deleting a machine also deletes its services and their virtual hosts. Deleting
-a service removes its aliases but does not stop the external process. Virtual
-host names are exact and case-insensitive; no suffix or naming convention is
-reserved. Only explicitly configured records are treated as workspace virtual
-hosts. Other hostnames and IP addresses use ordinary outbound access through
-the source machine, subject to the same network policy boundary.
+an Agent deletes services scoped to that Agent. Deleting a service removes its
+aliases but does not stop the external process. Virtual host names are exact and
+case-insensitive; no suffix or naming convention is reserved. Only explicitly
+configured records are treated as workspace virtual hosts. Other hostnames and
+IP addresses use ordinary outbound access through the source machine, subject
+to the same network policy boundary.
 
 Virtual-host changes are active without a Proxy or Agent Server restart. The
 Proxy updates its in-memory routing table and immediately broadcasts a full,
@@ -596,7 +599,7 @@ token in `Treer-Authorization`. Application `Authorization`, cookies,
 `Set-Cookie`, streaming responses, and WebSocket upgrades pass through unchanged.
 Treer consumes its own ingress cookie/header and strips client-supplied
 `X-Treer-*` identity headers before forwarding. Only HTTP services can be
-published. Disabling or deleting an ingress does not stop the machine service.
+published. Disabling or deleting an ingress does not stop the service.
 
 The Proxy also records hourly payload totals for each relayed machine direction.
 Workspace members can query the last 1 to 720 hours without scanning individual
@@ -630,7 +633,7 @@ Managed agents can control workspace discovery records through the local Agent
 Server without receiving Proxy credentials:
 
 ```bash
-treer network service create api --port 8080 --protocol http
+treer network service create api --agent self --port 8080 --protocol http
 treer network service probe api
 treer ui set api --path /
 treer ui show
@@ -642,10 +645,14 @@ treer network host delete api.internal
 
 The Agent Server forwards the caller identity under its machine credential, and
 the Proxy evaluates service and virtual-host actions independently. They
-currently inherit the allow-all default. On Linux, a process started directly
-inside a managed Agent remains in its private network namespace. Register
-services started on the machine host network, such as systemd services or
-Docker containers with published ports.
+currently inherit the allow-all default. `--agent self` registers a service on
+the current Agent's private loopback, including in Linux transparent-network
+mode; the Controller reaches it through an Agent-specific Unix bridge without
+publishing a host port. Omit `--agent` to register a machine-level service such
+as a systemd service or a Docker container with a published port. In
+`proxy-env` compatibility mode there is no per-Agent network namespace, so an
+Agent service falls back to machine loopback and its port must be unique on that
+machine.
 
 ## Agent collaboration
 
