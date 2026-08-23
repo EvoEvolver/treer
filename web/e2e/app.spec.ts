@@ -159,6 +159,23 @@ test("workspace dropdown opens Profiles and Network", async ({ page }) => {
   await expect(page.getByText("Machine services")).toBeVisible()
 })
 
+test("service registration can target an Agent's private loopback", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: /Workspace/ }).click()
+  await page.getByRole("menuitem", { name: "Network" }).click()
+  await page.getByRole("button", { name: "Add service" }).click()
+
+  const dialog = page.getByRole("dialog", { name: "Register service" })
+  const selects = dialog.getByRole("combobox")
+  await selects.nth(0).click()
+  await page.getByRole("option", { name: /api-server.*workstation/ }).click()
+
+  await expect(selects.nth(1)).toBeDisabled()
+  const targetHost = dialog.getByText("Target host", { exact: true }).locator("..").getByRole("textbox")
+  await expect(targetHost).toBeDisabled()
+  await expect(targetHost).toHaveValue("127.0.0.1")
+})
+
 test("clicking a machine opens an overview with identity, agents, services, virtual hosts, and traffic", async ({ page }) => {
   await page.goto("/")
   await machinesTab(page).click()

@@ -180,5 +180,5 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
 
   if (!workspaceId) return <div className="grid h-full place-items-center text-xs text-zinc-500">No workspace selected</div>
   if (!agentId) return <div className="grid h-full place-items-center text-xs text-zinc-500">Select an agent to attach</div>
-  return <div ref={hostRef} className="h-full min-h-0 min-w-0 w-full max-w-full overflow-hidden p-3" />
+  return <div className="h-full min-h-0 min-w-0 w-full max-w-full p-3"><div ref={hostRef} className="h-full min-h-0 min-w-0 w-full max-w-full overflow-hidden" /></div>
 })

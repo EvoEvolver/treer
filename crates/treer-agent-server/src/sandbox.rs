@@ -19,6 +19,8 @@ use uuid::Uuid;
 pub struct ExecArgs {
     #[arg(long)]
     network_proxy: String,
+    #[arg(long)]
+    service_socket: PathBuf,
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
@@ -37,6 +39,8 @@ pub struct ChildArgs {
     resolv_conf: PathBuf,
     #[arg(long)]
     nscd_mask: PathBuf,
+    #[arg(long)]
+    service_socket: PathBuf,
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
@@ -57,6 +61,7 @@ struct AgentOutcome {
 
 pub async fn run(args: ExecArgs) -> Result<()> {
     require_command(&args.command)?;
+    remove_stale_socket(&args.service_socket)?;
     let mut sandbox_dir = SandboxDirectory::create()?;
     let notify = sandbox_dir.path().join("agent.sock");
     let nsswitch = sandbox_dir.path().join("nsswitch.conf");
@@ -96,6 +101,8 @@ pub async fn run(args: ExecArgs) -> Result<()> {
         .arg(&resolv_conf)
         .arg("--nscd-mask")
         .arg(&nscd_mask)
+        .arg("--service-socket")
+        .arg(&args.service_socket)
         .arg("--")
         .args(&args.command)
         .kill_on_drop(true);
@@ -138,6 +145,7 @@ pub async fn run(args: ExecArgs) -> Result<()> {
     shutdown.cancel();
     let _ = transfer_task.await;
     drop(listener);
+    let _ = std::fs::remove_file(&args.service_socket);
     sandbox_dir.cleanup();
     if let Some(error) = outcome.error {
         bail!("failed to start sandboxed agent: {error}");
@@ -166,14 +174,75 @@ pub async fn run_child(args: ChildArgs) -> Result<()> {
         ..tun2proxy::Args::default()
     };
     prepare_namespace_proxy_route(config.proxy.addr.ip()).await?;
-    tun2proxy::general_run_async(
+    let service_listener = UnixListener::bind(&args.service_socket).with_context(|| {
+        format!(
+            "failed to create Agent service bridge {}",
+            args.service_socket.display()
+        )
+    })?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&args.service_socket, std::fs::Permissions::from_mode(0o600))?;
+    let service_task = tokio::spawn(serve_agent_services(service_listener));
+    let result = tun2proxy::general_run_async(
         config,
         tun2proxy::DEFAULT_MTU,
         false,
         CancellationToken::new(),
     )
     .await
-    .context("transparent network runtime failed")?;
+    .context("transparent network runtime failed");
+    service_task.abort();
+    let _ = service_task.await;
+    let _ = std::fs::remove_file(&args.service_socket);
+    result.map(|_| ())
+}
+
+fn remove_stale_socket(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+async fn serve_agent_services(listener: UnixListener) {
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::warn!(%error, "Agent service bridge stopped accepting connections");
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(error) = bridge_agent_service(stream).await {
+                tracing::debug!(%error, "Agent service bridge connection closed");
+            }
+        });
+    }
+}
+
+async fn bridge_agent_service(mut stream: UnixStream) -> Result<()> {
+    let port = stream
+        .read_u16()
+        .await
+        .context("failed to read Agent service port")?;
+    if port == 0 {
+        bail!("Agent service port must not be zero");
+    }
+    let mut service = match tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
+        Ok(service) => service,
+        Err(error) => {
+            let _ = stream.write_u8(1).await;
+            return Err(error)
+                .with_context(|| format!("failed to connect to Agent service on port {port}"));
+        }
+    };
+    stream
+        .write_u8(0)
+        .await
+        .context("failed to acknowledge Agent service connection")?;
+    tokio::io::copy_bidirectional(&mut stream, &mut service).await?;
     Ok(())
 }
 
@@ -415,5 +484,36 @@ mod tests {
             sandbox_nsswitch("passwd: files\n"),
             "passwd: files\nhosts: files dns\n"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_service_bridge_connects_inside_its_loopback() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind Agent service");
+        let port = listener.local_addr().expect("service address").port();
+        let service = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept Agent service");
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).await.expect("read request");
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").await.expect("write response");
+        });
+        let (mut client, bridge) = UnixStream::pair().expect("create bridge pair");
+        let bridge = tokio::spawn(bridge_agent_service(bridge));
+
+        client.write_u16(port).await.expect("select service port");
+        assert_eq!(client.read_u8().await.expect("read bridge ACK"), 0);
+        client.write_all(b"ping").await.expect("write request");
+        let mut response = [0_u8; 4];
+        client
+            .read_exact(&mut response)
+            .await
+            .expect("read response");
+        assert_eq!(&response, b"pong");
+        drop(client);
+
+        service.await.expect("Agent service task");
+        bridge.await.expect("bridge task").expect("bridge result");
     }
 }

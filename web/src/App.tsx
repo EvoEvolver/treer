@@ -420,6 +420,7 @@ function WorkspaceApp() {
   const [publishAccess, setPublishAccess] = useState<"public" | "workspace">("public")
   const [serviceName, setServiceName] = useState("")
   const [serviceServerId, setServiceServerId] = useState("")
+  const [serviceTargetAgentId, setServiceTargetAgentId] = useState<string | null>(null)
   const [serviceTargetHost, setServiceTargetHost] = useState("127.0.0.1")
   const [serviceTargetPort, setServiceTargetPort] = useState("")
   const [serviceProtocol, setServiceProtocol] = useState<"tcp" | "http">("http")
@@ -947,6 +948,7 @@ function WorkspaceApp() {
     setServiceTargetHost("127.0.0.1")
     setServiceTargetPort("")
     setServiceProtocol("http")
+    setServiceTargetAgentId(null)
     setServiceServerId((current) => current || snapshot?.servers[0]?.server_id || "")
     setCreateServiceOpen(true)
   }
@@ -955,6 +957,7 @@ function WorkspaceApp() {
     setEditingService(service)
     setServiceName(service.name)
     setServiceServerId(service.server_id)
+    setServiceTargetAgentId(service.target_agent_id ?? null)
     setServiceTargetHost(service.target_host)
     setServiceTargetPort(String(service.target_port))
     setServiceProtocol(service.protocol)
@@ -985,6 +988,7 @@ function WorkspaceApp() {
         body: JSON.stringify({
           name: serviceName,
           server_id: serviceServerId,
+          ...(!editingService && serviceTargetAgentId ? { target_agent_id: serviceTargetAgentId } : {}),
           target_host: serviceTargetHost,
           target_port: Number(serviceTargetPort),
           protocol: serviceProtocol,
@@ -1202,7 +1206,34 @@ function WorkspaceApp() {
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createServiceOpen} onOpenChange={(open) => { setCreateServiceOpen(open); if (!open) setEditingService(null) }}><DialogContent className="max-w-xl"><form onSubmit={createService} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>{editingService ? "Edit machine service" : "Register machine service"}</DialogTitle><DialogDescription>{editingService ? "Update the durable service target without changing its virtual hosts." : "Register a long-running service already available from its machine."}</DialogDescription></DialogHeader><Field label="Service name"><Input value={serviceName} onChange={(event) => setServiceName(event.target.value)} placeholder="API server" required autoFocus /></Field><Field label="Machine"><Select value={serviceServerId} onValueChange={setServiceServerId} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Target host"><Input className="font-mono" value={serviceTargetHost} onChange={(event) => setServiceTargetHost(event.target.value)} required /></Field><Field label="Target port"><Input type="number" min="1" max="65535" value={serviceTargetPort} onChange={(event) => setServiceTargetPort(event.target.value)} required /></Field><Field label="Protocol"><Select value={serviceProtocol} onValueChange={(value: "tcp" | "http") => setServiceProtocol(value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="http">HTTP</SelectItem><SelectItem value="tcp">TCP</SelectItem></SelectContent></Select></Field><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setCreateServiceOpen(false)}>Cancel</Button><Button type="submit" disabled={!serviceName || !serviceServerId || !serviceTargetPort}><Server />{editingService ? "Save service" : "Register service"}</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createServiceOpen} onOpenChange={(open) => { setCreateServiceOpen(open); if (!open) setEditingService(null) }}>
+      <DialogContent className="max-w-xl">
+        <form onSubmit={createService} className="grid gap-4 sm:grid-cols-2">
+          <DialogHeader className="sm:col-span-2">
+            <DialogTitle>{editingService ? "Edit service" : "Register service"}</DialogTitle>
+            <DialogDescription>{editingService ? "Update this service without changing its scope." : "Register a machine service or a service on an Agent's private loopback."}</DialogDescription>
+          </DialogHeader>
+          <Field label="Service name"><Input value={serviceName} onChange={(event) => setServiceName(event.target.value)} placeholder="API server" required autoFocus /></Field>
+          <Field label="Scope">
+            <Select value={serviceTargetAgentId ?? "machine"} disabled={Boolean(editingService)} onValueChange={(value) => {
+              if (value === "machine") { setServiceTargetAgentId(null); return }
+              setServiceTargetAgentId(value)
+              const agent = snapshot?.agents.find((item) => item.agent_id === value)
+              if (agent) setServiceServerId(agent.server_id)
+              setServiceTargetHost("127.0.0.1")
+            }}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="machine">Machine</SelectItem>{snapshot?.agents.map((agent) => <SelectItem key={agent.agent_id} value={agent.agent_id}>{agent.name} · {machineName(snapshot?.servers.find((machine) => machine.server_id === agent.server_id), agent.server_id)}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          <Field label="Machine"><Select value={serviceServerId} onValueChange={setServiceServerId} disabled={Boolean(serviceTargetAgentId)} required><SelectTrigger><SelectValue placeholder="Select machine" /></SelectTrigger><SelectContent>{snapshot?.servers.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="Target host"><Input className="font-mono" value={serviceTargetHost} onChange={(event) => setServiceTargetHost(event.target.value)} disabled={Boolean(serviceTargetAgentId)} required /></Field>
+          <Field label="Target port"><Input type="number" min="1" max="65535" value={serviceTargetPort} onChange={(event) => setServiceTargetPort(event.target.value)} required /></Field>
+          <Field label="Protocol"><Select value={serviceProtocol} onValueChange={(value: "tcp" | "http") => setServiceProtocol(value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="http">HTTP</SelectItem><SelectItem value="tcp">TCP</SelectItem></SelectContent></Select></Field>
+          <DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setCreateServiceOpen(false)}>Cancel</Button><Button type="submit" disabled={!serviceName || !serviceServerId || !serviceTargetPort}><Server />{editingService ? "Save service" : "Register service"}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
 
     <Dialog open={createVirtualHostOpen} onOpenChange={setCreateVirtualHostOpen}><DialogContent><form onSubmit={createVirtualHost} className="space-y-4"><DialogHeader><DialogTitle>Add virtual host</DialogTitle><DialogDescription>Map a workspace hostname to a registered machine service.</DialogDescription></DialogHeader><Field label="Virtual hostname"><Input className="font-mono" value={virtualHostname} onChange={(event) => setVirtualHostname(event.target.value)} placeholder="app.internal" required autoFocus /></Field><Field label="Service"><Select value={virtualServiceId} onValueChange={setVirtualServiceId} required><SelectTrigger><SelectValue placeholder="Select service" /></SelectTrigger><SelectContent>{services.map((service) => <SelectItem key={service.service_id} value={service.service_id}>{service.name} · {service.target_host}:{service.target_port}</SelectItem>)}</SelectContent></Select></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateVirtualHostOpen(false)}>Cancel</Button><Button type="submit" disabled={!virtualHostname || !virtualServiceId}><Plus />Add host</Button></DialogFooter></form></DialogContent></Dialog>
 

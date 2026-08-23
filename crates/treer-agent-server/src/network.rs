@@ -4,7 +4,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(target_os = "linux")]
+use tokio::net::UnixStream;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
@@ -20,6 +22,10 @@ const INITIAL_WINDOW: usize = 256 * 1024;
 const MAX_CHUNK: usize = 16 * 1024;
 pub const SANDBOX_LOCAL_API_IP: &str = "192.0.2.1";
 
+pub fn agent_service_socket_path(agent_id: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("treer-agent-service-{agent_id}.sock"))
+}
+
 #[derive(Clone)]
 pub struct NetworkRuntime {
     inner: Arc<NetworkInner>,
@@ -31,10 +37,14 @@ struct NetworkInner {
     outgoing: mpsc::Sender<NetworkBinaryFrame>,
     outgoing_rx: Mutex<mpsc::Receiver<NetworkBinaryFrame>>,
     streams: Mutex<HashMap<String, mpsc::Sender<NetworkBinaryFrame>>>,
+    transparent_networking: bool,
 }
 
 impl NetworkRuntime {
-    pub async fn bind_near(api_address: SocketAddr) -> anyhow::Result<Self> {
+    pub async fn bind_near(
+        api_address: SocketAddr,
+        transparent_networking: bool,
+    ) -> anyhow::Result<Self> {
         let listener = bind_near(api_address).await?;
         let listen_address = listener.local_addr()?;
         let (outgoing, outgoing_rx) = mpsc::channel(OUTGOING_CHANNEL_CAPACITY);
@@ -45,6 +55,7 @@ impl NetworkRuntime {
                 outgoing,
                 outgoing_rx: Mutex::new(outgoing_rx),
                 streams: Mutex::new(HashMap::new()),
+                transparent_networking,
             }),
         };
         let accept_runtime = runtime.clone();
@@ -118,6 +129,41 @@ impl NetworkRuntime {
                     payload: encode_error("proxy_disconnected", "proxy connection was lost"),
                 })
                 .await;
+        }
+    }
+
+    pub async fn probe(
+        &self,
+        host: String,
+        port: u16,
+        target_agent_id: Option<String>,
+        timeout_ms: u64,
+    ) -> serde_json::Value {
+        let timeout = std::time::Duration::from_millis(timeout_ms.clamp(100, 30_000));
+        match tokio::time::timeout(
+            timeout,
+            connect_destination(
+                &host,
+                port,
+                target_agent_id.as_deref(),
+                self.inner.transparent_networking,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_)) => serde_json::json!({ "healthy": true, "host": host, "port": port }),
+            Ok(Err(error)) => serde_json::json!({
+                "healthy": false,
+                "host": host,
+                "port": port,
+                "error": error.to_string(),
+            }),
+            Err(_) => serde_json::json!({
+                "healthy": false,
+                "host": host,
+                "port": port,
+                "error": "connection timed out",
+            }),
         }
     }
 
@@ -196,11 +242,13 @@ impl NetworkRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             let result = async {
-                let socket = TcpStream::connect((request.host.as_str(), request.port))
-                    .await
-                    .with_context(|| {
-                        format!("failed to connect to {}:{}", request.host, request.port)
-                    })?;
+                let socket = connect_destination(
+                    &request.host,
+                    request.port,
+                    request.destination_agent_id.as_deref(),
+                    runtime.inner.transparent_networking,
+                )
+                .await?;
                 runtime
                     .send(NetworkBinaryFrame {
                         kind: NetworkBinaryKind::Opened,
@@ -233,6 +281,51 @@ impl NetworkRuntime {
             .await
             .map_err(|_| anyhow!("network transport closed"))
     }
+}
+
+trait DestinationStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> DestinationStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+async fn connect_destination(
+    host: &str,
+    port: u16,
+    target_agent_id: Option<&str>,
+    transparent_networking: bool,
+) -> anyhow::Result<Box<dyn DestinationStream>> {
+    if let Some(agent_id) = target_agent_id {
+        if transparent_networking {
+            #[cfg(target_os = "linux")]
+            {
+                let path = agent_service_socket_path(agent_id);
+                let mut socket = UnixStream::connect(&path).await.with_context(|| {
+                    format!("Agent {agent_id} is offline or its service bridge is unavailable")
+                })?;
+                socket
+                    .write_u16(port)
+                    .await
+                    .context("failed to select Agent service port")?;
+                if socket
+                    .read_u8()
+                    .await
+                    .context("Agent service bridge closed before connecting")?
+                    != 0
+                {
+                    return Err(anyhow!("Agent service is not listening on port {port}"));
+                }
+                return Ok(Box::new(socket));
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(anyhow!("transparent Agent services require Linux"));
+        }
+        let socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .with_context(|| format!("failed to connect to Agent service on port {port}"))?;
+        return Ok(Box::new(socket));
+    }
+    let socket = TcpStream::connect((host, port))
+        .await
+        .with_context(|| format!("failed to connect to {host}:{port}"))?;
+    Ok(Box::new(socket))
 }
 
 async fn bridge_local_api(mut socket: TcpStream, address: SocketAddr) -> anyhow::Result<()> {
@@ -437,14 +530,17 @@ async fn write_socks_reply(socket: &mut TcpStream, status: u8) -> io::Result<()>
     socket.write_all(&[5, status, 0, 1, 0, 0, 0, 0, 0, 0]).await
 }
 
-async fn bridge_stream(
-    socket: TcpStream,
+async fn bridge_stream<S>(
+    socket: S,
     mut incoming: mpsc::Receiver<NetworkBinaryFrame>,
     runtime: &NetworkRuntime,
     stream_id: &str,
     mut send_window: usize,
-) -> anyhow::Result<()> {
-    let (mut reader, mut writer) = socket.into_split();
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(socket);
     let mut buffer = vec![0_u8; MAX_CHUNK];
     let mut local_closed = false;
     let mut remote_closed = false;
@@ -516,6 +612,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    #[cfg(target_os = "linux")]
+    use tokio::net::UnixListener;
 
     async fn next_frame(runtime: &NetworkRuntime) -> NetworkBinaryFrame {
         tokio::time::timeout(Duration::from_secs(2), runtime.next_outgoing())
@@ -612,7 +710,7 @@ mod tests {
                 .await
                 .expect("write local API response");
         });
-        let runtime = NetworkRuntime::bind_near(local_api_address)
+        let runtime = NetworkRuntime::bind_near(local_api_address, false)
             .await
             .expect("bind network runtime");
         let mut client = TcpStream::connect(runtime.listen_address())
@@ -672,7 +770,7 @@ mod tests {
             .expect("reserve API port");
         let api_address = api_reservation.local_addr().expect("API address");
         drop(api_reservation);
-        let runtime = NetworkRuntime::bind_near(api_address)
+        let runtime = NetworkRuntime::bind_near(api_address, false)
             .await
             .expect("bind network runtime");
         let mut client = TcpStream::connect(runtime.listen_address())
@@ -760,7 +858,7 @@ mod tests {
             .expect("reserve API port");
         let api_address = api_reservation.local_addr().expect("API address");
         drop(api_reservation);
-        let runtime = NetworkRuntime::bind_near(api_address)
+        let runtime = NetworkRuntime::bind_near(api_address, false)
             .await
             .expect("bind network runtime");
         let mut client = TcpStream::connect(runtime.listen_address())
@@ -789,6 +887,7 @@ mod tests {
                 payload: serde_json::to_vec(&NetworkConnectRequest {
                     source_server_id: "server".to_string(),
                     source_agent_id: None,
+                    destination_agent_id: None,
                     host: Ipv4Addr::LOCALHOST.to_string(),
                     port: target_port,
                 })
@@ -843,5 +942,32 @@ mod tests {
 
         target_task.await.expect("target task");
         relay.abort();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn transparent_agent_destination_uses_its_unix_bridge() {
+        let agent_id = format!("test-{}", Uuid::new_v4().simple());
+        let path = agent_service_socket_path(&agent_id);
+        let listener = UnixListener::bind(&path).expect("bind Agent service bridge");
+        let bridge = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept bridge request");
+            assert_eq!(stream.read_u16().await.expect("read service port"), 4242);
+            stream.write_u8(0).await.expect("write bridge ACK");
+            let mut payload = [0_u8; 4];
+            stream.read_exact(&mut payload).await.expect("read payload");
+            assert_eq!(&payload, b"ping");
+        });
+
+        let mut stream = connect_destination("ignored.example", 4242, Some(&agent_id), true)
+            .await
+            .expect("connect through Agent bridge");
+        stream
+            .write_all(b"ping")
+            .await
+            .expect("write bridge payload");
+        drop(stream);
+        bridge.await.expect("bridge task");
+        std::fs::remove_file(path).expect("remove bridge socket");
     }
 }
