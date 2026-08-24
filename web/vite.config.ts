@@ -11,7 +11,7 @@ export default defineConfig({
   resolve: { alias: { "@": path.resolve(root, "./src") } },
   server: {
     proxy: {
-      "/api": { target: "http://127.0.0.1:8787", ws: true },
+      "/api": { target: process.env.TREER_DEV_PROXY ?? "http://127.0.0.1:8787", ws: true },
     },
   },
   build: { target: "es2022", assetsInlineLimit: 100_000_000, cssCodeSplit: false },
