@@ -113,9 +113,11 @@ Creating an Agent with a `recipe` git URL starts an interactive installer
 (Codex, Claude, or shell) and immediately prompts it with the bundled
 [install skill](../skills/treer-install/SKILL.md). The installer clones that
 repository, creates a different command Agent, and upserts a workspace launch
-profile from `treer-agent.json`. Extra chats use New Chat in that Agent's UI
-on the same app-server. Launch starts or restarts the process; it does not
-run Install recipe again. The installer must not probe another Agent's
+profile from `treer-agent.json`. Each created Agent is one thread. Extra
+conversations use Launch to create another Agent. A recipe start script may
+attach to an already healthy same-type listener instead of starting another
+app-server and frontend. Launch does not run Install recipe again. The
+installer must not probe another Agent's
 service; readiness is an `agent_uis` row on workspace discovery plus the
 saved profile. Same-machine Agents may health-probe sibling services. This is
 not an App package installer.

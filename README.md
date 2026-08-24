@@ -816,9 +816,10 @@ treer agent admin create --machine SERVER_ID --kind codex --name installer \
 ```
 
 A successful install saves a launch profile (name and `run` from
-`treer-agent.json`). Extra chats use New Chat in that Agent's UI. Launch
-starts or restarts the same app-server + UI process; do not run Install
-recipe again.
+`treer-agent.json`). Each created Agent is one thread. Extra conversations
+use Launch to create another Agent. A recipe start script may attach to an
+already healthy same-type listener instead of starting another process. Do
+not run Install recipe again.
 
 ## Checks
 

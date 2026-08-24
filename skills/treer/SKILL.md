@@ -389,8 +389,9 @@ treer agent admin create --machine <server-id> --kind codex --name installer \
 ```
 
 The installer creates a different command Agent and must save a launch
-profile from `treer-agent.json` so Launch can start or restart that process.
-Extra chats use New Chat in the created Agent's UI.
+profile from `treer-agent.json` so Launch can create another Agent of that
+recipe. Each Agent is one thread. A recipe start script may attach to an
+already healthy same-type listener instead of starting another process.
 It must not `treer network service probe` that Agent's service
 (`service_not_owned`). Wait on `treer status` until `agent_uis` lists the
 created Agent, then confirm `treer agent admin profile show`.

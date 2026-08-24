@@ -62,10 +62,10 @@ script.
 
 ## Save a launch profile
 
-Install once. Extra chats are **New Chat** in the created Agent's UI, not
-another install or another Agent. After `apply.sh` (or after you create the
-first command Agent), upsert a workspace launch profile from
-`treer-agent.json` so Launch can start or restart that same process:
+Install once. Each created Agent is one thread. Extra conversations are
+another Agent via Launch, not another install. After `apply.sh` (or after you
+create the first command Agent), upsert a workspace launch profile from
+`treer-agent.json` so Launch can create another Agent of this recipe:
 
 ```bash
 # $DEST is the recipe checkout. --cwd must be Host-relative, same as the Agent.
@@ -99,9 +99,9 @@ Success is workspace discovery plus a reusable Launch option:
 4. `treer agent admin profile show` returns the recipe's launch profile.
 
 If `apply.sh` is still waiting on probe after the UI is registered, treat the
-install as done and stop. Leave the created Agent running. Extra chats use
-New Chat in that Agent's UI. Launch the saved profile only to start or
-restart the process.
+install as done and stop. Leave the created Agent running. Extra conversations
+use Launch to create another Agent. A recipe start script may attach to an
+already healthy same-type listener instead of starting another process.
 
 ## Boundaries
 
