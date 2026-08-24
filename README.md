@@ -680,8 +680,28 @@ treer agent attach reviewer
 treer agent admin delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
+treer agent transcript reviewer --limit 100
 treer agent send-keys reviewer ctrl-c
 ```
+
+An Agent may register a `treer.agent-interface/v1` server on its private
+loopback. The Controller verifies its manifest and automatically sends semantic
+prompts to it when `prompt.submit` is declared; otherwise prompt continues to
+use terminal input. Structured transcript reads require `transcript.read`:
+
+```bash
+treer interface register --port 4180 --instance-id pi-1 \
+  --capability prompt.submit --capability transcript.read \
+  --capability state.observe --ui-path /
+treer interface show
+treer agent transcript self --limit 100
+treer interface clear
+```
+
+The interface process should repeat registration after a Controller restart and
+deduplicate prompts by `operation_id`. Raw keys, terminal attach, stop, and
+delete remain PTY/Host operations. Pi UI performs this registration
+automatically.
 
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles

@@ -2815,6 +2815,7 @@ mod tests {
             exited_at: None,
             exit_code: None,
             output_revision: 0,
+            interface: None,
         }
     }
 
@@ -3908,6 +3909,7 @@ mod tests {
                         exited_at: None,
                         exit_code: None,
                         output_revision: 0,
+                        interface: None,
                     }],
                 },
             })
@@ -4051,6 +4053,7 @@ mod tests {
                         exited_at: None,
                         exit_code: None,
                         output_revision: 0,
+                        interface: None,
                     }],
                 },
             )

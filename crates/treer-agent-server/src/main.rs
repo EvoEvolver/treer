@@ -1,3 +1,4 @@
+mod agent_interface;
 mod controller;
 mod host_client;
 mod local_api;

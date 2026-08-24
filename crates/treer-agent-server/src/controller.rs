@@ -13,8 +13,9 @@ use treer_host_protocol::{
     HostSpawnRequest, HostWrite,
 };
 use treer_protocol::{
-    AgentInfo, AgentStatus, CreateAgentRequest, ProtocolError, ReadAgentOutputResponse,
-    TerminalCursor, VirtualNetworkHostsSnapshot,
+    AgentInfo, AgentInterfaceDescriptor, AgentStatus, AgentTranscriptResponse, CreateAgentRequest,
+    ProtocolError, ReadAgentOutputResponse, RegisterAgentInterfaceRequest, TerminalCursor,
+    VirtualNetworkHostsSnapshot, AGENT_INTERFACE_PROTOCOL_V1,
 };
 #[cfg(test)]
 use uuid::Uuid;
@@ -27,6 +28,7 @@ const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const AGENT_COMMAND_DELAY: Duration = Duration::from_millis(500);
 const CLAUDE_TRUST_CONFIRM_DELAY: Duration = Duration::from_millis(1_500);
+const AGENT_INTERFACE_LEASE: Duration = Duration::from_secs(60);
 
 struct AgentLaunch {
     command: String,
@@ -375,6 +377,17 @@ impl ControllerRuntime {
                 "agent prompt cannot be empty",
             ));
         }
+        if let Some(interface) = self.interface_for(agent_id, "prompt.submit")? {
+            crate::agent_interface::submit_prompt(
+                agent_id,
+                &interface,
+                operation_id,
+                text,
+                self.inner.sandbox_executable.is_some(),
+            )
+            .await?;
+            return self.update_agent_status(agent_id, AgentStatus::Working);
+        }
         let bracketed = self
             .get(agent_id)?
             .lock()
@@ -402,6 +415,265 @@ impl ControllerRuntime {
             .await
             .map_err(|error| protocol_error("host_error", error))?;
         self.process_response(response, AgentStatus::Working)
+    }
+
+    pub async fn transcript(
+        &self,
+        agent_id: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<AgentTranscriptResponse, ProtocolError> {
+        let interface = self
+            .interface_for(agent_id, "transcript.read")?
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    "agent_interface_capability_unavailable",
+                    "Agent does not expose transcript.read",
+                )
+            })?;
+        crate::agent_interface::transcript(
+            agent_id,
+            &interface,
+            cursor,
+            limit,
+            self.inner.sandbox_executable.is_some(),
+        )
+        .await
+    }
+
+    pub async fn register_interface(
+        &self,
+        agent_id: &str,
+        request: RegisterAgentInterfaceRequest,
+    ) -> Result<AgentInterfaceDescriptor, ProtocolError> {
+        if request.protocol != AGENT_INTERFACE_PROTOCOL_V1 {
+            return Err(ProtocolError::new(
+                "agent_interface_protocol_unsupported",
+                format!("unsupported Agent Interface protocol {}", request.protocol),
+            ));
+        }
+        if request.instance_id.trim().is_empty() || request.port == 0 {
+            return Err(ProtocolError::new(
+                "invalid_request",
+                "Agent Interface requires a non-empty instance ID and non-zero port",
+            ));
+        }
+        let mut capabilities = request.capabilities;
+        capabilities.sort();
+        capabilities.dedup();
+        if capabilities.iter().any(|capability| {
+            capability.is_empty()
+                || !capability
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        }) {
+            return Err(ProtocolError::new(
+                "invalid_request",
+                "Agent Interface capabilities must use letters, numbers, dot, dash, or underscore",
+            ));
+        }
+        let descriptor = AgentInterfaceDescriptor {
+            protocol: request.protocol,
+            instance_id: request.instance_id,
+            port: request.port,
+            capabilities,
+            ui_path: request.ui_path,
+            registered_at: Utc::now(),
+        };
+        let manifest = crate::agent_interface::manifest(
+            agent_id,
+            &descriptor,
+            self.inner.sandbox_executable.is_some(),
+        )
+        .await?;
+        let mut manifest_capabilities = manifest.capabilities;
+        manifest_capabilities.sort();
+        manifest_capabilities.dedup();
+        if manifest.protocol != descriptor.protocol
+            || manifest.instance_id != descriptor.instance_id
+            || manifest_capabilities != descriptor.capabilities
+            || manifest.ui_path != descriptor.ui_path
+        {
+            return Err(ProtocolError::new(
+                "agent_interface_manifest_mismatch",
+                "Agent Interface manifest does not match its registration request",
+            ));
+        }
+        let agent = self.get(agent_id)?;
+        let info = {
+            let mut agent = agent
+                .lock()
+                .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+            let start_monitor = agent
+                .info
+                .interface
+                .as_ref()
+                .is_none_or(|current| current.instance_id != descriptor.instance_id);
+            let publish_changed = agent.info.interface.as_ref().is_none_or(|current| {
+                current.protocol != descriptor.protocol
+                    || current.instance_id != descriptor.instance_id
+                    || current.port != descriptor.port
+                    || current.capabilities != descriptor.capabilities
+                    || current.ui_path != descriptor.ui_path
+            });
+            agent.info.interface = Some(descriptor.clone());
+            if publish_changed {
+                agent.info.updated_at = Utc::now();
+            }
+            (agent.info.clone(), start_monitor, publish_changed)
+        };
+        if info.2 {
+            let _ = self.inner.events.send(info.0);
+        }
+        if info.1 && descriptor.supports("state.observe") {
+            self.start_interface_status_monitor(agent_id.to_string(), descriptor.clone());
+        }
+        Ok(descriptor)
+    }
+
+    pub fn clear_interface(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentInterfaceDescriptor>, ProtocolError> {
+        let agent = self.get(agent_id)?;
+        let (descriptor, info) = {
+            let mut agent = agent
+                .lock()
+                .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+            let descriptor = agent.info.interface.take();
+            agent.info.updated_at = Utc::now();
+            (descriptor, agent.info.clone())
+        };
+        let _ = self.inner.events.send(info);
+        Ok(descriptor)
+    }
+
+    pub fn interface(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentInterfaceDescriptor>, ProtocolError> {
+        let agent = self.get(agent_id)?;
+        let interface = agent
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?
+            .info
+            .interface
+            .clone();
+        Ok(interface)
+    }
+
+    fn interface_for(
+        &self,
+        agent_id: &str,
+        capability: &str,
+    ) -> Result<Option<AgentInterfaceDescriptor>, ProtocolError> {
+        Ok(self
+            .interface(agent_id)?
+            .filter(|interface| interface.supports(capability)))
+    }
+
+    fn update_agent_status(
+        &self,
+        agent_id: &str,
+        status: AgentStatus,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let agent = self.get(agent_id)?;
+        let (info, changed) = {
+            let mut agent = agent
+                .lock()
+                .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+            let changed = agent.info.status != status;
+            agent.info.status = status;
+            if changed {
+                agent.info.updated_at = Utc::now();
+            }
+            (agent.info.clone(), changed)
+        };
+        if changed {
+            let _ = self.inner.events.send(info.clone());
+        }
+        Ok(info)
+    }
+
+    fn start_interface_status_monitor(
+        &self,
+        agent_id: String,
+        descriptor: AgentInterfaceDescriptor,
+    ) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let current = match runtime.interface(&agent_id) {
+                    Ok(Some(current)) if current.instance_id == descriptor.instance_id => current,
+                    _ => break,
+                };
+                if Utc::now()
+                    .signed_duration_since(current.registered_at)
+                    .num_milliseconds()
+                    >= AGENT_INTERFACE_LEASE.as_millis() as i64
+                {
+                    let _ = runtime.expire_interface(
+                        &agent_id,
+                        &current.instance_id,
+                        current.registered_at,
+                    );
+                    break;
+                }
+                match crate::agent_interface::status(
+                    &agent_id,
+                    &current,
+                    runtime.inner.sandbox_executable.is_some(),
+                )
+                .await
+                {
+                    Ok(status) => {
+                        let terminal = runtime
+                            .get(&agent_id)
+                            .ok()
+                            .and_then(|agent| {
+                                agent
+                                    .lock()
+                                    .ok()
+                                    .map(|agent| agent.info.status.is_terminal())
+                            })
+                            .unwrap_or(true);
+                        if !terminal {
+                            let _ = runtime.update_agent_status(&agent_id, status.status);
+                        }
+                    }
+                    Err(error) => {
+                        warn!(%agent_id, code = %error.code, "Agent Interface status probe failed");
+                    }
+                }
+            }
+        });
+    }
+
+    fn expire_interface(
+        &self,
+        agent_id: &str,
+        instance_id: &str,
+        registered_at: chrono::DateTime<Utc>,
+    ) -> Result<(), ProtocolError> {
+        let agent = self.get(agent_id)?;
+        let info = {
+            let mut agent = agent
+                .lock()
+                .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+            let should_expire = agent.info.interface.as_ref().is_some_and(|current| {
+                current.instance_id == instance_id && current.registered_at == registered_at
+            });
+            if !should_expire {
+                return Ok(());
+            }
+            agent.info.interface = None;
+            agent.info.updated_at = Utc::now();
+            agent.info.clone()
+        };
+        let _ = self.inner.events.send(info);
+        Ok(())
     }
 
     pub async fn write_raw(
@@ -561,6 +833,7 @@ impl ControllerRuntime {
         } else {
             AgentStatus::Exited
         };
+        let interface = self.interface(&metadata.agent_id).ok().flatten();
         let info = AgentInfo {
             agent_id: metadata.agent_id.clone(),
             workspace_id: metadata.workspace_id,
@@ -575,6 +848,7 @@ impl ControllerRuntime {
             exited_at: process.exited_at,
             exit_code: process.exit_code,
             output_revision: process.next_revision.saturating_sub(1),
+            interface,
         };
         let agent = Arc::new(Mutex::new(ControllerAgent {
             info: info.clone(),
@@ -663,7 +937,12 @@ impl ControllerRuntime {
                 agent.bracketed_paste = chunk.bracketed_paste;
                 agent.last_output = Instant::now();
                 agent.info.output_revision = chunk.revision;
-                if !agent.info.status.is_terminal() {
+                let interface_owns_status = agent
+                    .info
+                    .interface
+                    .as_ref()
+                    .is_some_and(|interface| interface.supports("state.observe"));
+                if !agent.info.status.is_terminal() && !interface_owns_status {
                     agent.info.status = detect_status(&agent.text).unwrap_or(AgentStatus::Working);
                 }
                 agent.info.updated_at = chunk.emitted_at;
@@ -719,7 +998,13 @@ impl ControllerRuntime {
                     let Ok(mut agent) = agent.lock() else {
                         continue;
                     };
-                    if agent.last_output.elapsed() >= QUIET_IDLE_AFTER
+                    let interface_owns_status = agent
+                        .info
+                        .interface
+                        .as_ref()
+                        .is_some_and(|interface| interface.supports("state.observe"));
+                    if !interface_owns_status
+                        && agent.last_output.elapsed() >= QUIET_IDLE_AFTER
                         && matches!(
                             agent.info.status,
                             AgentStatus::Starting | AgentStatus::Working

@@ -8,6 +8,9 @@ workspace members. It is not a safe multi-tenant execution sandbox.
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
+- An Agent can register or clear only its own Agent Interface Server. The
+  Controller verifies the private-loopback manifest before advertising it and
+  never forwards the workload credential to the interface.
 - Local operator requests use a private Controller credential that is not
   injected into managed Agent environments.
 - Service tokens are short-lived and audience-bound. Human App token
@@ -34,6 +37,12 @@ Treer Policy limits what authenticated requests Core accepts; it cannot stop an
 App from using other same-machine credentials or services it can reach. Run
 untrusted code under a separate user, container, VM, microVM, or stronger
 sandbox.
+
+Agent Interface Servers likewise do not create a security boundary. They run
+with the Agent's operating-system authority and may expose transcript and prompt
+operations to callers already authorized by Proxy Policy. Interface ports stay
+on Agent-private loopback; the Controller is the external routing and policy
+boundary.
 
 ## Credentials
 

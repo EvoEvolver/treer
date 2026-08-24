@@ -107,6 +107,29 @@ returns only later chunks and a gap flag when the ring has slid past that
 cursor. Live Controller lag resyncs from the same Host read instead of dropping
 bytes. This is opaque byte replay, not Agent-protocol item storage.
 
+## Agent Interface Server
+
+An Agent may register one versioned Agent Interface Server (AIS) with its local
+Controller. AIS is a semantic adapter beside the Agent's native application
+server; it does not replace Host process ownership. Registration is authenticated
+with the Agent workload credential, scoped to that same Agent, verified against
+`GET /v1/manifest`, and refreshed by the interface process after Controller
+restarts. The descriptor and capabilities travel with `AgentInfo` snapshots and
+events, while the live endpoint remains on Agent-private loopback.
+
+The Controller routes `prompt.submit` and `transcript.read` through AIS when the
+matching capability is present. A missing prompt capability falls back to the
+PTY compatibility path. Once an AIS request is dispatched, errors are returned
+without a second PTY submission. Every prompt carries the Proxy command ID as
+an idempotency key. An interface with `state.observe` owns working, idle, and
+blocked state; Host exit state remains authoritative. Terminal attach, raw
+input, resize, stop, and delete remain Host/PTY operations.
+
+Pi UI is the first AIS implementation. It exposes the v1 manifest, health,
+status, transcript, event, prompt, and abort routes from the same extension that
+serves its browser UI. The existing Agent-scoped `MachineService` carries UI
+HTTP traffic, but it is transport rather than the AIS semantic contract.
+
 Creating an Agent with a `recipe` git URL starts an interactive installer
 (Codex, Claude, or shell) and immediately prompts it with the bundled
 [install skill](../skills/treer-install/SKILL.md). The installer clones that

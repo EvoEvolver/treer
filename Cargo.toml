@@ -30,6 +30,7 @@ ed25519-dalek = "2"
 futures-util = "0.3"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 portable-pty = "0.9"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

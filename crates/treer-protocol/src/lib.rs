@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
+pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MESSAGE_SCHEMA_VERSION: u32 = 1;
@@ -101,6 +102,80 @@ pub struct AgentInfo {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub output_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<AgentInterfaceDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInterfaceDescriptor {
+    pub protocol: String,
+    pub instance_id: String,
+    pub port: u16,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_path: Option<String>,
+    pub registered_at: DateTime<Utc>,
+}
+
+impl AgentInterfaceDescriptor {
+    pub fn supports(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|value| value == capability)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterAgentInterfaceRequest {
+    pub protocol: String,
+    pub instance_id: String,
+    pub port: u16,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInterfaceManifest {
+    pub protocol: String,
+    pub instance_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTranscriptResponse {
+    pub agent_id: String,
+    pub interface_instance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub entries: Vec<AgentTranscriptEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTranscriptEntry {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub content: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInterfaceStatusResponse {
+    pub agent_id: String,
+    pub interface_instance_id: String,
+    pub status: AgentStatus,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -752,6 +827,13 @@ pub enum AgentCommand {
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lines: Option<usize>,
+    },
+    Transcript {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
     },
     Stop {
         agent_id: String,
@@ -2010,5 +2092,37 @@ mod tests {
         assert!(validate_recipe_url("https://user:pass@example.com/repo.git").is_err());
         assert!(!installer_composer_ready("Do you trust the contents"));
         assert!(installer_composer_ready("Ask Codex to do anything"));
+    }
+
+    #[test]
+    fn agent_interface_command_and_transcript_round_trip() {
+        let command = AgentCommand::Transcript {
+            agent_id: "agent-1".to_string(),
+            cursor: Some("42".to_string()),
+            limit: Some(100),
+        };
+        let encoded = serde_json::to_value(&command).expect("serialize interface command");
+        assert_eq!(encoded["action"], "transcript");
+        assert_eq!(
+            serde_json::from_value::<AgentCommand>(encoded).expect("deserialize interface command"),
+            command
+        );
+
+        let descriptor = AgentInterfaceDescriptor {
+            protocol: AGENT_INTERFACE_PROTOCOL_V1.to_string(),
+            instance_id: "pi-one".to_string(),
+            port: 4180,
+            capabilities: vec!["prompt.submit".to_string(), "transcript.read".to_string()],
+            ui_path: Some("/".to_string()),
+            registered_at: "2026-08-24T12:00:00Z".parse().expect("timestamp"),
+        };
+        assert!(descriptor.supports("prompt.submit"));
+        assert!(!descriptor.supports("abort"));
+        let encoded = serde_json::to_value(&descriptor).expect("serialize descriptor");
+        assert_eq!(
+            serde_json::from_value::<AgentInterfaceDescriptor>(encoded)
+                .expect("deserialize descriptor"),
+            descriptor
+        );
     }
 }

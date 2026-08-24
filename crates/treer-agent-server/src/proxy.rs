@@ -444,6 +444,16 @@ impl ProxyClient {
                 .read(&agent_id, lines)
                 .map(|read| CommandResult::success(command_id.clone(), read))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::Transcript {
+                agent_id,
+                cursor,
+                limit,
+            } => self
+                .runtime
+                .transcript(&agent_id, cursor.as_deref(), limit)
+                .await
+                .map(|transcript| CommandResult::success(command_id.clone(), transcript))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
             AgentCommand::Stop { agent_id } => self
                 .runtime
                 .stop(&command_id, &agent_id)

@@ -2,8 +2,10 @@
 
 Pi UI is a small browser interface for a single Pi Agent. Pi loads it as an
 extension, so the terminal and browser control the same Pi process and session.
-The extension listens only on the Agent's private loopback interface and
-registers that endpoint as a Treer Agent-scoped HTTP service.
+The extension listens only on the Agent's private loopback interface, registers
+that endpoint as a Treer Agent-scoped HTTP service, and registers itself as a
+`treer.agent-interface/v1` server. Treer CLI prompts and structured transcript
+reads therefore use the Pi session API instead of terminal keystrokes.
 
 ## Start an Agent
 
@@ -41,6 +43,12 @@ Agent ID, and selects it with `treer ui set`. Set `PI_UI_PORT` before launching
 Pi to use another port, or use `0` to select a free port automatically. Set
 `PI_UI_SERVICE_NAME` to override the service name, or
 `PI_UI_AUTO_REGISTER=0` to run the HTTP interface without changing Treer.
+
+The AIS routes are `GET /v1/manifest`, `/v1/health`, `/v1/status`,
+`/v1/transcript`, and `/v1/events`, plus `POST /v1/prompts` and `/v1/abort`.
+Prompt requests are deduplicated by Treer's `operation_id`. The extension
+refreshes registration periodically so a running Pi session recovers after a
+Controller hot restart.
 
 No npm install or frontend build is required to run the checked-in App. Pi,
 Node.js, and the `treer` CLI must be available in the Agent environment. Run

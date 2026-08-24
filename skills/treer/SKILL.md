@@ -38,6 +38,7 @@ treer machine --help
 treer message --help
 treer network --help
 treer ui --help
+treer interface --help
 treer member --help
 treer token --help
 ```
@@ -213,6 +214,38 @@ treer ui clear
 Deleting the service, changing it to TCP, or moving it to another machine also
 clears the custom interface. The declaration changes only the web presentation;
 it does not start, stop, or supervise the service process.
+
+## Use an Agent Interface Server
+
+An Agent-native integration may register a `treer.agent-interface/v1` HTTP
+server on its own private loopback. Registration is self-only and the Controller
+verifies the server manifest before publishing its capabilities:
+
+```bash
+treer interface register --port 4180 --instance-id pi-session-1 \
+  --capability prompt.submit --capability transcript.read \
+  --capability state.observe --ui-path /
+treer interface show
+```
+
+When `prompt.submit` is present, `treer agent prompt` uses the interface instead
+of writing to the terminal. Interface failures after dispatch are returned and
+are never retried through PTY input. Read a structured interface transcript
+with:
+
+```bash
+treer agent transcript reviewer --limit 100
+```
+
+Transcript requires `transcript.read`; ordinary `treer agent read` continues to
+read terminal replay. Attach, send-keys, resize, stop, and delete remain terminal
+or Host operations. The interface must deduplicate prompts by `operation_id`,
+repeat registration after Controller restart, and clear it during a clean
+shutdown:
+
+```bash
+treer interface clear
+```
 
 ## Publish an HTTP service
 

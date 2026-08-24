@@ -36,6 +36,16 @@ export interface Agent {
   name: string
   kind: string
   status: string
+  interface?: AgentInterface
+}
+
+export interface AgentInterface {
+  protocol: string
+  instance_id: string
+  port: number
+  capabilities: string[]
+  ui_path?: string
+  registered_at: string
 }
 
 export interface AgentUi {

@@ -415,6 +415,10 @@ pub fn router(
             get(read_agent),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/transcript",
+            get(read_agent_transcript),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/stop",
             post(stop_agent),
         )
@@ -648,6 +652,10 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/output",
             get(read_agent),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/transcript",
+            get(read_agent_transcript),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/stop",
@@ -4765,6 +4773,47 @@ async fn read_agent(
     Ok(Json(data))
 }
 
+async fn read_agent_transcript(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiFailure> {
+    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_OUTPUT_READ,
+        agent_policy_resource(&agent),
+    )
+    .await?;
+    let cursor = query.get("cursor").cloned();
+    let limit = query.get("limit").and_then(|value| value.parse().ok());
+    let data = state
+        .send_command(
+            &workspace_id,
+            &agent.server_id,
+            AgentCommand::Transcript {
+                agent_id: agent.agent_id,
+                cursor,
+                limit,
+            },
+        )
+        .await?;
+    Ok(Json(data))
+}
+
 async fn stop_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -5216,6 +5265,7 @@ mod tests {
             exited_at: None,
             exit_code: None,
             output_revision: 0,
+            interface: None,
         };
         let mut recipient = agent.clone();
         recipient.agent_id = "agent-b".to_string();

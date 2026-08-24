@@ -680,6 +680,7 @@ mod tests {
             exited_at: None,
             exit_code: None,
             output_revision: 0,
+            interface: None,
         });
 
         app.mark_proxy_unreachable("Proxy request failed".to_string());

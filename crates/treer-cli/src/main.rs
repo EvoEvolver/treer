@@ -24,11 +24,12 @@ use treer_protocol::{
     CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
     CreateVirtualNetworkHostRequest, GetMessageResponse, ImportMessagesRequest, InputAgentRequest,
     LaunchAgentProfileRequest, LegacyMailMessage, MachineServiceProtocol, MessageExternalSource,
-    ReceiveMessagesRequest, RenameRequest, SendMessageRequest, ServerInfo, ServiceIngressAccess,
-    SetAgentUiRequest, TerminalClientMessage, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
-    AGENT_ID_HEADER, INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
+    ServerInfo, ServiceIngressAccess, SetAgentUiRequest, TerminalClientMessage,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
+    WorkspaceSnapshot, AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL,
+    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -87,6 +88,11 @@ enum Command {
     Ui {
         #[command(subcommand)]
         command: UiCommand,
+    },
+    #[command(about = "Register this Agent's semantic interface server")]
+    Interface {
+        #[command(subcommand)]
+        command: InterfaceCommand,
     },
     #[command(about = "Obtain a short-lived identity token for a workspace service")]
     Token {
@@ -203,6 +209,14 @@ enum AgentCommand {
         target: String,
         #[arg(long, default_value_t = 100)]
         lines: usize,
+    },
+    #[command(about = "Read a structured transcript from an Agent Interface Server")]
+    Transcript {
+        target: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
     },
     #[command(about = "Send raw terminal key presses")]
     SendKeys {
@@ -395,6 +409,25 @@ enum UiCommand {
         path: String,
     },
     #[command(about = "Return this Agent to the terminal interface")]
+    Clear,
+}
+
+#[derive(Debug, Subcommand)]
+enum InterfaceCommand {
+    #[command(about = "Show this Agent's registered interface")]
+    Show,
+    #[command(about = "Register or refresh this Agent's interface")]
+    Register {
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        instance_id: String,
+        #[arg(long = "capability", required = true)]
+        capabilities: Vec<String>,
+        #[arg(long)]
+        ui_path: Option<String>,
+    },
+    #[command(about = "Remove this Agent's interface registration")]
     Clear,
 }
 
@@ -729,6 +762,7 @@ async fn run_cli() -> anyhow::Result<()> {
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::Network { command } => run_network_command(&client, command).await?,
         Command::Ui { command } => run_ui_command(&client, command).await?,
+        Command::Interface { command } => run_interface_command(&client, command).await?,
         Command::Token { command } => {
             let TokenCommand::Create { audience, json } = command;
             let response: WorkloadIdentityTokenResponse = client
@@ -834,6 +868,11 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
             prompt_and_maybe_wait(client, &target, text, wait).await
         }
         AgentCommand::Read { target, lines } => read_agent(client, &target, lines).await,
+        AgentCommand::Transcript {
+            target,
+            cursor,
+            limit,
+        } => read_agent_transcript(client, &target, cursor, limit).await,
         AgentCommand::SendKeys { target, keys } => {
             let target = normalize_target(&target)?;
             let data = encode_keys(&keys)?;
@@ -1401,6 +1440,36 @@ async fn run_ui_command(client: &ApiClient, command: UiCommand) -> anyhow::Resul
     }
 }
 
+async fn run_interface_command(
+    client: &ApiClient,
+    command: InterfaceCommand,
+) -> anyhow::Result<Value> {
+    match command {
+        InterfaceCommand::Show => client.value(Method::GET, "api/interface", None).await,
+        InterfaceCommand::Register {
+            port,
+            instance_id,
+            capabilities,
+            ui_path,
+        } => {
+            client
+                .value(
+                    Method::PUT,
+                    "api/interface",
+                    Some(serde_json::to_value(RegisterAgentInterfaceRequest {
+                        protocol: AGENT_INTERFACE_PROTOCOL_V1.to_string(),
+                        instance_id,
+                        port,
+                        capabilities,
+                        ui_path,
+                    })?),
+                )
+                .await
+        }
+        InterfaceCommand::Clear => client.value(Method::DELETE, "api/interface", None).await,
+    }
+}
+
 async fn run_virtual_host_command(
     client: &ApiClient,
     command: VirtualHostCommand,
@@ -1604,6 +1673,25 @@ async fn read_agent(client: &ApiClient, target: &str, lines: usize) -> anyhow::R
             None,
         )
         .await
+}
+
+async fn read_agent_transcript(
+    client: &ApiClient,
+    target: &str,
+    cursor: Option<String>,
+    limit: usize,
+) -> anyhow::Result<Value> {
+    let target = normalize_target(target)?;
+    let mut path = format!(
+        "api/agents/{}/transcript?limit={}",
+        path_segment(&target),
+        limit.min(1000)
+    );
+    if let Some(cursor) = cursor {
+        path.push_str("&cursor=");
+        path.push_str(&path_segment(&cursor));
+    }
+    client.value(Method::GET, &path, None).await
 }
 
 async fn stop_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
@@ -2457,6 +2545,61 @@ mod tests {
             Some(Command::Ui {
                 command: UiCommand::Clear
             })
+        ));
+    }
+
+    #[test]
+    fn agent_interface_commands_parse() {
+        let register = Args::try_parse_from([
+            "treer",
+            "interface",
+            "register",
+            "--port",
+            "4180",
+            "--instance-id",
+            "pi-one",
+            "--capability",
+            "prompt.submit",
+            "--capability",
+            "transcript.read",
+            "--ui-path",
+            "/",
+        ])
+        .expect("Agent Interface registration should parse");
+        assert!(matches!(
+            register.command,
+            Some(Command::Interface {
+                command: InterfaceCommand::Register {
+                    port: 4180,
+                    instance_id,
+                    capabilities,
+                    ui_path: Some(ui_path),
+                }
+            }) if instance_id == "pi-one"
+                && capabilities == ["prompt.submit", "transcript.read"]
+                && ui_path == "/"
+        ));
+
+        let transcript = Args::try_parse_from([
+            "treer",
+            "agent",
+            "transcript",
+            "reviewer",
+            "--cursor",
+            "10",
+            "--limit",
+            "25",
+        ])
+        .expect("Agent transcript should parse");
+        assert!(matches!(
+            transcript.command,
+            Some(Command::Agent {
+                command: AgentCommand::Transcript {
+                    target,
+                    cursor: Some(cursor),
+                    limit: 25,
+                }
+            }) if target == "reviewer" && cursor == "10"
         ));
     }
 

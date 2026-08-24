@@ -135,6 +135,18 @@ export function snapshotFromContext(context, runtime) {
   };
 }
 
+export function transcriptEntries(context, offset, limit) {
+  const sessionId = context?.sessionManager.getSessionId?.() ?? "pi-session";
+  const entries = context?.sessionManager.getBranch?.() ?? [];
+  return entries.slice(offset, offset + limit).map((entry, index) => ({
+    id: String(entry.id ?? entry.entryId ?? `${sessionId}:${offset + index}`),
+    kind: String(entry.type ?? "unknown"),
+    role: typeof entry.message?.role === "string" ? entry.message.role : null,
+    content: entry.message?.content ?? entry,
+    created_at: typeof entry.timestamp === "string" ? entry.timestamp : null,
+  }));
+}
+
 function json(value) {
   return JSON.stringify(value, (_key, item) =>
     typeof item === "bigint" ? item.toString() : item,
@@ -202,10 +214,32 @@ async function registerTreerUi(port, name) {
   await execFileAsync("treer", ["ui", "set", name]);
 }
 
+export async function registerTreerInterface(port, instanceId, options = {}) {
+  const run = options.run ?? execFileAsync;
+  const capabilities = [
+    "ui",
+    "prompt.submit",
+    "transcript.read",
+    "state.observe",
+    "events.stream",
+    "abort",
+  ];
+  const args = [
+    "interface", "register",
+    "--port", String(port),
+    "--instance-id", instanceId,
+    "--ui-path", "/",
+  ];
+  for (const capability of capabilities) args.push("--capability", capability);
+  await run("treer", args);
+}
+
 export default function piUiExtension(pi) {
   const configuredPort = normalizePort(process.env.PI_UI_PORT);
   const name = process.env.PI_UI_SERVICE_NAME || serviceName(process.env.TREER_AGENT_ID);
   const clients = new Set();
+  const instanceId = `pi_${randomBytes(16).toString("hex")}`;
+  const completedOperations = new Map();
   const runtime = {
     activeTools: new Map(),
     busy: false,
@@ -218,6 +252,7 @@ export default function piUiExtension(pi) {
   let context = null;
   let server = null;
   let heartbeat = null;
+  let registrationHeartbeat = null;
 
   const snapshot = () => snapshotFromContext(context, runtime);
   const broadcast = () => {
@@ -232,6 +267,79 @@ export default function piUiExtension(pi) {
         const url = new URL(request.url ?? "/", "http://127.0.0.1");
         if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/health") {
           return sendJson(response, 200, { service: "treer-pi-ui", status: "ok" }, request.method === "HEAD");
+        }
+        if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/v1/manifest") {
+          return sendJson(response, 200, {
+            protocol: "treer.agent-interface/v1",
+            instance_id: instanceId,
+            capabilities: ["ui", "prompt.submit", "transcript.read", "state.observe", "events.stream", "abort"],
+            ui_path: "/",
+          }, request.method === "HEAD");
+        }
+        if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/v1/health") {
+          return sendJson(response, 200, {
+            instance_id: instanceId,
+            status: context ? "ok" : "starting",
+          }, request.method === "HEAD");
+        }
+        if (request.method === "GET" && url.pathname === "/v1/status") {
+          return sendJson(response, 200, {
+            agent_id: process.env.TREER_AGENT_ID || null,
+            interface_instance_id: instanceId,
+            status: runtime.error ? "blocked" : runtime.busy ? "working" : context ? "idle" : "starting",
+            busy: runtime.busy,
+            error: runtime.error,
+          });
+        }
+        if (request.method === "GET" && url.pathname === "/v1/transcript") {
+          const entries = context?.sessionManager.getBranch() ?? [];
+          const cursor = Math.max(0, Number.parseInt(url.searchParams.get("cursor") ?? "0", 10) || 0);
+          const limit = Math.min(1000, Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "100", 10) || 100));
+          const page = transcriptEntries(context, cursor, limit);
+          const next = cursor + page.length;
+          return sendJson(response, 200, {
+            agent_id: process.env.TREER_AGENT_ID || "",
+            interface_instance_id: instanceId,
+            cursor: String(cursor),
+            next_cursor: next < entries.length ? String(next) : null,
+            entries: page,
+          });
+        }
+        if (request.method === "GET" && url.pathname === "/v1/events") {
+          response.writeHead(200, {
+            "cache-control": "no-cache, no-transform",
+            connection: "keep-alive",
+            "content-type": "text/event-stream; charset=utf-8",
+            "x-accel-buffering": "no",
+          });
+          clients.add(response);
+          response.write(`event: snapshot\ndata: ${json(snapshot())}\n\n`);
+          request.on("close", () => clients.delete(response));
+          return;
+        }
+        if (request.method === "POST" && url.pathname === "/v1/prompts") {
+          if (!context) return sendJson(response, 503, { error: "Pi session is not ready" });
+          const body = await readBody(request);
+          const operationId = typeof body.operation_id === "string" ? body.operation_id.trim() : "";
+          const message = typeof body.text === "string" ? body.text.trim() : "";
+          if (!operationId) return sendJson(response, 400, { error: "operation_id is required" });
+          if (!message) return sendJson(response, 400, { error: "text is required" });
+          if (completedOperations.has(operationId)) {
+            return sendJson(response, 202, { accepted: true, duplicate: true, operation_id: operationId });
+          }
+          const options = promptOptions(context.isIdle(), body.mode);
+          pi.sendUserMessage(message, {
+            ...options,
+            expandPromptTemplates: true,
+          });
+          completedOperations.set(operationId, Date.now());
+          while (completedOperations.size > 1024) completedOperations.delete(completedOperations.keys().next().value);
+          return sendJson(response, 202, { accepted: true, operation_id: operationId });
+        }
+        if (request.method === "POST" && url.pathname === "/v1/abort") {
+          if (!context) return sendJson(response, 503, { error: "Pi session is not ready" });
+          context.abort();
+          return sendJson(response, 202, { accepted: true });
         }
         if (request.method === "GET" && url.pathname === "/api/snapshot") {
           return sendJson(response, 200, snapshot());
@@ -326,7 +434,14 @@ export default function piUiExtension(pi) {
     if (process.env.TREER_AGENT_ID && process.env.PI_UI_AUTO_REGISTER !== "0") {
       try {
         await registerTreerUi(runtime.port, name);
-        ctx.ui.setStatus("pi-ui", `UI :${runtime.port}`);
+        await registerTreerInterface(runtime.port, instanceId);
+        registrationHeartbeat = setInterval(() => {
+          registerTreerInterface(runtime.port, instanceId).catch((error) => {
+            runtime.error = `Treer AIS registration refresh failed: ${error instanceof Error ? error.message : String(error)}`;
+            broadcast();
+          });
+        }, 20000);
+        ctx.ui.setStatus("pi-ui", `AIS :${runtime.port}`);
       } catch (error) {
         runtime.error = `Treer UI registration failed: ${error instanceof Error ? error.message : String(error)}`;
         ctx.ui.notify(runtime.error, "error");
@@ -406,10 +521,24 @@ export default function piUiExtension(pi) {
   pi.on("session_shutdown", async () => {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
+    if (registrationHeartbeat) clearInterval(registrationHeartbeat);
+    registrationHeartbeat = null;
+    if (process.env.TREER_AGENT_ID) {
+      await execFileAsync("treer", ["interface", "clear"]).catch(() => {});
+    }
     for (const client of clients) client.end();
     clients.clear();
     if (server) await new Promise((resolve) => server.close(resolve));
     server = null;
     runtime.port = null;
   });
+
+  return {
+    get instanceId() {
+      return instanceId;
+    },
+    get port() {
+      return runtime.port;
+    },
+  };
 }

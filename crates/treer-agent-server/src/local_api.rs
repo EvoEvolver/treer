@@ -19,10 +19,10 @@ use treer_protocol::{
     CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
     CreateVirtualNetworkHostRequest, ImportMessagesRequest, InputAgentRequest,
     LaunchAgentProfileRequest, ListMessagesQuery, PromptAgentRequest, ProtocolError,
-    ReceiveMessagesRequest, RenameRequest, SendMessageRequest, SetAgentUiRequest,
-    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
-    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
+    SetAgentUiRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, WorkloadIdentityTokenRequest,
+    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -208,6 +208,12 @@ pub fn router(state: LocalApiState) -> Router {
             get(get_agent_ui).put(set_agent_ui).delete(clear_agent_ui),
         )
         .route(
+            "/api/interface",
+            get(get_agent_interface)
+                .put(register_agent_interface)
+                .delete(clear_agent_interface),
+        )
+        .route(
             "/api/virtual-hosts",
             get(list_virtual_network_hosts).post(create_virtual_network_host),
         )
@@ -231,6 +237,10 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/agents/{agent_id}/prompt", post(prompt_agent))
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
+        .route(
+            "/api/agents/{agent_id}/transcript",
+            get(read_agent_transcript),
+        )
         .route("/api/agents/{agent_id}/stop", post(stop_agent))
         .route(
             "/api/messages",
@@ -499,6 +509,50 @@ async fn clear_agent_ui(
 ) -> Result<Json<Value>, LocalApiError> {
     let agent = required_validated_source_agent(&state, &headers)?;
     Ok(Json(state.delete_as("ui", Some(&agent)).await?))
+}
+
+async fn get_agent_interface(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .runtime
+                .interface(&agent.agent_id)
+                .map_err(LocalApiError::bad_request_protocol)?,
+        )
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+    ))
+}
+
+async fn register_agent_interface(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<RegisterAgentInterfaceRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let descriptor = state
+        .runtime
+        .register_interface(&agent.agent_id, request)
+        .await
+        .map_err(LocalApiError::bad_request_protocol)?;
+    Ok(Json(serde_json::to_value(descriptor).map_err(|error| {
+        LocalApiError::bad_request(error.to_string())
+    })?))
+}
+
+async fn clear_agent_interface(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let descriptor = state
+        .runtime
+        .clear_interface(&agent.agent_id)
+        .map_err(LocalApiError::bad_request_protocol)?;
+    Ok(Json(json!({ "removed": descriptor })))
 }
 
 async fn list_virtual_network_hosts(
@@ -1103,6 +1157,32 @@ async fn read_agent(
     Ok(Json(state.get_as(&suffix, source_agent.as_ref()).await?))
 }
 
+async fn read_agent_transcript(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    let mut suffix = format!("agents/{agent_id}/transcript");
+    let parameters = query
+        .iter()
+        .filter(|(key, _)| matches!(key.as_str(), "cursor" | "limit"))
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                key,
+                percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !parameters.is_empty() {
+        suffix.push('?');
+        suffix.push_str(&parameters.join("&"));
+    }
+    Ok(Json(state.get_as(&suffix, source_agent.as_ref()).await?))
+}
+
 async fn stop_agent(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
@@ -1145,6 +1225,12 @@ pub struct LocalApiError {
 }
 
 impl LocalApiError {
+    fn bad_request_protocol(error: ProtocolError) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error,
+        }
+    }
     fn bad_gateway(message: String) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,

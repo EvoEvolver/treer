@@ -283,7 +283,7 @@ impl NetworkRuntime {
     }
 }
 
-trait DestinationStream: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait DestinationStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> DestinationStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 async fn connect_destination(
@@ -326,6 +326,14 @@ async fn connect_destination(
         .await
         .with_context(|| format!("failed to connect to {host}:{port}"))?;
     Ok(Box::new(socket))
+}
+
+pub(crate) async fn connect_agent_service(
+    agent_id: &str,
+    port: u16,
+    transparent_networking: bool,
+) -> anyhow::Result<Box<dyn DestinationStream>> {
+    connect_destination("127.0.0.1", port, Some(agent_id), transparent_networking).await
 }
 
 async fn bridge_local_api(mut socket: TcpStream, address: SocketAddr) -> anyhow::Result<()> {
