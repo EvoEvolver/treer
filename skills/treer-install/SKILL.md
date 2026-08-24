@@ -60,24 +60,60 @@ script.
 `--cwd` for `treer agent admin create` must be relative to the Host root from
 `treer whoami` (`machine.root`). Do not pass an absolute working directory.
 
-## Do not probe another Agent's service
+## Save a launch profile
 
-`treer network service probe` is rejected with `service_not_owned` when the
-service belongs to the Agent you created. That is expected. Do not retry probe
-in a loop.
+Install once. Each created Agent is one thread. Extra conversations are
+another Agent via Launch, not another install. After `apply.sh` (or after you
+create the first command Agent), upsert a workspace launch profile from
+`treer-agent.json` so Launch can create another Agent of this recipe:
 
-Success is workspace discovery, not a cross-Agent probe:
+```bash
+# $DEST is the recipe checkout. --cwd must be Host-relative, same as the Agent.
+PROFILE_NAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' "$DEST/treer-agent.json")"
+PROFILE_DESC="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("description") or "")' "$DEST/treer-agent.json")"
+RUN_CMD="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("run") or {}).get("command") or "./scripts/treer-agent.sh")' "$DEST/treer-agent.json")"
+if treer agent admin profile show "$PROFILE_NAME" >/dev/null 2>&1; then
+  treer agent admin profile update "$PROFILE_NAME" \
+    --description "$PROFILE_DESC" --cwd "$DEST_REL" --command "$RUN_CMD" --clear-args
+else
+  treer agent admin profile create "$PROFILE_NAME" \
+    --description "$PROFILE_DESC" --cwd "$DEST_REL" "$RUN_CMD"
+fi
+```
+
+Prefer the checkout's `apply.sh` if it already writes this profile. Do not
+invent a second command line. Prefer `run.command` / `run.args` from
+`treer-agent.json`.
+
+## Verify the Agent Interface
+
+Do not use `treer network service probe` as the readiness signal. A successful
+HTTP response does not prove that the Agent registered its semantic interface
+or that the required capabilities are present.
+
+Success is workspace discovery plus a reusable Launch option:
 
 1. `treer agent show <name>` exists and is not `failed` or `exited`.
-2. `treer network service list` shows an Agent-scoped HTTP service for that Agent.
-3. `treer status` includes an `agent_uis` entry for that Agent.
+2. That Agent's `interface` uses `treer.agent-interface/v1` and declares the
+   recipe's required capabilities, normally `prompt.submit`, `transcript.read`,
+   and `state.observe`.
+3. For a browser UI, `treer network service list` shows an Agent-scoped HTTP
+   service and `treer status` includes a matching `agent_uis` entry.
+4. `treer agent admin profile show` returns the recipe's launch profile.
 
-If `apply.sh` is still waiting on probe after the UI is registered, treat the
-install as done and stop. Leave the created Agent running.
+Leave the created Agent running. Extra conversations use Launch to create
+another Agent. A recipe may reuse an already healthy same-type app server and
+frontend, but every command Agent still represents one thread and must run its
+own loopback AIS adapter with a unique `instance_id`. That adapter must bind all
+prompt, transcript, state, event, and abort operations to only that Agent's
+thread.
 
 ## Boundaries
 
 - Do not put secrets in a launch profile or recipe URL.
 - Do not use `--publish` for Treer iframe UIs. The start script registers
   `--agent self` and `treer ui set`.
+- Register the per-Agent adapter with `treer interface register`, refresh the
+  registration after Controller restarts, deduplicate prompts by
+  `operation_id`, and clear it on clean shutdown.
 - Do not stop Agents you did not create.

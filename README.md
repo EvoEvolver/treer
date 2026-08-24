@@ -839,6 +839,12 @@ treer agent admin create --machine SERVER_ID --kind codex --name installer \
   --recipe https://github.com/example/recipe.git
 ```
 
+A successful install saves a launch profile (name and `run` from
+`treer-agent.json`). Each created Agent is one thread. Extra conversations
+use Launch to create another Agent. A recipe may reuse an already healthy
+same-type app server, but each Agent must register its own AIS adapter with a
+unique instance ID and thread binding. Do not run Install recipe again.
+
 ## Checks
 
 ```bash

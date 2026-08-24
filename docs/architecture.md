@@ -97,7 +97,9 @@ captured onto the Controller SOCKS path. Agent-scoped services use a Unix
 bridge (`sandbox-exec --service-socket`) so the Controller can reach a
 namespace-local loopback listener without publishing a host TCP port. The
 browser Agent UI iframe uses that same bridge: register an HTTP service with
-`--agent self` and `treer ui set`. `publish_ports` (`sandbox-exec --publish`)
+`--agent self` and `treer ui set`. On a narrow viewport, selecting that Agent
+opens the iframe full-screen, matching the mobile terminal overlay.
+`publish_ports` (`sandbox-exec --publish`)
 is only for host-loopback clients that dial `127.0.0.1` themselves; it binds
 that port on the machine and splices accepted connections into the namespace.
 
@@ -133,10 +135,16 @@ HTTP traffic, but it is transport rather than the AIS semantic contract.
 Creating an Agent with a `recipe` git URL starts an interactive installer
 (Codex, Claude, or shell) and immediately prompts it with the bundled
 [install skill](../skills/treer-install/SKILL.md). The installer clones that
-repository and creates a different command Agent. It must not probe another
-Agent's service; readiness is an `agent_uis` row on workspace discovery.
-Same-machine Agents may health-probe sibling services. This is not an App
-package installer.
+repository, creates a different command Agent, and upserts a workspace launch
+profile from `treer-agent.json`. Each created Agent is one thread. Extra
+conversations use Launch to create another Agent. A recipe start script may
+attach to an already healthy same-type listener instead of starting another
+app-server and frontend. It still runs a per-Agent AIS adapter with a unique
+instance ID and immutable thread binding, so prompt, transcript, state, events,
+and abort cannot drift into another Agent's conversation. Launch does not run
+Install recipe again. Readiness is the Agent's verified AIS descriptor, the
+optional `agent_uis` presentation row, and the saved profile; a raw health probe
+does not establish semantic capabilities. This is not an App package installer.
 
 Covered organization, workspace, and membership mutations write their audit
 event in the same PostgreSQL transaction. Successful Agent create, rename, stop,

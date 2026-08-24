@@ -77,6 +77,20 @@ const virtualHost = {
   target_port: 3000,
 }
 
+const recipeProfile = {
+  profile_id: "alp-recipe",
+  workspace_id: "ws-1",
+  name: "Codex Agent UI",
+  description: "Codex app-server plus the thread UI iframe",
+  cwd: "codex-agent-ui",
+  command: "./scripts/treer-agent.sh",
+  args: [] as string[],
+  created_at: NOW,
+  created_by: "u1",
+  updated_at: NOW,
+  updated_by: "u1",
+}
+
 const snapshot = {
   revision: 1,
   servers: [machineA, machineB],
@@ -108,7 +122,7 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-1/services") return ok(route, { services: [serviceA] })
     if (path === "/workspaces/ws-1/ingresses") return ok(route, { ingresses: [] })
     if (path === "/workspaces/ws-1/traffic") return ok(route, { traffic })
-    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [] })
+    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile] })
 
     return route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
   })
@@ -280,6 +294,18 @@ test("create agent dialog can install a git recipe", async ({ page }) => {
   await page.getByRole("option", { name: "Install recipe" }).click()
   await expect(page.getByPlaceholder("https://github.com/example/recipe.git")).toBeVisible()
   await expect(page.getByRole("button", { name: "Install recipe" })).toBeVisible()
+})
+
+test("create agent dialog lists an installed recipe launch profile", async ({ page }) => {
+  await page.goto("/")
+  await agentsTab(page).click()
+  await page.getByRole("button", { name: "New" }).click()
+  await expect(page.getByRole("dialog")).toBeVisible()
+  await page.getByRole("dialog").getByRole("combobox").first().click()
+  await page.getByRole("option", { name: "Codex Agent UI" }).click()
+  await expect(page.getByText("./scripts/treer-agent.sh")).toBeVisible()
+  await expect(page.getByRole("dialog").getByRole("textbox")).toHaveValue(/codex-agent-ui-\d{4}-/)
+  await expect(page.getByRole("button", { name: "Create agent" })).toBeVisible()
 })
 
 test("mobile: machine overview hides sidebar and shows back button", async ({ page }) => {

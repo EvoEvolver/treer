@@ -84,6 +84,14 @@ function defaultAgentName(kind: string) {
   return `${prefix}-${now.getFullYear()}-${month}-${day}`
 }
 
+function defaultProfileAgentName(profileName: string) {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, "0")
+  const slug = profileName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "agent"
+  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  return `${slug}-${stamp}`.slice(0, 80)
+}
+
 function buildLabel(build: Machine["controller_build"]) {
   const commit = build.git_commit === "unknown" ? build.git_commit : build.git_commit.slice(0, 8)
   return `${build.version}@${commit}`
@@ -537,7 +545,7 @@ function WorkspaceApp() {
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
   const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)
-  const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen && !selectedAgentUi
+  const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen
   const mobileSidebarHidden = isMobile && mainView !== "terminal"
   const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
 
@@ -558,6 +566,11 @@ function WorkspaceApp() {
 
   function openMobileTerminal() {
     setMobileTerminalOpen(true)
+  }
+
+  function closeMobileSurface() {
+    setMobileTerminalOpen(false)
+    setCtrlModifier(false)
   }
 
   function refreshAgentView() {
@@ -716,7 +729,7 @@ function WorkspaceApp() {
     }
     const profile = launchProfiles.find((item) => item.profile_id === profileId)
     if (!profile) return
-    setAgentName(profile.name)
+    setAgentName(defaultProfileAgentName(profile.name))
     setAgentNameCustomized(false)
   }
 
@@ -791,7 +804,7 @@ function WorkspaceApp() {
   function openLaunchProfile(profile: AgentLaunchProfile) {
     setLaunchingProfile(profile)
     setLaunchMachineId((current) => onlineMachines.some((machine) => machine.server_id === current) ? current : onlineMachines[0]?.server_id ?? "")
-    setLaunchAgentName(profile.name)
+    setLaunchAgentName(defaultProfileAgentName(profile.name))
   }
 
   async function launchFromProfile(event: FormEvent) {
@@ -1158,18 +1171,19 @@ function WorkspaceApp() {
             {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={closeMainView}><ChevronLeft /></IconButton>}
             <span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "profiles" ? "Profiles" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
-            {!selectedAgentUi && <IconButton label="Open full-screen terminal" className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>}
+            <IconButton label={selectedAgentUi ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
             <IconButton label={selectedAgentUi ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={() => void stopAgent()}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : mainView === "profiles" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh profiles" onClick={loadLaunchProfiles} disabled={launchProfilesLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openNewLaunchProfile}><Plus />New profile</Button></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={loadAudit} disabled={auditLoading}><RotateCw /></IconButton> : <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div>}
         </header>
-        {mainView === "terminal" && selectedAgentUi && agentUiUrl ? <div className="min-h-0 min-w-0 overflow-hidden bg-white">
-          <iframe key={`${selectedAgentUi.updated_at}:${agentUiRevision}`} src={agentUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full border-0" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" />
+        {mainView === "terminal" && selectedAgentUi && agentUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-white", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-[#0f1215] pt-[env(safe-area-inset-top)]")}>
+          {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Interface"}</span><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div>}
+          <iframe key={`${selectedAgentUi.updated_at}:${agentUiRevision}`} src={agentUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-white" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" />
         </div> : mainView === "terminal" ? mobileTerminalIdle ? null : <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobileTerminalOpen && "fixed inset-0 z-[100] h-[100dvh] max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
-            <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={() => { setMobileTerminalOpen(false); setCtrlModifier(false) }}><X className="size-4" /></button>}</div></div>
+            <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button>}</div></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane ref={terminalPaneRef} key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} transformInput={transformTerminalInput} /></div>
             {mobileTerminalOpen && <div className="border-t border-zinc-800 bg-[#191d20] px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
               <div className="grid grid-cols-6 gap-1.5">
@@ -1212,7 +1226,7 @@ function WorkspaceApp() {
 
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /><span className="mt-1 block text-[10px] text-muted-foreground">Treer prompts this installer with the bundled install skill. Do not write a separate prompt.</span></Field>}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && !agentRecipeUrl.trim())}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /><span className="mt-1 block text-[10px] text-muted-foreground">Treer prompts this installer with the bundled install skill. Each created Agent is one thread.</span></Field>}{selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && !agentRecipeUrl.trim())}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 

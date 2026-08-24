@@ -434,9 +434,15 @@ treer agent admin create --machine <server-id> --kind codex --name installer \
   --recipe https://github.com/example/recipe.git
 ```
 
-The installer creates a different command Agent. It must not
-`treer network service probe` that Agent's service (`service_not_owned`).
-Wait on `treer status` until `agent_uis` lists the created Agent.
+The installer creates a different command Agent and must save a launch
+profile from `treer-agent.json` so Launch can create another Agent of that
+recipe. Each Agent is one thread. A recipe start script may attach to an
+already healthy same-type app server instead of starting another shared
+backend. It must still run and register a per-Agent AIS adapter with a unique
+`instance_id` that binds semantic operations to that Agent's thread. Do not use
+a raw service probe as Interface readiness. Wait until `treer agent show`
+reports the required capabilities; for browser recipes also confirm the
+matching `agent_uis` entry, then confirm `treer agent admin profile show`.
 
 Native agent arguments go after `--`:
 
