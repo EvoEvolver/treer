@@ -334,8 +334,8 @@ impl ProxyClient {
                         }
                         ProxyMessage::Error { error } => {
                             warn!(code = %error.code, message = %error.message, "proxy rejected a message");
-                            if matches!(error.code.as_str(), "duplicate_machine_connection" | "stale_connection") {
-                                return Ok(ConnectionDisposition::StopDuplicate);
+                            if let Some(disposition) = connection_error_disposition(&error.code) {
+                                return Ok(disposition);
                             }
                         }
                         ProxyMessage::Command { envelope } => {
@@ -494,6 +494,14 @@ enum ConnectionDisposition {
     StopDuplicate,
 }
 
+fn connection_error_disposition(code: &str) -> Option<ConnectionDisposition> {
+    match code {
+        "duplicate_machine_connection" => Some(ConnectionDisposition::StopDuplicate),
+        "stale_connection" => Some(ConnectionDisposition::Reconnect),
+        _ => None,
+    }
+}
+
 fn schedule_machine_shutdown(workspace: String) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -641,6 +649,19 @@ mod tests {
         );
         assert_eq!(server.host_build.version, "0.1.2");
         assert_eq!(server.host_build.git_commit, "0123456789abcdef");
+    }
+
+    #[test]
+    fn stale_cluster_ownership_reconnects_but_a_duplicate_controller_stops() {
+        assert_eq!(
+            connection_error_disposition("stale_connection"),
+            Some(ConnectionDisposition::Reconnect)
+        );
+        assert_eq!(
+            connection_error_disposition("duplicate_machine_connection"),
+            Some(ConnectionDisposition::StopDuplicate)
+        );
+        assert_eq!(connection_error_disposition("machine_revoked"), None);
     }
 
     #[tokio::test]

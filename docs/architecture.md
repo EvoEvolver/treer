@@ -92,6 +92,12 @@ runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
 
+Proxy replicas fence machine connections through a distributed ownership
+lease. An explicit duplicate-Controller error makes the older Controller stop
+reconnecting, while a stale or expired lease makes it reconnect and claim a
+fresh connection. A stale lease alone is not evidence that the machine
+credential is running on another host.
+
 Linux managed Agents run in a private network namespace. Outbound TCP is
 captured onto the Controller SOCKS path. Agent-scoped services use a Unix
 bridge (`sandbox-exec --service-socket`) so the Controller can reach a
