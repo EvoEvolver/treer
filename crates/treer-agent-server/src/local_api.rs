@@ -145,16 +145,6 @@ impl LocalApiState {
             .await
     }
 
-    async fn put_as(
-        &self,
-        suffix: &str,
-        body: &Value,
-        source_agent: Option<&ValidatedAgent>,
-    ) -> Result<Value, LocalApiError> {
-        self.request(reqwest::Method::PUT, suffix, Some(body), source_agent)
-            .await
-    }
-
     async fn delete_as(
         &self,
         suffix: &str,
