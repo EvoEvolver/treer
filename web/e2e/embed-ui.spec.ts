@@ -168,21 +168,23 @@ test("reload button label changes when an agent has an embedded UI", async ({ pa
   await expect(page.getByRole("button", { name: "Reload interface" })).toBeVisible()
 })
 
-test("mobile: full-screen terminal button is hidden when the agent has an embedded UI", async ({ page }) => {
+test("mobile: selecting an embedded UI agent opens a full-screen iframe", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
   await page.getByRole("tab", { name: /Agents/ }).click()
 
-  // Plain terminal agent → "Open full-screen terminal" button shows on mobile
-  await page.getByRole("button", { name: /plain-tty/ }).click()
-  await expect(page.getByRole("button", { name: "Open full-screen terminal" })).toBeVisible()
+  await expect(page.locator("aside")).toBeVisible()
+  await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
 
-  // Agent with UI → iframe replaces terminal, that button must disappear.
-  // The sidebar is hidden on mobile at this point, so we dispatch a click
-  // directly to the agent row (it's still in the DOM).
-  await page.getByRole("button", { name: /dashboard/ }).dispatchEvent("click")
-  await expect(page.getByRole("button", { name: "Open full-screen terminal" })).toBeHidden()
-  await expect(page.locator("iframe[title='dashboard interface']")).toBeVisible()
+  await page.getByRole("button", { name: /dashboard/ }).click()
+  const frame = page.locator("iframe[title='dashboard interface']")
+  await expect(frame).toBeVisible()
+  await expect(page.getByRole("button", { name: "Close full-screen interface" })).toBeVisible()
+  await expect(page.locator(".xterm")).toBeHidden()
+
+  await page.getByRole("button", { name: "Close full-screen interface" }).click()
+  await expect(frame).toBeHidden()
+  await expect(page.locator("aside")).toBeVisible()
 })
 
 test("reload button triggers an iframe reload (key changes)", async ({ page }) => {

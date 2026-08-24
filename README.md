@@ -815,6 +815,11 @@ treer agent admin create --machine SERVER_ID --kind codex --name installer \
   --recipe https://github.com/example/recipe.git
 ```
 
+A successful install saves a launch profile (name and `run` from
+`treer-agent.json`). Extra chats use New Chat in that Agent's UI. Launch
+starts or restarts the same app-server + UI process; do not run Install
+recipe again.
+
 ## Checks
 
 ```bash

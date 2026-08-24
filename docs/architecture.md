@@ -97,7 +97,9 @@ captured onto the Controller SOCKS path. Agent-scoped services use a Unix
 bridge (`sandbox-exec --service-socket`) so the Controller can reach a
 namespace-local loopback listener without publishing a host TCP port. The
 browser Agent UI iframe uses that same bridge: register an HTTP service with
-`--agent self` and `treer ui set`. `publish_ports` (`sandbox-exec --publish`)
+`--agent self` and `treer ui set`. On a narrow viewport, selecting that Agent
+opens the iframe full-screen, matching the mobile terminal overlay.
+`publish_ports` (`sandbox-exec --publish`)
 is only for host-loopback clients that dial `127.0.0.1` themselves; it binds
 that port on the machine and splices accepted connections into the namespace.
 
@@ -110,10 +112,13 @@ bytes. This is opaque byte replay, not Agent-protocol item storage.
 Creating an Agent with a `recipe` git URL starts an interactive installer
 (Codex, Claude, or shell) and immediately prompts it with the bundled
 [install skill](../skills/treer-install/SKILL.md). The installer clones that
-repository and creates a different command Agent. It must not probe another
-Agent's service; readiness is an `agent_uis` row on workspace discovery.
-Same-machine Agents may health-probe sibling services. This is not an App
-package installer.
+repository, creates a different command Agent, and upserts a workspace launch
+profile from `treer-agent.json`. Extra chats use New Chat in that Agent's UI
+on the same app-server. Launch starts or restarts the process; it does not
+run Install recipe again. The installer must not probe another Agent's
+service; readiness is an `agent_uis` row on workspace discovery plus the
+saved profile. Same-machine Agents may health-probe sibling services. This is
+not an App package installer.
 
 Covered organization, workspace, and membership mutations write their audit
 event in the same PostgreSQL transaction. Successful Agent create, rename, stop,

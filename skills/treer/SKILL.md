@@ -388,9 +388,12 @@ treer agent admin create --machine <server-id> --kind codex --name installer \
   --recipe https://github.com/example/recipe.git
 ```
 
-The installer creates a different command Agent. It must not
-`treer network service probe` that Agent's service (`service_not_owned`).
-Wait on `treer status` until `agent_uis` lists the created Agent.
+The installer creates a different command Agent and must save a launch
+profile from `treer-agent.json` so Launch can start or restart that process.
+Extra chats use New Chat in the created Agent's UI.
+It must not `treer network service probe` that Agent's service
+(`service_not_owned`). Wait on `treer status` until `agent_uis` lists the
+created Agent, then confirm `treer agent admin profile show`.
 
 Native agent arguments go after `--`:
 
