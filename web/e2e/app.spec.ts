@@ -190,7 +190,7 @@ test("workspace dropdown opens Profiles and Network", async ({ page }) => {
   await page.getByRole("button", { name: /Workspace|Profiles/ }).click()
   await page.getByRole("menuitem", { name: "Network" }).click()
   await expect(page.getByRole("heading", { name: "Network" })).toBeVisible()
-  await expect(page.getByText("Machine services")).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Machine services" })).toBeVisible()
 })
 
 test("service registration can target an Agent's private loopback", async ({ page }) => {
