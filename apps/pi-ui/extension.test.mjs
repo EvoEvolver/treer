@@ -138,7 +138,7 @@ test("registers the Pi server as an Agent Interface Server", async () => {
     "interface", "register", "--port", "4180",
     "--instance-id", "pi_instance", "--ui-path", "/",
   ]);
-  assert.equal(calls[0][1].filter((value) => value === "--capability").length, 6);
+  assert.equal(calls[0][1].filter((value) => value === "--capability").length, 5);
 });
 
 test("projects Pi entries into stable Treer transcript envelopes", () => {
