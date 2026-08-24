@@ -227,7 +227,6 @@ export default function piUiExtension(pi) {
   let context = null;
   let server = null;
   let heartbeat = null;
-  let registrationHeartbeat = null;
 
   const snapshot = () => snapshotFromContext(context, runtime);
   const broadcast = () => {
@@ -409,12 +408,6 @@ export default function piUiExtension(pi) {
     if (process.env.TREER_AGENT_ID && process.env.PI_UI_AUTO_REGISTER !== "0") {
       try {
         await registerTreerInterface(runtime.port, instanceId);
-        registrationHeartbeat = setInterval(() => {
-          registerTreerInterface(runtime.port, instanceId).catch((error) => {
-            runtime.error = `Treer AIS registration refresh failed: ${error instanceof Error ? error.message : String(error)}`;
-            broadcast();
-          });
-        }, 20000);
         ctx.ui.setStatus("pi-ui", `AIS :${runtime.port}`);
       } catch (error) {
         runtime.error = `Treer Interface registration failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -495,8 +488,6 @@ export default function piUiExtension(pi) {
   pi.on("session_shutdown", async () => {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
-    if (registrationHeartbeat) clearInterval(registrationHeartbeat);
-    registrationHeartbeat = null;
     if (process.env.TREER_AGENT_ID) {
       await execFileAsync("treer", ["interface", "clear"]).catch(() => {});
     }

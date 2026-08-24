@@ -21,6 +21,7 @@ use treer_protocol::{
 use uuid::Uuid;
 
 use crate::host_client::{HostClient, HostEvents};
+use crate::interface_cache::{CachedAgentInterface, InterfaceCache};
 
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
@@ -28,7 +29,7 @@ const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const AGENT_COMMAND_DELAY: Duration = Duration::from_millis(500);
 const CLAUDE_TRUST_CONFIRM_DELAY: Duration = Duration::from_millis(1_500);
-const AGENT_INTERFACE_LEASE: Duration = Duration::from_secs(60);
+const AGENT_INTERFACE_FAILURE_LIMIT: u8 = 5;
 
 fn validate_interface_ui_path(value: &str) -> Result<String, ProtocolError> {
     let value = value.trim();
@@ -80,6 +81,7 @@ pub struct ControllerConfig {
     pub network_proxy_url: String,
     pub treer_binary: Option<PathBuf>,
     pub sandbox_executable: Option<PathBuf>,
+    pub interface_cache_path: PathBuf,
 }
 
 struct ControllerInner {
@@ -90,6 +92,7 @@ struct ControllerInner {
     network_proxy_url: String,
     treer_binary: Option<PathBuf>,
     sandbox_executable: Option<PathBuf>,
+    interface_cache: InterfaceCache,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
     terminal_events: broadcast::Sender<TerminalOutput>,
@@ -149,6 +152,7 @@ impl ControllerRuntime {
                 network_proxy_url: config.network_proxy_url,
                 treer_binary: config.treer_binary,
                 sandbox_executable: config.sandbox_executable,
+                interface_cache: InterfaceCache::load(config.interface_cache_path),
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
                 terminal_events,
@@ -172,6 +176,64 @@ impl ControllerRuntime {
         runtime.start_event_tasks(events);
         runtime.start_idle_monitor();
         Ok((runtime, disconnected))
+    }
+
+    pub async fn restore_cached_interfaces(&self) {
+        let mut restored = Vec::new();
+        for mut cached in self.inner.interface_cache.entries() {
+            let matches_process = self
+                .get(&cached.agent_id)
+                .ok()
+                .and_then(|agent| {
+                    agent.lock().ok().map(|agent| {
+                        agent.info.pid == Some(cached.pid)
+                            && agent.info.started_at == cached.started_at
+                            && !agent.info.status.is_terminal()
+                    })
+                })
+                .unwrap_or(false);
+            if !matches_process {
+                continue;
+            }
+            cached.interface.registered_at = Utc::now();
+            if let Err(error) = self
+                .validate_interface_manifest(&cached.agent_id, &cached.interface)
+                .await
+            {
+                warn!(
+                    agent_id = %cached.agent_id,
+                    code = %error.code,
+                    "discarding stale Agent Interface cache entry"
+                );
+                continue;
+            }
+            let installed = self
+                .get(&cached.agent_id)
+                .ok()
+                .and_then(|agent| {
+                    agent.lock().ok().and_then(|mut agent| {
+                        if agent.info.pid != Some(cached.pid)
+                            || agent.info.started_at != cached.started_at
+                            || agent.info.status.is_terminal()
+                        {
+                            return None;
+                        }
+                        agent.info.interface = Some(cached.interface.clone());
+                        Some(agent.info.clone())
+                    })
+                })
+                .is_some();
+            if installed {
+                self.start_interface_status_monitor(
+                    cached.agent_id.clone(),
+                    cached.interface.clone(),
+                );
+                restored.push(cached);
+            }
+        }
+        if let Err(error) = self.inner.interface_cache.replace_all(restored) {
+            warn!(%error, "failed to update Agent Interface cache after recovery");
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentInfo> {
@@ -504,25 +566,8 @@ impl ControllerRuntime {
             ui_path,
             registered_at: Utc::now(),
         };
-        let manifest = crate::agent_interface::manifest(
-            agent_id,
-            &descriptor,
-            self.inner.sandbox_executable.is_some(),
-        )
-        .await?;
-        let mut manifest_capabilities = manifest.capabilities;
-        manifest_capabilities.sort();
-        manifest_capabilities.dedup();
-        if manifest.protocol != descriptor.protocol
-            || manifest.instance_id != descriptor.instance_id
-            || manifest_capabilities != descriptor.capabilities
-            || manifest.ui_path != descriptor.ui_path
-        {
-            return Err(ProtocolError::new(
-                "agent_interface_manifest_mismatch",
-                "Agent Interface manifest does not match its registration request",
-            ));
-        }
+        self.validate_interface_manifest(agent_id, &descriptor)
+            .await?;
         let agent = self.get(agent_id)?;
         let info = {
             let mut agent = agent
@@ -546,13 +591,66 @@ impl ControllerRuntime {
             }
             (agent.info.clone(), start_monitor, publish_changed)
         };
+        self.cache_interface(&info.0);
         if info.2 {
             let _ = self.inner.events.send(info.0);
         }
-        if info.1 && descriptor.supports("state.observe") {
+        if info.1 {
             self.start_interface_status_monitor(agent_id.to_string(), descriptor.clone());
         }
         Ok(descriptor)
+    }
+
+    async fn validate_interface_manifest(
+        &self,
+        agent_id: &str,
+        descriptor: &AgentInterfaceDescriptor,
+    ) -> Result<(), ProtocolError> {
+        if descriptor.protocol != AGENT_INTERFACE_PROTOCOL_V1
+            || descriptor.instance_id.trim().is_empty()
+            || descriptor.port == 0
+            || descriptor
+                .ui_path
+                .as_deref()
+                .map(validate_interface_ui_path)
+                .transpose()?
+                != descriptor.ui_path
+            || descriptor
+                .capabilities
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || descriptor.capabilities.iter().any(|capability| {
+                capability.is_empty()
+                    || !capability.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            })
+        {
+            return Err(ProtocolError::new(
+                "invalid_agent_interface_cache",
+                "cached Agent Interface descriptor is invalid",
+            ));
+        }
+        let manifest = crate::agent_interface::manifest(
+            agent_id,
+            descriptor,
+            self.inner.sandbox_executable.is_some(),
+        )
+        .await?;
+        let mut manifest_capabilities = manifest.capabilities;
+        manifest_capabilities.sort();
+        manifest_capabilities.dedup();
+        if manifest.protocol != descriptor.protocol
+            || manifest.instance_id != descriptor.instance_id
+            || manifest_capabilities != descriptor.capabilities
+            || manifest.ui_path != descriptor.ui_path
+        {
+            return Err(ProtocolError::new(
+                "agent_interface_manifest_mismatch",
+                "Agent Interface manifest does not match its registration request",
+            ));
+        }
+        Ok(())
     }
 
     pub fn clear_interface(
@@ -568,6 +666,7 @@ impl ControllerRuntime {
             agent.info.updated_at = Utc::now();
             (descriptor, agent.info.clone())
         };
+        self.remove_cached_interface(agent_id);
         let _ = self.inner.events.send(info);
         Ok(descriptor)
     }
@@ -627,24 +726,13 @@ impl ControllerRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut consecutive_failures = 0_u8;
             loop {
                 interval.tick().await;
                 let current = match runtime.interface(&agent_id) {
                     Ok(Some(current)) if current.instance_id == descriptor.instance_id => current,
                     _ => break,
                 };
-                if Utc::now()
-                    .signed_duration_since(current.registered_at)
-                    .num_milliseconds()
-                    >= AGENT_INTERFACE_LEASE.as_millis() as i64
-                {
-                    let _ = runtime.expire_interface(
-                        &agent_id,
-                        &current.instance_id,
-                        current.registered_at,
-                    );
-                    break;
-                }
                 match crate::agent_interface::status(
                     &agent_id,
                     &current,
@@ -653,6 +741,7 @@ impl ControllerRuntime {
                 .await
                 {
                     Ok(status) => {
+                        consecutive_failures = 0;
                         let terminal = runtime
                             .get(&agent_id)
                             .ok()
@@ -663,12 +752,21 @@ impl ControllerRuntime {
                                     .map(|agent| agent.info.status.is_terminal())
                             })
                             .unwrap_or(true);
-                        if !terminal {
+                        if !terminal && current.supports("state.observe") {
                             let _ = runtime.update_agent_status(&agent_id, status.status);
                         }
                     }
                     Err(error) => {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
                         warn!(%agent_id, code = %error.code, "Agent Interface status probe failed");
+                        if consecutive_failures >= AGENT_INTERFACE_FAILURE_LIMIT {
+                            let _ = runtime.expire_interface(
+                                &agent_id,
+                                &current.instance_id,
+                                current.registered_at,
+                            );
+                            break;
+                        }
                     }
                 }
             }
@@ -696,8 +794,34 @@ impl ControllerRuntime {
             agent.info.updated_at = Utc::now();
             agent.info.clone()
         };
+        self.remove_cached_interface(agent_id);
         let _ = self.inner.events.send(info);
         Ok(())
+    }
+
+    fn cache_interface(&self, info: &AgentInfo) {
+        let Some(pid) = info.pid else {
+            self.remove_cached_interface(&info.agent_id);
+            return;
+        };
+        let Some(interface) = info.interface.clone() else {
+            self.remove_cached_interface(&info.agent_id);
+            return;
+        };
+        if let Err(error) = self.inner.interface_cache.upsert(CachedAgentInterface {
+            agent_id: info.agent_id.clone(),
+            pid,
+            started_at: info.started_at,
+            interface,
+        }) {
+            warn!(agent_id = %info.agent_id, %error, "failed to persist Agent Interface cache");
+        }
+    }
+
+    fn remove_cached_interface(&self, agent_id: &str) {
+        if let Err(error) = self.inner.interface_cache.remove(agent_id) {
+            warn!(%agent_id, %error, "failed to remove Agent Interface cache entry");
+        }
     }
 
     pub async fn write_raw(
@@ -857,7 +981,10 @@ impl ControllerRuntime {
         } else {
             AgentStatus::Exited
         };
-        let interface = self.interface(&metadata.agent_id).ok().flatten();
+        let interface = process
+            .running
+            .then(|| self.interface(&metadata.agent_id).ok().flatten())
+            .flatten();
         let info = AgentInfo {
             agent_id: metadata.agent_id.clone(),
             workspace_id: metadata.workspace_id,
@@ -887,6 +1014,9 @@ impl ControllerRuntime {
             .write()
             .map_err(|_| ProtocolError::new("state_error", "agent registry lock poisoned"))?
             .insert(metadata.agent_id, agent);
+        if !process.running {
+            self.remove_cached_interface(&info.agent_id);
+        }
         let _ = self.inner.events.send(info.clone());
         Ok(info)
     }
@@ -906,11 +1036,19 @@ impl ControllerRuntime {
         let mut agent = agent
             .lock()
             .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+        let terminal = status.is_terminal();
         agent.info.status = status;
         agent.info.updated_at = Utc::now();
         agent.info.exited_at = process.exited_at;
         agent.info.exit_code = process.exit_code;
+        if terminal {
+            agent.info.interface = None;
+        }
         let info = agent.info.clone();
+        drop(agent);
+        if terminal {
+            self.remove_cached_interface(&info.agent_id);
+        }
         let _ = self.inner.events.send(info.clone());
         Ok(info)
     }
@@ -1000,9 +1138,15 @@ impl ControllerRuntime {
         agent.info.exit_code = process.exit_code;
         if !process.running {
             agent.info.status = AgentStatus::Exited;
+            agent.info.interface = None;
         }
         agent.info.updated_at = Utc::now();
-        let _ = self.inner.events.send(agent.info.clone());
+        let info = agent.info.clone();
+        drop(agent);
+        if !process.running {
+            self.remove_cached_interface(&info.agent_id);
+        }
+        let _ = self.inner.events.send(info);
     }
 
     fn start_idle_monitor(&self) {

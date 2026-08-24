@@ -45,8 +45,8 @@ Treer.
 The AIS routes are `GET /v1/manifest`, `/v1/health`, `/v1/status`,
 `/v1/transcript`, and `/v1/events`, plus `POST /v1/prompts` and `/v1/abort`.
 Prompt requests are deduplicated by Treer's `operation_id`. The extension
-refreshes registration periodically so a running Pi session recovers after a
-Controller hot restart.
+registers once at startup; the Controller revalidates its local registration
+cache when recovering a running Pi session after a hot restart.
 
 No npm install or frontend build is required to run the checked-in App. Pi,
 Node.js, and the `treer` CLI must be available in the Agent environment. Run

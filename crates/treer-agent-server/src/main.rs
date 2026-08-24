@@ -1,6 +1,7 @@
 mod agent_interface;
 mod controller;
 mod host_client;
+mod interface_cache;
 mod local_api;
 mod network;
 mod proxy;
@@ -237,9 +238,11 @@ async fn run_server(args: ServerArgs) -> Result<()> {
             network_proxy_url: network.proxy_url(),
             treer_binary: sibling_treer_binary(),
             sandbox_executable,
+            interface_cache_path: args.host_socket.with_extension("interfaces.json"),
         },
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
+    runtime.restore_cached_interfaces().await;
     let proxy_http = normalize_http_url(args.proxy.clone())?;
     let proxy_ws = agent_websocket_url(args.proxy)?;
     let server = proxy::server_info(

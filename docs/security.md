@@ -10,7 +10,8 @@ workspace members. It is not a safe multi-tenant execution sandbox.
   Controller and Proxy and bound to one Agent, machine, and workspace.
 - An Agent can register or clear only its own Agent Interface Server. The
   Controller verifies the private-loopback manifest before advertising it and
-  never forwards the workload credential to the interface.
+  never forwards the workload credential to the interface. Its local recovery
+  cache contains only a process-bound descriptor and is revalidated before use.
 - Local operator requests use a private Controller credential that is not
   injected into managed Agent environments.
 - Service tokens are short-lived and audience-bound. Human App token

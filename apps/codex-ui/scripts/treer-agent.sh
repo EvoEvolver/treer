@@ -36,9 +36,6 @@ fi
 "$APP_ROOT/node_modules/.bin/tsx" "$APP_ROOT/src/index.ts" &
 SERVER_PID=$!
 cleanup() {
-  if [ -n "${REGISTRATION_PID:-}" ]; then
-    kill "$REGISTRATION_PID" 2>/dev/null || true
-  fi
   if command -v treer >/dev/null 2>&1; then
     treer interface clear >/dev/null 2>&1 || true
   fi
@@ -78,12 +75,6 @@ register() {
 }
 
 register
-(
-  while sleep 20; do
-    register || echo "Treer Agent Interface registration refresh failed" >&2
-  done
-) &
-REGISTRATION_PID=$!
 echo "registered Codex AIS $INSTANCE_ID on private port $PORT"
 
 wait "$SERVER_PID"
