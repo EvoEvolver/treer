@@ -25,13 +25,6 @@ export function normalizePort(value) {
   return port;
 }
 
-export function serviceName(agentId) {
-  const suffix = String(agentId || "local")
-    .replace(/[^a-zA-Z0-9_-]/g, "")
-    .slice(-12) || "local";
-  return `pi-ui-${suffix}`;
-}
-
 export function promptOptions(isIdle, mode) {
   if (isIdle) return undefined;
   if (mode === "steer") return { deliverAs: "steer" };
@@ -198,26 +191,9 @@ async function serveAsset(pathname, response, headOnly = false) {
   }
 }
 
-async function registerTreerUi(port, name) {
-  const createArgs = [
-    "network", "service", "create", name,
-    "--agent", "self", "--port", String(port), "--protocol", "http",
-  ];
-  try {
-    await execFileAsync("treer", createArgs);
-  } catch {
-    await execFileAsync("treer", [
-      "network", "service", "update", name,
-      "--port", String(port), "--protocol", "http",
-    ]);
-  }
-  await execFileAsync("treer", ["ui", "set", name]);
-}
-
 export async function registerTreerInterface(port, instanceId, options = {}) {
   const run = options.run ?? execFileAsync;
   const capabilities = [
-    "ui",
     "prompt.submit",
     "transcript.read",
     "state.observe",
@@ -236,7 +212,6 @@ export async function registerTreerInterface(port, instanceId, options = {}) {
 
 export default function piUiExtension(pi) {
   const configuredPort = normalizePort(process.env.PI_UI_PORT);
-  const name = process.env.PI_UI_SERVICE_NAME || serviceName(process.env.TREER_AGENT_ID);
   const clients = new Set();
   const instanceId = `pi_${randomBytes(16).toString("hex")}`;
   const completedOperations = new Map();
@@ -272,7 +247,7 @@ export default function piUiExtension(pi) {
           return sendJson(response, 200, {
             protocol: "treer.agent-interface/v1",
             instance_id: instanceId,
-            capabilities: ["ui", "prompt.submit", "transcript.read", "state.observe", "events.stream", "abort"],
+            capabilities: ["prompt.submit", "transcript.read", "state.observe", "events.stream", "abort"],
             ui_path: "/",
           }, request.method === "HEAD");
         }
@@ -433,7 +408,6 @@ export default function piUiExtension(pi) {
     await startServer();
     if (process.env.TREER_AGENT_ID && process.env.PI_UI_AUTO_REGISTER !== "0") {
       try {
-        await registerTreerUi(runtime.port, name);
         await registerTreerInterface(runtime.port, instanceId);
         registrationHeartbeat = setInterval(() => {
           registerTreerInterface(runtime.port, instanceId).catch((error) => {
@@ -443,7 +417,7 @@ export default function piUiExtension(pi) {
         }, 20000);
         ctx.ui.setStatus("pi-ui", `AIS :${runtime.port}`);
       } catch (error) {
-        runtime.error = `Treer UI registration failed: ${error instanceof Error ? error.message : String(error)}`;
+        runtime.error = `Treer Interface registration failed: ${error instanceof Error ? error.message : String(error)}`;
         ctx.ui.notify(runtime.error, "error");
       }
     }

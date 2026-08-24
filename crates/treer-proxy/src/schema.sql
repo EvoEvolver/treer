@@ -282,20 +282,6 @@ CREATE INDEX IF NOT EXISTS machine_services_target_agent
     ON machine_services(workspace_id, target_agent_id)
     WHERE target_agent_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS agent_uis (
-    workspace_id TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-    service_id TEXT NOT NULL,
-    path TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    updated_by TEXT NOT NULL,
-    PRIMARY KEY(workspace_id, agent_id),
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS agent_uis_service
-    ON agent_uis(workspace_id, service_id);
-
 CREATE TABLE IF NOT EXISTS virtual_network_hosts (
     workspace_id TEXT NOT NULL,
     hostname TEXT NOT NULL,

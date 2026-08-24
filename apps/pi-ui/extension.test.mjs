@@ -9,7 +9,6 @@ import piUiExtension, {
   normalizePort,
   promptOptions,
   registerTreerInterface,
-  serviceName,
   snapshotFromContext,
   transcriptEntries,
 } from "./extension.mjs";
@@ -19,11 +18,6 @@ test("normalizes the configured loopback port", () => {
   assert.equal(normalizePort("0"), 0);
   assert.equal(normalizePort("4312"), 4312);
   assert.throws(() => normalizePort("-1"), /integer from 0 to 65535/);
-});
-
-test("derives a stable service name without exposing the full agent id", () => {
-  assert.equal(serviceName("ag_0123456789abcdef"), "pi-ui-456789abcdef");
-  assert.equal(serviceName(undefined), "pi-ui-local");
 });
 
 test("requires explicit delivery while Pi is working", () => {

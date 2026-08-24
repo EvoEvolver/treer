@@ -537,12 +537,12 @@ compatibility mode; use a Linux container when transparent capture is required.
 A transparent Agent can expose a namespace-local loopback listener by
 registering an Agent-scoped service
 (`treer network service create … --agent self`); the Controller reaches it
-through the sandbox's Unix bridge. That is also how the browser Agent UI iframe
-reaches an HTTP server inside the namespace: register the service against
-`--agent self` and run `treer ui set`. Create the Agent with `--publish <port>`
-(`publish_ports`) only when a host process must dial `127.0.0.1:<port>`
-itself. That mapping is inbound host-loopback only, not a public internet
-listener.
+through the sandbox's Unix bridge. A registered Agent Interface Server uses the
+same bridge directly; when its descriptor includes `ui_path`, the browser
+iframe reaches that path on the Interface port without a separate service
+record. Create the Agent with `--publish <port>` (`publish_ports`) only when a
+host process must dial `127.0.0.1:<port>` itself. That mapping is inbound
+host-loopback only, not a public internet listener.
 
 Managed agents reach the Controller's local API through the reserved TEST-NET-1
 address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
@@ -640,9 +640,6 @@ Server without receiving Proxy credentials:
 ```bash
 treer network service create api --agent self --port 8080 --protocol http
 treer network service probe api
-treer ui set api --path /
-treer ui show
-treer ui clear
 treer network host list
 treer network host create api.internal api
 treer network host delete api.internal
@@ -687,7 +684,9 @@ treer agent send-keys reviewer ctrl-c
 An Agent may register a `treer.agent-interface/v1` server on its private
 loopback. The Controller verifies its manifest and automatically sends semantic
 prompts to it when `prompt.submit` is declared; otherwise prompt continues to
-use terminal input. Structured transcript reads require `transcript.read`:
+use terminal input. Structured transcript reads require `transcript.read`.
+When `--ui-path` is present, Treer embeds that path and transparently tunnels
+its relative HTTP and WebSocket traffic to the same Interface port:
 
 ```bash
 treer interface register --port 4180 --instance-id pi-1 \

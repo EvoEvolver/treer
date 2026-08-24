@@ -34,9 +34,10 @@ In concrete terms:
    stable workspace aliases, and publish HTTP services — including ones that
    live only inside a managed Agent's sandbox — through an optional
    wildcard HTTPS ingress for humans and other Agents.
-6. An Agent can select one HTTP machine service as its custom interface. The
-   control plane embeds that page in place of the Agent terminal, and relative
-   HTTP and WebSocket traffic uses the existing browser network tunnel.
+6. An Agent Interface Server can declare a browser UI path alongside its
+   semantic capabilities. The control plane embeds that page in place of the
+   Agent terminal, and transparently tunnels relative HTTP and WebSocket
+   traffic to the Agent-private Interface port.
 7. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed.
 8. The central Proxy is open source and can be privately deployed.

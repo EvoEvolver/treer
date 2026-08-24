@@ -48,13 +48,6 @@ export interface AgentInterface {
   registered_at: string
 }
 
-export interface AgentUi {
-  agent_id: string
-  service_id: string
-  path: string
-  updated_at: string
-}
-
 export interface AgentLaunchProfile {
   profile_id: string
   workspace_id: string
@@ -74,7 +67,6 @@ export interface Snapshot {
   workspace: Workspace
   servers: Machine[]
   agents: Agent[]
-  agent_uis: AgentUi[]
 }
 
 export interface Member {

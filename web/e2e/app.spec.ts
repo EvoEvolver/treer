@@ -96,7 +96,6 @@ const snapshot = {
   workspace,
   servers: [machineA, machineB],
   agents: [agentA, agentB],
-  agent_uis: [],
 }
 
 const traffic = [

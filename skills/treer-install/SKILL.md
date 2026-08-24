@@ -97,8 +97,7 @@ Success is workspace discovery plus a reusable Launch option:
 2. That Agent's `interface` uses `treer.agent-interface/v1` and declares the
    recipe's required capabilities, normally `prompt.submit`, `transcript.read`,
    and `state.observe`.
-3. For a browser UI, `treer network service list` shows an Agent-scoped HTTP
-   service and `treer status` includes a matching `agent_uis` entry.
+3. For a browser UI, that Interface descriptor includes a validated `ui_path`.
 4. `treer agent admin profile show` returns the recipe's launch profile.
 
 Leave the created Agent running. Extra conversations use Launch to create
@@ -111,8 +110,8 @@ thread.
 ## Boundaries
 
 - Do not put secrets in a launch profile or recipe URL.
-- Do not use `--publish` for Treer iframe UIs. The start script registers
-  `--agent self` and `treer ui set`.
+- Do not use `--publish` or create a service record for Treer iframe UIs. The
+  per-Agent Interface registration includes `--ui-path` and its private port.
 - Register the per-Agent adapter with `treer interface register`, refresh the
   registration after Controller restarts, deduplicate prompts by
   `operation_id`, and clear it on clean shutdown.

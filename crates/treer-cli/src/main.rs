@@ -25,11 +25,11 @@ use treer_protocol::{
     CreateVirtualNetworkHostRequest, GetMessageResponse, ImportMessagesRequest, InputAgentRequest,
     LaunchAgentProfileRequest, LegacyMailMessage, MachineServiceProtocol, MessageExternalSource,
     ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
-    ServerInfo, ServiceIngressAccess, SetAgentUiRequest, TerminalClientMessage,
-    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
-    WorkspaceSnapshot, AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL,
-    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    ServerInfo, ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
+    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
+    AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER,
+    WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -83,11 +83,6 @@ enum Command {
     Network {
         #[command(subcommand)]
         command: NetworkCommand,
-    },
-    #[command(about = "Show this Agent's custom web interface instead of its terminal")]
-    Ui {
-        #[command(subcommand)]
-        command: UiCommand,
     },
     #[command(about = "Register this Agent's semantic interface server")]
     Interface {
@@ -399,20 +394,6 @@ enum TokenCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum UiCommand {
-    #[command(about = "Show the current custom interface declaration")]
-    Show,
-    #[command(about = "Use an HTTP service as this Agent's interface")]
-    Set {
-        service: String,
-        #[arg(long, default_value = "/")]
-        path: String,
-    },
-    #[command(about = "Return this Agent to the terminal interface")]
-    Clear,
-}
-
-#[derive(Debug, Subcommand)]
 enum InterfaceCommand {
     #[command(about = "Show this Agent's registered interface")]
     Show,
@@ -422,7 +403,7 @@ enum InterfaceCommand {
         port: u16,
         #[arg(long)]
         instance_id: String,
-        #[arg(long = "capability", required = true)]
+        #[arg(long = "capability")]
         capabilities: Vec<String>,
         #[arg(long)]
         ui_path: Option<String>,
@@ -761,7 +742,6 @@ async fn run_cli() -> anyhow::Result<()> {
         },
         Command::Machine { command } => run_machine_command(&client, command).await?,
         Command::Network { command } => run_network_command(&client, command).await?,
-        Command::Ui { command } => run_ui_command(&client, command).await?,
         Command::Interface { command } => run_interface_command(&client, command).await?,
         Command::Token { command } => {
             let TokenCommand::Create { audience, json } = command;
@@ -1419,25 +1399,6 @@ async fn consume_socks_address(
     let mut address = vec![0_u8; length];
     socket.read_exact(&mut address).await?;
     Ok(())
-}
-
-async fn run_ui_command(client: &ApiClient, command: UiCommand) -> anyhow::Result<Value> {
-    match command {
-        UiCommand::Show => client.value(Method::GET, "api/ui", None).await,
-        UiCommand::Set { service, path } => {
-            client
-                .value(
-                    Method::PUT,
-                    "api/ui",
-                    Some(serde_json::to_value(SetAgentUiRequest {
-                        service_id: service,
-                        path,
-                    })?),
-                )
-                .await
-        }
-        UiCommand::Clear => client.value(Method::DELETE, "api/ui", None).await,
-    }
 }
 
 async fn run_interface_command(
@@ -2524,27 +2485,6 @@ mod tests {
                     }
                 }
             }) if agent == "self"
-        ));
-    }
-
-    #[test]
-    fn agent_ui_commands_parse() {
-        let set = Args::try_parse_from(["treer", "ui", "set", "dashboard", "--path", "/treer/"])
-            .expect("Agent UI set should parse");
-        assert!(matches!(
-            set.command,
-            Some(Command::Ui {
-                command: UiCommand::Set { service, path }
-            }) if service == "dashboard" && path == "/treer/"
-        ));
-
-        let clear =
-            Args::try_parse_from(["treer", "ui", "clear"]).expect("Agent UI clear should parse");
-        assert!(matches!(
-            clear.command,
-            Some(Command::Ui {
-                command: UiCommand::Clear
-            })
         ));
     }
 

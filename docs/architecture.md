@@ -96,9 +96,10 @@ Linux managed Agents run in a private network namespace. Outbound TCP is
 captured onto the Controller SOCKS path. Agent-scoped services use a Unix
 bridge (`sandbox-exec --service-socket`) so the Controller can reach a
 namespace-local loopback listener without publishing a host TCP port. The
-browser Agent UI iframe uses that same bridge: register an HTTP service with
-`--agent self` and `treer ui set`. On a narrow viewport, selecting that Agent
-opens the iframe full-screen, matching the mobile terminal overlay.
+browser Agent UI iframe uses that same bridge to reach the port and `ui_path`
+declared by the Agent's verified Interface descriptor. No separate service or
+UI registration is required. On a narrow viewport, selecting that Agent opens
+the iframe full-screen, matching the mobile terminal overlay.
 `publish_ports` (`sandbox-exec --publish`)
 is only for host-loopback clients that dial `127.0.0.1` themselves; it binds
 that port on the machine and splices accepted connections into the namespace.
@@ -117,7 +118,9 @@ server; it does not replace Host process ownership. Registration is authenticate
 with the Agent workload credential, scoped to that same Agent, verified against
 `GET /v1/manifest`, and refreshed by the interface process after Controller
 restarts. The descriptor and capabilities travel with `AgentInfo` snapshots and
-events, while the live endpoint remains on Agent-private loopback.
+events, while the live endpoint remains on Agent-private loopback. An optional
+`ui_path` exposes an embedded browser interface on that same endpoint; HTTP and
+WebSocket traffic below the path is opaque to the semantic AIS contract.
 
 The Controller routes `prompt.submit` and `transcript.read` through AIS when the
 matching capability is present. A missing prompt capability falls back to the
@@ -129,8 +132,8 @@ input, resize, stop, and delete remain Host/PTY operations.
 
 Pi UI is the first AIS implementation. It exposes the v1 manifest, health,
 status, transcript, event, prompt, and abort routes from the same extension that
-serves its browser UI. The existing Agent-scoped `MachineService` carries UI
-HTTP traffic, but it is transport rather than the AIS semantic contract.
+serves its browser UI. Its verified descriptor is the single registration for
+both semantic capabilities and the optional browser presentation.
 
 Creating an Agent with a `recipe` git URL starts an interactive installer
 (Codex, Claude, or shell) and immediately prompts it with the bundled
@@ -142,9 +145,10 @@ attach to an already healthy same-type listener instead of starting another
 app-server and frontend. It still runs a per-Agent AIS adapter with a unique
 instance ID and immutable thread binding, so prompt, transcript, state, events,
 and abort cannot drift into another Agent's conversation. Launch does not run
-Install recipe again. Readiness is the Agent's verified AIS descriptor, the
-optional `agent_uis` presentation row, and the saved profile; a raw health probe
-does not establish semantic capabilities. This is not an App package installer.
+Install recipe again. Readiness is the Agent's verified AIS descriptor,
+including `ui_path` for browser recipes, and the saved profile; a raw health
+probe does not establish semantic capabilities. This is not an App package
+installer.
 
 Covered organization, workspace, and membership mutations write their audit
 event in the same PostgreSQL transaction. Successful Agent create, rename, stop,

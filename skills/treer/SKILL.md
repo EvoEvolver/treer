@@ -37,7 +37,6 @@ treer agent admin profile --help
 treer machine --help
 treer message --help
 treer network --help
-treer ui --help
 treer interface --help
 treer member --help
 treer token --help
@@ -126,13 +125,8 @@ vhosts, `--service` references, probe, and publish all work the same. Agents in
 other namespaces reach it through the Controller instead of raw TCP.
 
 `--publish` is only for host processes that dial `127.0.0.1` themselves. Do
-not use it for the Treer iframe; that tunnel uses the Agent-scoped Unix bridge
-(`--agent self` plus `treer ui set`).
-
-To present an HTTP Agent UI from inside the namespace to a host-loopback
-client, create the Agent with `--publish <port>` (`publish_ports` on the API).
-Treer maps `127.0.0.1:<port>` on the machine into the namespace. Register that
-host loopback port as a machine service (not `--agent`) and run `treer ui set`.
+not use it for the Treer iframe; an Agent Interface registration with
+`--ui-path` uses the Agent-scoped Unix bridge directly.
 
 Update a destination without changing its virtual hosts. Deleting a service
 also deletes aliases that reference it, but does not stop the external process:
@@ -183,38 +177,6 @@ These commands operate only in `TREER_WORKSPACE_ID`. Service and virtual-host
 operations have separate policy actions. Changes take effect immediately for
 online Controllers; reconnect and periodic full snapshots provide recovery.
 
-## Publish a custom Agent interface
-
-A managed Agent can replace its terminal in the Treer web application with an
-HTTP service on its own private loopback. From inside the Agent:
-
-```bash
-treer network service create agent-dashboard --agent self --port 4173 --protocol http
-treer ui set agent-dashboard
-treer ui show
-```
-
-Use `--path` when the application is mounted below its service root:
-
-```bash
-treer ui set agent-dashboard --path /treer/
-```
-
-The page must use relative asset, fetch, and WebSocket URLs. Treer embeds the
-page through the Proxy and carries both ordinary HTTP and WebSocket Upgrade
-traffic over the existing Controller WebSocket; do not publish or connect to a
-machine port directly. Prefer an Agent-scoped HTTP service (`--agent self`) so
-the iframe uses the sandbox Unix bridge. Return to the normal terminal view
-with:
-
-```bash
-treer ui clear
-```
-
-Deleting the service, changing it to TCP, or moving it to another machine also
-clears the custom interface. The declaration changes only the web presentation;
-it does not start, stop, or supervise the service process.
-
 ## Use an Agent Interface Server
 
 An Agent-native integration may register a `treer.agent-interface/v1` HTTP
@@ -227,6 +189,11 @@ treer interface register --port 4180 --instance-id pi-session-1 \
   --capability state.observe --ui-path /
 treer interface show
 ```
+
+`--ui-path` is optional. When present, Treer replaces the Agent terminal view
+with that page and transparently carries HTTP and WebSocket traffic to the same
+private Interface port. The page must use relative asset, fetch, and WebSocket
+URLs. No machine service, virtual host, or published port is required.
 
 When `prompt.submit` is present, `treer agent prompt` uses the interface instead
 of writing to the terminal. Interface failures after dispatch are returned and
@@ -442,7 +409,8 @@ backend. It must still run and register a per-Agent AIS adapter with a unique
 `instance_id` that binds semantic operations to that Agent's thread. Do not use
 a raw service probe as Interface readiness. Wait until `treer agent show`
 reports the required capabilities; for browser recipes also confirm the
-matching `agent_uis` entry, then confirm `treer agent admin profile show`.
+Interface descriptor's `ui_path`, then confirm
+`treer agent admin profile show`.
 
 Native agent arguments go after `--`:
 

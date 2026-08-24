@@ -27,10 +27,10 @@ use treer_protocol::{
     MachineEnrollmentResponse, MachineService, MessagePrincipal, MessagePrincipalKind,
     PromptAgentRequest, ProtocolError, ReceiveMessagesRequest, RenameRequest,
     ResolveAppRecipientsRequest, ResolveAppRecipientsResponse, SendMessageRequest, ServiceIngress,
-    ServiceIngressAccess, SetAgentUiRequest, TerminalClientMessage, TerminalCursor,
-    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest,
-    WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
+    ServiceIngressAccess, TerminalClientMessage, TerminalCursor, TerminalServerMessage,
+    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
+    WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -43,19 +43,18 @@ use crate::message_store::{MessageStore, MessageStoreError};
 use crate::policy::{
     PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_CREATE,
     ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT, ACTION_AGENT_METADATA_READ,
-    ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP, ACTION_AGENT_UI_READ,
-    ACTION_AGENT_UI_SET, ACTION_AGENT_UPDATE, ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE,
-    ACTION_INGRESS_CREATE, ACTION_INGRESS_DELETE, ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE,
-    ACTION_LAUNCH_PROFILE_CREATE, ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST,
-    ACTION_LAUNCH_PROFILE_READ, ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE,
-    ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT,
-    ACTION_MESSAGE_READ, ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_SERVICE_CREATE,
-    ACTION_SERVICE_DELETE, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE,
-    ACTION_VIRTUAL_HOST_CREATE, ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST,
-    RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_AGENT_UI, RESOURCE_HUMAN_DIRECTORY,
-    RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE, RESOURCE_MESSAGE_DELIVERY,
-    RESOURCE_MESSAGE_IMPORT, RESOURCE_MESSAGE_MAILBOX, RESOURCE_SERVICE_INGRESS,
-    RESOURCE_VIRTUAL_HOST,
+    ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP, ACTION_AGENT_UPDATE,
+    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_CREATE, ACTION_INGRESS_DELETE,
+    ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE, ACTION_LAUNCH_PROFILE_CREATE,
+    ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST, ACTION_LAUNCH_PROFILE_READ,
+    ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE, ACTION_MACHINE_DELETE,
+    ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT, ACTION_MESSAGE_READ,
+    ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE,
+    ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
+    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT,
+    RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE,
+    RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE, RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT,
+    RESOURCE_MESSAGE_MAILBOX, RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
 
@@ -367,10 +366,6 @@ pub fn router(
             get(get_agent).patch(rename_agent).delete(delete_agent),
         )
         .route(
-            "/agent/workspaces/{workspace_id}/ui",
-            get(agent_get_ui).put(agent_set_ui).delete(agent_clear_ui),
-        )
-        .route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
             axum::routing::patch(rename_server).delete(delete_server),
         )
@@ -626,20 +621,16 @@ pub fn router(
             get(get_agent).patch(rename_agent).delete(delete_agent),
         )
         .route(
-            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui",
-            get(get_agent_ui),
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui",
+            any(proxy_agent_interface_ui_root),
         )
         .route(
-            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui/proxy",
-            any(proxy_agent_ui_root),
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/",
+            any(proxy_agent_interface_ui_root),
         )
         .route(
-            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui/proxy/",
-            any(proxy_agent_ui_root),
-        )
-        .route(
-            "/api/workspaces/{workspace_id}/agents/{agent_id}/ui/proxy/{*path}",
-            any(proxy_agent_ui_path),
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/{*path}",
+            any(proxy_agent_interface_ui_path),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -2205,7 +2196,6 @@ async fn update_machine_service(
     let service = auth
         .update_machine_service(&workspace_id, &service_id, &session.user_id, request)
         .await?;
-    reconcile_agent_uis_for_service(&state, &auth, &service).await?;
     refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "service": service })))
@@ -2219,15 +2209,9 @@ async fn delete_machine_service(
     let current = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
-    let agent_uis = auth
-        .list_agent_uis_for_service(&workspace_id, &current.service_id)
-        .await?;
     let service = auth
         .delete_machine_service(&workspace_id, &current.service_id)
         .await?;
-    for ui in agent_uis {
-        state.clear_agent_ui(&workspace_id, &ui.agent_id).await?;
-    }
     refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({
@@ -2258,37 +2242,6 @@ async fn probe_machine_service(
         )
         .await?;
     Ok(Json(json!({ "service": service, "health": result })))
-}
-
-async fn reconcile_agent_uis_for_service(
-    state: &AppState,
-    auth: &AuthStore,
-    service: &MachineService,
-) -> Result<(), ApiFailure> {
-    let uis = auth
-        .list_agent_uis_for_service(&service.workspace_id, &service.service_id)
-        .await?;
-    for ui in uis {
-        let valid = service.protocol == treer_protocol::MachineServiceProtocol::Http
-            && state
-                .resolve_agent(&service.workspace_id, &ui.agent_id)
-                .await
-                .is_ok_and(|agent| {
-                    agent.server_id == service.server_id
-                        && service
-                            .target_agent_id
-                            .as_ref()
-                            .is_none_or(|target| target == &agent.agent_id)
-                });
-        if !valid {
-            auth.clear_agent_ui(&service.workspace_id, &ui.agent_id)
-                .await?;
-            state
-                .clear_agent_ui(&service.workspace_id, &ui.agent_id)
-                .await?;
-        }
-    }
-    Ok(())
 }
 
 async fn list_virtual_network_hosts(
@@ -2720,83 +2673,49 @@ async fn proxy_virtual_network_host(
     .await
 }
 
-async fn get_agent_ui(
+async fn proxy_agent_interface_ui_root(
     State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Path((workspace_id, target)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiFailure> {
-    let agent = state.resolve_agent(&workspace_id, &target).await?;
-    let ui = auth.get_agent_ui(&workspace_id, &agent.agent_id).await?;
-    Ok(Json(json!({ "ui": ui })))
-}
-
-async fn proxy_agent_ui_root(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
     Extension(browser): Extension<BrowserAccess>,
     Path((workspace_id, agent_id)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     browser.validate_tunnel_if_present(request.headers())?;
-    proxy_agent_ui(state, auth, workspace_id, agent_id, String::new(), request).await
+    proxy_agent_interface_ui(state, workspace_id, agent_id, String::new(), request).await
 }
 
-async fn proxy_agent_ui_path(
+async fn proxy_agent_interface_ui_path(
     State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
     Extension(browser): Extension<BrowserAccess>,
     Path((workspace_id, agent_id, path)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     browser.validate_tunnel_if_present(request.headers())?;
-    proxy_agent_ui(state, auth, workspace_id, agent_id, path, request).await
+    proxy_agent_interface_ui(state, workspace_id, agent_id, path, request).await
 }
 
-async fn proxy_agent_ui(
+async fn proxy_agent_interface_ui(
     state: AppState,
-    auth: AuthStore,
     workspace_id: String,
     target: String,
     path: String,
     mut request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
-    let ui = auth
-        .get_agent_ui(&workspace_id, &agent.agent_id)
-        .await?
-        .ok_or_else(|| ApiFailure::not_found("agent_ui_not_found", &agent.agent_id))?;
-    let service = auth
-        .resolve_machine_service(&workspace_id, &ui.service_id)
-        .await?;
-    if service.protocol != treer_protocol::MachineServiceProtocol::Http {
-        return Err(ApiFailure::bad_request(
-            "service_protocol_mismatch",
-            "Agent UI requires an HTTP service",
-        ));
-    }
-    if service.server_id != agent.server_id {
-        return Err(ApiFailure::bad_request(
-            "agent_ui_machine_mismatch",
-            "Agent UI service no longer belongs to the Agent machine",
-        ));
-    }
-    if service
-        .target_agent_id
+    let interface = agent
+        .interface
         .as_ref()
-        .is_some_and(|target| target != &agent.agent_id)
-    {
-        return Err(ApiFailure::bad_request(
-            "agent_ui_target_mismatch",
-            "Agent UI service belongs to another Agent",
-        ));
-    }
+        .ok_or_else(|| ApiFailure::not_found("agent_interface_not_found", &agent.agent_id))?;
+    let ui_path = interface
+        .ui_path
+        .as_deref()
+        .ok_or_else(|| ApiFailure::not_found("agent_interface_ui_unavailable", &agent.agent_id))?;
 
     let target_path = if path.is_empty() {
-        ui.path.clone()
-    } else if ui.path == "/" {
+        ui_path.to_string()
+    } else if ui_path == "/" {
         format!("/{path}")
     } else {
-        format!("{}/{path}", ui.path.trim_end_matches('/'))
+        format!("{}/{path}", ui_path.trim_end_matches('/'))
     };
     let target = request.uri().query().map_or(target_path.clone(), |query| {
         format!("{target_path}?{query}")
@@ -2806,18 +2725,18 @@ async fn proxy_agent_ui(
         .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
     *request.version_mut() = Version::HTTP_11;
     let upgraded = request.headers().contains_key(header::UPGRADE);
-    let authority = format!("{}:{}", service.target_host, service.target_port);
+    let authority = format!("127.0.0.1:{}", interface.port);
     sanitize_tunnel_request_headers(request.headers_mut(), upgraded, &authority)?;
     tunnel_http_request(
         state,
         &workspace_id,
-        &service.server_id,
-        service.target_agent_id.as_deref(),
-        &service.target_host,
-        service.target_port,
+        &agent.server_id,
+        Some(&agent.agent_id),
+        "127.0.0.1",
+        interface.port,
         request,
         true,
-        "agent UI",
+        "Agent Interface UI",
     )
     .await
 }
@@ -3019,120 +2938,6 @@ async fn agent_list_machine_services(
     list_machine_services(Extension(auth), Path(workspace_id)).await
 }
 
-async fn agent_get_ui(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let PolicySubject::Agent { agent_id, .. } = &subject else {
-        unreachable!("managed Agent route always produces an Agent subject")
-    };
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_AGENT_UI_READ,
-            PolicyResource::new(RESOURCE_AGENT_UI, agent_id),
-        ))
-        .await?;
-    let ui = auth.get_agent_ui(&workspace_id, agent_id).await?;
-    Ok(Json(json!({ "ui": ui })))
-}
-
-async fn agent_set_ui(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-    Json(request): Json<SetAgentUiRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let PolicySubject::Agent {
-        server_id,
-        agent_id,
-    } = &subject
-    else {
-        unreachable!("managed Agent route always produces an Agent subject")
-    };
-    let service = auth
-        .resolve_machine_service(&workspace_id, &request.service_id)
-        .await?;
-    if service.protocol != treer_protocol::MachineServiceProtocol::Http {
-        return Err(ApiFailure::bad_request(
-            "service_protocol_mismatch",
-            "Agent UI requires an HTTP service",
-        ));
-    }
-    if &service.server_id != server_id {
-        return Err(ApiFailure::bad_request(
-            "agent_ui_machine_mismatch",
-            "Agent UI service must belong to the current Agent machine",
-        ));
-    }
-    if service
-        .target_agent_id
-        .as_ref()
-        .is_some_and(|target| target != agent_id)
-    {
-        return Err(ApiFailure::bad_request(
-            "agent_ui_target_mismatch",
-            "Agent UI service must belong to the current Agent",
-        ));
-    }
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_AGENT_UI_SET,
-            PolicyResource::new(RESOURCE_AGENT_UI, agent_id)
-                .with_attribute("service_id", &service.service_id)
-                .with_attribute("server_id", &service.server_id),
-        ))
-        .await?;
-    let ui = auth
-        .set_agent_ui(
-            &workspace_id,
-            agent_id,
-            &service.service_id,
-            &request.path,
-            &policy_actor_name(&subject),
-        )
-        .await?;
-    state.update_agent_ui(ui.clone()).await?;
-    Ok(Json(json!({ "ui": ui })))
-}
-
-async fn agent_clear_ui(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let PolicySubject::Agent { agent_id, .. } = &subject else {
-        unreachable!("managed Agent route always produces an Agent subject")
-    };
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_AGENT_UI_SET,
-            PolicyResource::new(RESOURCE_AGENT_UI, agent_id),
-        ))
-        .await?;
-    let deleted = auth.clear_agent_ui(&workspace_id, agent_id).await?;
-    state.clear_agent_ui(&workspace_id, agent_id).await?;
-    Ok(Json(json!({ "deleted": deleted })))
-}
-
 async fn agent_create_machine_service(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -3255,7 +3060,6 @@ async fn agent_update_machine_service(
             request,
         )
         .await?;
-    reconcile_agent_uis_for_service(&state, &auth, &service).await?;
     refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({ "service": service })))
@@ -3289,15 +3093,9 @@ async fn agent_delete_machine_service(
             ),
         ))
         .await?;
-    let agent_uis = auth
-        .list_agent_uis_for_service(&workspace_id, &service.service_id)
-        .await?;
     let service = auth
         .delete_machine_service(&workspace_id, &service.service_id)
         .await?;
-    for ui in agent_uis {
-        state.clear_agent_ui(&workspace_id, &ui.agent_id).await?;
-    }
     refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     Ok(Json(json!({
@@ -4500,7 +4298,6 @@ async fn delete_agent(
         })?;
     refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
-    state.clear_agent_ui(&workspace_id, &agent.agent_id).await?;
     let deleted = state.delete_agent(&workspace_id, &agent.agent_id).await?;
     let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
     if let Err(error) = auth

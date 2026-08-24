@@ -33,14 +33,22 @@ const machine = {
 }
 
 // Two agents on the same machine:
-// - ag-ui: has an embedded UI registered (shows up in snapshot.agent_uis)
-// - ag-tty: a plain terminal agent (no ui).
+// - ag-ui: exposes a UI through its Agent Interface descriptor.
+// - ag-tty: a plain terminal agent without an Interface UI.
 const agentWithUi = {
   agent_id: "ag-ui",
   server_id: "srv-a",
   name: "dashboard",
   kind: "command",
   status: "running",
+  interface: {
+    protocol: "treer.agent-interface/v1",
+    instance_id: "interface-ui-1",
+    port: 8080,
+    capabilities: [],
+    ui_path: "/",
+    registered_at: NOW,
+  },
 }
 
 const agentPlain = {
@@ -49,13 +57,6 @@ const agentPlain = {
   name: "plain-tty",
   kind: "command",
   status: "running",
-}
-
-const agentUiRecord = {
-  agent_id: "ag-ui",
-  service_id: "svc-1",
-  path: "/",
-  updated_at: NOW,
 }
 
 const service = {
@@ -74,7 +75,6 @@ const snapshot = {
   workspace,
   servers: [machine],
   agents: [agentWithUi, agentPlain],
-  agent_uis: [agentUiRecord],
 }
 
 function ok(route: Route, body: unknown) {
@@ -104,10 +104,10 @@ async function mockApi(page: Page) {
   })
 }
 
-async function mockAgentUiContent(page: Page) {
-  // Intercept the UI proxy iframe URL and serve a small HTML page so we can
+async function mockInterfaceUiContent(page: Page) {
+  // Intercept the Interface UI iframe URL and serve a small HTML page so we can
   // verify the iframe actually loads that content (and not a blank page).
-  await page.route("**/api/workspaces/*/agents/*/ui/proxy/**", async (route: Route) => {
+  await page.route("**/api/workspaces/*/agents/*/interface/ui/**", async (route: Route) => {
     await route.fulfill({
       status: 200,
       contentType: "text/html",
@@ -118,7 +118,7 @@ async function mockAgentUiContent(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await mockApi(page)
-  await mockAgentUiContent(page)
+  await mockInterfaceUiContent(page)
 })
 
 test("selecting an agent with an embedded UI shows the iframe instead of the terminal pane", async ({ page }) => {
@@ -134,7 +134,7 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   // The iframe must be rendered, pointing at the UI proxy URL
   const frame = page.locator("iframe[title='dashboard interface']")
   await expect(frame).toBeVisible()
-  await expect(frame).toHaveAttribute("src", /\/api\/workspaces\/ws-1\/agents\/ag-ui\/ui\/proxy\//)
+  await expect(frame).toHaveAttribute("src", /\/api\/workspaces\/ws-1\/agents\/ag-ui\/interface\/ui\//)
 
   // And the iframe must have the sandbox restrictions we configured
   const sandbox = await frame.getAttribute("sandbox")
@@ -151,7 +151,7 @@ test("selecting a plain terminal agent shows the terminal pane, not an iframe", 
   await page.goto("/")
   await page.getByRole("tab", { name: /Agents/ }).click()
 
-  // Click the plain agent (no agent_uis entry)
+  // Click the plain agent without an Interface UI.
   await page.getByRole("button", { name: /^plain-tty / }).click()
 
   // No iframe should be rendered and the terminal pane is shown instead
@@ -197,7 +197,7 @@ test("reload button triggers an iframe reload (key changes)", async ({ page }) =
 
   // Track how many times the iframe's URL is fetched
   let uiProxyHits = 0
-  await page.route("**/api/workspaces/*/agents/*/ui/proxy/**", async (route) => {
+  await page.route("**/api/workspaces/*/agents/*/interface/ui/**", async (route) => {
     uiProxyHits += 1
     await route.fulfill({
       status: 200,

@@ -30,6 +30,25 @@ const AGENT_COMMAND_DELAY: Duration = Duration::from_millis(500);
 const CLAUDE_TRUST_CONFIRM_DELAY: Duration = Duration::from_millis(1_500);
 const AGENT_INTERFACE_LEASE: Duration = Duration::from_secs(60);
 
+fn validate_interface_ui_path(value: &str) -> Result<String, ProtocolError> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value.starts_with('/')
+        || value.len() > 1024
+        || value.contains("//")
+        || value.split('/').any(|segment| segment == "..")
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(ProtocolError::new(
+            "invalid_agent_interface_ui_path",
+            "Agent Interface ui_path must be an absolute path without whitespace or parent traversal",
+        ));
+    }
+    Ok(value.to_string())
+}
+
 struct AgentLaunch {
     command: String,
     args: Vec<String>,
@@ -472,12 +491,17 @@ impl ControllerRuntime {
                 "Agent Interface capabilities must use letters, numbers, dot, dash, or underscore",
             ));
         }
+        let ui_path = request
+            .ui_path
+            .as_deref()
+            .map(validate_interface_ui_path)
+            .transpose()?;
         let descriptor = AgentInterfaceDescriptor {
             protocol: request.protocol,
             instance_id: request.instance_id,
             port: request.port,
             capabilities,
-            ui_path: request.ui_path,
+            ui_path,
             registered_at: Utc::now(),
         };
         let manifest = crate::agent_interface::manifest(

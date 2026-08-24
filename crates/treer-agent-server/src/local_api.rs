@@ -20,9 +20,9 @@ use treer_protocol::{
     CreateVirtualNetworkHostRequest, ImportMessagesRequest, InputAgentRequest,
     LaunchAgentProfileRequest, ListMessagesQuery, PromptAgentRequest, ProtocolError,
     ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
-    SetAgentUiRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
-    UpdateMachineServiceRequest, UpdateServiceIngressRequest, WorkloadIdentityTokenRequest,
-    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
+    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -202,10 +202,6 @@ pub fn router(state: LocalApiState) -> Router {
         .route(
             "/api/services/{service_id}/probe",
             post(probe_machine_service),
-        )
-        .route(
-            "/api/ui",
-            get(get_agent_ui).put(set_agent_ui).delete(clear_agent_ui),
         )
         .route(
             "/api/interface",
@@ -482,33 +478,6 @@ async fn probe_machine_service(
             )
             .await?,
     ))
-}
-
-async fn get_agent_ui(
-    State(state): State<LocalApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, LocalApiError> {
-    let agent = required_validated_source_agent(&state, &headers)?;
-    Ok(Json(state.get_as("ui", Some(&agent)).await?))
-}
-
-async fn set_agent_ui(
-    State(state): State<LocalApiState>,
-    headers: HeaderMap,
-    Json(request): Json<SetAgentUiRequest>,
-) -> Result<Json<Value>, LocalApiError> {
-    let agent = required_validated_source_agent(&state, &headers)?;
-    let body = serde_json::to_value(request)
-        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
-    Ok(Json(state.put_as("ui", &body, Some(&agent)).await?))
-}
-
-async fn clear_agent_ui(
-    State(state): State<LocalApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, LocalApiError> {
-    let agent = required_validated_source_agent(&state, &headers)?;
-    Ok(Json(state.delete_as("ui", Some(&agent)).await?))
 }
 
 async fn get_agent_interface(

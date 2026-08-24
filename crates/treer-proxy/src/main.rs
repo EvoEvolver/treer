@@ -252,13 +252,6 @@ async fn main() -> anyhow::Result<()> {
         .start(state.clone())
         .await
         .context("failed to start NATS cluster consumers")?;
-    state
-        .restore_agent_uis(
-            auth.all_agent_uis().await.map_err(|_| {
-                anyhow::anyhow!("failed to load Agent UI declarations from database")
-            })?,
-        )
-        .await;
     let policy = policy::PolicyEngine::durable(WorkspacePolicyStore::new(auth.pool()));
     let identity = identity::IdentityIssuer::load(&auth, &proxy_public_url)
         .await
