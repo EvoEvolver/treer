@@ -32,6 +32,13 @@ The Host is intentionally product-agnostic. Shared wire models live in protocol
 crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
 
+The React app in `web/` is the browser control plane. Workspace views cover
+terminals, launch profiles, network, machine overview, and audit. The sidebar
+user menu opens a floating Settings overlay: Account edits preferred name and
+email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
+`localStorage` (`treer-theme`) and currently offers English only; Usage &
+billing is a placeholder until a billing backend exists.
+
 ## Core Message
 
 Core stores immutable Message bodies, ordered context edges, recipient

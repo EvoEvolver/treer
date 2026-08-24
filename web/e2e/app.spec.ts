@@ -108,13 +108,23 @@ function ok(route: Route, body: unknown) {
 }
 
 async function mockApi(page: Page) {
+  let currentUser = { ...user }
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, () => {})
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, () => {})
   await page.route("**/api/**", async (route: Route) => {
     const url = new URL(route.request().url())
     const path = url.pathname.replace(/^\/api/, "")
 
-    if (path === "/auth/me") return ok(route, user)
+    if (path === "/auth/me") return ok(route, currentUser)
+    if (path === "/auth/profile" && route.request().method() === "PATCH") {
+      const body = route.request().postDataJSON() as { email?: string; preferred_name?: string }
+      currentUser = {
+        ...currentUser,
+        email: body.email ?? currentUser.email,
+        preferred_name: body.preferred_name ?? currentUser.preferred_name,
+      }
+      return ok(route, currentUser)
+    }
     if (path === "/organizations") return ok(route, { organizations: [organization] })
     if (path === "/organizations/org-1/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "owner" }] })
     if (path === "/organizations/org-1/audit-events") return ok(route, { events: [] })
@@ -319,4 +329,68 @@ test("mobile: machine overview hides sidebar and shows back button", async ({ pa
   await expect(page.locator("aside")).toBeHidden()
   await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
   await expect(page.locator("aside")).toBeVisible()
+})
+
+async function openUserMenu(page: Page) {
+  await page.getByRole("button", { name: "User menu" }).click()
+}
+
+test("user menu contains Settings and Log out, not Edit profile", async ({ page }) => {
+  await page.goto("/")
+  await openUserMenu(page)
+  await expect(page.getByRole("menuitem", { name: "Settings" })).toBeVisible()
+  await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible()
+  await expect(page.getByRole("menuitem", { name: "Edit profile" })).toHaveCount(0)
+})
+
+test("opening Settings shows a floating panel with Usage & billing, Account, and General", async ({ page }) => {
+  await page.goto("/")
+  await openUserMenu(page)
+  await page.getByRole("menuitem", { name: "Settings" }).click()
+  const settings = page.getByRole("dialog", { name: "Settings" })
+  await expect(settings).toBeVisible()
+  await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Usage & billing" })).toBeVisible()
+  await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Account" })).toBeVisible()
+  await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" })).toBeVisible()
+  await expect(page.locator("header").getByText("Settings")).toHaveCount(0)
+})
+
+test("Account settings save preferred name via PATCH /api/auth/profile", async ({ page }) => {
+  await page.goto("/")
+  await openUserMenu(page)
+  await page.getByRole("menuitem", { name: "Settings" }).click()
+
+  const settings = page.getByRole("dialog", { name: "Settings" })
+  const name = settings.getByLabel("Preferred name")
+  const email = settings.getByLabel("Email")
+  await expect(name).toHaveValue("Test User")
+  await expect(email).toHaveValue("user@example.com")
+
+  await name.fill("Dana Owner")
+  const patched = page.waitForRequest((request) => request.url().includes("/api/auth/profile") && request.method() === "PATCH")
+  await page.getByRole("button", { name: "Save" }).click()
+  const request = await patched
+  expect(request.postDataJSON()).toEqual({ email: "user@example.com", preferred_name: "Dana Owner" })
+
+  await expect(page.locator("aside").getByText("Dana Owner")).toBeVisible()
+})
+
+test("General settings show theme and English language, and toggle dark class", async ({ page }) => {
+  await page.goto("/")
+  await openUserMenu(page)
+  await page.getByRole("menuitem", { name: "Settings" }).click()
+  const settings = page.getByRole("dialog", { name: "Settings" })
+  await settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" }).click()
+
+  await expect(settings.getByRole("group", { name: "Theme" })).toBeVisible()
+  await expect(settings.getByRole("button", { name: "Light" })).toBeVisible()
+  await expect(settings.getByRole("button", { name: "Dark" })).toBeVisible()
+  await expect(settings.getByLabel("Language")).toHaveText("English")
+  await expect(settings.getByText("Only English is available.")).toBeVisible()
+
+  await expect(page.locator("html")).not.toHaveClass(/dark/)
+  await page.getByRole("button", { name: "Dark" }).click()
+  await expect(page.locator("html")).toHaveClass(/dark/)
+  await page.getByRole("button", { name: "Light" }).click()
+  await expect(page.locator("html")).not.toHaveClass(/dark/)
 })
