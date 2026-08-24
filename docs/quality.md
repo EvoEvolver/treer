@@ -8,6 +8,20 @@ export TREER_TEST_DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
 just check
 ```
 
+The complete gate is a release and CI requirement, not a prerequisite for every
+local change. When Docker is unavailable, run the focused checks that cover the
+change and record that the PostgreSQL-backed workspace gate was skipped. Do not
+point `TREER_TEST_DATABASE_URL` at a shared or production database just to make
+the local gate pass.
+
+Use Slurm for CPU- or memory-heavy builds, Clippy runs, frontend builds, and
+non-database workspace tests when the checkout and toolchain are available on
+the compute nodes. Slurm does not remove the PostgreSQL requirement: the job
+must still receive an isolated `TREER_TEST_DATABASE_URL`, either from a
+cluster-provided database or from a supported container runtime. If neither is
+available on the allocated node, skip the PostgreSQL-backed tests and report
+that limitation instead of treating the partial run as the complete gate.
+
 `just check` verifies documentation links, release tooling, the control-plane
 and Mail frontends, Mail/Telegram tests, Rust build/format/tests, and Clippy with
 warnings denied. Focused commands are:

@@ -400,6 +400,8 @@ enum UiCommand {
 
 #[derive(Debug, Subcommand)]
 enum NetworkCommand {
+    #[command(about = "Bridge stdin/stdout to a host through the Agent's Treer network")]
+    Connect { host: String, port: u16 },
     #[command(about = "Manage long-running services")]
     Service {
         #[command(subcommand)]
@@ -662,7 +664,15 @@ fn load_operator_credential(workspace: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run_cli().await {
+    let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let result = match git_proxy_invocation(
+        std::env::var("TREER_GIT_PROXY_MODE").as_deref() == Ok("1"),
+        &raw_args,
+    ) {
+        Some((host, port)) => run_network_connect(host, port).await,
+        None => run_cli().await,
+    };
+    if let Err(error) = result {
         let (code, message) = error.downcast_ref::<CliFailure>().map_or_else(
             || ("cli_failed", error.to_string()),
             |failure| (failure.code.as_str(), failure.message.clone()),
@@ -681,6 +691,13 @@ async fn main() {
     }
 }
 
+fn git_proxy_invocation(enabled: bool, args: &[String]) -> Option<(&str, u16)> {
+    if !enabled || args.len() != 2 {
+        return None;
+    }
+    Some((&args[0], args[1].parse().ok()?))
+}
+
 async fn run_cli() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(skill) = args.skill {
@@ -694,6 +711,12 @@ async fn run_cli() -> anyhow::Result<()> {
     let command = args
         .command
         .context("a command is required; run `treer --help` for usage")?;
+    if let Command::Network {
+        command: NetworkCommand::Connect { host, port },
+    } = &command
+    {
+        return run_network_connect(host, *port).await;
+    }
     let client = ApiClient::new(
         resolve_server_url(args.url, &args.workspace)?,
         &args.workspace,
@@ -1231,10 +1254,132 @@ async fn run_machine_command(client: &ApiClient, command: MachineCommand) -> any
 
 async fn run_network_command(client: &ApiClient, command: NetworkCommand) -> anyhow::Result<Value> {
     match command {
+        NetworkCommand::Connect { .. } => {
+            bail!("network connect must run before API client initialization")
+        }
         NetworkCommand::Service { command } => run_service_command(client, command).await,
         NetworkCommand::Host { command } => run_virtual_host_command(client, command).await,
         NetworkCommand::Publish { command } => run_publish_command(client, command).await,
     }
+}
+
+async fn run_network_connect(host: &str, port: u16) -> anyhow::Result<()> {
+    let proxy = std::env::var("TREER_NETWORK_PROXY").context(
+        "TREER_NETWORK_PROXY is not set; `treer network connect` must run inside a managed Agent",
+    )?;
+    let proxy = Url::parse(&proxy).context("TREER_NETWORK_PROXY is not a valid URL")?;
+    let mut socket = connect_network_proxy(&proxy, host, port).await?;
+    let (mut socket_reader, mut socket_writer) = socket.split();
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let upload = async {
+        tokio::io::copy(&mut stdin, &mut socket_writer).await?;
+        socket_writer.shutdown().await
+    };
+    let download = async {
+        tokio::io::copy(&mut socket_reader, &mut stdout).await?;
+        stdout.flush().await
+    };
+    tokio::try_join!(upload, download)?;
+    Ok(())
+}
+
+async fn connect_network_proxy(
+    proxy: &Url,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<tokio::net::TcpStream> {
+    if !matches!(proxy.scheme(), "socks5" | "socks5h") {
+        bail!("TREER_NETWORK_PROXY must use socks5 or socks5h")
+    }
+    if port == 0 {
+        bail!("destination port must not be zero")
+    }
+    let proxy_host = proxy
+        .host_str()
+        .context("TREER_NETWORK_PROXY is missing a host")?;
+    let proxy_port = proxy
+        .port()
+        .context("TREER_NETWORK_PROXY is missing a port")?;
+    let host = host.trim_end_matches('.');
+    let host_len = u8::try_from(host.len()).context("destination hostname is too long")?;
+    if host_len == 0 {
+        bail!("destination hostname must not be empty")
+    }
+
+    let mut socket = tokio::net::TcpStream::connect((proxy_host, proxy_port))
+        .await
+        .with_context(|| {
+            format!("failed to connect to Treer network proxy {proxy_host}:{proxy_port}")
+        })?;
+    let username = proxy.username().as_bytes();
+    if username.is_empty() {
+        socket.write_all(&[5, 1, 0]).await?;
+        expect_socks_response(&mut socket, [5, 0], "SOCKS method negotiation").await?;
+    } else {
+        let password = proxy.password().unwrap_or_default().as_bytes();
+        let username_len = u8::try_from(username.len()).context("SOCKS username is too long")?;
+        let password_len = u8::try_from(password.len()).context("SOCKS password is too long")?;
+        socket.write_all(&[5, 1, 2]).await?;
+        expect_socks_response(&mut socket, [5, 2], "SOCKS method negotiation").await?;
+        let mut authentication = Vec::with_capacity(username.len() + password.len() + 3);
+        authentication.extend_from_slice(&[1, username_len]);
+        authentication.extend_from_slice(username);
+        authentication.push(password_len);
+        authentication.extend_from_slice(password);
+        socket.write_all(&authentication).await?;
+        expect_socks_response(&mut socket, [1, 0], "SOCKS authentication").await?;
+    }
+
+    let mut request = Vec::with_capacity(host.len() + 7);
+    request.extend_from_slice(&[5, 1, 0, 3, host_len]);
+    request.extend_from_slice(host.as_bytes());
+    request.extend_from_slice(&port.to_be_bytes());
+    socket.write_all(&request).await?;
+
+    let mut response = [0_u8; 4];
+    socket.read_exact(&mut response).await?;
+    if response[0] != 5 {
+        bail!("Treer network proxy returned an invalid SOCKS version")
+    }
+    consume_socks_address(&mut socket, response[3]).await?;
+    let mut bound_port = [0_u8; 2];
+    socket.read_exact(&mut bound_port).await?;
+    if response[1] != 0 {
+        bail!(
+            "Treer network proxy rejected {host}:{port} with SOCKS status {}",
+            response[1]
+        )
+    }
+    Ok(socket)
+}
+
+async fn expect_socks_response(
+    socket: &mut tokio::net::TcpStream,
+    expected: [u8; 2],
+    phase: &str,
+) -> anyhow::Result<()> {
+    let mut response = [0_u8; 2];
+    socket.read_exact(&mut response).await?;
+    if response != expected {
+        bail!("Treer network proxy failed {phase}")
+    }
+    Ok(())
+}
+
+async fn consume_socks_address(
+    socket: &mut tokio::net::TcpStream,
+    address_type: u8,
+) -> anyhow::Result<()> {
+    let length = match address_type {
+        1 => 4,
+        3 => usize::from(socket.read_u8().await?),
+        4 => 16,
+        _ => bail!("Treer network proxy returned an invalid SOCKS address type"),
+    };
+    let mut address = vec![0_u8; length];
+    socket.read_exact(&mut address).await?;
+    Ok(())
 }
 
 async fn run_ui_command(client: &ApiClient, command: UiCommand) -> anyhow::Result<Value> {
@@ -2108,6 +2253,101 @@ mod tests {
                 }
             }) if hostname == "api.internal"
         ));
+    }
+
+    #[test]
+    fn network_connect_command_parses() {
+        let args = Args::try_parse_from(["treer", "network", "connect", "git.internal", "9418"])
+            .expect("network connect should parse");
+        assert!(matches!(
+            args.command,
+            Some(Command::Network {
+                command: NetworkCommand::Connect { host, port }
+            }) if host == "git.internal" && port == 9418
+        ));
+    }
+
+    #[test]
+    fn git_proxy_mode_maps_git_arguments_to_network_connect() {
+        let args = ["git.internal".to_string(), "9418".to_string()];
+        assert_eq!(
+            git_proxy_invocation(true, &args),
+            Some(("git.internal", 9418))
+        );
+        assert_eq!(git_proxy_invocation(false, &args), None);
+        assert_eq!(git_proxy_invocation(true, &["status".to_string()]), None);
+        assert_eq!(
+            git_proxy_invocation(true, &["git.internal".to_string(), "invalid".to_string()]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn network_connect_uses_authenticated_socks_and_remote_dns() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind SOCKS server");
+        let address = listener.local_addr().expect("SOCKS address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SOCKS client");
+            let mut greeting = [0_u8; 3];
+            socket
+                .read_exact(&mut greeting)
+                .await
+                .expect("read greeting");
+            assert_eq!(greeting, [5, 1, 2]);
+            socket.write_all(&[5, 2]).await.expect("select auth");
+
+            assert_eq!(socket.read_u8().await.expect("auth version"), 1);
+            let username_len = socket.read_u8().await.expect("username length");
+            let mut username = vec![0_u8; usize::from(username_len)];
+            socket.read_exact(&mut username).await.expect("username");
+            let password_len = socket.read_u8().await.expect("password length");
+            let mut password = vec![0_u8; usize::from(password_len)];
+            socket.read_exact(&mut password).await.expect("password");
+            assert_eq!(username, b"agent-a");
+            assert_eq!(password, b"treer");
+            socket.write_all(&[1, 0]).await.expect("accept auth");
+
+            let mut request = [0_u8; 5];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("connect request");
+            assert_eq!(&request[..4], &[5, 1, 0, 3]);
+            let mut host = vec![0_u8; usize::from(request[4])];
+            socket
+                .read_exact(&mut host)
+                .await
+                .expect("destination host");
+            assert_eq!(host, b"git.internal");
+            assert_eq!(socket.read_u16().await.expect("destination port"), 9418);
+            socket
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .expect("accept connect");
+
+            let mut payload = [0_u8; 4];
+            socket
+                .read_exact(&mut payload)
+                .await
+                .expect("client payload");
+            assert_eq!(&payload, b"ping");
+            socket.write_all(b"pong").await.expect("server payload");
+        });
+
+        let proxy = Url::parse(&format!("socks5h://agent-a:treer@{address}")).expect("proxy URL");
+        let mut socket = connect_network_proxy(&proxy, "git.internal", 9418)
+            .await
+            .expect("connect through SOCKS");
+        socket.write_all(b"ping").await.expect("write payload");
+        let mut response = [0_u8; 4];
+        socket
+            .read_exact(&mut response)
+            .await
+            .expect("read payload");
+        assert_eq!(&response, b"pong");
+        server.await.expect("SOCKS server task");
     }
 
     #[test]

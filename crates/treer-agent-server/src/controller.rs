@@ -1031,6 +1031,8 @@ fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap
     } else {
         env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
         env.insert("all_proxy".to_string(), network_proxy_url);
+        env.insert("GIT_PROXY_COMMAND".to_string(), "treer".to_string());
+        env.insert("TREER_GIT_PROXY_MODE".to_string(), "1".to_string());
         for name in ["NO_PROXY", "no_proxy"] {
             env.insert(name.to_string(), "127.0.0.1,localhost,::1".to_string());
         }
@@ -1246,6 +1248,14 @@ mod tests {
 
         assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(proxy));
         assert_eq!(env.get("all_proxy").map(String::as_str), Some(proxy));
+        assert_eq!(
+            env.get("GIT_PROXY_COMMAND").map(String::as_str),
+            Some("treer")
+        );
+        assert_eq!(
+            env.get("TREER_GIT_PROXY_MODE").map(String::as_str),
+            Some("1")
+        );
         assert_eq!(
             env.get("NO_PROXY").map(String::as_str),
             Some("127.0.0.1,localhost,::1")

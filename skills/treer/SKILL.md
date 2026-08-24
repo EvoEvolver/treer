@@ -159,6 +159,19 @@ treer network host create api.internal api
 treer network host create git.internal git
 ```
 
+Managed Agents in compatibility networking mode automatically route native Git
+protocol remotes through Treer without resolving the virtual hostname locally:
+
+```bash
+git clone git://git.internal/project.git
+```
+
+Use the stdio bridge directly when another TCP client accepts a proxy command:
+
+```bash
+treer network connect database.internal 5432
+```
+
 Delete only the named alias; this does not delete or stop its service:
 
 ```bash

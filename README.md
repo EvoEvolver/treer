@@ -529,9 +529,13 @@ adapter. `TREER_NETWORK_PROXY` remains available for diagnostics. Set
 transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
 `all_proxy` instead. In this mode, `NO_PROXY` and `no_proxy` contain
 `127.0.0.1,localhost,::1`, so Controller and App loopback calls do not enter
-the SOCKS path. Native macOS currently uses this compatibility mode; use a Linux
-container when transparent capture is required. A transparent Agent can expose
-a namespace-local loopback listener by registering an Agent-scoped service
+the SOCKS path. Treer also configures Git to invoke its network bridge, so native
+`git://` remotes retain workspace virtual-host routing even though Git does not
+honor `ALL_PROXY`. Other TCP clients can use the same stdio bridge as their proxy
+command: `treer network connect HOST PORT`. Native macOS currently uses this
+compatibility mode; use a Linux container when transparent capture is required.
+A transparent Agent can expose a namespace-local loopback listener by
+registering an Agent-scoped service
 (`treer network service create … --agent self`); the Controller reaches it
 through the sandbox's Unix bridge. That is also how the browser Agent UI iframe
 reaches an HTTP server inside the namespace: register the service against
