@@ -1125,6 +1125,7 @@ mod tests {
             cols: 120,
             rows: 36,
             publish_ports: Vec::new(),
+            recipe: None,
         };
 
         let launch = resolve_launch(&request).expect("resolve claude launch");
@@ -1156,6 +1157,7 @@ mod tests {
             cols: 120,
             rows: 36,
             publish_ports: Vec::new(),
+            recipe: None,
         };
 
         let launch = resolve_launch(&request).expect("resolve shell command launch");
@@ -1182,6 +1184,7 @@ mod tests {
             cols: 120,
             rows: 36,
             publish_ports: Vec::new(),
+            recipe: None,
         };
 
         let launch = resolve_launch(&request).expect("resolve command launch");
@@ -1202,6 +1205,7 @@ mod tests {
             cols: 120,
             rows: 36,
             publish_ports: Vec::new(),
+            recipe: None,
         };
 
         let launch = resolve_launch(&request).expect("resolve terminal launch");

@@ -531,13 +531,14 @@ transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
 `127.0.0.1,localhost,::1`, so Controller and App loopback calls do not enter
 the SOCKS path. Native macOS currently uses this compatibility mode; use a Linux
 container when transparent capture is required. A transparent Agent can expose
-a namespace-local loopback listener by registering an Agent-scoped service; the
-Controller reaches it through the sandbox's Unix bridge. Create the Agent with
-`--publish <port>` (`publish_ports`) when a host-loopback client such as the
-HTTP Agent UI tunnel must reach that listener: the Controller binds
-`127.0.0.1:<port>` on the machine and splices accepted connections into the
-sandbox. Register that host loopback port as a machine service. The mapping is
-inbound host-loopback only, not a public internet listener.
+a namespace-local loopback listener by registering an Agent-scoped service
+(`treer network service create … --agent self`); the Controller reaches it
+through the sandbox's Unix bridge. That is also how the browser Agent UI iframe
+reaches an HTTP server inside the namespace: register the service against
+`--agent self` and run `treer ui set`. Create the Agent with `--publish <port>`
+(`publish_ports`) only when a host process must dial `127.0.0.1:<port>`
+itself. That mapping is inbound host-loopback only, not a public internet
+listener.
 
 Managed agents reach the Controller's local API through the reserved TEST-NET-1
 address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
@@ -799,12 +800,20 @@ Print the agent skill bundled with the installed binary:
 
 ```bash
 treer --skill
-treer --skills  # accepted alias
+treer --skills  # accepted alias for the CLI contract
+treer --skill install
 ```
 
-This does not require a running proxy. The source is
-`skills/treer/SKILL.md`, embedded at build time so its instructions match the
-CLI version that prints them.
+This does not require a running proxy. The CLI contract is
+`skills/treer/SKILL.md`. Recipe installs use `skills/treer-install/SKILL.md`.
+Both are embedded at build time so the printed instructions match the binary.
+
+Create an installer that receives the install skill as its first prompt:
+
+```bash
+treer agent admin create --machine SERVER_ID --kind codex --name installer \
+  --recipe https://github.com/example/recipe.git
+```
 
 ## Checks
 

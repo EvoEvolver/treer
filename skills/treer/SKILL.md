@@ -124,6 +124,10 @@ outside, an agent-scoped service behaves like a regular machine service:
 vhosts, `--service` references, probe, and publish all work the same. Agents in
 other namespaces reach it through the Controller instead of raw TCP.
 
+`--publish` is only for host processes that dial `127.0.0.1` themselves. Do
+not use it for the Treer iframe; that tunnel uses the Agent-scoped Unix bridge
+(`--agent self` plus `treer ui set`).
+
 To present an HTTP Agent UI from inside the namespace to a host-loopback
 client, create the Agent with `--publish <port>` (`publish_ports` on the API).
 Treer maps `127.0.0.1:<port>` on the machine into the namespace. Register that
@@ -168,10 +172,10 @@ online Controllers; reconnect and periodic full snapshots provide recovery.
 ## Publish a custom Agent interface
 
 A managed Agent can replace its terminal in the Treer web application with an
-HTTP service registered on its own machine:
+HTTP service on its own private loopback. From inside the Agent:
 
 ```bash
-treer network service create agent-dashboard --port 4173 --protocol http
+treer network service create agent-dashboard --agent self --port 4173 --protocol http
 treer ui set agent-dashboard
 treer ui show
 ```
@@ -185,8 +189,9 @@ treer ui set agent-dashboard --path /treer/
 The page must use relative asset, fetch, and WebSocket URLs. Treer embeds the
 page through the Proxy and carries both ordinary HTTP and WebSocket Upgrade
 traffic over the existing Controller WebSocket; do not publish or connect to a
-machine port directly. The selected service must use HTTP and belong to the
-current Agent's machine. Return to the normal terminal view with:
+machine port directly. Prefer an Agent-scoped HTTP service (`--agent self`) so
+the iframe uses the sandbox Unix bridge. Return to the normal terminal view
+with:
 
 ```bash
 treer ui clear
@@ -370,8 +375,22 @@ treer agent admin create --machine <server-id> --kind codex --name reviewer --cw
 ```
 
 ```bash
-treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . --publish 4173 -- /path/to/codex-agent-ui/scripts/treer-agent.sh
+treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- /path/to/codex-agent-ui/scripts/treer-agent.sh
 ```
+
+To install a public git recipe, create an interactive installer and pass
+`--recipe`. Treer prompts that Agent with the bundled install skill
+(`treer --skill install`). Do not write a second prompt.
+
+```bash
+treer --skill install
+treer agent admin create --machine <server-id> --kind codex --name installer \
+  --recipe https://github.com/example/recipe.git
+```
+
+The installer creates a different command Agent. It must not
+`treer network service probe` that Agent's service (`service_not_owned`).
+Wait on `treer status` until `agent_uis` lists the created Agent.
 
 Native agent arguments go after `--`:
 

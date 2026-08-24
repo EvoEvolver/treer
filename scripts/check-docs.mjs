@@ -19,6 +19,7 @@ const requiredFiles = [
   "apps/mail/README.md",
   "apps/telegram/README.md",
   "skills/treer/SKILL.md",
+  "skills/treer-install/SKILL.md",
 ];
 const excludedDirectories = new Set([
   ".git",
@@ -53,10 +54,15 @@ requireText("README.md", "apps/telegram/README.md");
 requireText("AGENTS.md", "docs/README.md");
 requireText("AGENTS.md", "apps/README.md");
 requireText("AGENTS.md", "skills/treer/SKILL.md");
+requireText("AGENTS.md", "skills/treer-install/SKILL.md");
 requireText("docs/README.md", "../apps/README.md");
 requireText(
   "crates/treer-cli/src/main.rs",
   'include_str!("../../../skills/treer/SKILL.md")',
+);
+requireText(
+  "crates/treer-protocol/src/lib.rs",
+  'include_str!("../../../skills/treer-install/SKILL.md")',
 );
 
 function markdownFiles(directory) {
