@@ -99,6 +99,8 @@ in that Agent's private network namespace; run long-lived services through a
 host facility such as systemd or a Docker published port before registering
 them.
 
+## Register machine services
+
 Register a service on the current Agent's machine, or select another workspace
 machine explicitly:
 
@@ -108,6 +110,33 @@ treer network service create git --machine build-machine --port 9418 --protocol 
 treer network service list
 treer network service probe api
 ```
+
+#### Agent-scoped: HTTP server inside an Agent sandbox
+
+If your service runs inside an Agent sandbox (its private network namespace),
+register it with `--agent`. Use `--agent self` when creating it from that
+Agent, no port forwarding or host-side helper needed:
+
+```bash
+treer network service create my-dashboard --agent self --port 8766 --protocol http
+```
+
+The Controller dials the Agent's private service socket directly. From the
+outside, an agent-scoped service behaves like a regular machine service:
+vhosts, `--service` references, probe, and publish all work the same.
+
+To expose an HTTP server running inside an Agent's sandbox (its private
+loopback), register the service with `--agent`. Use `--agent self` when
+creating it from inside that Agent, no port forwarding or host helper needed:
+
+```bash
+treer network service create my-dashboard --agent self --port 8766 --protocol http
+treer network service probe my-dashboard
+```
+
+The Controller dials the Agent's private service socket directly. From a human
+viewpoint the service behaves like a normal machine service; Agents running in
+a different namespace reach it through the Controller instead of raw TCP.
 
 Update a destination without changing its virtual hosts. Deleting a service
 also deletes aliases that reference it, but does not stop the external process:
@@ -179,9 +208,11 @@ it does not start, stop, or supervise the service process.
 ## Publish an HTTP service
 
 Publish a registered HTTP service through the Proxy's wildcard HTTPS domain.
-The returned URL remains stable until the ingress is deleted:
+Any HTTP-registered service is publishable, including agent-scoped services
+backed by a managed Agent's private loopback:
 
 ```bash
+treer network publish create my-dashboard --slug dashboard --access public
 treer network publish create api --slug issue-tracker --access public
 treer network publish list
 ```
