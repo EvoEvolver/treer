@@ -75,6 +75,19 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     terminal.open(host)
     focusRef.current = () => terminal.focus()
 
+    // Windows browsers (Chrome/Edge) auto-copy selected text to the clipboard;
+    // xterm would forward that as Ctrl+C → SIGINT. If a selection exists when
+    // Ctrl+C is pressed, swallow the key so the agent's foreground job is not
+    // interrupted. (Selected text is already on the OS clipboard.)
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown") return true
+      if (!event.ctrlKey || event.altKey || event.metaKey) return true
+      if (event.key.toLowerCase() !== "c") return true
+      const selection = window.getSelection()?.toString()
+      if (!selection) return true
+      return false
+    })
+
     const send = (data: string) => {
       if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data))
     }
