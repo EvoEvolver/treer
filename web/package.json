@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build && node scripts/clean-dist.mjs",
     "typecheck": "tsc -b --pretty false && wrangler types --env canary ./worker-configuration.d.ts && tsc -p tsconfig.worker.json --pretty false",
+    "test:e2e": "playwright test",
     "preview": "vite preview",
     "worker:dev": "wrangler dev --env canary",
     "worker:upload:canary": "wrangler versions upload --env canary",

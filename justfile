@@ -20,6 +20,7 @@ check:
     node --test scripts/release-r2.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
+    cd web && pnpm test:e2e
     cd apps/mail/web && pnpm typecheck
     cd apps/mail/web && pnpm build
     python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
@@ -38,6 +39,9 @@ web:
 
 web-build:
     cd web && pnpm build
+
+web-test:
+    cd web && pnpm test:e2e
 
 mail config state=".treer/apps/mail":
     TREER_APP_CONFIG={{config}} TREER_APP_STATE_DIR={{state}} python3 apps/mail/mail.py

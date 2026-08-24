@@ -93,6 +93,7 @@ const recipeProfile = {
 
 const snapshot = {
   revision: 1,
+  workspace,
   servers: [machineA, machineB],
   agents: [agentA, agentB],
   agent_uis: [],
@@ -108,6 +109,8 @@ function ok(route: Route, body: unknown) {
 }
 
 async function mockApi(page: Page) {
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, () => {})
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, () => {})
   await page.route("**/api/**", async (route: Route) => {
     const url = new URL(route.request().url())
     const path = url.pathname.replace(/^\/api/, "")
@@ -142,21 +145,21 @@ const machinesTab = (page: Page) => page.getByRole("tab", { name: /Machines/ })
 test("opens app, shows org, workspace, machines and agents", async ({ page }) => {
   await page.goto("/")
   await expect(page.locator("aside").getByText("Acme")).toBeVisible()
-  await expect(page.locator("aside").getByRole("combobox").filter({ hasText: "Demo" })).toBeVisible()
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
 
   await machinesTab(page).click()
   await expect(workstationRow(page)).toBeVisible()
   await expect(cloudboxRow(page)).toBeVisible()
 
   await agentsTab(page).click()
-  await expect(page.getByRole("button", { name: /api-server/ })).toBeVisible()
-  await expect(page.getByRole("button", { name: /worker/ })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^api-server / })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^worker / })).toBeVisible()
 })
 
 test("agent list row menu can rename and delete", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
-  const row = page.getByRole("button", { name: /api-server/ })
+  const row = page.getByRole("button", { name: /^api-server / })
   await row.hover()
   await page.getByRole("button", { name: "Actions for api-server" }).click()
   await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible()

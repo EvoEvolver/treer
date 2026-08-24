@@ -71,6 +71,7 @@ const service = {
 
 const snapshot = {
   revision: 1,
+  workspace,
   servers: [machine],
   agents: [agentWithUi, agentPlain],
   agent_uis: [agentUiRecord],
@@ -81,6 +82,8 @@ function ok(route: Route, body: unknown) {
 }
 
 async function mockApi(page: Page) {
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, () => {})
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, () => {})
   await page.route("**/api/**", async (route: Route) => {
     const url = new URL(route.request().url())
     const path = url.pathname.replace(/^\/api/, "")
@@ -123,7 +126,7 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   await page.getByRole("tab", { name: /Agents/ }).click()
 
   // Click the agent that has a UI
-  await page.getByRole("button", { name: /dashboard/ }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
 
   // The terminal pane (xterm host) must NOT be rendered
   await expect(page.locator(".xterm")).toBeHidden()
@@ -149,7 +152,7 @@ test("selecting a plain terminal agent shows the terminal pane, not an iframe", 
   await page.getByRole("tab", { name: /Agents/ }).click()
 
   // Click the plain agent (no agent_uis entry)
-  await page.getByRole("button", { name: /plain-tty/ }).click()
+  await page.getByRole("button", { name: /^plain-tty / }).click()
 
   // No iframe should be rendered and the terminal pane is shown instead
   await expect(page.locator("iframe[title='plain-tty interface']")).toBeHidden()
@@ -160,11 +163,11 @@ test("reload button label changes when an agent has an embedded UI", async ({ pa
   await page.getByRole("tab", { name: /Agents/ }).click()
 
   // Plain agent: Reconnect terminal
-  await page.getByRole("button", { name: /plain-tty/ }).click()
+  await page.getByRole("button", { name: /^plain-tty / }).click()
   await expect(page.getByRole("button", { name: "Reconnect terminal" })).toBeVisible()
 
   // Agent with UI: label switches to Reload interface
-  await page.getByRole("button", { name: /dashboard/ }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
   await expect(page.getByRole("button", { name: "Reload interface" })).toBeVisible()
 })
 
@@ -176,7 +179,7 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
   await expect(page.locator("aside")).toBeVisible()
   await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
 
-  await page.getByRole("button", { name: /dashboard/ }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='dashboard interface']")
   await expect(frame).toBeVisible()
   await expect(page.getByRole("button", { name: "Close full-screen interface" })).toBeVisible()
@@ -190,7 +193,7 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
 test("reload button triggers an iframe reload (key changes)", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("tab", { name: /Agents/ }).click()
-  await page.getByRole("button", { name: /dashboard/ }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
 
   // Track how many times the iframe's URL is fetched
   let uiProxyHits = 0

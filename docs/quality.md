@@ -29,6 +29,7 @@ warnings denied. Focused commands are:
 ```sh
 just app-test
 just messaging-e2e
+just web-test
 cargo test -p treer-proxy message_
 node scripts/check-docs.mjs
 ```
@@ -38,7 +39,7 @@ node scripts/check-docs.mjs
 | Area | Present evidence | Remaining gap |
 | --- | --- | --- |
 | Rust | Workspace tests, format, strict Clippy | No normal cross-platform PR CI |
-| Frontend | Control-plane and Mail typecheck/build | No visual regression suite |
+| Frontend | Control-plane and Mail typecheck/build; mocked desktop/mobile browser workflows | No screenshot visual regression suite |
 | Core Message | Store/API/CLI tests for DAG visibility, delivery, idempotency, Policy revision, body-free outbox, and migration | No retention/export/delete, attachments, or load/failure suite |
 | App identity | OAuth/PKCE, audience, membership/service invalidation, directory, and App Message routes | No refresh-token contract or unattended browser test |
 | Mail | Python HTTP contract, frontend build, resumable SQLite/PostgreSQL migration | No unattended real-browser audit |
