@@ -11,6 +11,8 @@ network access remain deployment concerns.
 
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
+- [`pi-ui`](pi-ui/README.md) is an Agent-scoped browser interface loaded inside
+  a Pi Agent.
 
 Each App is source code, configuration schema, documentation, and tests. There
 is deliberately no App manifest, package installer, local command broker, or

@@ -96,20 +96,7 @@ Machine services are durable records for long-running processes. Host-network
 services outlive the managed Agent that registers them. Agent-scoped services
 target a managed Agent's private loopback and are deleted with that Agent.
 
-A server started directly inside a Linux managed Agent remains in that Agent's
-private network namespace; outbound TCP uses the transparent TUN/SOCKS path.
-Host loopback and internet listeners on the machine do not see that bind.
-Register an Agent-scoped service so Treer's workspace network can reach it
-without a host TCP port:
-
-```bash
-treer network service create api --agent self --port 8080 --protocol http
-```
-
-To present an HTTP Agent UI from inside the namespace, create the Agent with
-`--publish <port>` (`publish_ports` on the API). Treer then maps
-`127.0.0.1:<port>` on the machine into the namespace. Register the **host**
-loopback port as a machine service (not `--agent`) and run `treer ui set`.
+## Register machine services
 
 Register a service on the current Agent's machine, or select another workspace
 machine explicitly:
@@ -120,6 +107,27 @@ treer network service create git --machine build-machine --port 9418 --protocol 
 treer network service list
 treer network service probe api
 ```
+
+#### Agent-scoped: HTTP server inside an Agent sandbox
+
+If your service runs inside an Agent sandbox (its private network namespace),
+register it with `--agent`. Use `--agent self` when creating it from that
+Agent, no port forwarding or host-side helper needed:
+
+```bash
+treer network service create my-dashboard --agent self --port 8766 --protocol http
+treer network service probe my-dashboard
+```
+
+The Controller dials the Agent's private service socket directly. From the
+outside, an agent-scoped service behaves like a regular machine service:
+vhosts, `--service` references, probe, and publish all work the same. Agents in
+other namespaces reach it through the Controller instead of raw TCP.
+
+To present an HTTP Agent UI from inside the namespace to a host-loopback
+client, create the Agent with `--publish <port>` (`publish_ports` on the API).
+Treer maps `127.0.0.1:<port>` on the machine into the namespace. Register that
+host loopback port as a machine service (not `--agent`) and run `treer ui set`.
 
 Update a destination without changing its virtual hosts. Deleting a service
 also deletes aliases that reference it, but does not stop the external process:
@@ -191,9 +199,11 @@ it does not start, stop, or supervise the service process.
 ## Publish an HTTP service
 
 Publish a registered HTTP service through the Proxy's wildcard HTTPS domain.
-The returned URL remains stable until the ingress is deleted:
+Any HTTP-registered service is publishable, including agent-scoped services
+backed by a managed Agent's private loopback:
 
 ```bash
+treer network publish create my-dashboard --slug dashboard --access public
 treer network publish create api --slug issue-tracker --access public
 treer network publish list
 ```

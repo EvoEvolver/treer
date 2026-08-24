@@ -31,7 +31,8 @@ In concrete terms:
    replaceable workspace Apps over public contracts rather than privileged
    Proxy features.
 5. Agents can register and maintain long-running machine services, expose
-   stable workspace aliases, and publish HTTP services through an optional
+   stable workspace aliases, and publish HTTP services — including ones that
+   live only inside a managed Agent's sandbox — through an optional
    wildcard HTTPS ingress for humans and other Agents.
 6. An Agent can select one HTTP machine service as its custom interface. The
    control plane embeds that page in place of the Agent terminal, and relative
