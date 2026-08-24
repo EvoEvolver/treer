@@ -143,10 +143,11 @@ an idempotency key. An interface with `state.observe` owns working, idle, and
 blocked state; Host exit state remains authoritative. Terminal attach, raw
 input, resize, stop, and delete remain Host/PTY operations.
 
-Pi UI is the first AIS implementation. It exposes the v1 manifest, health,
-status, transcript, event, prompt, and abort routes from the same extension that
-serves its browser UI. Its verified descriptor is the single registration for
-both semantic capabilities and the optional browser presentation.
+Pi UI and Codex UI are the bundled AIS implementations. Pi exposes the v1
+routes from its extension. Codex UI owns one `codex app-server` thread per Treer
+Agent and deliberately has no thread list or session switcher. Each serves its
+browser UI and semantic routes from the same private listener; its verified
+descriptor is the single registration for both capabilities and presentation.
 
 Creating an Agent with a `recipe` git URL starts an interactive installer
 (Codex, Claude, or shell) and immediately prompts it with the bundled

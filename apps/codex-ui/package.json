@@ -1,0 +1,24 @@
+{
+  "name": "treer-codex-ui",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild markdown.entry.js --bundle --format=esm --minify --legal-comments=inline --outfile=public/markdown.js",
+    "check": "npm run typecheck && node --check public/app.js && node --check public/markdown.js",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "tsx": "^4.19.3",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/ws": "^8.18.1",
+    "dompurify": "3.4.14",
+    "esbuild": "0.28.2",
+    "marked": "18.0.10",
+    "typescript": "^5.8.3"
+  }
+}

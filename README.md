@@ -699,8 +699,8 @@ treer interface clear
 
 The interface process should repeat registration after a Controller restart and
 deduplicate prompts by `operation_id`. Raw keys, terminal attach, stop, and
-delete remain PTY/Host operations. Pi UI performs this registration
-automatically.
+delete remain PTY/Host operations. The bundled Pi UI and single-Agent
+[Codex UI](apps/codex-ui/README.md) perform this registration automatically.
 
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles

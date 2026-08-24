@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <base href="./" />
+    <title>Codex</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="identity">
+          <span class="brand-mark">C</span>
+          <div class="identity-copy">
+            <h1 id="title">Codex</h1>
+            <p id="cwd">Connecting</p>
+          </div>
+        </div>
+        <div class="controls">
+          <span id="status" class="status status-starting"><span class="status-dot"></span><span>Starting</span></span>
+          <label class="select-wrap" title="Model">
+            <span class="sr-only">Model</span>
+            <select id="model" aria-label="Model" disabled><option>Model</option></select>
+          </label>
+          <label class="select-wrap effort-wrap" title="Reasoning effort">
+            <span class="sr-only">Reasoning effort</span>
+            <select id="effort" aria-label="Reasoning effort" disabled><option>Effort</option></select>
+          </label>
+          <button id="interrupt" class="icon-button" type="button" aria-label="Stop current run" title="Stop current run" disabled>&#9632;</button>
+        </div>
+      </header>
+      <section id="feedback" class="feedback" hidden></section>
+      <section id="timeline" class="timeline" aria-live="polite">
+        <div class="empty"><span class="empty-mark">C</span><strong>Ready</strong></div>
+      </section>
+      <form id="composer" class="composer">
+        <textarea id="prompt" rows="1" placeholder="Message Codex" aria-label="Message Codex"></textarea>
+        <button id="send" class="icon-button primary" type="submit" aria-label="Send message" title="Send message">&#8593;</button>
+      </form>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

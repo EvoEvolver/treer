@@ -1,0 +1,9 @@
+{
+  "name": "Codex + UI",
+  "description": "One Codex app-server, one Treer Agent, and one embedded UI.",
+  "requires": ["node", "npm", "codex", "treer", "curl"],
+  "run": {
+    "command": "./apps/codex-ui/scripts/treer-agent.sh",
+    "args": []
+  }
+}
