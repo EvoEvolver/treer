@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Pi</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">pi</span><div><h1>Pi</h1><p id="cwd">Connecting</p></div></div>
+        <div class="runtime">
+          <span id="status" class="status"><span class="status-dot"></span><span>Connecting</span></span>
+          <span id="model" class="model">No model</span>
+          <button id="fork" class="button quiet fork-button" type="button" title="Create a new Agent from this conversation">Fork</button>
+          <button id="compact" class="button quiet" type="button">Compact</button>
+          <button id="abort" class="icon-button" type="button" aria-label="Stop current run" title="Stop current run" disabled>■</button>
+        </div>
+      </header>
+      <section id="feedback" class="feedback" hidden></section>
+      <section id="timeline" class="timeline" aria-live="polite">
+        <div class="empty"><strong>Start a conversation</strong><span>Pi is ready in this workspace.</span></div>
+      </section>
+      <form id="composer" class="composer">
+        <textarea id="prompt" rows="1" placeholder="Message Pi" aria-label="Message Pi"></textarea>
+        <div class="composer-actions">
+          <select id="delivery" aria-label="Delivery mode">
+            <option value="prompt">Prompt</option>
+            <option value="steer">Steer</option>
+            <option value="followUp">Follow up</option>
+          </select>
+          <button id="send" class="icon-button primary" type="submit" aria-label="Send message" title="Send message">↑</button>
+        </div>
+      </form>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

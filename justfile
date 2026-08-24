@@ -24,6 +24,7 @@ check:
     cd apps/mail/web && pnpm build
     python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
+    node --test apps/pi-ui/*.test.mjs
     cargo build --workspace
     cargo fmt --all -- --check
     cargo test --workspace
@@ -53,6 +54,7 @@ telegram-test:
 app-test:
     python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
+    node --test apps/pi-ui/*.test.mjs
 
 messaging-e2e:
     cargo test -p treer-proxy message_

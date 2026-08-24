@@ -1,0 +1,16 @@
+{
+  "name": "treer-pi-ui",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild markdown.entry.js --bundle --format=esm --minify --legal-comments=inline --outfile=public/markdown.js",
+    "test": "node --test",
+    "check": "node --check extension.mjs && node --check markdown.entry.js && node --check public/app.js && node --check public/markdown.js && node --test"
+  },
+  "devDependencies": {
+    "dompurify": "3.4.14",
+    "esbuild": "0.28.2",
+    "marked": "18.0.10"
+  }
+}
