@@ -11,6 +11,9 @@ second manual.
 - Managed Treer operations use [the embedded Treer skill](skills/treer/SKILL.md).
   That skill is the runtime CLI contract printed by `treer --skill` and
   `treer --skills`; do not move, rename, or duplicate it here.
+- Recipe installs use [the bundled installer skill](skills/treer-install/SKILL.md),
+  printed by `treer --skill install`. Creating an Agent with `--recipe`
+  sends that skill as the first prompt.
 - The root [README](README.md) owns setup and operator examples.
 - [PLAN.md](PLAN.md) and dated [research](docs/research/) preserve design
   history. Use source, tests, and maintained docs for current behavior.
@@ -26,6 +29,7 @@ second manual.
 | Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
 | Build or operate a workspace App | [apps/README.md](apps/README.md) |
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
+| Install a git recipe with an installer Agent | [skills/treer-install/SKILL.md](skills/treer-install/SKILL.md) |
 
 ## Source map
 

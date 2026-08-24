@@ -139,6 +139,24 @@ test("opens app, shows org, workspace, machines and agents", async ({ page }) =>
   await expect(page.getByRole("button", { name: /worker/ })).toBeVisible()
 })
 
+test("agent list row menu can rename and delete", async ({ page }) => {
+  await page.goto("/")
+  await agentsTab(page).click()
+  const row = page.getByRole("button", { name: /api-server/ })
+  await row.hover()
+  await page.getByRole("button", { name: "Actions for api-server" }).click()
+  await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible()
+  await expect(page.getByRole("menuitem", { name: "Stop" })).toBeVisible()
+  await expect(page.getByRole("menuitem", { name: "Delete" })).toBeVisible()
+  await page.getByRole("menuitem", { name: "Rename" }).click()
+  await expect(page.getByRole("heading", { name: "Rename agent" })).toBeVisible()
+  await page.getByRole("button", { name: "Cancel" }).click()
+  await row.hover()
+  await page.getByRole("button", { name: "Actions for api-server" }).click()
+  await page.getByRole("menuitem", { name: "Delete" }).click()
+  await expect(page.getByRole("heading", { name: "Delete agent" })).toBeVisible()
+})
+
 test("org dropdown contains Members and Audit entries", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: "Organization actions" }).click()
@@ -251,6 +269,17 @@ test("mobile: opening network hides sidebar, back button returns to terminal", a
 
   await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
   await expect(aside).toBeVisible()
+})
+
+test("create agent dialog can install a git recipe", async ({ page }) => {
+  await page.goto("/")
+  await agentsTab(page).click()
+  await page.getByRole("button", { name: "New" }).click()
+  await expect(page.getByRole("dialog")).toBeVisible()
+  await page.getByRole("dialog").getByRole("combobox").first().click()
+  await page.getByRole("option", { name: "Install recipe" }).click()
+  await expect(page.getByPlaceholder("https://github.com/example/recipe.git")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Install recipe" })).toBeVisible()
 })
 
 test("mobile: machine overview hides sidebar and shows back button", async ({ page }) => {

@@ -19,6 +19,7 @@ matching the question; follow its source links for implementation detail.
 | [Treer Telegram App](../apps/telegram/README.md) | Telegram setup, bindings, reply mapping, recovery, and limits |
 | [Root README](../README.md) | Installation, deployment, and operator command examples |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
+| [Treer install skill](../skills/treer-install/SKILL.md) | Recipe-install contract prompted when creating an installer with a git URL |
 
 ## Active execution plans
 
@@ -55,7 +56,9 @@ Use this order when documents disagree:
 The root [AGENTS.md](../AGENTS.md) is a development index. It deliberately links
 to, but does not duplicate, the embedded Treer skill. Keep
 `skills/treer/SKILL.md` at its current path because the CLI embeds it at build
-time and prints it through `treer --skill` and `treer --skills`.
+time and prints it through `treer --skill` and `treer --skills`. Keep
+`skills/treer-install/SKILL.md` next to it; `treer --skill install` and
+Agent create `--recipe` embed that file.
 
 ## Update map
 

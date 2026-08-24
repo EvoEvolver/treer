@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
+    installer_base_prompt, installer_composer_ready, recipe_url, validate_recipe_url,
     AcknowledgeMessagesRequest, AgentCommand, AgentInfo, AgentLaunchProfile, ApiError,
     AppIdentityVerifyRequest, AppPrincipal, AppPrincipalKind, CreateAgentLaunchProfileRequest,
     CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
@@ -3310,7 +3311,7 @@ async fn agent_probe_machine_service(
     let service = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
-    require_agent_owns_service(&subject, &service)?;
+    require_agent_can_probe_service(&subject, &service)?;
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -3792,6 +3793,80 @@ fn service_ingress_policy_resource(
     }
 }
 
+async fn prompt_installer_recipe(
+    state: &AppState,
+    workspace_id: &str,
+    server_id: &str,
+    agent_id: &str,
+    recipe: &str,
+) -> Result<(), ProtocolError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        let output = state
+            .send_command(
+                workspace_id,
+                server_id,
+                AgentCommand::Read {
+                    agent_id: agent_id.to_string(),
+                    lines: Some(80),
+                },
+            )
+            .await?;
+        let text = output
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if text.contains("Do you trust") || text.contains("Press enter to continue") {
+            state
+                .send_command(
+                    workspace_id,
+                    server_id,
+                    AgentCommand::Input {
+                        agent_id: agent_id.to_string(),
+                        data: vec![b'\r'],
+                    },
+                )
+                .await?;
+        } else if installer_composer_ready(text) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    state
+        .send_command(
+            workspace_id,
+            server_id,
+            AgentCommand::Prompt {
+                agent_id: agent_id.to_string(),
+                text: installer_base_prompt(recipe),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+fn require_agent_can_probe_service(
+    subject: &PolicySubject,
+    service: &MachineService,
+) -> Result<(), ApiFailure> {
+    match subject {
+        PolicySubject::Agent { server_id, .. } if server_id == &service.server_id => Ok(()),
+        PolicySubject::Agent { .. } => Err(ApiFailure::forbidden(
+            "service_not_owned",
+            "agents may probe only services on their own machine",
+        )),
+        PolicySubject::Machine { .. }
+        | PolicySubject::Human { .. }
+        | PolicySubject::Service { .. } => Err(ApiFailure::forbidden(
+            "ingress_agent_required",
+            "a managed agent identity is required to probe a service",
+        )),
+    }
+}
+
 fn require_agent_owns_service(
     subject: &PolicySubject,
     service: &MachineService,
@@ -4103,6 +4178,7 @@ fn agent_request_from_launch_profile(
         cols: request.cols,
         rows: request.rows,
         publish_ports: Vec::new(),
+        recipe: None,
     })
 }
 
@@ -4491,6 +4567,18 @@ async fn execute_agent_create(
     request: CreateAgentRequest,
     launch_profile_id: Option<&str>,
 ) -> Result<Value, ApiFailure> {
+    if let Some(recipe) = recipe_url(&request) {
+        if let Err(message) = validate_recipe_url(recipe) {
+            return Err(ApiFailure::bad_request("invalid_recipe", &message));
+        }
+        if !matches!(request.kind.as_str(), "codex" | "claude" | "shell") {
+            return Err(ApiFailure::bad_request(
+                "recipe_requires_interactive_agent",
+                "recipe install requires kind codex, claude, or shell",
+            ));
+        }
+    }
+    let recipe = recipe_url(&request).map(str::to_string);
     let server_id = state
         .select_server(workspace_id, request.server_id.as_deref())
         .await?;
@@ -4508,7 +4596,7 @@ async fn execute_agent_create(
     let workload_credential = auth
         .create_agent_credential(workspace_id, &server_id, &agent_id)
         .await?;
-    let data = state
+    let mut data = state
         .send_command(
             workspace_id,
             &server_id,
@@ -4519,6 +4607,26 @@ async fn execute_agent_create(
             },
         )
         .await?;
+    if let Some(recipe) = recipe.as_deref() {
+        match prompt_installer_recipe(state, workspace_id, &server_id, &agent_id, recipe).await {
+            Ok(()) => {
+                if let Some(object) = data.as_object_mut() {
+                    object.insert("installer_prompted".into(), json!(true));
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    %workspace_id,
+                    %agent_id,
+                    "failed to prompt installer with bundled skill"
+                );
+                if let Some(object) = data.as_object_mut() {
+                    object.insert("installer_prompt_error".into(), json!(error.message));
+                }
+            }
+        }
+    }
     let (actor_kind, actor_id) = control_audit_actor(session, subject);
     let payload = launch_profile_id.map_or_else(
         || json!({ "server_id": &server_id }),
@@ -5067,8 +5175,8 @@ mod tests {
     use std::process::{Command, Stdio};
     use tower::ServiceExt;
     use treer_protocol::{
-        PolicyEffect, PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, WorkspacePolicyDocument,
-        POLICY_SCHEMA_VERSION,
+        MachineServiceProtocol, PolicyEffect, PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef,
+        WorkspacePolicyDocument, POLICY_SCHEMA_VERSION,
     };
     use treer_proxy::policy_store::WorkspacePolicyStore;
 
@@ -5653,6 +5761,42 @@ mod tests {
         let error = require_machine_target(Some(&subject), "machine-b")
             .expect_err("cross-machine operation must require Agent identity");
         assert_eq!(error.error.code, "agent_identity_required");
+    }
+
+    #[test]
+    fn same_machine_agents_can_probe_sibling_services() {
+        let timestamp = "2026-08-20T00:00:00Z".parse().expect("valid timestamp");
+        let service = MachineService {
+            service_id: "svc_ui".to_string(),
+            workspace_id: "default".to_string(),
+            name: "codex-ui".to_string(),
+            server_id: "machine-a".to_string(),
+            target_agent_id: Some("ag_ui".to_string()),
+            target_host: "127.0.0.1".to_string(),
+            target_port: 4173,
+            protocol: MachineServiceProtocol::Http,
+            created_at: timestamp,
+            created_by: "agent:ag_ui".to_string(),
+            updated_at: timestamp,
+            updated_by: "agent:ag_ui".to_string(),
+        };
+        let installer = PolicySubject::Agent {
+            server_id: "machine-a".to_string(),
+            agent_id: "ag_installer".to_string(),
+        };
+        let other_machine = PolicySubject::Agent {
+            server_id: "machine-b".to_string(),
+            agent_id: "ag_other".to_string(),
+        };
+        assert!(require_agent_can_probe_service(&installer, &service).is_ok());
+        assert_eq!(
+            require_agent_can_probe_service(&other_machine, &service)
+                .expect_err("cross-machine probe")
+                .error
+                .code,
+            "service_not_owned"
+        );
+        assert!(require_agent_owns_service(&installer, &service).is_err());
     }
 
     #[tokio::test]

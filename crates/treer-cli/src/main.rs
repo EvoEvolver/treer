@@ -28,7 +28,7 @@ use treer_protocol::{
     SetAgentUiRequest, TerminalClientMessage, TerminalServerMessage,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
     WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
-    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    AGENT_ID_HEADER, INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -47,9 +47,12 @@ struct Args {
     #[arg(
         long,
         visible_alias = "skills",
-        help = "Print the bundled agent skill and exit"
+        num_args = 0..=1,
+        default_missing_value = "treer",
+        value_name = "NAME",
+        help = "Print a bundled agent skill and exit (`treer` or `install`)"
     )]
-    skill: bool,
+    skill: Option<String>,
     #[arg(long, env = "TREER_AGENT_SERVER_URL")]
     url: Option<Url>,
     #[arg(long, env = "TREER_WORKSPACE_ID", default_value = "default")]
@@ -240,6 +243,12 @@ enum AgentAdminCommand {
             help = "Publish a Linux network-sandbox TCP port on 127.0.0.1"
         )]
         publish_ports: Vec<u16>,
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Git recipe URL; Treer prompts this Agent with the bundled install skill"
+        )]
+        recipe: Option<String>,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -674,8 +683,12 @@ async fn main() {
 
 async fn run_cli() -> anyhow::Result<()> {
     let args = Args::parse();
-    if args.skill {
-        print!("{SKILL}");
+    if let Some(skill) = args.skill {
+        match skill.as_str() {
+            "treer" => print!("{SKILL}"),
+            "install" | "treer-install" => print!("{INSTALL_SKILL}"),
+            other => bail!("unknown skill {other}; available skills: treer, install"),
+        }
         return Ok(());
     }
     let command = args
@@ -834,6 +847,7 @@ async fn run_agent_admin_command(
             name,
             cwd,
             publish_ports,
+            recipe,
             args,
         } => {
             let server_id = resolve_service_machine(client, machine.as_deref()).await?;
@@ -850,6 +864,7 @@ async fn run_agent_admin_command(
                         cols: 120,
                         rows: 36,
                         publish_ports,
+                        recipe,
                     })?),
                 )
                 .await
@@ -1937,11 +1952,16 @@ mod tests {
     fn skill_flags_work_without_a_subcommand() {
         for flag in ["--skill", "--skills"] {
             let args = Args::try_parse_from(["treer", flag]).expect("skill flag should parse");
-            assert!(args.skill);
+            assert_eq!(args.skill.as_deref(), Some("treer"));
             assert!(args.command.is_none());
         }
+        let install = Args::try_parse_from(["treer", "--skill", "install"])
+            .expect("install skill should parse");
+        assert_eq!(install.skill.as_deref(), Some("install"));
         assert!(SKILL.starts_with("---\nname: treer\n"));
+        assert!(INSTALL_SKILL.starts_with("---\nname: treer-install\n"));
         assert!(!SKILL.contains("TODO"));
+        assert!(!INSTALL_SKILL.contains("TODO"));
     }
 
     #[test]
@@ -2351,6 +2371,33 @@ mod tests {
                     }
                 }
             }) if publish_ports == vec![4173]
+        ));
+
+        let recipe = Args::try_parse_from([
+            "treer",
+            "agent",
+            "admin",
+            "create",
+            "--machine",
+            "builder",
+            "--kind",
+            "codex",
+            "--name",
+            "installer",
+            "--recipe",
+            "https://github.com/example/recipe.git",
+        ])
+        .expect("agent admin create --recipe should parse");
+        assert!(matches!(
+            recipe.command,
+            Some(Command::Agent {
+                command: AgentCommand::Admin {
+                    command: AgentAdminCommand::Create {
+                        recipe: Some(url),
+                        ..
+                    }
+                }
+            }) if url == "https://github.com/example/recipe.git"
         ));
     }
 }

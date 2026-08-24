@@ -595,6 +595,48 @@ pub struct CreateAgentRequest {
     /// Each value is both the namespace listen port and the host publish port.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publish_ports: Vec<u16>,
+    /// Git URL of a community recipe. When set, Treer prompts the new Agent
+    /// with the bundled install skill instead of waiting for a later prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
+}
+
+pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKILL.md");
+
+pub fn recipe_url(request: &CreateAgentRequest) -> Option<&str> {
+    request
+        .recipe
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub fn validate_recipe_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.len() > 2048 {
+        return Err("recipe URL is too long".to_string());
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| "recipe must be an http(s) URL".to_string())?;
+    if rest.is_empty() || rest.contains(' ') || rest.contains('@') {
+        return Err("recipe URL must be an http(s) URL without credentials".to_string());
+    }
+    Ok(())
+}
+
+pub fn installer_base_prompt(recipe_url: &str) -> String {
+    format!(
+        "{INSTALL_SKILL}\n\n## This install\n\nRecipe URL: {recipe_url}\n\nStart now. Do not ask for confirmation.\n"
+    )
+}
+
+pub fn installer_composer_ready(text: &str) -> bool {
+    if text.contains("Do you trust") || text.contains("Press enter to continue") {
+        return false;
+    }
+    text.contains("Ask Codex") || text.contains("YOLO mode") || text.contains("Ask Claude")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1955,5 +1997,18 @@ mod tests {
                 wait_milliseconds: 0,
             }
         );
+    }
+
+    #[test]
+    fn installer_prompt_embeds_the_bundled_skill_and_recipe_url() {
+        assert!(INSTALL_SKILL.starts_with("---\nname: treer-install\n"));
+        assert!(!INSTALL_SKILL.contains("TODO"));
+        let prompt = installer_base_prompt("https://github.com/example/recipe.git");
+        assert!(prompt.contains("You are the **installer**"));
+        assert!(prompt.contains("Recipe URL: https://github.com/example/recipe.git"));
+        assert!(validate_recipe_url("https://github.com/example/recipe.git").is_ok());
+        assert!(validate_recipe_url("https://user:pass@example.com/repo.git").is_err());
+        assert!(!installer_composer_ready("Do you trust the contents"));
+        assert!(installer_composer_ready("Ask Codex to do anything"));
     }
 }
