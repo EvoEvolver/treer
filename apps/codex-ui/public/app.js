@@ -19,6 +19,7 @@ let socket = null;
 let reconnectTimer = null;
 let streamConnected = false;
 let submitting = false;
+let loadingOlder = false;
 let settingsBusy = false;
 let localError = null;
 
@@ -73,9 +74,28 @@ function itemNode(item) {
   return details;
 }
 
-function renderTimeline() {
+function workingNode() {
+  const activity = node("div", "agent-activity");
+  activity.setAttribute("role", "status");
+  activity.setAttribute("aria-label", "Codex is working");
+  activity.append(node("span", "activity-spinner"), node("span", "", "Working"));
+  return activity;
+}
+
+function loadOlderNode() {
+  const row = node("div", "history-control");
+  const button = node("button", "history-button", loadingOlder ? "Loading..." : "Load earlier messages");
+  button.type = "button";
+  button.disabled = loadingOlder;
+  button.addEventListener("click", () => void loadOlderMessages());
+  row.append(button);
+  return row;
+}
+
+function renderTimeline(scrollAnchor) {
   const nearBottom = elements.timeline.scrollHeight - elements.timeline.scrollTop - elements.timeline.clientHeight < 120;
   const fragment = document.createDocumentFragment();
+  if (snapshot?.thread?.hasOlderItems) fragment.append(loadOlderNode());
   for (const turn of snapshot?.thread?.turns ?? []) {
     for (const item of turn.items ?? []) {
       const rendered = itemNode(item);
@@ -83,13 +103,18 @@ function renderTimeline() {
     }
     if (turn.error) fragment.append(node("div", "turn-error", turn.error));
   }
+  if (snapshot?.thread?.status === "running") fragment.append(workingNode());
   elements.timeline.replaceChildren(fragment);
   if (!elements.timeline.childElementCount) {
     const empty = node("div", "empty");
     empty.append(node("span", "empty-mark", "C"), node("strong", "", snapshot?.ready ? "Ready" : "Starting"));
     elements.timeline.append(empty);
   }
-  if (nearBottom) elements.timeline.scrollTop = elements.timeline.scrollHeight;
+  if (scrollAnchor) {
+    elements.timeline.scrollTop = scrollAnchor.top + elements.timeline.scrollHeight - scrollAnchor.height;
+  } else if (nearBottom) {
+    elements.timeline.scrollTop = elements.timeline.scrollHeight;
+  }
 }
 
 function replaceOptions(select, options, value, placeholder) {
@@ -123,7 +148,7 @@ function renderSettings() {
   elements.effort.disabled = settingsBusy || !thread || efforts.length === 0;
 }
 
-function render() {
+function render(scrollAnchor) {
   const thread = snapshot?.thread;
   const state = !streamConnected ? "reconnecting" : snapshot?.runtime?.state ?? "starting";
   elements.title.textContent = thread?.title || "Codex";
@@ -131,11 +156,19 @@ function render() {
   elements.status.className = `status status-${state}`;
   elements.status.lastElementChild.textContent = state.charAt(0).toUpperCase() + state.slice(1);
   elements.interrupt.disabled = thread?.status !== "running";
-  elements.send.disabled = submitting || !snapshot?.ready || thread?.status === "running";
+  renderComposer();
   elements.feedback.hidden = !localError;
   elements.feedback.textContent = localError || "";
   renderSettings();
-  renderTimeline();
+  renderTimeline(scrollAnchor);
+}
+
+function renderComposer() {
+  const canSend = !submitting && snapshot?.ready && elements.prompt.value.trim().length > 0;
+  const steering = snapshot?.thread?.status === "running";
+  elements.send.disabled = !canSend;
+  elements.send.setAttribute("aria-label", steering ? "Steer current run" : "Send message");
+  elements.send.title = steering ? "Steer current run" : "Send message";
 }
 
 async function request(path, init) {
@@ -153,7 +186,10 @@ async function updateSettings(input) {
   localError = null;
   render();
   try {
-    snapshot = await request("api/settings", { method: "POST", body: JSON.stringify(input) });
+    snapshot = await request("api/settings", {
+      method: "POST",
+      body: JSON.stringify({ ...input, history_limit: snapshot?.history?.limit ?? 50 }),
+    });
   } catch (error) {
     localError = error.message;
   } finally {
@@ -173,12 +209,15 @@ elements.effort.addEventListener("change", () => {
 elements.composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const prompt = elements.prompt.value.trim();
-  if (!prompt || submitting) return;
+  if (!prompt || submitting || !snapshot?.ready) return;
   submitting = true;
   localError = null;
   render();
   try {
-    snapshot = await request("api/prompt", { method: "POST", body: JSON.stringify({ prompt }) });
+    snapshot = await request("api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ prompt, history_limit: snapshot?.history?.limit ?? 50 }),
+    });
     elements.prompt.value = "";
     elements.prompt.style.height = "auto";
   } catch (error) {
@@ -199,12 +238,52 @@ elements.prompt.addEventListener("keydown", (event) => {
 elements.prompt.addEventListener("input", () => {
   elements.prompt.style.height = "auto";
   elements.prompt.style.height = `${Math.min(elements.prompt.scrollHeight, 180)}px`;
+  renderComposer();
 });
+
+async function loadOlderMessages() {
+  if (loadingOlder || !snapshot?.thread?.hasOlderItems) return;
+  const scrollAnchor = {
+    height: elements.timeline.scrollHeight,
+    top: elements.timeline.scrollTop,
+  };
+  loadingOlder = true;
+  const button = elements.timeline.querySelector(".history-button");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading...";
+  }
+  localError = null;
+  try {
+    snapshot = await request("api/history/older", {
+      method: "POST",
+      body: JSON.stringify({ limit: snapshot?.history?.limit ?? 50 }),
+    });
+    loadingOlder = false;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: "history-limit",
+        limit: snapshot.history.limit,
+        respond: false,
+      }));
+    }
+    render(scrollAnchor);
+  } catch (error) {
+    loadingOlder = false;
+    localError = error.message;
+    render();
+  } finally {
+    renderComposer();
+  }
+}
 
 elements.interrupt.addEventListener("click", async () => {
   localError = null;
   try {
-    snapshot = await request("api/interrupt", { method: "POST" });
+    snapshot = await request("api/interrupt", {
+      method: "POST",
+      body: JSON.stringify({ history_limit: snapshot?.history?.limit ?? 50 }),
+    });
   } catch (error) {
     localError = error.message;
   }
@@ -218,6 +297,9 @@ function connect() {
   socket = new WebSocket(url);
   socket.addEventListener("open", () => {
     streamConnected = true;
+    if ((snapshot?.history?.limit ?? 50) > 50) {
+      socket.send(JSON.stringify({ type: "history-limit", limit: snapshot.history.limit }));
+    }
     render();
   });
   socket.addEventListener("message", (event) => {

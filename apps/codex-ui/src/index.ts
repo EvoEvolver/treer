@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 
 import { CodexRuntime } from "./codex.js";
 
@@ -15,9 +15,10 @@ const command = process.env.CODEX_BIN || "codex";
 const agentId = process.env.TREER_AGENT_ID || "";
 const interfaceInstanceId = process.env.CODEX_UI_INSTANCE_ID || `codex-ui-${process.pid}`;
 const interfaceCapabilities = ["prompt.submit", "transcript.read", "state.observe", "abort"];
+const initialHistoryLimit = 50;
 
 const runtime = new CodexRuntime(command, cwd);
-const sockets = new Set<{ send: (data: string) => void }>();
+const sockets = new Set<{ socket: WebSocket; historyLimit: number }>();
 const completedOperations = new Map<string, number>();
 
 function mime(file: string) {
@@ -61,6 +62,12 @@ function requestPath(url: URL) {
   return url.pathname.replace(/\/+$/, "") || "/";
 }
 
+function historyLimitFrom(body: Record<string, unknown>) {
+  return typeof body.history_limit === "number" && Number.isFinite(body.history_limit)
+    ? Math.min(10_000, Math.max(initialHistoryLimit, Math.floor(body.history_limit)))
+    : initialHistoryLimit;
+}
+
 async function readJson(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
@@ -70,8 +77,8 @@ async function readJson(request: IncomingMessage) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
-function statePayload() {
-  const snapshot = runtime.snapshot();
+function statePayload(historyLimit = initialHistoryLimit) {
+  const snapshot = runtime.snapshot(historyLimit);
   return {
     ready: snapshot.ready,
     runtime: {
@@ -86,6 +93,7 @@ function statePayload() {
     },
     thread: snapshot.thread,
     modelOptions: snapshot.models,
+    history: { limit: historyLimit },
   };
 }
 
@@ -114,12 +122,11 @@ function transcriptPayload(url: URL) {
 }
 
 function broadcast() {
-  const encoded = JSON.stringify({ type: "state", ...statePayload() });
-  for (const socket of sockets) {
+  for (const client of sockets) {
     try {
-      socket.send(encoded);
+      client.socket.send(JSON.stringify({ type: "state", ...statePayload(client.historyLimit) }));
     } catch {
-      sockets.delete(socket);
+      sockets.delete(client);
     }
   }
 }
@@ -212,6 +219,14 @@ const server = createServer(async (request, response) => {
       send(response, 200, statePayload());
       return;
     }
+    if (path === "/api/history/older" && method === "POST") {
+      const body = await readJson(request);
+      const current = typeof body.limit === "number" && Number.isFinite(body.limit)
+        ? Math.max(initialHistoryLimit, Math.floor(body.limit))
+        : initialHistoryLimit;
+      send(response, 200, statePayload(Math.min(current + initialHistoryLimit, 10_000)));
+      return;
+    }
     if (path === "/api/prompt" && method === "POST") {
       const body = await readJson(request);
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
@@ -220,12 +235,13 @@ const server = createServer(async (request, response) => {
         return;
       }
       await runtime.prompt(prompt);
-      send(response, 200, statePayload());
+      send(response, 200, statePayload(historyLimitFrom(body)));
       return;
     }
     if (path === "/api/interrupt" && method === "POST") {
+      const body = await readJson(request);
       await runtime.interrupt();
-      send(response, 200, statePayload());
+      send(response, 200, statePayload(historyLimitFrom(body)));
       return;
     }
     if (path === "/api/settings" && method === "POST") {
@@ -238,7 +254,7 @@ const server = createServer(async (request, response) => {
             ? body.reasoningEffort
             : undefined,
       });
-      send(response, 200, statePayload());
+      send(response, 200, statePayload(historyLimitFrom(body)));
       return;
     }
 
@@ -261,9 +277,23 @@ server.on("upgrade", (request, socket, head) => {
     return;
   }
   socketsServer.handleUpgrade(request, socket, head, (webSocket) => {
-    sockets.add(webSocket);
-    webSocket.send(JSON.stringify({ type: "state", ...statePayload() }));
-    webSocket.on("close", () => sockets.delete(webSocket));
+    const client = { socket: webSocket, historyLimit: initialHistoryLimit };
+    sockets.add(client);
+    webSocket.send(JSON.stringify({ type: "state", ...statePayload(client.historyLimit) }));
+    webSocket.on("message", (data) => {
+      try {
+        const message = JSON.parse(String(data)) as { type?: string; limit?: number; respond?: boolean };
+        if (message.type === "history-limit" && typeof message.limit === "number") {
+          client.historyLimit = Math.min(10_000, Math.max(initialHistoryLimit, Math.floor(message.limit)));
+          if (message.respond !== false) {
+            webSocket.send(JSON.stringify({ type: "state", ...statePayload(client.historyLimit) }));
+          }
+        }
+      } catch {
+        // Ignore malformed client messages.
+      }
+    });
+    webSocket.on("close", () => sockets.delete(client));
   });
 });
 

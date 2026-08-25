@@ -24,7 +24,7 @@ export interface TurnDto {
   items: HistoryItem[];
 }
 
-interface CodexItem {
+export interface CodexItem {
   type?: string;
   id?: string;
   text?: string;
@@ -32,11 +32,35 @@ interface CodexItem {
   summary?: string[];
   command?: string;
   aggregatedOutput?: string | null;
+  arguments?: unknown;
+  result?: unknown;
+  error?: unknown;
+  server?: string;
+  tool?: string;
+  namespace?: string;
+  query?: string;
+  path?: string;
+  prompt?: string;
+  contentItems?: unknown;
   status?: string | null;
   [key: string]: unknown;
 }
 
-interface CodexTurn {
+function detailText(label: string, value: unknown) {
+  if (value == null || value === "") return "";
+  const encoded = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return encoded ? `${label}\n${encoded}` : "";
+}
+
+function toolDetail(item: CodexItem) {
+  return [
+    detailText("Arguments", item.arguments),
+    detailText("Result", item.result ?? item.contentItems),
+    detailText("Error", item.error),
+  ].filter(Boolean).join("\n\n");
+}
+
+export interface CodexTurn {
   id?: string;
   status?: string;
   error?: { message?: string } | null;
@@ -85,6 +109,34 @@ export function mapItem(item: CodexItem, turnId: string, order: number): History
     case "fileChange":
     case "file_change":
       return { ...base, kind: "fileChange", text: text || "File change", status: item.status ?? null };
+    case "mcpToolCall":
+      return {
+        ...base,
+        kind: "toolCall",
+        text: [item.server, item.tool].filter(Boolean).join(" / ") || "MCP tool",
+        detailText: toolDetail(item),
+        status: item.status ?? null,
+      };
+    case "dynamicToolCall":
+      return {
+        ...base,
+        kind: "toolCall",
+        text: [item.namespace, item.tool].filter(Boolean).join(" / ") || "Tool call",
+        detailText: toolDetail(item),
+        status: item.status ?? null,
+      };
+    case "collabAgentToolCall":
+      return {
+        ...base,
+        kind: "toolCall",
+        text: item.tool || "Agent operation",
+        detailText: detailText("Prompt", item.prompt),
+        status: item.status ?? null,
+      };
+    case "webSearch":
+      return { ...base, kind: "toolCall", text: item.query || "Web search", detailText: text };
+    case "imageView":
+      return { ...base, kind: "toolCall", text: item.path || "View image", detailText: text };
     default:
       return { ...base, kind: type.toLowerCase().includes("tool") ? "toolCall" : "other", text: text || type };
   }

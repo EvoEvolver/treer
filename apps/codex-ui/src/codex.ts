@@ -4,14 +4,25 @@ import { EventEmitter } from "node:events";
 import { JsonRpcClient } from "./jsonrpc.js";
 import {
   fallbackModelOption,
+  mapItem,
   mapModelOption,
   mapReasoningEffort,
   mapTurn,
   yoloResponse,
+  type CodexItem,
+  type CodexTurn,
   type ModelOption,
   type ReasoningEffort,
   type TurnDto,
 } from "./map.js";
+
+const HISTORY_PAGE_SIZE = 50;
+
+interface LiveItem {
+  item: CodexItem;
+  sequence: number;
+  turnId: string;
+}
 
 export interface ThreadState {
   id: string;
@@ -25,12 +36,16 @@ export interface ThreadState {
   createdAt: string;
   updatedAt: string;
   turns: TurnDto[];
+  hasOlderItems: boolean;
 }
 
 export class CodexRuntime extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
   private client: JsonRpcClient | null = null;
   private ready = false;
+  private fullTurns: TurnDto[] = [];
+  private liveItems = new Map<string, LiveItem>();
+  private liveSequence = 0;
   thread: ThreadState | null = null;
   models: ModelOption[] = [];
 
@@ -98,7 +113,7 @@ export class CodexRuntime extends EventEmitter {
       {
         cwd: this.cwd,
         approvalPolicy: "never",
-        sandbox: "workspace-write",
+        sandbox: "danger-full-access",
         experimentalRawEvents: false,
         persistExtendedHistory: true,
       },
@@ -121,6 +136,7 @@ export class CodexRuntime extends EventEmitter {
       createdAt: now,
       updatedAt: now,
       turns: [],
+      hasOlderItems: false,
     };
     if (this.models.length === 0) {
       this.models = fallbackModelOption(model, reasoningEffort);
@@ -134,11 +150,26 @@ export class CodexRuntime extends EventEmitter {
     if (!this.client || !this.thread) {
       throw new Error("Codex is not ready");
     }
+    const input = [{ type: "text", text, text_elements: [] }];
+    if (this.thread.status === "running" && this.thread.activeTurnId) {
+      await this.client.request<{ turnId: string }>(
+        "turn/steer",
+        {
+          threadId: this.thread.id,
+          expectedTurnId: this.thread.activeTurnId,
+          input,
+        },
+        60_000,
+      );
+      this.thread.updatedAt = new Date().toISOString();
+      this.emit("state");
+      return;
+    }
     const turn = await this.client.request<{ turn: { id: string } }>(
       "turn/start",
       {
         threadId: this.thread.id,
-        input: [{ type: "text", text, text_elements: [] }],
+        input,
         ...(this.thread.model ? { model: this.thread.model } : {}),
         ...(this.thread.reasoningEffort ? { effort: this.thread.reasoningEffort } : {}),
       },
@@ -199,10 +230,13 @@ export class CodexRuntime extends EventEmitter {
     this.ready = false;
   }
 
-  snapshot() {
+  snapshot(historyLimit?: number) {
+    const thread = this.thread && historyLimit !== undefined
+      ? this.threadWithHistoryLimit(historyLimit)
+      : this.thread;
     return {
       ready: this.ready,
-      thread: this.thread,
+      thread,
       models: this.models,
     };
   }
@@ -259,6 +293,79 @@ export class CodexRuntime extends EventEmitter {
     };
   }
 
+  private threadWithHistoryLimit(historyLimit: number) {
+    const thread = this.thread!;
+    const sourceTurns = this.mergedTurns();
+    const totalItems = sourceTurns.reduce((count, turn) => count + turn.items.length, 0);
+    let remaining = Math.min(Math.max(1, historyLimit), totalItems);
+    const visibleTurns: TurnDto[] = [];
+    for (let index = sourceTurns.length - 1; index >= 0 && remaining > 0; index -= 1) {
+      const turn = sourceTurns[index];
+      const items = turn.items.slice(-remaining);
+      remaining -= items.length;
+      visibleTurns.unshift({ ...turn, items });
+    }
+    return {
+      ...thread,
+      turns: visibleTurns,
+      hasOlderItems: totalItems > historyLimit,
+    };
+  }
+
+  private mergedTurns() {
+    const turns = this.fullTurns.map((turn) => ({ ...turn, items: [...turn.items] }));
+    const byId = new Map(turns.map((turn) => [turn.id, turn]));
+    const liveByTurn = new Map<string, LiveItem[]>();
+    for (const entry of this.liveItems.values()) {
+      const items = liveByTurn.get(entry.turnId) ?? [];
+      items.push(entry);
+      liveByTurn.set(entry.turnId, items);
+    }
+    for (const [turnId, entries] of liveByTurn) {
+      entries.sort((left, right) => left.sequence - right.sequence);
+      let turn = byId.get(turnId);
+      if (!turn) {
+        turn = {
+          id: turnId,
+          startedAt: null,
+          status: turnId === this.thread?.activeTurnId ? "inProgress" : "completed",
+          error: null,
+          items: [],
+        };
+        turns.push(turn);
+        byId.set(turnId, turn);
+      }
+      // The persisted thread omits tool activity and may also omit item IDs. For a
+      // turn observed by this process, the live stream is therefore both richer
+      // and the only reliable source of ordering.
+      turn.items = entries.map((entry, index) => mapItem(entry.item, turnId, index));
+    }
+    return turns;
+  }
+
+  private upsertLiveItem(turnId: string, item: CodexItem) {
+    if (typeof item.id !== "string") return;
+    const current = this.liveItems.get(item.id);
+    this.liveItems.set(item.id, {
+      item,
+      sequence: current?.sequence ?? this.liveSequence++,
+      turnId,
+    });
+  }
+
+  private updateLiveItem(itemId: string, update: (item: CodexItem) => CodexItem) {
+    const current = this.liveItems.get(itemId);
+    if (!current) return false;
+    this.liveItems.set(itemId, { ...current, item: update(current.item) });
+    return true;
+  }
+
+  private publishLiveHistory() {
+    if (!this.thread) return;
+    this.thread.turns = this.mergedTurns();
+    this.emit("state");
+  }
+
   private async refresh() {
     if (!this.client || !this.thread) {
       return;
@@ -276,9 +383,13 @@ export class CodexRuntime extends EventEmitter {
         turns?: Array<Record<string, unknown>>;
         preview?: string;
       };
-      const turns = Array.isArray(record.turns) ? record.turns.map((turn) => mapTurn(turn)) : [];
-      const active = turns.find((turn) => turn.status === "inProgress");
       const statusType = record.status && typeof record.status === "object" ? record.status.type : null;
+      this.fullTurns = Array.isArray(record.turns) ? record.turns.map((turn) => mapTurn(turn)) : [];
+      const active = this.fullTurns.find((turn) => turn.status === "inProgress");
+      const running = statusType === "active" || active !== undefined;
+      const activeTurnId = running
+        ? active?.id ?? this.thread.activeTurnId
+        : null;
       this.thread = {
         ...this.thread,
         id: record.id ?? this.thread.id,
@@ -286,12 +397,14 @@ export class CodexRuntime extends EventEmitter {
         cwd: record.cwd || this.thread.cwd,
         model: this.thread.model,
         reasoningEffort: this.thread.reasoningEffort,
-        status: statusType === "active" || active ? "running" : statusType === "systemError" ? "error" : "idle",
-        activeTurnId: active?.id ?? null,
-        lastError: turns.find((turn) => turn.error)?.error ?? null,
+        status: running ? "running" : statusType === "systemError" ? "error" : "idle",
+        activeTurnId,
+        lastError: this.fullTurns.find((turn) => turn.error)?.error ?? null,
         updatedAt: new Date().toISOString(),
-        turns,
+        turns: [],
+        hasOlderItems: false,
       };
+      this.thread.turns = this.mergedTurns();
       this.emit("state");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -305,12 +418,53 @@ export class CodexRuntime extends EventEmitter {
 
   private async onNotification(event: { method?: string; params?: Record<string, unknown> }) {
     const method = event.method ?? "";
-    if (
-      method.startsWith("turn/") ||
-      method.startsWith("item/") ||
-      method.startsWith("thread/") ||
-      method === "error"
-    ) {
+    const params = event.params ?? {};
+    if ((method === "item/started" || method === "item/completed")
+        && typeof params.turnId === "string" && params.item && typeof params.item === "object") {
+      this.upsertLiveItem(params.turnId, params.item as CodexItem);
+      this.publishLiveHistory();
+      return;
+    }
+    if (method === "item/commandExecution/outputDelta" && typeof params.itemId === "string") {
+      this.updateLiveItem(params.itemId, (item) => ({
+        ...item,
+        aggregatedOutput: `${item.aggregatedOutput ?? ""}${typeof params.delta === "string" ? params.delta : ""}`,
+      }));
+      this.publishLiveHistory();
+      return;
+    }
+    if ((method === "item/agentMessage/delta" || method === "item/reasoning/textDelta")
+        && typeof params.itemId === "string") {
+      this.updateLiveItem(params.itemId, (item) => ({
+        ...item,
+        text: `${item.text ?? ""}${typeof params.delta === "string" ? params.delta : ""}`,
+      }));
+      this.publishLiveHistory();
+      return;
+    }
+    if (method === "turn/started" && params.turn && typeof params.turn === "object") {
+      const turn = params.turn as CodexTurn;
+      const turnId = typeof turn.id === "string" ? turn.id : null;
+      if (turnId && this.thread) {
+        for (const item of turn.items ?? []) this.upsertLiveItem(turnId, item);
+        this.thread.status = "running";
+        this.thread.activeTurnId = turnId;
+        this.publishLiveHistory();
+      }
+      return;
+    }
+    if (method === "turn/completed" && params.turn && typeof params.turn === "object") {
+      const turn = params.turn as CodexTurn;
+      const turnId = typeof turn.id === "string" ? turn.id : null;
+      if (turnId && this.thread) {
+        for (const item of turn.items ?? []) this.upsertLiveItem(turnId, item);
+        this.thread.status = turn.status === "failed" ? "error" : "idle";
+        this.thread.activeTurnId = null;
+        this.publishLiveHistory();
+      }
+      return;
+    }
+    if (method.startsWith("thread/") || method === "error") {
       try {
         await this.refresh();
       } catch (error) {
