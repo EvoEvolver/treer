@@ -45,6 +45,7 @@ import {
 } from "lucide-react"
 import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type AgentLaunchProfile, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
+import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
 import { cn } from "@/lib/utils"
 import { SettingsDialog } from "@/components/settings"
 import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pane"
@@ -65,6 +66,19 @@ type AuthMode = "login" | "register" | "forgot" | "reset"
 type AuthConfig = { github: boolean; google: boolean; invitation_required: boolean }
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 type DeleteTarget = { kind: "machine" | "agent"; id: string; name: string } | null
+
+const PREVIEW_USER: User = { user_id: "usr_preview", email: "you@example.com", preferred_name: "You" }
+const PREVIEW_ORG: Organization = { organization_id: "org_preview", name: "You Personal", role: "owner" }
+const PREVIEW_WORKSPACE: Workspace = { workspace_id: "ws_preview", name: "lab" }
+const PREVIEW_NOW = "2026-08-25T00:00:00.000Z"
+const PREVIEW_PROFILES: AgentLaunchProfile[] = [
+  { profile_id: "codex", workspace_id: "ws_preview", name: "Codex", description: "OpenAI Codex", cwd: ".", command: "codex", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+  { profile_id: "claude", workspace_id: "ws_preview", name: "Claude", description: "Anthropic Claude Code", cwd: ".", command: "claude", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+  { profile_id: "pi", workspace_id: "ws_preview", name: "Pi", description: "Pi coding agent", cwd: ".", command: "pi", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+  { profile_id: "opencode", workspace_id: "ws_preview", name: "OpenCode", description: "OpenCode", cwd: ".", command: "opencode", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+]
+const PREVIEW_INSTALL = "curl -fsSL 'https://treer.example/install.sh' | sh"
+const PREVIEW_CONNECT = "TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy 'https://treer.example/'"
 
 const activeStatuses = new Set(["starting", "working", "idle", "blocked"])
 
@@ -243,26 +257,31 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
   </main>
 }
 
+const PREVIEW_ADMIN_INVITE = "https://treer.example/?invite=inv_preview"
+
 function AdminPanel() {
-  const [authenticated, setAuthenticated] = useState<boolean | undefined>(undefined)
+  const preview = firstRunTourMode() === "preview"
+  const [authenticated, setAuthenticated] = useState<boolean | undefined>(preview ? true : undefined)
   const [password, setPassword] = useState("")
-  const [dashboard, setDashboard] = useState<AdminDashboard | null>(null)
+  const [dashboard, setDashboard] = useState<AdminDashboard | null>(preview ? { machine_count: 0, agent_count: 0 } : null)
   const [inviteUrl, setInviteUrl] = useState("")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   const loadDashboard = useCallback(async () => {
+    if (preview) return
     setDashboard(await api<AdminDashboard>("/api/admin/dashboard"))
-  }, [])
+  }, [preview])
 
   useEffect(() => {
+    if (preview) return
     api<{ admin: boolean }>("/api/admin/me")
       .then(() => { setAuthenticated(true); return loadDashboard() })
       .catch((reason) => {
         if (reason instanceof ApiError && reason.status === 401) setAuthenticated(false)
         else setError(reason instanceof Error ? reason.message : "Unable to load admin panel")
       })
-  }, [loadDashboard])
+  }, [preview, loadDashboard])
 
   async function login(event: FormEvent) {
     event.preventDefault(); setSubmitting(true); setError("")
@@ -274,6 +293,10 @@ function AdminPanel() {
   }
 
   async function createInvite() {
+    if (preview) {
+      setInviteUrl(PREVIEW_ADMIN_INVITE)
+      return
+    }
     setError("")
     try {
       const data = await api<{ url: string }>("/api/admin/invitations", { method: "POST", body: "{}" })
@@ -282,14 +305,61 @@ function AdminPanel() {
   }
 
   async function logout() {
+    if (preview) return
     await api("/api/admin/logout", { method: "POST", body: "{}" })
     setAuthenticated(false); setDashboard(null); setInviteUrl("")
   }
 
+  const tourHostRef = useRef<AdminTourHost | null>(null)
+  tourHostRef.current = {
+    openInvite: () => { void createInvite() },
+    closeInvite: () => setInviteUrl(""),
+  }
+
+  function replayAdminTour() {
+    clearAdminTour()
+    if (tourHostRef.current) startAdminTour(tourHostRef.current, { persist: !preview })
+  }
+
+  useEffect(() => {
+    if (!authenticated) return
+    if (!shouldAutoStartAdminTour()) return
+    const timer = window.setTimeout(() => {
+      if (!tourHostRef.current) return
+      startAdminTour(tourHostRef.current, { persist: !preview })
+    }, 450)
+    return () => {
+      window.clearTimeout(timer)
+      stopFirstRunTour()
+    }
+  }, [authenticated, preview])
+
   if (authenticated === undefined) return <div className="grid min-h-dvh place-items-center bg-sidebar text-sm text-muted-foreground">Loading admin...</div>
   if (!authenticated) return <main className="grid min-h-dvh place-items-center bg-sidebar p-4"><form onSubmit={login} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm"><div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] text-white"><ShieldCheck className="size-4" /></div><h1 className="text-xl font-semibold">Treer administration</h1><p className="mt-1 text-sm text-muted-foreground">Platform access is separate from user accounts.</p><div className="mt-6 space-y-2"><Label htmlFor="admin-password">Admin password</Label><Input id="admin-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></div><div className="mt-3 min-h-5 text-xs text-destructive">{error}</div><div className="mt-4 flex justify-end"><Button type="submit" disabled={submitting}>{submitting ? "Please wait" : "Open admin panel"}</Button></div></form></main>
 
-  return <main className="min-h-dvh bg-sidebar"><header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div><Button size="sm" onClick={loadDashboard}><RotateCw />Refresh</Button></div>{error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="grid grid-cols-2 border-y"><div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div><div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div></div><section className="mt-12"><h2 className="text-sm font-semibold">User invitations</h2><div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div><Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button></div></section></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
+  return <main className="min-h-dvh bg-sidebar">
+    {preview && <div className="treer-tour-banner"><span>Tour preview · admin panel, no server writes</span></div>}
+    <header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" asChild><a href="/" data-tour="admin-workspace-link">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout} disabled={preview}><LogOut /></Button></div></div></header>
+    <div className="mx-auto max-w-4xl px-5 py-10">
+      <div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div>
+        <div className="flex gap-1"><Button size="sm" variant="outline" onClick={replayAdminTour}><ListChecks />Replay tour</Button><Button size="sm" onClick={loadDashboard} disabled={preview}><RotateCw />Refresh</Button></div>
+      </div>
+      {error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
+      <div className="grid grid-cols-2 border-y" data-tour="admin-overview">
+        <div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div>
+        <div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div>
+      </div>
+      <section className="mt-12" data-tour="admin-invite">
+        <h2 className="text-sm font-semibold">User invitations</h2>
+        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div>
+          <Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button>
+        </div>
+      </section>
+    </div>
+    <Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent data-tour="admin-invite-dialog"><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
+  </main>
 }
 
 
@@ -365,12 +435,14 @@ function LaunchProfilesView({ profiles, loading, onEdit, onLaunch, onDelete }: {
 }
 
 function WorkspaceApp() {
-  const [user, setUser] = useState<User | null | undefined>(undefined)
-  const [organizations, setOrganizations] = useState<Organization[]>([])
-  const [organizationId, setOrganizationId] = useState<string | null>(null)
+  const preview = firstRunTourMode() === "preview"
+  const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
+  const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
+  const [organizationId, setOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [workspaceId, setWorkspaceId] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("agents")
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionState>("connecting")
@@ -411,7 +483,8 @@ function WorkspaceApp() {
   const [agentCwd, setAgentCwd] = useState(".")
   const [agentCommandLine, setAgentCommandLine] = useState("codex")
   const [agentRecipeUrl, setAgentRecipeUrl] = useState("")
-  const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>([])
+  const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
+  const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
   const [launchProfileName, setLaunchProfileName] = useState("")
   const [launchProfileDescription, setLaunchProfileDescription] = useState("")
@@ -446,11 +519,12 @@ function WorkspaceApp() {
   const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : "Something went wrong"), [])
 
   useEffect(() => {
+    if (preview) return
     api<User>("/api/auth/me").then(setUser).catch((reason) => {
       if (reason instanceof ApiError && reason.status === 401) setUser(null)
       else showError(reason)
     })
-  }, [showError])
+  }, [preview, showError])
 
   useEffect(() => {
     if (!user) return
@@ -468,9 +542,13 @@ function WorkspaceApp() {
     })
   }, [])
 
-  useEffect(() => { if (user) loadOrganizations().catch(showError) }, [user, loadOrganizations, showError])
+  useEffect(() => { if (user && !preview) loadOrganizations().catch(showError) }, [user, preview, loadOrganizations, showError])
 
   useEffect(() => {
+    if (preview) {
+      setConnection("no workspace")
+      return
+    }
     let cancelled = false
     setWorkspaceId(null)
     setSnapshot(null)
@@ -486,16 +564,17 @@ function WorkspaceApp() {
       if (!data.workspaces.length) setConnection("no workspace")
     }).catch(showError)
     return () => { cancelled = true }
-  }, [organizationId, showError])
+  }, [organizationId, preview, showError])
 
   const refreshSnapshot = useCallback(async () => {
-    if (!workspaceId) return
+    if (preview || !workspaceId) return
     const data = await api<Snapshot>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`)
     setSnapshot(data)
     setWorkspaces((items) => replaceWorkspace(items, data.workspace))
-  }, [workspaceId])
+  }, [preview, workspaceId])
 
   useEffect(() => {
+    if (preview) return
     if (!workspaceId) {
       setSnapshot(null)
       setSelectedAgentId(null)
@@ -533,7 +612,7 @@ function WorkspaceApp() {
     }
     connect(true)
     return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
-  }, [workspaceId, refreshSnapshot, showError])
+  }, [preview, workspaceId, refreshSnapshot, showError])
 
   useEffect(() => {
     const agents = snapshot?.agents ?? []
@@ -639,6 +718,14 @@ function WorkspaceApp() {
 
   async function createWorkspace(event: FormEvent) {
     event.preventDefault()
+    if (preview) {
+      setCreateWorkspaceOpen(false)
+      setWorkspaceName("")
+      setWorkspaces([PREVIEW_WORKSPACE])
+      setWorkspaceId(PREVIEW_WORKSPACE.workspace_id)
+      setSnapshot({ revision: 0, workspace: PREVIEW_WORKSPACE, servers: [], agents: [] })
+      return
+    }
     if (!organizationId) return
     try {
       const data = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", body: JSON.stringify({ organization_id: organizationId, name: workspaceName }) })
@@ -670,6 +757,10 @@ function WorkspaceApp() {
 
   async function createAgent(event: FormEvent) {
     event.preventDefault()
+    if (preview) {
+      setCreateAgentOpen(false)
+      return
+    }
     if (!workspaceId) return
     try {
       let agent
@@ -689,14 +780,16 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
-  function openCreateAgent() {
-    setAgentProfileId("terminal")
-    setAgentName(defaultAgentName("terminal"))
-    setAgentNameCustomized(false)
-    setAgentCommandLine("codex")
-    setAgentRecipeUrl("")
+  function openCreateAgent(reset = true) {
+    if (reset || !createAgentOpenRef.current) {
+      setAgentProfileId("terminal")
+      setAgentName(defaultAgentName("terminal"))
+      setAgentNameCustomized(false)
+      setAgentCommandLine("codex")
+      setAgentRecipeUrl("")
+    }
     setCreateAgentOpen(true)
-    void loadLaunchProfiles().catch(showError)
+    if (!preview) void loadLaunchProfiles().catch(showError)
   }
 
   function changeAgentCommandLine(commandLine: string) {
@@ -736,6 +829,7 @@ function WorkspaceApp() {
   }
 
   const loadLaunchProfiles = useCallback(async () => {
+    if (preview) return
     if (!workspaceId) {
       setLaunchProfiles([])
       return
@@ -747,7 +841,7 @@ function WorkspaceApp() {
     } finally {
       setLaunchProfilesLoading(false)
     }
-  }, [workspaceId])
+  }, [preview, workspaceId])
 
   useEffect(() => {
     if (mainView === "profiles") loadLaunchProfiles().catch(showError)
@@ -837,12 +931,67 @@ function WorkspaceApp() {
   }
 
   async function openInstall() {
-    if (!workspaceId) return
+    if (preview || !workspaceId) {
+      const origin = window.location.origin
+      setInstallCommand(preview ? PREVIEW_INSTALL : `curl -fsSL '${origin}/install.sh' | sh`)
+      setConnectCommand(preview ? PREVIEW_CONNECT : `TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy '${origin}/'`)
+      setInstallOpen(true)
+      return
+    }
     try {
       const data = await api<{ install_command: string; connect_command: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bootstrap`, { method: "POST", body: "{}" })
       setInstallCommand(data.install_command); setConnectCommand(data.connect_command); setInstallOpen(true)
     } catch (reason) { showError(reason) }
   }
+
+  useEffect(() => {
+    createAgentOpenRef.current = createAgentOpen
+  }, [createAgentOpen])
+
+  const tourHostRef = useRef<FirstRunTourHost | null>(null)
+  tourHostRef.current = {
+    setSidebarTab,
+    openCreateWorkspace: () => { setWorkspaceName(""); setCreateWorkspaceOpen(true) },
+    closeCreateWorkspace: () => setCreateWorkspaceOpen(false),
+    prepareWorkspaceForMachineSteps: () => {
+      if (!preview) return
+      setWorkspaces([PREVIEW_WORKSPACE])
+      setWorkspaceId(PREVIEW_WORKSPACE.workspace_id)
+      setSnapshot({ revision: 0, workspace: PREVIEW_WORKSPACE, servers: [], agents: [] })
+      setConnection("no workspace")
+    },
+    openInstall,
+    closeInstall: () => setInstallOpen(false),
+    openCreateAgent,
+    closeCreateAgent: () => setCreateAgentOpen(false),
+    setAgentLaunch: (kind) => {
+      if (kind === "ui-profile") {
+        const profile = launchProfiles.find((item) => item.name === "Codex") ?? launchProfiles[0]
+        changeAgentProfile(profile?.profile_id ?? "terminal")
+        return
+      }
+      changeAgentProfile(kind)
+    },
+  }
+
+  function replayFirstRunTour() {
+    if (!user) return
+    clearFirstRunTour(user.user_id)
+    if (tourHostRef.current) startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
+  }
+
+  useEffect(() => {
+    if (!user) return
+    if (!shouldAutoStartFirstRunTour(user.user_id)) return
+    const timer = window.setTimeout(() => {
+      if (!tourHostRef.current) return
+      startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
+    }, 450)
+    return () => {
+      window.clearTimeout(timer)
+      stopFirstRunTour()
+    }
+  }, [user, preview])
 
   function openRename(target: NonNullable<RenameTarget>) { setRenameTarget(target); setRenameName(target.name) }
 
@@ -1107,6 +1256,7 @@ function WorkspaceApp() {
   }
 
   async function logout() {
+    if (preview) return
     try { await api("/api/auth/logout", { method: "POST", body: "{}" }) }
     finally { window.location.href = "/" }
   }
@@ -1117,6 +1267,7 @@ function WorkspaceApp() {
   return <TooltipProvider delayDuration={350}>
       <main className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[272px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
         <aside className={cn("flex min-h-0 flex-col border-b bg-sidebar md:border-b-0 md:border-r", mobileSidebarHidden && "hidden md:flex")}>
+        {preview && <div className="treer-tour-banner"><span>Tour preview · empty first-run account, no server writes</span></div>}
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
           <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={setOrganizationId}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
@@ -1124,10 +1275,12 @@ function WorkspaceApp() {
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_64px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
-          <Select value={workspaceId ?? undefined} onValueChange={setWorkspaceId} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+          <div data-tour="workspace-select">
+            <Select value={workspaceId ?? undefined} onValueChange={setWorkspaceId} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+          </div>
           <div className="flex">
             <IconButton label="Rename workspace" disabled={!workspace} onClick={() => { if (workspace) { setWorkspaceName(workspace.name); setRenameWorkspaceOpen(true) } }}><Pencil /></IconButton>
-            <IconButton label="Create workspace" disabled={!organizationId} onClick={() => { setWorkspaceName(""); setCreateWorkspaceOpen(true) }}><Plus /></IconButton>
+            <span data-tour="create-workspace"><IconButton label="Create workspace" disabled={!organizationId} onClick={() => { setWorkspaceName(""); setCreateWorkspaceOpen(true) }}><Plus /></IconButton></span>
           </div>
         </div>
         <div className="px-2 pb-2">
@@ -1138,14 +1291,14 @@ function WorkspaceApp() {
             </DropdownMenuContent></DropdownMenu>
         </div>
 
-        <Tabs defaultValue="agents" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <Tabs value={sidebarTab} onValueChange={(value) => setSidebarTab(value as SidebarTab)} className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <TabsList className="mx-2 grid h-auto grid-cols-2 bg-accent p-0.5">
-            <TabsTrigger value="machines" className="h-8 gap-2 text-xs"><Server className="size-3.5" />Machines <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.servers.length ?? 0}</span></TabsTrigger>
-            <TabsTrigger value="agents" className="h-8 gap-2 text-xs"><TerminalSquare className="size-3.5" />Agents <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.agents.length ?? 0}</span></TabsTrigger>
+            <TabsTrigger value="machines" data-tour="machines-tab" className="h-8 gap-2 text-xs"><Server className="size-3.5" />Machines <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.servers.length ?? 0}</span></TabsTrigger>
+            <TabsTrigger value="agents" data-tour="agents-tab" className="h-8 gap-2 text-xs"><TerminalSquare className="size-3.5" />Agents <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.agents.length ?? 0}</span></TabsTrigger>
           </TabsList>
           <TabsContent value="machines" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></div>
+              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><span data-tour="add-machine"><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></span></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
                 {snapshot?.servers.map((machine) => <MachineItem key={machine.server_id} machine={machine} selected={mainView === "machine" && machine.server_id === selectedMachineId} onClick={() => showMachineOverview(machine.server_id)} onRename={() => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDelete={() => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} />)}
                 {snapshot && !snapshot.servers.length && <EmptyState icon={<Server />} label="No machines connected" />}
@@ -1154,7 +1307,7 @@ function WorkspaceApp() {
           </TabsContent>
           <TabsContent value="agents" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openCreateAgent} disabled={!workspaceId || !onlineMachines.length}><Plus className="size-3.5" />New</Button></div>
+              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><span data-tour="create-agent"><Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => openCreateAgent()} disabled={!workspaceId || (!onlineMachines.length && !preview)}><Plus className="size-3.5" />New</Button></span></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
                 {snapshot?.agents.map((agent) => <AgentItem key={agent.agent_id} agent={agent} machine={snapshot.servers.find((item) => item.server_id === agent.server_id)} selected={mainView === "terminal" && agent.agent_id === selectedAgentId} onClick={() => showAgentTerminal(agent.agent_id)} onRename={() => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onStop={() => void stopAgent(agent.agent_id)} onDelete={() => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} />)}
                 {snapshot && !snapshot.agents.length && <EmptyState icon={<TerminalSquare />} label="No agents in this workspace" />}
@@ -1166,7 +1319,7 @@ function WorkspaceApp() {
         <div className="shrink-0 border-t p-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild><button type="button" aria-label="User menu" className="grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-accent"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={openSettings}><SettingsIcon />Settings</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
+            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={openSettings}><SettingsIcon />Settings</DropdownMenuItem><DropdownMenuItem onSelect={replayFirstRunTour}><ListChecks />Replay product tour</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout} disabled={preview}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
           </DropdownMenu>
         </div>
       </aside>
@@ -1226,7 +1379,7 @@ function WorkspaceApp() {
     <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
 
     <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={organizationName} onValueChange={setOrganizationName} onSubmit={createOrganization} />
-    <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={createWorkspace} />
+    <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={createWorkspace} dataTour="create-workspace-dialog" />
     <SimpleNameDialog open={renameWorkspaceOpen} onOpenChange={setRenameWorkspaceOpen} title="Rename workspace" description="Update the workspace name shown to organization members." label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={renameWorkspace} />
 
     <Dialog open={renameOrganizationOpen} onOpenChange={setRenameOrganizationOpen}><DialogContent><form onSubmit={renameOrganization}><DialogHeader><DialogTitle>Rename organization</DialogTitle><DialogDescription>Update the organization name shown to its members.</DialogDescription></DialogHeader><div className="my-5"><Field label="Organization name"><Input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameOrganizationOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
@@ -1237,9 +1390,9 @@ function WorkspaceApp() {
 
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /><span className="mt-1 block text-[10px] text-muted-foreground">Treer prompts this installer with the bundled install skill. Each created Agent is one thread.</span></Field>}{selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && !agentRecipeUrl.trim())}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent data-tour="create-agent-dialog"><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger data-tour="agent-launch"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /><span className="mt-1 block text-[10px] text-muted-foreground">Treer prompts this installer with the bundled install skill. Each created Agent is one thread.</span></Field></div>}{selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && !agentRecipeUrl.trim())}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button></DialogFooter></form></DialogContent></Dialog>
 
-    <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl" data-tour="add-machine-dialog"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={createServiceOpen} onOpenChange={(open) => { setCreateServiceOpen(open); if (!open) setEditingService(null) }}>
       <DialogContent className="max-w-xl">
@@ -1309,8 +1462,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return <div className="space-y-2"><Label>{label}</Label>{children}</div>
 }
 
-function SimpleNameDialog({ open, onOpenChange, title, description, label, value, onValueChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; label: string; value: string; onValueChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><form onSubmit={onSubmit}><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader><div className="my-5"><Field label={label}><Input value={value} onChange={(event) => onValueChange(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit">Create</Button></DialogFooter></form></DialogContent></Dialog>
+function SimpleNameDialog({ open, onOpenChange, title, description, label, value, onValueChange, onSubmit, dataTour }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; label: string; value: string; onValueChange: (value: string) => void; onSubmit: (event: FormEvent) => void; dataTour?: string }) {
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent data-tour={dataTour}><form onSubmit={onSubmit}><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader><div className="my-5"><Field label={label}><Input value={value} onChange={(event) => onValueChange(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit">Create</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {
