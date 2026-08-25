@@ -147,6 +147,20 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   await expect(innerHeading).toBeVisible()
 })
 
+test("selecting an embedded UI agent on an offline machine does not load the iframe", async ({ page }) => {
+  await page.unroute("**/api/workspaces/ws-1/snapshot")
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
+    ...snapshot,
+    servers: [{ ...machine, status: "offline" }],
+  }))
+  await page.goto("/")
+  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
+  await expect(page.getByText("Machine is offline")).toBeVisible()
+  await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
+  await expect(page.getByText("offline").first()).toBeVisible()
+})
+
 test("selecting a plain terminal agent shows the terminal pane, not an iframe", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("tab", { name: /Agents/ }).click()

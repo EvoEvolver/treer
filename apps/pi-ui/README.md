@@ -44,6 +44,9 @@ Treer.
 
 The AIS routes are `GET /v1/manifest`, `/v1/health`, `/v1/status`,
 `/v1/transcript`, and `/v1/events`, plus `POST /v1/prompts` and `/v1/abort`.
+`/v1/transcript` pages by conversation turn: `page` (or `cursor`) is the
+0-based turn index, and `limit` is the number of turns (default 1).
+Transcript paging is implemented with the shared [`ais-kit`](../ais-kit/README.md).
 Prompt requests are deduplicated by Treer's `operation_id`. The extension
 registers once at startup; the Controller revalidates its local registration
 cache when recovering a running Pi session after a hot restart.

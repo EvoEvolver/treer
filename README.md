@@ -677,14 +677,15 @@ treer agent attach reviewer
 treer agent admin delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
-treer agent transcript reviewer --limit 100
+treer agent transcript reviewer --page 0
 treer agent send-keys reviewer ctrl-c
 ```
 
 An Agent may register a `treer.agent-interface/v1` server on its private
 loopback. The Controller verifies its manifest and automatically sends semantic
 prompts to it when `prompt.submit` is declared; otherwise prompt continues to
-use terminal input. Structured transcript reads require `transcript.read`.
+use terminal input. Structured transcript reads require `transcript.read` and return one
+conversation turn per page.
 When `--ui-path` is present, Treer embeds that path and transparently tunnels
 its relative HTTP and WebSocket traffic to the same Interface port:
 
@@ -693,7 +694,7 @@ treer interface register --port 4180 --instance-id pi-1 \
   --capability prompt.submit --capability transcript.read \
   --capability state.observe --ui-path /
 treer interface show
-treer agent transcript self --limit 100
+treer agent transcript self --page 0
 treer interface clear
 ```
 
@@ -702,7 +703,10 @@ the Interface manifest before restoring it after a hot restart. Interface
 processes register once at startup and should deduplicate prompts by
 `operation_id`. Raw keys, terminal attach, stop, and delete remain PTY/Host
 operations. The bundled Pi UI and single-Agent [Codex UI](apps/codex-ui/README.md)
-perform this registration automatically.
+perform this registration automatically. Launch-profile sidecars without a
+bundled page live under `apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`,
+`apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`. Built-in `--kind
+codex` and `--kind claude` stay on the terminal path.
 
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles
