@@ -31,8 +31,15 @@ Channel pointers may move, like R2 artifact channels:
 `latest` is not a Treer channel. The updater rejects it.
 
 Forks set `TREER_GHCR_OWNER` to the lowercase GitHub owner that owns the
-packages. GHCR packages should be public so Compose can pull anonymously. For
-private packages, set `TREER_GHCR_TOKEN` to a read token.
+packages. Actions-published GHCR packages start private; GitHub does not let
+`GITHUB_TOKEN` change that visibility. An organization owner must set each
+package to Public before anonymous `docker compose pull` works:
+
+- [treer-proxy](https://github.com/orgs/EvoEvolver/packages/container/package/treer-proxy)
+- [treer-app](https://github.com/orgs/EvoEvolver/packages/container/package/treer-app)
+- [treer-updater](https://github.com/orgs/EvoEvolver/packages/container/package/treer-updater)
+
+For private packages, set `TREER_GHCR_TOKEN` to a read token.
 
 ## First start
 

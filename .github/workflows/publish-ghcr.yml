@@ -157,16 +157,6 @@ jobs:
             "${IMAGE}:sha-${GITHUB_SHA}-amd64" \
             "${IMAGE}:sha-${GITHUB_SHA}-arm64"
 
-      - name: Make the package public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api --method PUT \
-            "orgs/${{ github.repository_owner }}/packages/container/${{ matrix.image }}/visibility" \
-            -f visibility=public
-
   retag:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
@@ -206,13 +196,3 @@ jobs:
           docker buildx imagetools create \
             -t "${IMAGE}:${{ inputs.channel }}" \
             "${IMAGE}:${{ inputs.version }}"
-
-      - name: Make the package public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api --method PUT \
-            "orgs/${{ github.repository_owner }}/packages/container/${{ matrix.image }}/visibility" \
-            -f visibility=public
