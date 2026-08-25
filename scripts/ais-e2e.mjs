@@ -231,12 +231,24 @@ const nativeAnthropic = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANT
 const env = {
   ...luna,
   PATH: uniquePath(),
+  HOME: process.env.HOME,
   AIS_MODEL: "gpt-5.6-luna",
   CODEX_AIS_MODEL: "gpt-5.6-luna",
   DSH_PROVIDER: process.env.DSH_PROVIDER || "openai",
 };
 if (!nativeAnthropic) env.CLAUDE_MODEL = "gpt-5.6-luna";
-const envPairs = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+for (const key of [
+  "XAI_API_KEY",
+  "CURSOR_API_KEY",
+  "CURSOR_AUTH_TOKEN",
+  "GROK_AIS_MODEL",
+  "CURSOR_AIS_MODEL",
+]) {
+  if (process.env[key]) env[key] = process.env[key];
+}
+const envPairs = Object.entries(env)
+  .filter(([, value]) => value != null && value !== "")
+  .map(([key, value]) => `${key}=${value}`);
 
 const reports = [];
 for (const platform of platforms) {

@@ -60,6 +60,10 @@ test("selectAuthMethod prefers a listed id", () => {
     "xai.api_key",
   );
   assert.equal(selectAuthMethod([{ id: "cursor_login" }]), "cursor_login");
+  assert.equal(
+    selectAuthMethod([{ id: "xai.api_key" }], ["cached_token"]),
+    null,
+  );
 });
 
 test("ACP backend keeps one session and concatenates message chunks", async () => {
@@ -74,6 +78,32 @@ test("ACP backend keeps one session and concatenates message chunks", async () =
   assert.equal(entries[1].role, "assistant");
   assert.equal(entries[1].content, "PING-1");
   assert.equal(entries[1]._streaming, undefined);
+});
+
+test("ACP prompt submit does not wait for the turn", async () => {
+  let finish;
+  const hanging = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const rpc = fakeAcpRpc({
+    "session/prompt": async () => {
+      await hanging;
+      return { stopReason: "end_turn" };
+    },
+  });
+  const backend = createAcpBackend(rpc, { cwd: "/tmp" });
+  await backend.start();
+  const started = Date.now();
+  await backend.prompt("hello");
+  assert.ok(Date.now() - started < 100);
+  assert.equal((await backend.status()).busy, true);
+  assert.equal((await backend.status()).status, "working");
+  finish();
+  const deadline = Date.now() + 500;
+  while ((await backend.status()).busy && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal((await backend.status()).busy, false);
 });
 
 test("ACP backend auto-approves permission requests", async () => {

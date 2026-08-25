@@ -53,8 +53,11 @@ function publicEntries(entries) {
 export function selectAuthMethod(methods, preferredIds = []) {
   const list = Array.isArray(methods) ? methods : [];
   const ids = new Set(list.map((method) => method?.id).filter(Boolean));
-  for (const id of preferredIds) {
-    if (ids.has(id)) return id;
+  if (preferredIds.length) {
+    for (const id of preferredIds) {
+      if (ids.has(id)) return id;
+    }
+    return null;
   }
   return list[0]?.id ?? null;
 }
@@ -141,21 +144,22 @@ export function createAcpBackend(rpc, options = {}) {
     },
     async prompt(text) {
       if (!sessionId) throw new Error("ACP session is not ready");
+      if (busy) throw new Error("ACP session is busy");
       busy = true;
       error = null;
       appendEntry(entries, "user", text);
-      try {
-        await rpc.request("session/prompt", {
-          sessionId,
-          prompt: [{ type: "text", text }],
-        });
+      // AIS prompt.submit is 202-accepted. ACP session/prompt blocks until the
+      // turn ends, which is longer than the Controller's AIS HTTP timeout.
+      rpc.request("session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text }],
+      }).then(() => {
         finishAssistant(entries);
-      } catch (err) {
+      }).catch((err) => {
         error = err instanceof Error ? err.message : String(err);
-        throw err;
-      } finally {
+      }).finally(() => {
         busy = false;
-      }
+      });
     },
     async abort() {
       if (!sessionId) return;
