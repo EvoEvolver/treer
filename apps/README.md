@@ -13,6 +13,8 @@ network access remain deployment concerns.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`pi-ui`](pi-ui/README.md) is an Agent-scoped browser interface loaded inside
   a Pi Agent.
+- [`soul`](soul/README.md) is an experimental Agent-scoped file server that
+  uploads environment-bound state bundles and launches command Agents from them.
 
 Each App is source code, configuration schema, documentation, and tests. There
 is deliberately no App manifest, package installer, local command broker, or
