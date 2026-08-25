@@ -22,3 +22,36 @@ test("JSON-RPC error notifications do not crash the process", async () => {
   ]);
   rpc.close();
 });
+
+test("JSON-RPC incoming requests can be answered", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const written = [];
+  stdin.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  const rpc = createJsonRpcClient({ stdin, stdout, includeJsonrpc: true });
+  const seen = [];
+  rpc.events.on("request", (method, params, id) => seen.push([method, params, id]));
+  stdout.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "session/request_permission",
+    params: { options: [{ optionId: "allow-once" }] },
+  })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, [
+    ["session/request_permission", { options: [{ optionId: "allow-once" }] }, 7],
+  ]);
+  rpc.respond(7, { outcome: { outcome: "selected", optionId: "allow-once" } });
+  assert.equal(
+    written.at(-1),
+    `${JSON.stringify({
+      id: 7,
+      result: { outcome: { outcome: "selected", optionId: "allow-once" } },
+      jsonrpc: "2.0",
+    })}\n`,
+  );
+  rpc.close();
+});

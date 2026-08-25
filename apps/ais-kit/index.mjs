@@ -8,6 +8,7 @@ export {
 } from "./transcript.mjs";
 export { createOperationLog } from "./operations.mjs";
 export { createJsonRpcClient } from "./jsonrpc.mjs";
+export { createAcpBackend, selectAuthMethod } from "./acp.mjs";
 export {
   clearTreerInterface,
   registerTreerInterface,

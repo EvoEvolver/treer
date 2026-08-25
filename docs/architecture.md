@@ -154,12 +154,16 @@ verified descriptor is the single registration for both capabilities and
 presentation.
 
 Launch-profile sidecars in `apps/codex-ais`, `apps/opencode-ais`,
-`apps/dsh-ais`, and `apps/claude-ais` register the same protocol without a
-bundled page. They bind one Treer Agent to one downstream thread/session beside
-`codex app-server`, `opencode serve`, a dedicated DeepSeek Harness host
-(`dsh --profile web`) or SDK runtime, and Claude Code stream-json. Built-in
-`--kind codex` and `--kind claude` remain TUI/PTY paths. Shared helpers live in
-`apps/ais-kit`.
+`apps/dsh-ais`, `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`
+register the same protocol without a bundled page. They bind one Treer Agent to
+one downstream thread/session beside `codex app-server`, `opencode serve`, a
+dedicated DeepSeek Harness host (`dsh --profile web`) or SDK runtime, Claude
+Code stream-json, Grok Build ACP (`grok agent stdio`), and Cursor ACP
+(`cursor-agent acp`). Neither Grok Build nor Cursor ships a Codex-style
+app-server; ACP over stdio is their first-party editor integration. The Cursor
+sidecar uses `cursor-agent`, not `agent`, because Grok Build also installs an
+`agent` symlink. Built-in `--kind codex` and `--kind claude` remain TUI/PTY
+paths. Shared helpers live in `apps/ais-kit`.
 
 `GET /v1/transcript` pages by conversation turn. A turn starts at a user prompt
 and includes the following entries until the next user prompt. Leading non-user

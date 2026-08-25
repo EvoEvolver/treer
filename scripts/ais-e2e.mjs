@@ -47,6 +47,18 @@ const platforms = [
     name: "ais-e2e-claude",
     command: ["apps/claude-ais/scripts/treer-agent.sh"],
   },
+  {
+    id: "grok",
+    binary: "grok",
+    name: "ais-e2e-grok",
+    command: ["apps/grok-ais/scripts/treer-agent.sh"],
+  },
+  {
+    id: "cursor",
+    binary: "cursor-agent",
+    name: "ais-e2e-cursor",
+    command: ["apps/cursor-ais/scripts/treer-agent.sh"],
+  },
 ];
 
 function uniquePath() {

@@ -19,10 +19,11 @@ network access remain deployment concerns.
   uploads environment-bound state bundles and launches command Agents from them.
 - [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
-  [`dsh-ais`](dsh-ais/README.md), and [`claude-ais`](claude-ais/README.md) are
+  [`dsh-ais`](dsh-ais/README.md), [`claude-ais`](claude-ais/README.md),
+  [`grok-ais`](grok-ais/README.md), and [`cursor-ais`](cursor-ais/README.md) are
   per-Agent AIS sidecars over Codex app-server, OpenCode HTTP, DeepSeek Harness
-  session APIs, and Claude Code stream-json. They register semantic capabilities
-  without a bundled browser page.
+  session APIs, Claude Code stream-json, and Grok Build / Cursor ACP. They
+  register semantic capabilities without a bundled browser page.
 
 Each App is source code, configuration schema, documentation, and tests. There
 is deliberately no App manifest, package installer, local command broker, or

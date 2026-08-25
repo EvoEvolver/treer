@@ -24,7 +24,8 @@ export function createJsonRpcClient(options = {}) {
     } catch {
       return;
     }
-    if (message && Object.hasOwn(message, "id") && pending.has(message.id)) {
+    const hasId = Boolean(message && Object.hasOwn(message, "id") && message.id !== null);
+    if (hasId && pending.has(message.id)) {
       const { resolve, reject } = pending.get(message.id);
       pending.delete(message.id);
       if (message.error) {
@@ -39,9 +40,15 @@ export function createJsonRpcClient(options = {}) {
     }
     if (typeof message?.method === "string") {
       const params = message.params ?? {};
+      const eventName = message.method === "error" ? "server-error" : message.method;
+      if (hasId) {
+        events.emit("request", message.method, params, message.id);
+        events.emit(eventName, params, message.id);
+        return;
+      }
       events.emit("notification", message.method, params);
       // Node's EventEmitter treats "error" as fatal unless a listener exists.
-      events.emit(message.method === "error" ? "server-error" : message.method, params);
+      events.emit(eventName, params);
     }
   });
   reader.on("close", () => {
@@ -73,6 +80,11 @@ export function createJsonRpcClient(options = {}) {
       const message = { method };
       if (includeJsonrpc) message.jsonrpc = "2.0";
       if (params !== undefined) message.params = params;
+      write(message);
+    },
+    respond(id, result) {
+      const message = { id, result: result ?? {} };
+      if (includeJsonrpc) message.jsonrpc = "2.0";
       write(message);
     },
     close() {

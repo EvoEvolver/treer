@@ -14,3 +14,5 @@ Adapters in this repository:
 - [`../opencode-ais`](../opencode-ais/README.md) — OpenCode HTTP
 - [`../dsh-ais`](../dsh-ais/README.md) — DeepSeek Harness session API
 - [`../claude-ais`](../claude-ais/README.md) — Claude Code stream-json session
+- [`../grok-ais`](../grok-ais/README.md) — Grok Build ACP (`grok agent stdio`)
+- [`../cursor-ais`](../cursor-ais/README.md) — Cursor ACP (`cursor-agent acp`)

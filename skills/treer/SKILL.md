@@ -222,9 +222,11 @@ treer interface clear
 In-tree adapters register the same protocol from launch profiles. Use
 `apps/pi-ui` and `apps/codex-ui` for bundled browser UIs, `apps/codex-ais` for a
 Codex app-server sidecar without HTML, `apps/opencode-ais` for OpenCode HTTP,
-`apps/dsh-ais` for DeepSeek Harness, and `apps/claude-ais` for Claude Code
-stream-json. Each Agent is one thread/session. Built-in `--kind codex` and
-`--kind claude` stay on the terminal path and are not Interfaces.
+`apps/dsh-ais` for DeepSeek Harness, `apps/claude-ais` for Claude Code
+stream-json, `apps/grok-ais` for Grok Build ACP, and `apps/cursor-ais` for
+Cursor ACP. Launch Cursor with `cursor-agent`, not `agent`. Each Agent is one
+thread/session. Built-in `--kind codex` and `--kind claude` stay on the terminal
+path and are not Interfaces.
 
 ## Publish an HTTP service
 

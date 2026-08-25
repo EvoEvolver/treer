@@ -705,8 +705,8 @@ processes register once at startup and should deduplicate prompts by
 operations. The bundled Pi UI and single-Agent [Codex UI](apps/codex-ui/README.md)
 perform this registration automatically. Launch-profile sidecars without a
 bundled page live under `apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`,
-and `apps/claude-ais`. Built-in `--kind codex` and `--kind claude` stay on the
-terminal path.
+`apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`. Built-in `--kind
+codex` and `--kind claude` stay on the terminal path.
 
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles

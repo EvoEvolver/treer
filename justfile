@@ -32,6 +32,8 @@ check:
     node --test apps/opencode-ais/*.test.mjs
     node --test apps/dsh-ais/*.test.mjs
     node --test apps/claude-ais/*.test.mjs
+    node --test apps/grok-ais/*.test.mjs
+    node --test apps/cursor-ais/*.test.mjs
     cargo build --workspace
     cargo fmt --all -- --check
     cargo test --workspace
@@ -74,6 +76,8 @@ app-test:
     node --test apps/opencode-ais/*.test.mjs
     node --test apps/dsh-ais/*.test.mjs
     node --test apps/claude-ais/*.test.mjs
+    node --test apps/grok-ais/*.test.mjs
+    node --test apps/cursor-ais/*.test.mjs
 
 ais-e2e:
     node scripts/ais-e2e.mjs
