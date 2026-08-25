@@ -1126,7 +1126,7 @@ async fn read_agent_transcript(
     let mut suffix = format!("agents/{agent_id}/transcript");
     let parameters = query
         .iter()
-        .filter(|(key, _)| matches!(key.as_str(), "cursor" | "limit"))
+        .filter(|(key, _)| matches!(key.as_str(), "page" | "cursor" | "limit"))
         .map(|(key, value)| {
             format!(
                 "{}={}",

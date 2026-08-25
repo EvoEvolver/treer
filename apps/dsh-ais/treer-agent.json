@@ -1,0 +1,7 @@
+{
+  "name": "DeepSeek Harness AIS",
+  "description": "DeepSeek Harness session API with a per-Agent Treer Interface adapter. One Agent is one session.",
+  "run": {
+    "command": "./scripts/treer-agent.sh"
+  }
+}

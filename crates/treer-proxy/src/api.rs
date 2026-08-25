@@ -4595,7 +4595,10 @@ async fn read_agent_transcript(
         agent_policy_resource(&agent),
     )
     .await?;
-    let cursor = query.get("cursor").cloned();
+    let cursor = query
+        .get("page")
+        .cloned()
+        .or_else(|| query.get("cursor").cloned());
     let limit = query.get("limit").and_then(|value| value.parse().ok());
     let data = state
         .send_command(

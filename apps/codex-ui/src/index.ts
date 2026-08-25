@@ -90,26 +90,30 @@ function statePayload() {
 }
 
 function transcriptPayload(url: URL) {
-  const thread = runtime.snapshot().thread;
-  const entries = (thread?.turns ?? []).flatMap((turn) =>
-    turn.items.map((item, index) => ({
-      id: item.id || `${turn.id}:${index}`,
-      kind: item.kind,
-      role: item.kind === "userMessage" ? "user" : item.kind === "agentMessage" ? "assistant" : null,
-      content: item.text,
-      created_at: turn.startedAt,
-    })),
-  );
-  const cursor = Math.max(0, Number.parseInt(url.searchParams.get("cursor") || "0", 10) || 0);
-  const limit = Math.min(1000, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "100", 10) || 100));
-  const page = entries.slice(cursor, cursor + limit);
-  const next = cursor + page.length;
+  const turns = runtime.snapshot().thread?.turns ?? [];
+  const pageRaw = url.searchParams.get("page") ?? url.searchParams.get("cursor") ?? "0";
+  const limitRaw = url.searchParams.get("limit") ?? "1";
+  const page = Math.max(0, Number.parseInt(pageRaw, 10) || 0);
+  const limit = Math.min(1000, Math.max(1, Number.parseInt(limitRaw, 10) || 1));
+  const selected = turns.slice(page, page + limit);
+  const nextPage = page + selected.length < turns.length ? page + selected.length : null;
   return {
     agent_id: agentId,
     interface_instance_id: interfaceInstanceId,
-    cursor: String(cursor),
-    next_cursor: next < entries.length ? String(next) : null,
-    entries: page,
+    page,
+    page_count: turns.length,
+    next_page: nextPage,
+    cursor: String(page),
+    next_cursor: nextPage == null ? null : String(nextPage),
+    entries: selected.flatMap((turn) =>
+      turn.items.map((item, index) => ({
+        id: item.id || `${turn.id}:${index}`,
+        kind: item.kind,
+        role: item.kind === "userMessage" ? "user" : item.kind === "agentMessage" ? "assistant" : null,
+        content: item.text,
+        created_at: turn.startedAt,
+      })),
+    ),
   };
 }
 

@@ -201,18 +201,30 @@ are never retried through PTY input. Read a structured interface transcript
 with:
 
 ```bash
-treer agent transcript reviewer --limit 100
+treer agent transcript reviewer --page 0
 ```
+
+Each page is one conversation turn: a user prompt plus the following entries
+until the next user prompt. `--cursor` is an alias for `--page`. `--limit`
+selects how many turns to return and defaults to 1. The JSON includes
+`page`, `page_count`, and `next_page`.
 
 Transcript requires `transcript.read`; ordinary `treer agent read` continues to
 read terminal replay. Attach, send-keys, resize, stop, and delete remain terminal
-or Host operations. The interface must deduplicate prompts by `operation_id`,
-repeat registration after Controller restart, and clear it during a clean
-shutdown:
+or Host operations. The interface must deduplicate prompts by `operation_id` and
+clear registration during a clean shutdown. The Controller caches a
+process-bound descriptor and revalidates it after a hot restart:
 
 ```bash
 treer interface clear
 ```
+
+In-tree adapters register the same protocol from launch profiles. Use
+`apps/pi-ui` and `apps/codex-ui` for bundled browser UIs, `apps/codex-ais` for a
+Codex app-server sidecar without HTML, `apps/opencode-ais` for OpenCode HTTP,
+`apps/dsh-ais` for DeepSeek Harness, and `apps/claude-ais` for Claude Code
+stream-json. Each Agent is one thread/session. Built-in `--kind codex` and
+`--kind claude` stay on the terminal path and are not Interfaces.
 
 ## Publish an HTTP service
 

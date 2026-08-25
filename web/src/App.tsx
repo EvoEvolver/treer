@@ -112,8 +112,16 @@ function authorizationReturnUrl() {
   }
 }
 
+function machineOnline(machine?: Machine) {
+  return machine?.status === "online"
+}
+
+function agentDisplayStatus(agent: Agent, machine?: Machine) {
+  return machineOnline(machine) ? agent.status : "offline"
+}
+
 function Status({ value }: { value: string }) {
-  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 text-[10px] font-medium capitalize text-zinc-500", value === "idle" && "text-emerald-700", ["working", "starting"].includes(value) && "text-sky-700", value === "blocked" && "text-amber-700", ["failed", "exited"].includes(value) && "text-red-600")}><span className="size-1.5 rounded-full bg-current opacity-75" />{value}</span>
+  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 text-[10px] font-medium capitalize text-zinc-500", value === "idle" && "text-emerald-700", ["working", "starting"].includes(value) && "text-sky-700", value === "blocked" && "text-amber-700", ["failed", "exited", "offline"].includes(value) && "text-red-600")}><span className="size-1.5 rounded-full bg-current opacity-75" />{value}</span>
 }
 
 function IconButton({ label, children, ...props }: React.ComponentProps<typeof Button> & { label: string }) {
@@ -533,7 +541,9 @@ function WorkspaceApp() {
   }, [snapshot])
 
   const selectedAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId)
-  const selectedAgentInterface = selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
+  const selectedAgentMachine = snapshot?.servers.find((machine) => machine.server_id === selectedAgent?.server_id)
+  const selectedAgentMachineOnline = machineOnline(selectedAgentMachine)
+  const selectedAgentInterface = selectedAgentMachineOnline && selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
   const onlineMachines = snapshot?.servers.filter((machine) => machine.status === "online") ?? []
   const selectedCreateProfile = launchProfiles.find((profile) => profile.profile_id === agentProfileId)
   const organization = organizations.find((item) => item.organization_id === organizationId)
@@ -1174,7 +1184,12 @@ function WorkspaceApp() {
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : mainView === "profiles" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh profiles" onClick={loadLaunchProfiles} disabled={launchProfilesLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openNewLaunchProfile}><Plus />New profile</Button></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={loadAudit} disabled={auditLoading}><RotateCw /></IconButton> : mainView === "network" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div> : null}
         </header>
-        {mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-white", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-[#0f1215] pt-[env(safe-area-inset-top)]")}>
+        {mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
+          <div className="max-w-sm">
+            <p className="text-sm font-medium text-zinc-800">Machine is offline</p>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">{machineName(selectedAgentMachine, selectedAgent.server_id)} is not connected to the control plane. Start the Host on that machine, then open this Agent again.</p>
+          </div>
+        </div> : mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-white", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-[#0f1215] pt-[env(safe-area-inset-top)]")}>
           {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Interface"}</span><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div>}
           <iframe key={`${selectedAgentInterface.instance_id}:${selectedAgentInterface.registered_at}:${interfaceUiRevision}`} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-white" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" />
         </div> : mainView === "terminal" ? mobileTerminalIdle ? null : <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
@@ -1369,7 +1384,7 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
           <div className="truncate text-xs font-medium">{agent.name}</div>
           <div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{agent.kind} · {agent.agent_id}</div>
         </div>
-        <div className="flex items-center gap-2"><Status value={agent.status} /><Button size="sm" variant="outline" onClick={() => onOpenAgent(agent.agent_id)}>Terminal</Button></div>
+        <div className="flex items-center gap-2"><Status value={agentDisplayStatus(agent, machine)} /><Button size="sm" variant="outline" onClick={() => onOpenAgent(agent.agent_id)}>Terminal</Button></div>
       </div>)}</div> : <EmptyState icon={<TerminalSquare />} label="No agents running on this machine" />}
     </section>
 
@@ -1404,8 +1419,8 @@ function MachineItem({ machine, selected, onClick, onRename, onDelete }: { machi
 }
 
 function AgentItem({ agent, machine, selected, onClick, onRename, onStop, onDelete }: { agent: Agent; machine?: Machine; selected: boolean; onClick: () => void; onRename: () => void; onStop: () => void; onDelete: () => void }) {
-  const running = activeStatuses.has(agent.status)
-  return <div className={cn("group flex min-h-12 items-center gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-medium">{agent.name}</span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""} · {machineName(machine, agent.server_id)}</span></button><div className="flex shrink-0 flex-col items-end gap-0.5"><Status value={agent.status} /><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className={cn("size-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100", selected && "opacity-100")} aria-label={`Actions for ${agent.name}`}><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem><DropdownMenuItem disabled={!running} onSelect={onStop}><Square />Stop</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
+  const running = machineOnline(machine) && activeStatuses.has(agent.status)
+  return <div className={cn("group flex min-h-12 items-center gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-medium">{agent.name}</span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""} · {machineName(machine, agent.server_id)}</span></button><div className="flex shrink-0 flex-col items-end gap-0.5"><Status value={agentDisplayStatus(agent, machine)} /><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className={cn("size-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100", selected && "opacity-100")} aria-label={`Actions for ${agent.name}`}><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem><DropdownMenuItem disabled={!running} onSelect={onStop}><Square />Stop</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
 }
 
 export default function App() {
