@@ -18,6 +18,7 @@ matching the question; follow its source links for implementation detail.
 | [Treer Mail App](../apps/mail/README.md) | Mail setup, browser OAuth, legacy migration, backup, and limits |
 | [Treer Telegram App](../apps/telegram/README.md) | Telegram setup, bindings, reply mapping, recovery, and limits |
 | [Root README](../README.md) | Installation, deployment, and operator command examples |
+| [Self-hosted Compose](../deploy/README.md) | GHCR images, updater sidecar, and `/admin` control-plane updates |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 | [Treer install skill](../skills/treer-install/SKILL.md) | Recipe-install contract prompted when creating an installer with a git URL |
 
@@ -65,6 +66,7 @@ Agent create `--recipe` embed that file.
 | Change | Documentation to review |
 | --- | --- |
 | User-visible setup or commands | `README.md`, embedded Treer skill |
+| Self-hosted images or `/admin` update | `deploy/README.md`, release process, security model |
 | Product scope or promise | Product direction |
 | Capability classification or sequencing | Capability roadmap |
 | Component ownership, route, protocol, or state | Architecture |

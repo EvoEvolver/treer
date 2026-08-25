@@ -352,6 +352,7 @@ test("opening Settings shows a floating panel with Usage & billing, Account, and
   await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Usage & billing" })).toBeVisible()
   await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Account" })).toBeVisible()
   await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" })).toBeVisible()
+  await expect(settings.getByText("Control plane")).toHaveCount(0)
   await expect(page.locator("header").getByText("Settings")).toHaveCount(0)
 })
 

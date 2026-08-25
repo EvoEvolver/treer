@@ -27,6 +27,7 @@ flowchart LR
 | `treer-cli` | Human/operator and managed-Agent commands, including Core Message |
 | `treer-protocol` | Shared public and Controller wire models |
 | `apps` | Ordinary service code, presentation, external APIs, configuration, secrets, and App-owned state |
+| `deploy/updater` | Self-hosted Compose mutations over `docker.sock`; not part of Proxy |
 
 The Host is intentionally product-agnostic. Shared wire models live in protocol
 crates. Every distributed lookup is scoped by workspace before machine or Agent
@@ -37,7 +38,9 @@ terminals, launch profiles, network, machine overview, and audit. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
 `localStorage` (`treer-theme`) and currently offers English only; Usage &
-billing is a placeholder until a billing backend exists.
+billing is a placeholder until a billing backend exists. Control-plane image
+updates are not in Settings. They live on `/admin` for the platform
+administrator.
 
 ## Core Message
 
@@ -179,5 +182,16 @@ traffic counters, and Core Message. NATS supplies events and cross-Proxy live
 routing but is not Message truth. App SQLite databases contain only App-owned
 sessions or external delivery mappings.
 
-See [Security](security.md) for trust claims and [Quality](quality.md) for the
-verification matrix.
+## Self-hosted control plane updates
+
+Compose pulls immutable GHCR tags for Proxy, App, and the updater sidecar.
+`/admin` exposes Check and Apply to the platform administrator. Proxy forwards
+those calls to the sidecar over HTTP with a shared token and never mounts
+`docker.sock`. Hosted Railway leaves `TREER_UPDATER_URL` unset.
+
+After the control plane moves, enrolled machines still run
+`treer-agent-server update` on each host. Remote machine rollout from the
+control plane is a follow-up.
+
+See [Self-hosted Compose](../deploy/README.md), [Security](security.md) for
+trust claims, and [Quality](quality.md) for the verification matrix.

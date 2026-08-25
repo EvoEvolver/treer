@@ -1,3 +1,5 @@
+name: treer
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -25,7 +27,7 @@ services:
       - "127.0.0.1:8222:8222"
 
   proxy:
-    build: .
+    image: ghcr.io/${TREER_GHCR_OWNER:-evoevolver}/treer-proxy:${TREER_IMAGE_TAG:-stable}
     init: true
     restart: unless-stopped
     depends_on:
@@ -33,31 +35,58 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+      updater:
+        condition: service_healthy
     environment:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD}"
       DATABASE_URL: "${DATABASE_URL:?set DATABASE_URL}"
       PORT: "8787"
       TREER_PROXY_PUBLIC_URL: "${TREER_PROXY_PUBLIC_URL:-http://127.0.0.1:8787/}"
+      TREER_APP_PUBLIC_URL: "${TREER_APP_PUBLIC_URL:-http://127.0.0.1:3000/}"
       TREER_NATS_URL: "nats://nats:4222"
       TREER_NATS_STREAM: "TREER_EVENTS"
       TREER_NATS_SUBJECT_PREFIX: "treer.v1.events"
       TREER_NATS_CLUSTER_SUBJECT_PREFIX: "treer.v1.cluster"
       TREER_ENABLE_CORE_MESSAGES: "true"
-      TREER_APP_PUBLIC_URL: "http://127.0.0.1:3000/"
+      TREER_UPDATER_URL: "http://updater:7420"
+      TREER_UPDATER_TOKEN: "${TREER_UPDATER_TOKEN:?set TREER_UPDATER_TOKEN}"
     ports:
       - "8787:8787"
 
   app:
-    build:
-      context: ./web
+    image: ghcr.io/${TREER_GHCR_OWNER:-evoevolver}/treer-app:${TREER_IMAGE_TAG:-stable}
+    restart: unless-stopped
     environment:
       PORT: "8080"
-      TREER_PROXY_PUBLIC_URL: "http://127.0.0.1:8787/"
+      TREER_PROXY_PUBLIC_URL: "${TREER_PROXY_PUBLIC_URL:-http://127.0.0.1:8787/}"
     depends_on:
       proxy:
         condition: service_started
     ports:
       - "3000:8080"
+
+  updater:
+    image: ghcr.io/${TREER_GHCR_OWNER:-evoevolver}/treer-updater:${TREER_IMAGE_TAG:-stable}
+    restart: unless-stopped
+    environment:
+      TREER_LISTEN: "0.0.0.0:7420"
+      TREER_UPDATER_TOKEN: "${TREER_UPDATER_TOKEN:?set TREER_UPDATER_TOKEN}"
+      TREER_COMPOSE_FILE: /compose/compose.yaml
+      TREER_COMPOSE_PROJECT: treer
+      TREER_UPDATE_CHANNEL: "${TREER_IMAGE_TAG:-stable}"
+      TREER_GHCR_OWNER: "${TREER_GHCR_OWNER:-evoevolver}"
+      TREER_PROXY_IMAGE: "ghcr.io/${TREER_GHCR_OWNER:-evoevolver}/treer-proxy"
+      TREER_APP_IMAGE: "ghcr.io/${TREER_GHCR_OWNER:-evoevolver}/treer-app"
+      TREER_UPDATER_IMAGE: "ghcr.io/${TREER_GHCR_OWNER:-evoevolver}/treer-updater"
+      TREER_GHCR_TOKEN: "${TREER_GHCR_TOKEN:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/compose:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7420/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   postgres-data:

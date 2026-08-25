@@ -24,7 +24,36 @@ operations.
 
 The dated [source-level project review](docs/research/2026-08-18-project-review.md)
 contains the original technology survey, detailed information-flow diagrams,
-and comparisons with Herdr and AgentENV.
+and comparisons with Herdr and AgentENV. Self-hosted Compose, GHCR images, and
+`/admin` control-plane updates are in [deploy/README.md](deploy/README.md).
+
+## Self-hosted deployment
+
+A single-host install runs PostgreSQL, NATS, Proxy, the browser App, and an
+updater sidecar from published GHCR images. Copy `.env.example`, set
+`ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `DATABASE_URL`, and a long random
+`TREER_UPDATER_TOKEN`, then pull and start:
+
+```bash
+cp .env.example .env
+docker compose pull
+docker compose up -d
+```
+
+The App is on port 3000, the Proxy on 8787. Open `/admin` with `ADMIN_PASSWORD`
+to invite users and to update the control-plane images. Apply talks to the
+updater sidecar; Proxy never mounts the Docker socket. After the control plane
+moves, each enrolled machine still runs `treer-agent-server update`. Default
+`TREER_IMAGE_TAG=stable`. Pin `canary` or a version tag such as `v0.1.3` when
+you want that channel instead.
+
+Set `TREER_PROXY_PUBLIC_URL` to the URL other machines can reach and
+`TREER_APP_PUBLIC_URL` to the exact browser origin. Operator detail, rollback,
+and GHCR tag rules are in [deploy/README.md](deploy/README.md).
+
+Local source builds overlay `compose.dev.yaml` and pass `--build`. The hosted
+Railway plus Cloudflare path is a separate source rebuild of Proxy plus a
+Worker App; see [Managed deployment](#managed-deployment).
 
 ## Run the prototype
 
@@ -283,10 +312,12 @@ require a separate privileged installation flow.
 The platform administrator is not a Treer user and does not belong to an
 organization. Open `/admin` and use the password supplied in `ADMIN_PASSWORD`
 to access the separate admin dashboard. It reports the current platform-wide
-machine and Agent totals and creates single-use user invitations. A user who
-registers from an administrator invitation receives an organization named
-`<preferred name> Personal` and owns it. Treer does not seed an initial
-organization or workspace.
+machine and Agent totals and creates single-use user invitations. On a
+self-hosted Compose stack it also checks and applies GHCR image updates for
+Proxy, App, and the updater sidecar. Workspace Settings does not include that
+control. A user who registers from an administrator invitation receives an
+organization named `<preferred name> Personal` and owns it. Treer does not seed
+an initial organization or workspace.
 
 Organization owners and administrators can create member invitations from
 **Members**. Registering from an organization invitation only joins that
@@ -368,23 +399,10 @@ Controller connections may land on different replicas.
 Each Controller heartbeat also rechecks its machine against PostgreSQL, so a
 revoked machine is disconnected even if NATS delivery is interrupted.
 
-For a single-host deployment with separate PostgreSQL, NATS, Proxy, and App
-processes, use the checked-in Compose stack:
-
-```bash
-ADMIN_PASSWORD='replace-this' \
-POSTGRES_PASSWORD='replace-this-too' \
-DATABASE_URL='postgres://treer:replace-this-too@postgres:5432/treer' \
-docker compose up --build -d
-curl -fsS http://127.0.0.1:8222/jsz
-```
-
-This persists PostgreSQL and JetStream data in separate volumes. NATS client
-and monitoring ports bind only to host loopback; the Proxy is available on port
-8787 and the App on port 3000. Set `TREER_PROXY_PUBLIC_URL` when other machines
-must reach the Proxy and `TREER_APP_PUBLIC_URL` to the exact browser origin. If
-credentials contain URL-reserved characters, percent-encode them in
-`DATABASE_URL`.
+The checked-in Compose stack starts NATS next to PostgreSQL, Proxy, App, and
+the updater. See [Self-hosted deployment](#self-hosted-deployment). NATS client
+and monitoring ports bind only to host loopback. If credentials contain
+URL-reserved characters, percent-encode them in `DATABASE_URL`.
 
 For a Proxy started outside Compose, configure:
 

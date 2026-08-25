@@ -26,6 +26,7 @@ check:
     python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
     node --test apps/pi-ui/*.test.mjs
     cargo build --workspace
     cargo fmt --all -- --check
@@ -58,6 +59,9 @@ telegram-test:
 
 soul-test:
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
+
+updater-test:
+    python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
 
 app-test:
     python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v

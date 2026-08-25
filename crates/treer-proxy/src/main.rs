@@ -9,6 +9,7 @@ mod message_store;
 pub mod policy;
 mod state;
 mod traffic;
+mod updater;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -128,6 +129,14 @@ struct Args {
         help = "Enable Core Message API routes after schema and policy rollout"
     )]
     enable_core_messages: bool,
+    #[arg(
+        long,
+        env = "TREER_UPDATER_URL",
+        help = "Internal updater sidecar URL; unset on hosted Railway"
+    )]
+    updater_url: Option<Url>,
+    #[arg(long, env = "TREER_UPDATER_TOKEN", hide_env_values = true)]
+    updater_token: Option<String>,
     #[arg(long, env = "RAILWAY_PUBLIC_DOMAIN", hide = true)]
     railway_public_domain: Option<String>,
     #[arg(long, env = "RAILWAY_REPLICA_ID", hide = true)]
@@ -256,6 +265,16 @@ async fn main() -> anyhow::Result<()> {
     let identity = identity::IdentityIssuer::load(&auth, &proxy_public_url)
         .await
         .context("failed to initialize workload identity issuer")?;
+    let updater = match (args.updater_url, args.updater_token) {
+        (None, None) => updater::UpdaterClient::disabled(),
+        (Some(url), Some(token)) => updater::UpdaterClient::new(url, token)?,
+        (Some(_), None) => {
+            anyhow::bail!("TREER_UPDATER_TOKEN must be set when TREER_UPDATER_URL is configured")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("TREER_UPDATER_URL must be set when TREER_UPDATER_TOKEN is configured")
+        }
+    };
     api::spawn_network_metadata_refresh(state.clone(), auth.clone());
     let app = api::router(
         state,
@@ -267,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
         ingress.clone(),
         messages,
         api::CapabilityRollout::new(args.enable_core_messages),
+        updater,
     )
     .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)

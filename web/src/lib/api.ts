@@ -81,6 +81,30 @@ export interface AdminDashboard {
   agent_count: number
 }
 
+export interface ControlPlaneService {
+  name: string
+  present: boolean
+  image?: string
+  digest?: string | null
+  version?: string | null
+  revision?: string | null
+  channel_digest?: string
+  update_available?: boolean
+}
+
+export interface ControlPlaneJob {
+  id: string
+  state: "running" | "succeeded" | "failed"
+  error?: string | null
+}
+
+export interface ControlPlaneUpdateStatus {
+  channel: string
+  services: ControlPlaneService[]
+  job?: ControlPlaneJob | null
+  update_available?: boolean
+}
+
 export interface VirtualNetworkHost {
   hostname: string
   service_id: string

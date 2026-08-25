@@ -55,6 +55,8 @@ boundary.
 | Local operator credential | One Controller install; protects the local API but is not a same-account sandbox |
 | Workload identity token | One Agent/machine/service audience for 60 seconds |
 | Human App token | One user/workspace/service audience; verification rechecks membership and service |
+| Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts |
+| Updater token | Shared Bearer secret between Proxy and the Compose updater sidecar; never exposed to browsers |
 | Mail cookie | Local opaque handle to an App token; compromise of Mail state grants that token until expiry |
 | Telegram bot token | One Telegram bot; Telegram and any process that can inspect it can act as the bot |
 | Release signing key | All official release manifests; must remain offline and outside runtime systems |
@@ -79,6 +81,12 @@ Public service ingress deliberately accepts anonymous internet traffic.
 Workspace ingress requires a current member session or service-audience token.
 The Proxy strips gateway credentials and Treer headers before forwarding, but
 it remains in the browser-to-service data path.
+
+Self-hosted Compose gives the updater sidecar the host Docker socket and a
+read-only bind of `compose.yaml`. Compromise of that sidecar is host Docker
+compromise. Proxy, App, PostgreSQL, and NATS do not mount the socket. Hosted
+Railway does not run the sidecar. `/api/admin/update*` require a current
+platform admin session; workspace members cannot start an image apply.
 
 Linux `publish_ports` maps a namespace TCP port onto the machine loopback. It
 is not an internet listener. Any process on that machine that can reach
@@ -105,5 +113,6 @@ security control.
    updaters.
 
 Relevant source boundaries are `crates/treer-proxy/src/auth.rs`,
-`identity.rs`, `policy.rs`, `message_store.rs`, and the Controller sandbox and
+`identity.rs`, `policy.rs`, `message_store.rs`, `updater.rs`,
+`deploy/updater/updater.py`, and the Controller sandbox and
 network modules.

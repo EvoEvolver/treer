@@ -1,0 +1,198 @@
+name: Publish GHCR images
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing version tag to point a channel at, for example v0.1.3
+        required: true
+        type: string
+      channel:
+        description: Mutable channel pointer to move after Canary or Production
+        required: true
+        type: choice
+        options:
+          - canary
+          - stable
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-ghcr-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    if: github.event_name == 'push'
+    name: Build ${{ matrix.image }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: treer-proxy
+            file: Dockerfile
+            context: .
+            runner: ubuntu-22.04
+            platform: linux/amd64
+            suffix: amd64
+          - image: treer-proxy
+            file: Dockerfile
+            context: .
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
+            suffix: arm64
+          - image: treer-app
+            file: web/Dockerfile
+            context: ./web
+            runner: ubuntu-22.04
+            platform: linux/amd64
+            suffix: amd64
+          - image: treer-app
+            file: web/Dockerfile
+            context: ./web
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
+            suffix: arm64
+          - image: treer-updater
+            file: deploy/updater/Dockerfile
+            context: ./deploy/updater
+            runner: ubuntu-22.04
+            platform: linux/amd64
+            suffix: amd64
+          - image: treer-updater
+            file: deploy/updater/Dockerfile
+            context: ./deploy/updater
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          test "${tag}" != "latest"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          test "${tag}" = "v${cargo_version}"
+
+      - name: Lowercase image owner
+        id: owner
+        shell: bash
+        run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          build-args: |
+            TREER_VERSION=${{ github.ref_name }}
+            TREER_BUILD_COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          tags: ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ matrix.image }}:sha-${{ github.sha }}-${{ matrix.suffix }}
+
+  merge:
+    if: github.event_name == 'push'
+    needs: publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        image: [treer-proxy, treer-app, treer-updater]
+    steps:
+      - name: Lowercase image owner
+        id: owner
+        shell: bash
+        run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create version, digest, and canary tags
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${IMAGE}:${GITHUB_REF_NAME}" \
+            -t "${IMAGE}:sha-${GITHUB_SHA}" \
+            -t "${IMAGE}:canary" \
+            "${IMAGE}:sha-${GITHUB_SHA}-amd64" \
+            "${IMAGE}:sha-${GITHUB_SHA}-arm64"
+
+  retag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        image: [treer-proxy, treer-app, treer-updater]
+    steps:
+      - name: Reject latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ inputs.version }}" != "latest"
+          test "${{ inputs.channel }}" != "latest"
+
+      - name: Lowercase image owner
+        id: owner
+        shell: bash
+        run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Point channel tag at the version digest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${IMAGE}:${{ inputs.channel }}" \
+            "${IMAGE}:${{ inputs.version }}"

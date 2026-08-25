@@ -42,8 +42,9 @@ import {
   UserRound,
   Users,
   X,
+  Download,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type AgentLaunchProfile, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type AgentLaunchProfile, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { cn } from "@/lib/utils"
 import { SettingsDialog } from "@/components/settings"
@@ -281,9 +282,114 @@ function AdminPanel() {
   if (authenticated === undefined) return <div className="grid min-h-dvh place-items-center bg-sidebar text-sm text-muted-foreground">Loading admin...</div>
   if (!authenticated) return <main className="grid min-h-dvh place-items-center bg-sidebar p-4"><form onSubmit={login} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm"><div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] text-white"><ShieldCheck className="size-4" /></div><h1 className="text-xl font-semibold">Treer administration</h1><p className="mt-1 text-sm text-muted-foreground">Platform access is separate from user accounts.</p><div className="mt-6 space-y-2"><Label htmlFor="admin-password">Admin password</Label><Input id="admin-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></div><div className="mt-3 min-h-5 text-xs text-destructive">{error}</div><div className="mt-4 flex justify-end"><Button type="submit" disabled={submitting}>{submitting ? "Please wait" : "Open admin panel"}</Button></div></form></main>
 
-  return <main className="min-h-dvh bg-sidebar"><header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div><Button size="sm" onClick={loadDashboard}><RotateCw />Refresh</Button></div>{error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="grid grid-cols-2 border-y"><div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div><div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div></div><section className="mt-12"><h2 className="text-sm font-semibold">User invitations</h2><div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div><Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button></div></section></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
+  return <main className="min-h-dvh bg-sidebar"><header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div><Button size="sm" onClick={loadDashboard}><RotateCw />Refresh</Button></div>{error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="grid grid-cols-2 border-y"><div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div><div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div></div><ControlPlaneUpdate onError={setError} /><section className="mt-12"><h2 className="text-sm font-semibold">User invitations</h2><div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div><Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button></div></section></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
 }
 
+
+function ControlPlaneUpdate({ onError }: { onError: (message: string) => void }) {
+  const [status, setStatus] = useState<ControlPlaneUpdateStatus | null>(null)
+  const [configured, setConfigured] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const next = await api<ControlPlaneUpdateStatus>("/api/admin/update")
+      setConfigured(true)
+      setStatus(next)
+      return next
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 404) {
+        setConfigured(false)
+        setStatus(null)
+        return null
+      }
+      throw reason
+    }
+  }, [])
+
+  useEffect(() => {
+    loadStatus().catch((reason) => onError(reason instanceof Error ? reason.message : "Unable to load control-plane status"))
+  }, [loadStatus, onError])
+
+  async function checkForUpdates() {
+    setBusy(true)
+    try {
+      const next = await api<ControlPlaneUpdateStatus>("/api/admin/update/check")
+      setConfigured(true)
+      setStatus(next)
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "Unable to check for updates")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function applyUpdate() {
+    setBusy(true)
+    onError("")
+    try {
+      const accepted = await api<ControlPlaneUpdateStatus>("/api/admin/update", { method: "POST", body: "{}" })
+      setStatus(accepted)
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000))
+        try {
+          const next = await loadStatus()
+          if (!next) return
+          if (next.job?.state === "running") continue
+          if (next.job?.state === "failed") {
+            onError(next.job.error || "Control-plane update failed")
+            return
+          }
+          return
+        } catch {
+          // Proxy and updater bounce while Compose recreates them.
+        }
+      }
+      onError("The update is still running. Refresh this page after the control plane returns.")
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "Unable to apply the update")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (configured === null) return null
+  if (!configured) {
+    return <section className="mt-12">
+      <h2 className="text-sm font-semibold">Control plane</h2>
+      <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">Control-plane updates are not configured on this deployment. Hosted Railway uses its own release promotion. Self-hosted Compose exposes this panel through the updater sidecar.</p>
+    </section>
+  }
+
+  const jobRunning = status?.job?.state === "running" || busy
+  const digestLabel = (value?: string | null) => value ? value.replace(/^sha256:/, "").slice(0, 12) : "unknown"
+
+  return <section className="mt-12">
+    <h2 className="text-sm font-semibold">Control plane</h2>
+    <p className="mt-1 text-xs text-muted-foreground">Updates pull immutable GHCR tags for Proxy, App, and the updater sidecar. Enrolled machines still run <span className="font-mono">treer-agent-server update</span> on each host.</p>
+    <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+      <div>
+        <div className="text-sm font-medium">Channel {status?.channel ?? "—"}</div>
+        <div className="mt-2 space-y-1">
+          {(status?.services ?? []).map((service) => (
+            <div key={service.name} className="flex flex-wrap items-baseline gap-x-3 text-xs">
+              <span className="w-16 font-medium">{service.name}</span>
+              <span className="text-muted-foreground">{service.present ? service.version || "running" : "missing"}</span>
+              <span className="font-mono text-[10px] text-muted-foreground">{digestLabel(service.digest)}</span>
+              {service.update_available && <span className="text-emerald-700">update available</span>}
+            </div>
+          ))}
+        </div>
+        {status?.job?.state === "failed" && <div className="mt-2 text-xs text-destructive">{status.job.error}</div>}
+        {jobRunning && <div className="mt-2 text-xs text-muted-foreground">Applying images. This page may briefly lose the Proxy connection.</div>}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={() => { void checkForUpdates() }} disabled={jobRunning}><RotateCw />Check for updates</Button>
+        <Button size="sm" onClick={() => { void applyUpdate() }} disabled={jobRunning || !(status?.update_available || (status?.services ?? []).some((service) => service.update_available))}><Download />Apply update</Button>
+      </div>
+    </div>
+  </section>
+}
 
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`

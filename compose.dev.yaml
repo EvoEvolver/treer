@@ -1,0 +1,24 @@
+# Local source builds. Production Compose uses published GHCR images.
+#   docker compose -f compose.yaml -f compose.dev.yaml up --build
+services:
+  proxy:
+    image: treer-proxy:dev
+    build:
+      context: .
+      args:
+        TREER_VERSION: dev
+        TREER_BUILD_COMMIT: dev
+  app:
+    image: treer-app:dev
+    build:
+      context: ./web
+      args:
+        TREER_VERSION: dev
+        TREER_BUILD_COMMIT: dev
+  updater:
+    image: treer-updater:dev
+    build:
+      context: ./deploy/updater
+      args:
+        TREER_VERSION: dev
+        TREER_BUILD_COMMIT: dev

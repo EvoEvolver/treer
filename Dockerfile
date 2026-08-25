@@ -21,6 +21,8 @@ RUN set -eu; \
     cp target/release/treer-agent-server "/out/dist/$platform/treer-agent-server"
 
 FROM debian:bookworm-slim
+ARG TREER_VERSION=0.0.0
+ARG TREER_BUILD_COMMIT=unknown
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -28,6 +30,10 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /out/bin/treer-proxy /usr/local/bin/treer-proxy
 COPY --from=builder /out/dist /app/dist
+
+LABEL org.opencontainers.image.source="https://github.com/EvoEvolver/treer"
+LABEL org.opencontainers.image.version="${TREER_VERSION}"
+LABEL org.opencontainers.image.revision="${TREER_BUILD_COMMIT}"
 
 ENV TREER_ARTIFACTS_DIR=/app/dist
 EXPOSE 8080
