@@ -15,6 +15,8 @@ network access remain deployment concerns.
   a Pi Agent.
 - [`codex-ui`](codex-ui/README.md) is Treer's single-Agent browser interface for
   Codex.
+- [`soul`](soul/README.md) is an experimental Agent-scoped file server that
+  uploads environment-bound state bundles and launches command Agents from them.
 - [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
   [`dsh-ais`](dsh-ais/README.md), and [`claude-ais`](claude-ais/README.md) are

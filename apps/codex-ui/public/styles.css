@@ -34,7 +34,7 @@ h1 { overflow: hidden; margin: 0; font-size: 14px; line-height: 17px; text-overf
 .status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #999791; }
 .status-idle .status-dot { background: var(--accent); }
-.status-working .status-dot { background: var(--amber); box-shadow: 0 0 0 3px rgb(183 102 10 / 13%); }
+.status-working .status-dot { border: 2px solid rgb(183 102 10 / 24%); border-top-color: var(--amber); background: transparent; animation: spin .8s linear infinite; }
 .status-blocked .status-dot { background: var(--danger); }
 .select-wrap select, .icon-button { height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
 .select-wrap select { max-width: 190px; padding: 0 26px 0 9px; color: var(--muted); font-size: 12px; }
@@ -43,7 +43,10 @@ h1 { overflow: hidden; margin: 0; font-size: 14px; line-height: 17px; text-overf
 .icon-button.primary { border-color: var(--accent); background: var(--accent); color: #fff; font-size: 19px; }
 
 .feedback { grid-area: feedback; border-bottom: 1px solid #e5b7b1; background: #fff0ee; padding: 8px 16px; color: var(--danger); font-size: 12px; }
-.timeline { grid-area: timeline; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 28px max(18px, calc((100% - 860px) / 2)) 44px; scroll-behavior: smooth; }
+.timeline { grid-area: timeline; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 28px max(18px, calc((100% - 860px) / 2)) 44px; }
+.history-control { display: flex; justify-content: center; min-height: 48px; margin-bottom: 14px; }
+.history-button { height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); padding: 0 12px; color: var(--muted); font-size: 12px; }
+.history-button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .empty { display: grid; min-height: 100%; place-content: center; justify-items: center; gap: 10px; color: var(--muted); }
 .empty-mark { width: 34px; height: 34px; background: var(--soft); color: var(--muted); }
 .empty strong { font-size: 13px; font-weight: 600; }
@@ -85,6 +88,9 @@ h1 { overflow: hidden; margin: 0; font-size: 14px; line-height: 17px; text-overf
 .tool-body { border-top: 1px solid var(--border); background: var(--soft); padding: 10px; }
 .tool-body pre, .tool-plain { overflow: auto; max-height: 320px; margin: 0; color: var(--code); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
 .turn-error { margin: 0 0 18px; border-left: 3px solid var(--danger); padding: 8px 12px; color: var(--danger); font-size: 12px; }
+.agent-activity { display: flex; align-items: center; gap: 9px; width: fit-content; min-height: 28px; margin: 4px 0 18px; color: var(--muted); font-size: 12px; }
+.activity-spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .composer { display: grid; grid-area: composer; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; width: min(900px, calc(100% - 24px)); margin: 0 auto 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 10px; box-shadow: 0 8px 28px rgb(25 24 21 / 8%); }
 .composer textarea { width: 100%; min-height: 42px; max-height: 180px; resize: none; border: 0; outline: 0; background: transparent; padding: 9px 8px; font-size: 14px; line-height: 1.45; }
