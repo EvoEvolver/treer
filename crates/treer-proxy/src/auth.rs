@@ -6817,6 +6817,7 @@ mod tests {
                     git_commit: "host-test".to_string(),
                 },
                 labels: Default::default(),
+                available_agents: None,
                 status: ServerStatus::Online,
                 connected_at: now,
                 last_seen_at: now,

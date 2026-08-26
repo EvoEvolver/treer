@@ -28,6 +28,7 @@ export interface Machine {
   controller_build: BuildInfo
   host_build: BuildInfo
   status: string
+  available_agents?: string[]
 }
 
 export interface Agent {

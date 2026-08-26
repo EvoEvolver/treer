@@ -10,7 +10,7 @@ flowchart LR
     Controller[Agent Server / Controller] <--> Proxy
     Controller <--> Host[Agent Host]
     Host --> Runtime[Agent runtime and PTY]
-    Runtime --> Agent[Codex / Claude / shell]
+    Runtime --> Agent[Codex / Claude / Cursor / shell]
     Mail[Mail App] -->|App OAuth + bearer API| Proxy
     Telegram[Telegram App] -->|treer CLI as managed Agent| Controller
     Telegram <--> TG[Telegram Bot API]
@@ -155,8 +155,9 @@ Agent and deliberately has no thread list or session switcher. Each serves its
 browser UI and semantic routes from the same private listener; its verified
 descriptor is the single registration for both capabilities and presentation.
 
-Creating an Agent with a `recipe` git URL starts an interactive installer
-(Codex, Claude, or shell) and immediately prompts it with the bundled
+Creating an Agent with a `recipe` git URL lets the operator pick an already
+installed interactive CLI on that machine. Treer reuses an idle Agent of that
+kind when one exists; otherwise it starts that CLI and prompts it with the bundled
 [install skill](../skills/treer-install/SKILL.md). The installer clones that
 repository, creates a different command Agent, and upserts a workspace launch
 profile from `treer-agent.json`. Each created Agent is one thread. Extra

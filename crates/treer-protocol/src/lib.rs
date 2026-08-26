@@ -78,6 +78,8 @@ pub struct ServerInfo {
     pub host_build: BuildInfo,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_agents: Option<Vec<String>>,
     pub status: ServerStatus,
     pub connected_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
@@ -709,7 +711,138 @@ pub fn installer_composer_ready(text: &str) -> bool {
     if text.contains("Do you trust") || text.contains("Press enter to continue") {
         return false;
     }
-    text.contains("Ask Codex") || text.contains("YOLO mode") || text.contains("Ask Claude")
+    text.contains("Ask Codex")
+        || text.contains("YOLO mode")
+        || text.contains("Ask Claude")
+        || text.contains("Grok Build")
+        || text.contains("cursor-agent")
+        || text.contains("OpenCode")
+}
+
+pub fn recipe_installer_kind_allowed(kind: &str) -> bool {
+    matches!(
+        kind,
+        "auto"
+            | "codex"
+            | "claude"
+            | "cursor"
+            | "cursor-agent"
+            | "grok"
+            | "opencode"
+            | "pi"
+            | "shell"
+    )
+}
+
+pub fn reusable_installer_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "codex" | "claude" | "cursor" | "cursor-agent" | "grok" | "opencode" | "pi"
+    )
+}
+
+pub fn pick_existing_installer_agent<'a>(
+    agents: &'a [AgentInfo],
+    server_id: &str,
+    kind: Option<&str>,
+) -> Option<&'a AgentInfo> {
+    let wanted = kind
+        .map(normalize_interactive_agent_kind)
+        .filter(|value| *value != "auto");
+    let mut best: Option<&AgentInfo> = None;
+    let mut best_rank = u8::MAX;
+    for agent in agents {
+        if agent.server_id != server_id || !reusable_installer_kind(&agent.kind) {
+            continue;
+        }
+        if wanted.is_some_and(|kind| normalize_interactive_agent_kind(&agent.kind) != kind) {
+            continue;
+        }
+        if agent.status.is_terminal() || agent.status == AgentStatus::Working {
+            continue;
+        }
+        let rank = match agent.status {
+            AgentStatus::Idle => 0,
+            AgentStatus::Blocked => 1,
+            AgentStatus::Starting => 2,
+            AgentStatus::Unknown => 3,
+            _ => 4,
+        };
+        if rank < best_rank {
+            best = Some(agent);
+            best_rank = rank;
+        }
+    }
+    best
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractiveAgentCatalogEntry {
+    pub kind: &'static str,
+    pub command: &'static str,
+    pub install: Option<&'static str>,
+}
+
+pub const INTERACTIVE_AGENT_CATALOG: &[InteractiveAgentCatalogEntry] = &[
+    InteractiveAgentCatalogEntry {
+        kind: "claude",
+        command: "claude",
+        install: Some("curl -fsSL https://claude.ai/install.sh | bash"),
+    },
+    InteractiveAgentCatalogEntry {
+        kind: "cursor",
+        command: "cursor-agent",
+        install: Some("curl https://cursor.com/install -fsS | bash"),
+    },
+    InteractiveAgentCatalogEntry {
+        kind: "grok",
+        command: "grok",
+        install: None,
+    },
+    InteractiveAgentCatalogEntry {
+        kind: "opencode",
+        command: "opencode",
+        install: Some("npm install -g opencode-ai"),
+    },
+    InteractiveAgentCatalogEntry {
+        kind: "pi",
+        command: "pi",
+        install: None,
+    },
+    InteractiveAgentCatalogEntry {
+        kind: "codex",
+        command: "codex",
+        install: Some("npm install -g @openai/codex"),
+    },
+];
+
+pub fn normalize_interactive_agent_kind(kind: &str) -> &str {
+    if kind == "cursor-agent" {
+        "cursor"
+    } else {
+        kind
+    }
+}
+
+pub fn interactive_agent_kind_for_command(command: &str) -> Option<&'static str> {
+    let file = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let name = file.strip_suffix(".exe").unwrap_or(file);
+    if name == "cursor-agent" {
+        return Some("cursor");
+    }
+    INTERACTIVE_AGENT_CATALOG
+        .iter()
+        .find(|entry| entry.kind == name || entry.command == name)
+        .map(|entry| entry.kind)
+}
+
+pub fn interactive_agent_catalog_entry(
+    kind: &str,
+) -> Option<&'static InteractiveAgentCatalogEntry> {
+    let kind = normalize_interactive_agent_kind(kind);
+    INTERACTIVE_AGENT_CATALOG
+        .iter()
+        .find(|entry| entry.kind == kind)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2069,6 +2202,63 @@ mod tests {
         assert!(validate_recipe_url("https://user:pass@example.com/repo.git").is_err());
         assert!(!installer_composer_ready("Do you trust the contents"));
         assert!(installer_composer_ready("Ask Codex to do anything"));
+        assert!(installer_composer_ready("Ask Claude to do anything"));
+        assert!(recipe_installer_kind_allowed("auto"));
+        assert!(recipe_installer_kind_allowed("cursor"));
+        assert!(!recipe_installer_kind_allowed("command"));
+        assert!(reusable_installer_kind("claude"));
+        assert!(!reusable_installer_kind("auto"));
+        assert!(!reusable_installer_kind("shell"));
+    }
+
+    fn installer_agent(
+        agent_id: &str,
+        server_id: &str,
+        kind: &str,
+        status: AgentStatus,
+    ) -> AgentInfo {
+        let now = Utc::now();
+        AgentInfo {
+            agent_id: agent_id.to_string(),
+            workspace_id: "ws_test".to_string(),
+            server_id: server_id.to_string(),
+            kind: kind.to_string(),
+            name: agent_id.to_string(),
+            cwd: ".".to_string(),
+            status,
+            pid: None,
+            started_at: now,
+            updated_at: now,
+            exited_at: None,
+            exit_code: None,
+            output_revision: 0,
+            interface: None,
+        }
+    }
+
+    #[test]
+    fn recipe_install_reuses_an_idle_interactive_agent_on_the_machine() {
+        let idle_claude = installer_agent("ag_claude", "srv_a", "claude", AgentStatus::Idle);
+        let working_codex = installer_agent("ag_codex", "srv_a", "codex", AgentStatus::Working);
+        let other_machine = installer_agent("ag_other", "srv_b", "cursor", AgentStatus::Idle);
+        let terminal = installer_agent("ag_term", "srv_a", "command", AgentStatus::Idle);
+        let agents = vec![working_codex, terminal, other_machine, idle_claude.clone()];
+        let picked = pick_existing_installer_agent(&agents, "srv_a", None).expect("idle installer");
+        assert_eq!(picked.agent_id, idle_claude.agent_id);
+        assert_eq!(
+            pick_existing_installer_agent(&agents, "srv_a", Some("codex"))
+                .map(|agent| agent.agent_id.as_str()),
+            None
+        );
+        assert!(pick_existing_installer_agent(&agents, "srv_missing", None).is_none());
+        assert_eq!(
+            interactive_agent_kind_for_command("cursor-agent"),
+            Some("cursor")
+        );
+        assert_eq!(
+            interactive_agent_kind_for_command("/usr/bin/claude"),
+            Some("claude")
+        );
     }
 
     #[test]

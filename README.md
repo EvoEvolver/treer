@@ -854,7 +854,7 @@ Both are embedded at build time so the printed instructions match the binary.
 Create an installer that receives the install skill as its first prompt:
 
 ```bash
-treer agent admin create --machine SERVER_ID --kind codex --name installer \
+treer agent admin create --machine SERVER_ID --kind auto --name installer \
   --recipe https://github.com/example/recipe.git
 ```
 

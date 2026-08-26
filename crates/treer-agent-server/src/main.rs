@@ -251,6 +251,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         hostname,
         root.display().to_string(),
         host_build.clone(),
+        runtime.available_agent_kinds(),
     );
 
     let proxy_client = proxy::ProxyClient::new(

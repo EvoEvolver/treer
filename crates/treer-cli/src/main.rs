@@ -2107,6 +2107,7 @@ mod tests {
                     "git_commit": "host-test"
                 },
                 "labels": {},
+                "available_agents": ["claude"],
                 "status": "online",
                 "connected_at": "2026-08-17T00:00:00Z",
                 "last_seen_at": "2026-08-17T00:00:00Z"
@@ -2704,7 +2705,7 @@ mod tests {
             "--machine",
             "builder",
             "--kind",
-            "codex",
+            "auto",
             "--name",
             "installer",
             "--recipe",

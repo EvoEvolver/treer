@@ -18,19 +18,19 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
-    installer_base_prompt, installer_composer_ready, recipe_url, validate_recipe_url,
-    AcknowledgeMessagesRequest, AgentCommand, AgentInfo, AgentLaunchProfile, ApiError,
-    AppIdentityVerifyRequest, AppPrincipal, AppPrincipalKind, CreateAgentLaunchProfileRequest,
-    CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
-    CreateVirtualNetworkHostRequest, GetMessageResponse, ImportMessagesRequest, InputAgentRequest,
-    LaunchAgentProfileRequest, ListMessagesQuery, MachineEnrollmentRequest,
-    MachineEnrollmentResponse, MachineService, MessagePrincipal, MessagePrincipalKind,
-    PromptAgentRequest, ProtocolError, ReceiveMessagesRequest, RenameRequest,
-    ResolveAppRecipientsRequest, ResolveAppRecipientsResponse, SendMessageRequest, ServiceIngress,
-    ServiceIngressAccess, TerminalClientMessage, TerminalCursor, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    installer_base_prompt, installer_composer_ready, pick_existing_installer_agent,
+    recipe_installer_kind_allowed, recipe_url, validate_recipe_url, AcknowledgeMessagesRequest,
+    AgentCommand, AgentInfo, AgentLaunchProfile, ApiError, AppIdentityVerifyRequest, AppPrincipal,
+    AppPrincipalKind, CreateAgentLaunchProfileRequest, CreateAgentRequest,
+    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
+    GetMessageResponse, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
+    ListMessagesQuery, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
+    MessagePrincipal, MessagePrincipalKind, PromptAgentRequest, ProtocolError,
+    ReceiveMessagesRequest, RenameRequest, ResolveAppRecipientsRequest,
+    ResolveAppRecipientsResponse, SendMessageRequest, ServiceIngress, ServiceIngressAccess,
+    TerminalClientMessage, TerminalCursor, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, VirtualNetworkHostsSnapshot,
+    WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -4384,10 +4384,10 @@ async fn execute_agent_create(
         if let Err(message) = validate_recipe_url(recipe) {
             return Err(ApiFailure::bad_request("invalid_recipe", &message));
         }
-        if !matches!(request.kind.as_str(), "codex" | "claude" | "shell") {
+        if !recipe_installer_kind_allowed(&request.kind) {
             return Err(ApiFailure::bad_request(
                 "recipe_requires_interactive_agent",
-                "recipe install requires kind codex, claude, or shell",
+                "recipe install requires an interactive agent kind or auto",
             ));
         }
     }
@@ -4404,6 +4404,40 @@ async fn execute_agent_create(
         PolicyResource::new(RESOURCE_MACHINE, &server_id),
     )
     .await?;
+    if let Some(recipe) = recipe.as_deref() {
+        if let Ok(snapshot) = state.snapshot(workspace_id).await {
+            let filter = if request.kind == "auto" {
+                None
+            } else {
+                Some(request.kind.as_str())
+            };
+            if let Some(existing) =
+                pick_existing_installer_agent(&snapshot.agents, &server_id, filter)
+            {
+                let agent_id = existing.agent_id.clone();
+                let mut data = serde_json::to_value(existing).unwrap_or_else(|_| json!({}));
+                match prompt_installer_recipe(state, workspace_id, &server_id, &agent_id, recipe)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Some(object) = data.as_object_mut() {
+                            object.insert("installer_reused".into(), json!(true));
+                            object.insert("installer_prompted".into(), json!(true));
+                        }
+                        return Ok(data);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            %workspace_id,
+                            %agent_id,
+                            "failed to prompt an existing installer; creating a new agent"
+                        );
+                    }
+                }
+            }
+        }
+    }
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
     let agent_name = request.name.clone();
     let workload_credential = auth
@@ -5052,6 +5086,7 @@ mod tests {
                 git_commit: "host-test".to_string(),
             },
             labels: Default::default(),
+            available_agents: None,
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,
@@ -6315,6 +6350,7 @@ mod tests {
                 git_commit: "host-test".to_string(),
             },
             labels: Default::default(),
+            available_agents: None,
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,
@@ -6465,6 +6501,7 @@ mod tests {
                 git_commit: "host-test".to_string(),
             },
             labels: Default::default(),
+            available_agents: None,
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,

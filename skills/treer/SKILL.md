@@ -391,13 +391,15 @@ treer agent admin create --machine <server-id> --kind codex --name reviewer --cw
 treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- /path/to/codex-agent-ui/scripts/treer-agent.sh
 ```
 
-To install a public git recipe, create an interactive installer and pass
-`--recipe`. Treer prompts that Agent with the bundled install skill
-(`treer --skill install`). Do not write a second prompt.
+To install a public git recipe, pass `--recipe`. `--kind auto` reuses an idle
+interactive Agent on that machine when one exists; otherwise Treer starts an
+available CLI (Claude, Cursor, Grok, OpenCode, Pi, or Codex) and installs a
+missing default if needed. Treer then prompts that Agent with the bundled
+install skill (`treer --skill install`). Do not write a second prompt.
 
 ```bash
 treer --skill install
-treer agent admin create --machine <server-id> --kind codex --name installer \
+treer agent admin create --machine <server-id> --kind auto --name installer \
   --recipe https://github.com/example/recipe.git
 ```
 

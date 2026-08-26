@@ -27,7 +27,9 @@ Use `treer --help` for syntax. Control commands print JSON.
 
 Read the **Recipe URL** from the `This install` section of this prompt.
 Need `git`, `node`, `npm`, `curl`, and `treer` on PATH when the recipe requires
-them. If the recipe needs `codex` and it is missing:
+them. You may already be a running Claude, Cursor, Grok, OpenCode, Pi, or Codex
+agent; do not assume you are Codex. If a required command is missing, install
+it before continuing. If the recipe needs `codex` and it is missing:
 
 ```bash
 npm install -g @openai/codex
