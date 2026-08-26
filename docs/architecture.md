@@ -99,6 +99,16 @@ runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
 
+The Host is supervised by a per-user systemd service on Linux or a LaunchAgent
+on macOS when that user manager is available. Installation probes supervision
+before consuming a single-use enrollment key. Automatic mode visibly falls
+back to an attached foreground Host when persistent supervision is unavailable;
+the persisted service-manager choice keeps later lifecycle commands consistent.
+Startup is complete only when the Controller identity endpoint and a
+Proxy-backed API request both succeed. Because service configuration is saved
+before native registration, `service repair` can reconstruct a partial
+installation without another enrollment key.
+
 Proxy replicas fence machine connections through a distributed ownership
 lease. An explicit duplicate-Controller error makes the older Controller stop
 reconnecting, while a stale or expired lease makes it reconnect and claim a

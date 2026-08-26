@@ -1,4 +1,6 @@
 use std::env;
+#[cfg(target_os = "linux")]
+use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -7,8 +9,10 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use treer_host_protocol::HostDaemonConfig;
+use treer_protocol::OPERATOR_CREDENTIAL_HEADER;
 use url::Url;
 use uuid::Uuid;
 
@@ -17,6 +21,69 @@ const MAX_UPDATE_BINARY_BYTES: usize = 128 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const UPDATE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROLLER_START_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ServiceMode {
+    Auto,
+    Systemd,
+    Launchd,
+    Foreground,
+}
+
+impl std::fmt::Display for ServiceMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Auto => "auto",
+            Self::Systemd => "systemd",
+            Self::Launchd => "launchd",
+            Self::Foreground => "foreground",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceManager {
+    SystemdUser,
+    Launchd,
+    Foreground,
+}
+
+fn default_service_manager() -> ServiceManager {
+    #[cfg(target_os = "linux")]
+    {
+        ServiceManager::SystemdUser
+    }
+    #[cfg(target_os = "macos")]
+    {
+        ServiceManager::Launchd
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        ServiceManager::Foreground
+    }
+}
+
+#[derive(Debug)]
+pub struct ServiceSelection {
+    pub manager: ServiceManager,
+    fallback_reason: Option<String>,
+}
+
+impl ServiceSelection {
+    pub fn announce(&self) {
+        if let Some(reason) = &self.fallback_reason {
+            eprintln!("treer: warning: persistent user service unavailable: {reason}");
+            eprintln!(
+                "treer: warning: falling back to foreground mode; keep this terminal open or run the command under a process supervisor"
+            );
+        } else if self.manager == ServiceManager::Foreground {
+            eprintln!(
+                "treer: foreground service mode selected; keep this terminal open or run the command under a process supervisor"
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -30,6 +97,8 @@ pub struct ServiceConfig {
     pub listen: String,
     pub host_socket: PathBuf,
     pub install_hostname: String,
+    #[serde(default = "default_service_manager")]
+    pub service_manager: ServiceManager,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,16 +298,30 @@ pub fn register(config: ServiceConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn refresh_registration(config: ServiceConfig) -> Result<()> {
+pub enum ServiceActivation {
+    Managed,
+    Foreground(tokio::process::Child),
+}
+
+pub async fn refresh_registration_and_wait(config: ServiceConfig) -> Result<ServiceActivation> {
     let workspace = config.workspace.clone();
     register(config)?;
+    let (_, installed) = installed_service(&workspace)?;
+    if installed.service_manager == ServiceManager::Foreground {
+        if restart_controller(&workspace).is_ok() {
+            wait_for_controller_and_proxy(&installed).await?;
+            return Ok(ServiceActivation::Managed);
+        }
+        return start_and_wait(&workspace).await;
+    }
     if let Err(error) = restart_controller(&workspace) {
         eprintln!(
             "treer: warning: hot Controller restart failed ({error:#}); restarting the Host service"
         );
         restart(&workspace)?;
     }
-    Ok(())
+    wait_for_controller_and_proxy(&installed).await?;
+    Ok(ServiceActivation::Managed)
 }
 
 pub fn registered_config(workspace: &str) -> Result<Option<ServiceConfig>> {
@@ -246,9 +329,11 @@ pub fn registered_config(workspace: &str) -> Result<Option<ServiceConfig>> {
     Ok(find_installed_service(workspace)?.map(|(_, config)| config))
 }
 
-pub fn preflight_registration(workspace: &str) -> Result<()> {
+pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<ServiceSelection> {
     validate_workspace(workspace)?;
-    require_host_binary(&ServicePaths::new("preflight")?)
+    require_host_binary(&ServicePaths::new("preflight")?)?;
+    host_socket_path("preflight")?;
+    select_service_manager(mode)
 }
 
 fn require_host_binary(paths: &ServicePaths) -> Result<()> {
@@ -262,6 +347,113 @@ fn require_host_binary(paths: &ServicePaths) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
+    select_linux_service_manager(mode, probe_systemd_user)
+}
+
+#[cfg(target_os = "linux")]
+fn select_linux_service_manager(
+    mode: ServiceMode,
+    probe: impl FnOnce() -> Result<()>,
+) -> Result<ServiceSelection> {
+    match mode {
+        ServiceMode::Auto => match probe() {
+            Ok(()) => Ok(ServiceSelection {
+                manager: ServiceManager::SystemdUser,
+                fallback_reason: None,
+            }),
+            Err(error) => Ok(ServiceSelection {
+                manager: ServiceManager::Foreground,
+                fallback_reason: Some(format!("{error:#}")),
+            }),
+        },
+        ServiceMode::Systemd => {
+            probe().context(
+                "systemd user service mode was requested but the user manager is unavailable; use `--service-mode foreground` or enable a user systemd session",
+            )?;
+            Ok(ServiceSelection {
+                manager: ServiceManager::SystemdUser,
+                fallback_reason: None,
+            })
+        }
+        ServiceMode::Foreground => Ok(ServiceSelection {
+            manager: ServiceManager::Foreground,
+            fallback_reason: None,
+        }),
+        ServiceMode::Launchd => bail!("launchd service mode is available only on macOS"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_systemd_user() -> Result<()> {
+    let executable = env::var_os("TREER_SYSTEMCTL").unwrap_or_else(|| "systemctl".into());
+    probe_systemd_user_with(&executable)
+}
+
+#[cfg(target_os = "linux")]
+fn probe_systemd_user_with(executable: &OsStr) -> Result<()> {
+    let output = Command::new(executable)
+        .args(["--user", "show-environment"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run {} --user show-environment",
+                PathBuf::from(executable).display()
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if detail.is_empty() {
+        bail!(
+            "systemctl --user show-environment exited with {}",
+            output.status
+        );
+    }
+    bail!("systemctl --user is unavailable: {detail}")
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl_command() -> Command {
+    Command::new(env::var_os("TREER_SYSTEMCTL").unwrap_or_else(|| "systemctl".into()))
+}
+
+#[cfg(target_os = "macos")]
+fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
+    match mode {
+        ServiceMode::Auto | ServiceMode::Launchd => Ok(ServiceSelection {
+            manager: ServiceManager::Launchd,
+            fallback_reason: None,
+        }),
+        ServiceMode::Foreground => Ok(ServiceSelection {
+            manager: ServiceManager::Foreground,
+            fallback_reason: None,
+        }),
+        ServiceMode::Systemd => bail!("systemd service mode is available only on Linux"),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
+    match mode {
+        ServiceMode::Auto => Ok(ServiceSelection {
+            manager: ServiceManager::Foreground,
+            fallback_reason: Some(
+                "this platform has no supported persistent user service manager".to_string(),
+            ),
+        }),
+        ServiceMode::Foreground => Ok(ServiceSelection {
+            manager: ServiceManager::Foreground,
+            fallback_reason: None,
+        }),
+        ServiceMode::Systemd | ServiceMode::Launchd => {
+            bail!("the requested service manager is not available on this platform")
+        }
+    }
+}
+
 pub fn host_socket_path(server_id: &str) -> Result<PathBuf> {
     validate_server_id(server_id)?;
     let name = host_socket_filename(server_id);
@@ -272,6 +464,69 @@ pub fn host_socket_path(server_id: &str) -> Result<PathBuf> {
 pub fn start(workspace: &str) -> Result<()> {
     let (paths, config) = installed_service(workspace)?;
     platform::start(&paths, &config)
+}
+
+pub async fn start_and_wait(workspace: &str) -> Result<ServiceActivation> {
+    let (paths, config) = installed_service(workspace)?;
+    let mut activation = if config.service_manager == ServiceManager::Foreground {
+        eprintln!(
+            "treer: starting Host in foreground mode; keep this terminal open or run the command under a process supervisor"
+        );
+        let child = tokio::process::Command::new(&paths.host_executable)
+            .arg("run")
+            .arg("--config")
+            .arg(&paths.host_config)
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "failed to start foreground Host {}",
+                    paths.host_executable.display()
+                )
+            })?;
+        ServiceActivation::Foreground(child)
+    } else {
+        platform::start(&paths, &config)?;
+        ServiceActivation::Managed
+    };
+
+    if let Err(error) = wait_for_controller_and_proxy(&config).await {
+        if let ServiceActivation::Foreground(child) = &mut activation {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        return Err(error);
+    }
+    if let ServiceActivation::Foreground(child) = &mut activation {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to inspect foreground Host status")?
+        {
+            bail!("foreground treer-agent-host exited before startup completed with {status}");
+        }
+    }
+    println!("treer: Controller and Proxy connection are ready");
+    Ok(activation)
+}
+
+pub async fn wait_for_foreground(activation: ServiceActivation) -> Result<()> {
+    let ServiceActivation::Foreground(mut child) = activation else {
+        return Ok(());
+    };
+    let status = child
+        .wait()
+        .await
+        .context("failed to wait for foreground Host")?;
+    require_success(status, "foreground treer-agent-host")
+}
+
+pub async fn repair_and_wait(workspace: &str, mode: ServiceMode) -> Result<ServiceActivation> {
+    let (_, mut config) = installed_service(workspace)?;
+    let selection = preflight_registration(workspace, mode)?;
+    selection.announce();
+    config.service_manager = selection.manager;
+    let activation = refresh_registration_and_wait(config).await?;
+    println!("treer: service registration repaired without a new enrollment key");
+    Ok(activation)
 }
 
 pub fn stop(workspace: &str) -> Result<()> {
@@ -700,6 +955,50 @@ async fn wait_for_controller(config: &ServiceConfig, previous_epoch: Option<&str
     }
 }
 
+async fn proxy_is_reachable(config: &ServiceConfig) -> bool {
+    let Some(mut url) = controller_health_url(config) else {
+        return false;
+    };
+    url.set_path("/api/agents");
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_millis(900))
+        .no_proxy()
+        .build()
+    else {
+        return false;
+    };
+    matches!(
+        client
+            .get(url)
+            .header(OPERATOR_CREDENTIAL_HEADER, &config.operator_credential)
+            .send()
+            .await,
+        Ok(response) if response.status().is_success()
+    )
+}
+
+async fn wait_for_controller_and_proxy(config: &ServiceConfig) -> Result<()> {
+    let deadline = Instant::now() + CONTROLLER_START_TIMEOUT;
+    loop {
+        let controller_ready = controller_epoch(config).await.is_some();
+        if controller_ready && proxy_is_reachable(config).await {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let waiting_for = if controller_ready {
+                "Proxy connection"
+            } else {
+                "Controller health"
+            };
+            bail!(
+                "{waiting_for} did not become ready within {} seconds",
+                CONTROLLER_START_TIMEOUT.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 pub fn status(workspace: &str) -> Result<()> {
     let (paths, config) = installed_service(workspace)?;
     platform::status(&paths, &config)
@@ -1114,6 +1413,11 @@ mod platform {
     }
 
     pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        match config.service_manager {
+            ServiceManager::Foreground => return Ok(()),
+            ServiceManager::SystemdUser => {}
+            ServiceManager::Launchd => bail!("launchd service configuration cannot run on Linux"),
+        }
         let unit_path = unit_path(&config.server_id)?;
         let parent = unit_path
             .parent()
@@ -1131,12 +1435,12 @@ mod platform {
             .as_bytes(),
         )?;
         run_checked(
-            Command::new("systemctl").args(["--user", "daemon-reload"]),
+            systemctl_command().args(["--user", "daemon-reload"]),
             "systemctl --user daemon-reload",
         )?;
         let unit = unit_name(&config.server_id);
         run_checked(
-            Command::new("systemctl").args(["--user", "enable", unit.as_str()]),
+            systemctl_command().args(["--user", "enable", unit.as_str()]),
             "systemctl --user enable",
         )?;
         warn_if_linger_disabled();
@@ -1144,41 +1448,46 @@ mod platform {
     }
 
     pub fn start(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
-            Command::new("systemctl").args(["--user", "start", unit.as_str()]),
+            systemctl_command().args(["--user", "start", unit.as_str()]),
             "systemctl --user start",
         )
     }
 
     pub fn stop(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
-            Command::new("systemctl").args(["--user", "stop", unit.as_str()]),
+            systemctl_command().args(["--user", "stop", unit.as_str()]),
             "systemctl --user stop",
         )
     }
 
     pub fn stop_remotely(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
-            Command::new("systemctl").args(["--user", "--no-block", "stop", unit.as_str()]),
+            systemctl_command().args(["--user", "--no-block", "stop", unit.as_str()]),
             "systemctl --user --no-block stop",
         )
     }
 
     pub fn restart(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
-            Command::new("systemctl").args(["--user", "restart", unit.as_str()]),
+            systemctl_command().args(["--user", "restart", unit.as_str()]),
             "systemctl --user restart",
         )
     }
 
     pub fn status(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
-            Command::new("systemctl").args(["--user", "status", "--no-pager", unit.as_str()]),
+            systemctl_command().args(["--user", "status", "--no-pager", unit.as_str()]),
             "systemctl --user status",
         )
     }
@@ -1189,6 +1498,7 @@ mod platform {
         lines: usize,
         follow: bool,
     ) -> Result<()> {
+        require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         let mut command = Command::new("journalctl");
         command.args([
@@ -1207,14 +1517,30 @@ mod platform {
 
     pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
         let unit = unit_name(&config.server_id);
-        let _ = Command::new("systemctl")
+        if config.service_manager == ServiceManager::Foreground {
+            remove_if_exists(&unit_path(&config.server_id)?)?;
+            return Ok(());
+        }
+        require_systemd(config)?;
+        let _ = systemctl_command()
             .args(["--user", "disable", "--now", unit.as_str()])
             .status();
         remove_if_exists(&unit_path(&config.server_id)?)?;
         run_checked(
-            Command::new("systemctl").args(["--user", "daemon-reload"]),
+            systemctl_command().args(["--user", "daemon-reload"]),
             "systemctl --user daemon-reload",
         )
+    }
+
+    fn require_systemd(config: &ServiceConfig) -> Result<()> {
+        match config.service_manager {
+            ServiceManager::SystemdUser => Ok(()),
+            ServiceManager::Foreground => bail!(
+                "this service uses foreground mode; run `treer-agent-server service --workspace {} start` in a terminal or process supervisor",
+                config.workspace
+            ),
+            ServiceManager::Launchd => bail!("launchd service configuration cannot run on Linux"),
+        }
     }
 
     fn warn_if_linger_disabled() {
@@ -1273,6 +1599,13 @@ mod platform {
     }
 
     pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        match config.service_manager {
+            ServiceManager::Foreground => return Ok(()),
+            ServiceManager::Launchd => {}
+            ServiceManager::SystemdUser => {
+                bail!("systemd user service configuration cannot run on macOS")
+            }
+        }
         let plist_path = plist_path(&config.server_id)?;
         let parent = plist_path
             .parent()
@@ -1298,6 +1631,7 @@ mod platform {
     }
 
     pub fn start(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         let loaded = Command::new("launchctl")
             .args(["print", target.as_str()])
@@ -1324,6 +1658,7 @@ mod platform {
     }
 
     pub fn stop(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         run_checked(
             Command::new("launchctl").args(["bootout", target.as_str()]),
@@ -1332,10 +1667,12 @@ mod platform {
     }
 
     pub fn stop_remotely(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_launchd(config)?;
         stop(paths, config)
     }
 
     pub fn restart(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         let _ = Command::new("launchctl")
             .args(["bootout", target.as_str()])
@@ -1344,6 +1681,7 @@ mod platform {
     }
 
     pub fn status(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         run_checked(
             Command::new("launchctl").args(["print", target.as_str()]),
@@ -1357,6 +1695,7 @@ mod platform {
         lines: usize,
         follow: bool,
     ) -> Result<()> {
+        require_launchd(config)?;
         let log_path = paths.state_dir.join(format!(
             "agent-server-{}.log",
             component_key(&config.server_id)
@@ -1371,11 +1710,29 @@ mod platform {
     }
 
     pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Foreground {
+            remove_if_exists(&plist_path(&config.server_id)?)?;
+            return Ok(());
+        }
+        require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         let _ = Command::new("launchctl")
             .args(["bootout", target.as_str()])
             .status();
         remove_if_exists(&plist_path(&config.server_id)?)
+    }
+
+    fn require_launchd(config: &ServiceConfig) -> Result<()> {
+        match config.service_manager {
+            ServiceManager::Launchd => Ok(()),
+            ServiceManager::Foreground => bail!(
+                "this service uses foreground mode; run `treer-agent-server service --workspace {} start` in a terminal or process supervisor",
+                config.workspace
+            ),
+            ServiceManager::SystemdUser => {
+                bail!("systemd user service configuration cannot run on macOS")
+            }
+        }
     }
 }
 
@@ -1387,8 +1744,12 @@ mod platform {
         bail!("service management is currently supported on Linux and macOS")
     }
 
-    pub fn register(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
-        unsupported()
+    pub fn register(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Foreground {
+            Ok(())
+        } else {
+            unsupported()
+        }
     }
 
     pub fn start(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
@@ -1420,8 +1781,12 @@ mod platform {
         unsupported()
     }
 
-    pub fn uninstall(_paths: &ServicePaths, _config: &ServiceConfig) -> Result<()> {
-        unsupported()
+    pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Foreground {
+            Ok(())
+        } else {
+            unsupported()
+        }
     }
 }
 
@@ -1512,18 +1877,23 @@ mod tests {
             .await
             .expect("bind health server");
         let address = listener.local_addr().expect("health server address");
-        let app = Router::new().route(
-            "/api/health",
-            get(|| async {
-                Json(json!({
-                    "status": "ok",
-                    "service": "treer-agent-server",
-                    "workspace_id": "default",
-                    "server_id": "srv_test",
-                    "controller_epoch": "epoch-test",
-                }))
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(json!({
+                        "status": "ok",
+                        "service": "treer-agent-server",
+                        "workspace_id": "default",
+                        "server_id": "srv_test",
+                        "controller_epoch": "epoch-test",
+                    }))
+                }),
+            )
+            .route(
+                "/api/agents",
+                get(|| async { Json(json!({ "agents": [] })) }),
+            );
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
         assert!(local_api_matches(&address, "default", "srv_test").await);
@@ -1539,13 +1909,89 @@ mod tests {
             listen: address.to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
+            service_manager: default_service_manager(),
         };
         assert_eq!(
             controller_epoch(&config).await.as_deref(),
             Some("epoch-test")
         );
+        wait_for_controller_and_proxy(&config)
+            .await
+            .expect("Controller and Proxy readiness");
 
         server.abort();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn automatic_service_mode_falls_back_but_explicit_systemd_fails() {
+        let automatic = select_linux_service_manager(ServiceMode::Auto, || {
+            bail!("Failed to connect to bus: No such file or directory")
+        })
+        .expect("automatic fallback");
+        assert_eq!(automatic.manager, ServiceManager::Foreground);
+        assert!(automatic
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Failed to connect to bus")));
+
+        let explicit = select_linux_service_manager(ServiceMode::Systemd, || {
+            bail!("Failed to connect to bus: No such file or directory")
+        })
+        .expect_err("explicit systemd must fail");
+        assert!(explicit.to_string().contains("user manager is unavailable"));
+
+        let foreground = select_linux_service_manager(ServiceMode::Foreground, || {
+            panic!("foreground mode must not probe systemd")
+        })
+        .expect("foreground selection");
+        assert_eq!(foreground.manager, ServiceManager::Foreground);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_probe_preserves_the_actionable_bus_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "treer-fake-systemctl-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&directory).expect("create fake systemctl directory");
+        let executable = directory.join("systemctl");
+        fs::write(
+            &executable,
+            b"#!/bin/sh\necho 'Failed to connect to bus: No such file or directory' >&2\nexit 1\n",
+        )
+        .expect("write fake systemctl");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make fake systemctl executable");
+
+        let error = probe_systemd_user_with(executable.as_os_str())
+            .expect_err("unavailable fake user manager");
+        assert!(error
+            .to_string()
+            .contains("Failed to connect to bus: No such file or directory"));
+
+        fs::remove_file(executable).expect("remove fake systemctl");
+        fs::remove_dir(directory).expect("remove fake systemctl directory");
+    }
+
+    #[test]
+    fn legacy_service_config_defaults_to_the_native_manager() {
+        let config: ServiceConfig = serde_json::from_value(json!({
+            "proxy": "https://treer.example/",
+            "workspace": "default",
+            "server_id": "srv_test",
+            "machine_token": "token",
+            "operator_credential": "operator",
+            "root": "/tmp",
+            "listen": "127.0.0.1:8790",
+            "host_socket": "/tmp/host.sock",
+            "install_hostname": "builder"
+        }))
+        .expect("legacy configuration");
+        assert_eq!(config.service_manager, default_service_manager());
     }
 
     #[test]
@@ -1592,6 +2038,7 @@ mod tests {
             listen: "127.0.0.1:8790".to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
+            service_manager: default_service_manager(),
         };
         let explicit = Url::parse("https://canary.treer.example/").unwrap();
 
@@ -1623,6 +2070,7 @@ mod tests {
             listen: "127.0.0.1:8790".to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
+            service_manager: default_service_manager(),
         };
 
         assert_eq!(
@@ -1656,6 +2104,7 @@ mod tests {
                 listen: "127.0.0.1:8790".to_string(),
                 host_socket: PathBuf::from(format!("/tmp/{server_id}.sock")),
                 install_hostname: current_hostname().expect("local hostname"),
+                service_manager: default_service_manager(),
             };
             (ServicePaths::new(server_id).expect("service paths"), config)
         };
