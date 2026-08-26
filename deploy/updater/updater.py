@@ -9,6 +9,7 @@ import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -50,7 +51,52 @@ def first_repo_digest(inspect: dict[str, Any]) -> str | None:
     return None
 
 
-def service_record(name: str, inspect: dict[str, Any] | None) -> dict[str, Any]:
+def add_digest(refs: set[str], value: object) -> None:
+    if not isinstance(value, str) or not value:
+        return
+    refs.add(value)
+    if not value.startswith("sha256:") and len(value) >= 64:
+        refs.add(f"sha256:{value}")
+
+
+def running_image_refs(
+    inspect: dict[str, Any], image_inspect: dict[str, Any] | None = None
+) -> set[str]:
+    refs: set[str] = set()
+    add_digest(refs, inspect.get("Image"))
+    descriptor = inspect.get("ImageManifestDescriptor")
+    if isinstance(descriptor, dict):
+        add_digest(refs, descriptor.get("digest"))
+    add_digest(refs, first_repo_digest(inspect))
+    if image_inspect:
+        add_digest(refs, image_inspect.get("Id"))
+        add_digest(refs, first_repo_digest(image_inspect))
+        for item in image_inspect.get("RepoDigests") or []:
+            if isinstance(item, str) and "@" in item:
+                add_digest(refs, item.split("@", 1)[1])
+    return refs
+
+
+def display_digest(inspect: dict[str, Any], image_inspect: dict[str, Any] | None = None) -> str | None:
+    if image_inspect:
+        digest = first_repo_digest(image_inspect)
+        if digest:
+            return digest
+        image_id = image_inspect.get("Id")
+        if isinstance(image_id, str) and image_id:
+            return image_id
+    descriptor = inspect.get("ImageManifestDescriptor")
+    if isinstance(descriptor, dict) and isinstance(descriptor.get("digest"), str):
+        return descriptor["digest"]
+    image_id = inspect.get("Image")
+    return image_id if isinstance(image_id, str) and image_id else None
+
+
+def service_record(
+    name: str,
+    inspect: dict[str, Any] | None,
+    image_inspect: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if inspect is None:
         return {"name": name, "present": False}
     config = inspect.get("Config") or {}
@@ -59,9 +105,11 @@ def service_record(name: str, inspect: dict[str, Any] | None) -> dict[str, Any]:
         "name": name,
         "present": True,
         "image": config.get("Image"),
-        "digest": first_repo_digest(inspect),
+        "digest": display_digest(inspect, image_inspect),
+        "image_id": inspect.get("Image") if isinstance(inspect.get("Image"), str) else None,
         "version": labels.get("org.opencontainers.image.version"),
         "revision": labels.get("org.opencontainers.image.revision"),
+        "refs": sorted(running_image_refs(inspect, image_inspect)),
     }
 
 
@@ -101,10 +149,15 @@ class Updater:
         for name in SERVICES:
             record = self._inspect(name)
             image = self.images[name]
-            channel_digest = self._registry_digest(image, self.channel)
+            channel_digests = self._channel_digests(image, self.channel)
+            channel_digest = sorted(channel_digests)[0] if channel_digests else None
             record["channel_digest"] = channel_digest
+            running_refs = set(record.get("refs") or [])
             record["update_available"] = bool(
-                record.get("present") and channel_digest and channel_digest != record.get("digest")
+                record.get("present")
+                and channel_digests
+                and running_refs
+                and running_refs.isdisjoint(channel_digests)
             )
             update_available = update_available or bool(record["update_available"])
             services.append(record)
@@ -116,6 +169,9 @@ class Updater:
         }
 
     def apply(self) -> dict[str, Any]:
+        report = self.check()
+        if not report["update_available"]:
+            raise UpdaterError(409, "already_current", "this channel is already running")
         with self._lock:
             if self._job and self._job.get("state") == "running":
                 raise UpdaterError(409, "update_in_progress", "a control-plane update is already running")
@@ -129,12 +185,24 @@ class Updater:
         try:
             for name in SERVICES:
                 self._run_docker(["pull", f"{self.images[name]}:{self.channel}"])
-            self._compose(["up", "-d", "--no-deps", "--pull", "never", *APPLY_SERVICES])
-            try:
-                self._compose(["up", "-d", "--no-deps", "--pull", "never", "updater"])
-            except Exception as error:  # noqa: BLE001
-                # Recreating this process is expected; the next status read comes from the new container.
-                print(f"updater recreate: {error}", file=sys.stderr)
+            running_ids = {name: self._running_image_id(name) for name in SERVICES}
+            pulled_ids = {
+                name: self._local_image_id(f"{self.images[name]}:{self.channel}")
+                for name in SERVICES
+            }
+            recreate = [
+                name
+                for name in APPLY_SERVICES
+                if pulled_ids.get(name) and running_ids.get(name) != pulled_ids.get(name)
+            ]
+            if recreate:
+                self._compose(["up", "-d", "--no-deps", "--pull", "never", *recreate])
+            updater_changed = bool(
+                pulled_ids.get("updater")
+                and running_ids.get("updater") != pulled_ids.get("updater")
+            )
+            if updater_changed:
+                self._recreate_updater_detached()
             with self._lock:
                 if self._job and self._job.get("id") == job_id:
                     self._job = {"id": job_id, "state": "succeeded", "error": None}
@@ -147,11 +215,89 @@ class Updater:
         container_id = self._compose(["ps", "-q", "--status", "running", name]).strip()
         if not container_id:
             return service_record(name, None)
-        payload = json.loads(self._run_docker(["inspect", container_id]))
-        inspect = payload[0] if isinstance(payload, list) and payload else None
-        if not isinstance(inspect, dict):
+        inspect = self._inspect_json(container_id)
+        if inspect is None:
             return service_record(name, None)
-        return service_record(name, inspect)
+        image_id = inspect.get("Image") if isinstance(inspect.get("Image"), str) else None
+        image_inspect = self._inspect_json(image_id) if image_id else None
+        return service_record(name, inspect, image_inspect)
+
+    def _inspect_json(self, target: str) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(self._run_docker(["inspect", target]))
+        except (UpdaterError, json.JSONDecodeError):
+            return None
+        inspect = payload[0] if isinstance(payload, list) and payload else None
+        return inspect if isinstance(inspect, dict) else None
+
+    def _running_image_id(self, name: str) -> str | None:
+        record = self._inspect(name)
+        image_id = record.get("image_id")
+        return image_id if isinstance(image_id, str) and image_id else None
+
+    def _local_image_id(self, ref: str) -> str | None:
+        inspect = self._inspect_json(ref)
+        image_id = inspect.get("Id") if inspect else None
+        return image_id if isinstance(image_id, str) and image_id else None
+
+    def _channel_digests(self, image: str, tag: str) -> set[str]:
+        value = self._registry_digest(image, tag)
+        if isinstance(value, str):
+            return {value} if value else set()
+        return {item for item in value if isinstance(item, str) and item}
+
+    def _compose_host_file(self) -> str:
+        hostname = os.environ.get("HOSTNAME", "").strip()
+        if hostname:
+            inspect = self._inspect_json(hostname)
+            compose_dir = "/compose"
+            if inspect:
+                for mount in inspect.get("Mounts") or []:
+                    if not isinstance(mount, dict):
+                        continue
+                    destination = mount.get("Destination")
+                    source = mount.get("Source")
+                    if destination == compose_dir and isinstance(source, str) and source:
+                        return str(Path(source) / Path(self.compose_file).name)
+                    if destination == self.compose_file and isinstance(source, str) and source:
+                        return source
+        return self.compose_file
+
+    def _recreate_updater_detached(self) -> None:
+        host_file = self._compose_host_file()
+        host_dir = str(Path(host_file).parent)
+        image = f"{self.images['updater']}:{self.channel}"
+        try:
+            self._run_docker(["rm", "-f", "treer-updater-recreate"])
+        except UpdaterError:
+            pass
+        self._run_docker(
+            [
+                "run",
+                "--rm",
+                "-d",
+                "--name",
+                "treer-updater-recreate",
+                "--entrypoint",
+                "docker",
+                "-v",
+                "/var/run/docker.sock:/var/run/docker.sock",
+                "-v",
+                f"{host_dir}:{host_dir}:ro",
+                image,
+                "compose",
+                "-f",
+                host_file,
+                "-p",
+                self.compose_project,
+                "up",
+                "-d",
+                "--no-deps",
+                "--pull",
+                "never",
+                "updater",
+            ]
+        )
 
     def _compose(self, args: list[str]) -> str:
         return self._run_docker(
@@ -175,7 +321,7 @@ class Updater:
         return completed.stdout
 
 
-def ghcr_manifest_digest(image: str, tag: str) -> str:
+def ghcr_manifest_digest(image: str, tag: str) -> set[str]:
     repository = image.removeprefix("ghcr.io/")
     token = _ghcr_token(repository)
     request = Request(f"https://ghcr.io/v2/{repository}/manifests/{tag}", method="GET")
@@ -189,18 +335,26 @@ def ghcr_manifest_digest(image: str, tag: str) -> str:
     )
     try:
         with urlopen(request, timeout=30) as response:
-            digest = response.headers.get("Docker-Content-Digest")
+            header_digest = response.headers.get("Docker-Content-Digest")
+            payload = json.loads(response.read().decode())
     except HTTPError as error:
         raise UpdaterError(
             502,
             "registry_unavailable",
             f"GHCR returned HTTP {error.code} for {image}:{tag}",
         ) from error
-    except URLError as error:
+    except (URLError, json.JSONDecodeError) as error:
         raise UpdaterError(502, "registry_unavailable", f"cannot reach GHCR: {error}") from error
-    if not digest:
+    digests: set[str] = set()
+    add_digest(digests, header_digest)
+    if isinstance(payload, dict):
+        add_digest(digests, payload.get("digest"))
+        for manifest in payload.get("manifests") or []:
+            if isinstance(manifest, dict):
+                add_digest(digests, manifest.get("digest"))
+    if not digests:
         raise UpdaterError(502, "registry_unavailable", f"GHCR omitted a digest for {image}:{tag}")
-    return digest
+    return digests
 
 
 def _ghcr_token(repository: str) -> str:

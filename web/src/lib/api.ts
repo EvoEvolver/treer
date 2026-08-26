@@ -210,7 +210,17 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
     credentials: "include",
     headers: { "content-type": "application/json", ...options?.headers },
   })
-  const body = (await response.json()) as T & ApiErrorBody
+  const text = await response.text()
+  let body: T & ApiErrorBody
+  try {
+    body = JSON.parse(text) as T & ApiErrorBody
+  } catch {
+    const fallback =
+      response.status === 502 || response.status === 503
+        ? "control-plane updater sidecar is unreachable"
+        : `HTTP ${response.status}`
+    throw new ApiError(fallback, response.status)
+  }
   if (!response.ok) throw new ApiError(body.error?.message ?? `HTTP ${response.status}`, response.status)
   return body
 }

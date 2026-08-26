@@ -68,7 +68,7 @@ impl UpdaterClient {
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "updater sidecar request failed");
-                ApiFailure::bad_gateway(
+                ApiFailure::service_unavailable(
                     "updater_unreachable",
                     "control-plane updater sidecar is unreachable",
                 )
@@ -84,7 +84,7 @@ impl UpdaterClient {
             StatusCode::from_u16(sidecar_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let body = response.json::<Value>().await.map_err(|error| {
             tracing::warn!(%error, "updater sidecar returned a non-JSON body");
-            ApiFailure::bad_gateway(
+            ApiFailure::service_unavailable(
                 "updater_unreachable",
                 "control-plane updater sidecar returned an invalid response",
             )
