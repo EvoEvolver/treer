@@ -1436,9 +1436,13 @@ fn shell_agent_launch(
     if let Some(default_arg) = default_arg {
         launch_args.push(default_arg.to_string());
     }
+    if agent_command == "codex" {
+        launch_args.push("-c".to_string());
+        launch_args.push("check_for_upgrades_on_startup=false".to_string());
+    }
     launch_args.extend(args.iter().cloned());
     let agent_line = shell_join(agent_command, &launch_args);
-    let script = if let Some(install) = install {
+    let mut script = if let Some(install) = install {
         format!(
             "if ! command -v {} >/dev/null 2>&1; then echo 'treer: installing missing {}' >&2; {}; fi; {}",
             shell_quote(agent_command),
@@ -1447,8 +1451,14 @@ fn shell_agent_launch(
             agent_line
         )
     } else {
-        agent_line
+        agent_line.clone()
     };
+    if agent_command == "codex" {
+        // Codex's in-session npm updater exits 0 and drops to the login shell,
+        // which then interprets leftover TUI queries as commands. Restart in
+        // the same process so the installer prompt can land.
+        script = format!("{script}; exec {agent_line}");
+    }
     let mut input = script.into_bytes();
     input.push(b'\r');
     let mut launch = AgentLaunch {
@@ -1774,7 +1784,7 @@ mod tests {
         assert_eq!(
             launch.initial_writes,
             [HostWrite {
-                data: b"if ! command -v 'codex' >/dev/null 2>&1; then echo 'treer: installing missing codex' >&2; npm install -g @openai/codex; fi; 'codex' '--dangerously-bypass-approvals-and-sandbox' '--model' 'gpt 5' 'it'\\''s' ''\r".to_vec(),
+                data: b"if ! command -v 'codex' >/dev/null 2>&1; then echo 'treer: installing missing codex' >&2; npm install -g @openai/codex; fi; 'codex' '--dangerously-bypass-approvals-and-sandbox' '-c' 'check_for_upgrades_on_startup=false' '--model' 'gpt 5' 'it'\\''s' ''; exec 'codex' '--dangerously-bypass-approvals-and-sandbox' '-c' 'check_for_upgrades_on_startup=false' '--model' 'gpt 5' 'it'\\''s' ''\r".to_vec(),
                 delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
             }]
         );

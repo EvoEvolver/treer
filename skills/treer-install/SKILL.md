@@ -10,7 +10,6 @@ Do not run the recipe's server, `codex app-server`, or UI process in this
 process.
 
 Treer starts this turn with this skill as the base prompt and a recipe URL.
-Do not wait for another human prompt.
 
 ## Verify caller context
 
@@ -23,7 +22,7 @@ treer whoami
 
 Use `treer --help` for syntax. Control commands print JSON.
 
-## Install from the recipe URL
+## Inspect the recipe, then ask which agents to install
 
 Read the **Recipe URL** from the `This install` section of this prompt.
 Need `git`, `node`, `npm`, `curl`, and `treer` on PATH when the recipe requires
@@ -43,21 +42,33 @@ if [ ! -f "$DEST/scripts/apply.sh" ] && [ ! -f "$DEST/treer-agent.json" ]; then
 fi
 ```
 
-Prefer the checkout's own installer. Do not invent a second path.
+**Stop after you know the recipe's agent list.** Do not run `apply.sh` yet.
+Discover the supported agents from, in order:
+
+1. `"$DEST/scripts/apply.sh" --list` when that flag exists
+2. The recipe README table of harnesses / agents
+3. `treer-agent.json` plus `scripts/apply.sh` argument help (`--agent`)
+
+Then ask the human which of those agents to install. Wait for their answer.
+Accept a subset, "all available", or "none". Do not guess.
+
+Only after they answer, run the checkout's installer for **that subset**:
 
 ```bash
 if [ -f "$DEST/scripts/apply.sh" ]; then
-  "$DEST/scripts/apply.sh" --dir "$DEST"
+  # Repeat --agent for each chosen harness, for example:
+  # "$DEST/scripts/apply.sh" --dir "$DEST" --agent grok --agent cursor
+  "$DEST/scripts/apply.sh" --dir "$DEST" --agent <chosen> [--agent <chosen> ...]
 elif [ -f "$DEST/treer-agent.json" ]; then
-  # Follow install/run from treer-agent.json using Host-relative --cwd.
-  # Create a command Agent; do not launch the server here.
   echo "apply.sh missing; follow treer-agent.json with treer agent admin create"
   exit 1
 fi
 ```
 
-If this checkout already contains `scripts/apply.sh`, skip clone and run that
-script.
+Prefer the checkout's own installer. Do not invent a second path.
+If this checkout already contains `scripts/apply.sh`, skip clone and inspect
+that tree. Never run `apply.sh` with no `--agent` from this installer flow:
+that installs every harness the machine happens to have.
 
 `--cwd` for `treer agent admin create` must be relative to the Host root from
 `treer whoami` (`machine.root`). Do not pass an absolute working directory.
@@ -106,8 +117,7 @@ Leave the created Agent running. Extra conversations use Launch to create
 another Agent. A recipe may reuse an already healthy same-type app server and
 frontend, but every command Agent still represents one thread and must run its
 own loopback AIS adapter with a unique `instance_id`. That adapter must bind all
-prompt, transcript, state, event, and abort operations to only that Agent's
-thread.
+prompt, transcript, state, and abort operations to only that Agent's thread.
 
 ## Boundaries
 
