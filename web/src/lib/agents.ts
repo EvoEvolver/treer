@@ -1,0 +1,51 @@
+import type { Machine } from "@/lib/api"
+
+export interface AgentCatalogEntry {
+  kind: string
+  command: string
+  label: string
+  install: string | null
+  start: string
+}
+
+export const AGENT_CATALOG: AgentCatalogEntry[] = [
+  { kind: "claude", command: "claude", label: "Claude", install: "curl -fsSL https://claude.ai/install.sh | bash", start: "claude --dangerously-skip-permissions" },
+  { kind: "cursor", command: "cursor-agent", label: "Cursor", install: "curl https://cursor.com/install -fsS | bash", start: "cursor-agent" },
+  { kind: "grok", command: "grok", label: "Grok", install: null, start: "grok --always-approve" },
+  { kind: "opencode", command: "opencode", label: "OpenCode", install: "npm install -g opencode-ai", start: "opencode" },
+  { kind: "pi", command: "pi", label: "Pi", install: null, start: "pi" },
+  { kind: "codex", command: "codex", label: "Codex", install: "npm install -g @openai/codex", start: "codex --dangerously-bypass-approvals-and-sandbox" },
+]
+
+export function agentKindFromCommand(command: string): string | null {
+  const file = command.split(/[/\\]/).pop() ?? command
+  const name = file.replace(/\.exe$/i, "")
+  if (name === "cursor-agent") return "cursor"
+  return AGENT_CATALOG.find((entry) => entry.kind === name || entry.command === name)?.kind ?? null
+}
+
+export function catalogEntry(kind: string): AgentCatalogEntry | undefined {
+  const normalized = kind === "cursor-agent" ? "cursor" : kind
+  return AGENT_CATALOG.find((entry) => entry.kind === normalized)
+}
+
+export function machineReportsAgents(machine?: Machine | null): boolean {
+  return machine?.available_agents != null
+}
+
+export function isAgentInstalled(machine: Machine | undefined | null, kind: string): boolean | null {
+  if (!machineReportsAgents(machine)) return null
+  const normalized = kind === "cursor-agent" ? "cursor" : kind
+  return (machine?.available_agents ?? []).includes(normalized)
+}
+
+export function availableCatalog(machine?: Machine | null): AgentCatalogEntry[] {
+  if (!machineReportsAgents(machine)) return AGENT_CATALOG
+  const installed = new Set(machine?.available_agents ?? [])
+  return AGENT_CATALOG.filter((entry) => installed.has(entry.kind))
+}
+
+export function installThenStartScript(entry: AgentCatalogEntry): string | null {
+  if (!entry.install) return null
+  return `${entry.install} && echo && echo 'treer: install finished; starting ${entry.label} for login' && exec ${entry.start}`
+}

@@ -168,6 +168,18 @@ branch.
 - Roll back the Proxy to its prior Railway deployment. Database contraction is
   a separate release and is never part of an automatic code rollback.
 
-The first implementation rebuilds the Proxy from the same commit in each
-Railway environment. Moving to a single OCI image digest is a future hardening
-step; the frontend artifact is already byte-identical across promotion.
+## GHCR images for self-host
+
+After Canary passes, tag the same commit `vX.Y.Z` matching `Cargo.toml` and
+push the tag. The `Publish GHCR images` workflow builds native `linux/amd64`
+and `linux/arm64` images for Proxy, App, and the updater sidecar, then writes
+immutable `vX.Y.Z` and `sha-<commit>` tags plus a moving `canary` pointer.
+
+Do not publish `latest`. After Production promotion, dispatch the same
+workflow with `channel=stable` and the version tag. That retags existing
+digests; it does not rebuild.
+
+Self-hosted Compose pulls those images (`image:`, not `build: .`) and applies
+later versions from `/admin`. See [Self-hosted Compose](../deploy/README.md).
+Hosted Railway continues to rebuild the Proxy from the promoted commit in each
+environment. The frontend artifact is already byte-identical across promotion.

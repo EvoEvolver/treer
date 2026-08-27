@@ -28,6 +28,7 @@ export interface Machine {
   controller_build: BuildInfo
   host_build: BuildInfo
   status: string
+  available_agents?: string[]
 }
 
 export interface Agent {
@@ -81,6 +82,30 @@ export interface AdminDashboard {
   organization_count: number
   machine_count: number
   agent_count: number
+}
+
+export interface ControlPlaneService {
+  name: string
+  present: boolean
+  image?: string
+  digest?: string | null
+  version?: string | null
+  revision?: string | null
+  channel_digest?: string
+  update_available?: boolean
+}
+
+export interface ControlPlaneJob {
+  id: string
+  state: "running" | "succeeded" | "failed"
+  error?: string | null
+}
+
+export interface ControlPlaneUpdateStatus {
+  channel: string
+  services: ControlPlaneService[]
+  job?: ControlPlaneJob | null
+  update_available?: boolean
 }
 
 export interface AdminUser {
@@ -244,7 +269,17 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
     credentials: "include",
     headers: { "content-type": "application/json", ...options?.headers },
   })
-  const body = (await response.json()) as T & ApiErrorBody
+  const text = await response.text()
+  let body: T & ApiErrorBody
+  try {
+    body = JSON.parse(text) as T & ApiErrorBody
+  } catch {
+    const fallback =
+      response.status === 502 || response.status === 503
+        ? "control-plane updater sidecar is unreachable"
+        : `HTTP ${response.status}`
+    throw new ApiError(fallback, response.status)
+  }
   if (!response.ok) throw new ApiError(body.error?.message ?? `HTTP ${response.status}`, response.status)
   return body
 }

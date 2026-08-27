@@ -18,6 +18,7 @@ const requiredFiles = [
   "apps/README.md",
   "apps/mail/README.md",
   "apps/telegram/README.md",
+  "deploy/README.md",
   "skills/treer/SKILL.md",
   "skills/treer-install/SKILL.md",
 ];
@@ -56,6 +57,7 @@ requireText("AGENTS.md", "apps/README.md");
 requireText("AGENTS.md", "skills/treer/SKILL.md");
 requireText("AGENTS.md", "skills/treer-install/SKILL.md");
 requireText("docs/README.md", "../apps/README.md");
+requireText("docs/README.md", "../deploy/README.md");
 requireText(
   "crates/treer-cli/src/main.rs",
   'include_str!("../../../skills/treer/SKILL.md")',

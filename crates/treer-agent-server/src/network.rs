@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
+use base64::Engine;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(target_os = "linux")]
 use tokio::net::UnixStream;
@@ -168,11 +169,18 @@ impl NetworkRuntime {
     }
 
     async fn spawn_source(&self, mut socket: TcpStream) {
-        let route = match read_socks_request(&mut socket).await {
+        let protocol = match peek_proxy_protocol(&socket).await {
+            Ok(protocol) => protocol,
+            Err(error) => {
+                debug!(%error, "network proxy peek failed");
+                return;
+            }
+        };
+        let route = match read_proxy_request(&mut socket, protocol).await {
             Ok(route) => route,
             Err(error) => {
-                debug!(%error, "rejected local SOCKS request");
-                let _ = write_socks_reply(&mut socket, 0x01).await;
+                debug!(%error, "rejected local proxy request");
+                let _ = write_proxy_failure(&mut socket, protocol).await;
                 return;
             }
         };
@@ -181,7 +189,7 @@ impl NetworkRuntime {
         {
             let local_api_address = self.inner.local_api_address;
             tokio::spawn(async move {
-                if let Err(error) = bridge_local_api(socket, local_api_address).await {
+                if let Err(error) = bridge_local_api(socket, local_api_address, protocol).await {
                     debug!(%error, "local agent API stream closed");
                 }
             });
@@ -210,7 +218,7 @@ impl NetworkRuntime {
                         payload: serde_json::to_vec(&request)?,
                     })
                     .await?;
-                source_stream(socket, incoming_rx, &runtime, &stream_id).await
+                source_stream(socket, incoming_rx, &runtime, &stream_id, protocol).await
             }
             .await;
             runtime.inner.streams.lock().await.remove(&stream_id);
@@ -336,15 +344,19 @@ pub(crate) async fn connect_agent_service(
     connect_destination("127.0.0.1", port, Some(agent_id), transparent_networking).await
 }
 
-async fn bridge_local_api(mut socket: TcpStream, address: SocketAddr) -> anyhow::Result<()> {
+async fn bridge_local_api(
+    mut socket: TcpStream,
+    address: SocketAddr,
+    protocol: ClientProtocol,
+) -> anyhow::Result<()> {
     let mut local_api = match TcpStream::connect(address).await {
         Ok(socket) => socket,
         Err(error) => {
-            let _ = write_socks_reply(&mut socket, 0x05).await;
+            let _ = write_proxy_failure(&mut socket, protocol).await;
             return Err(error).with_context(|| format!("failed to connect to local API {address}"));
         }
     };
-    write_socks_reply(&mut socket, 0).await?;
+    write_proxy_success(&mut socket, protocol).await?;
     tokio::io::copy_bidirectional(&mut socket, &mut local_api).await?;
     Ok(())
 }
@@ -354,6 +366,35 @@ struct SocksRoute {
     host: String,
     port: u16,
     source_agent_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientProtocol {
+    Socks,
+    HttpConnect,
+}
+
+async fn peek_proxy_protocol(socket: &TcpStream) -> anyhow::Result<ClientProtocol> {
+    let mut first = [0_u8; 1];
+    let n = socket.peek(&mut first).await?;
+    if n == 0 {
+        return Err(anyhow!("proxy connection closed"));
+    }
+    if first[0] == 5 {
+        Ok(ClientProtocol::Socks)
+    } else {
+        Ok(ClientProtocol::HttpConnect)
+    }
+}
+
+async fn read_proxy_request(
+    socket: &mut TcpStream,
+    protocol: ClientProtocol,
+) -> anyhow::Result<SocksRoute> {
+    match protocol {
+        ClientProtocol::Socks => read_socks_request(socket).await,
+        ClientProtocol::HttpConnect => read_http_connect_request(socket).await,
+    }
 }
 
 async fn bind_near(api_address: SocketAddr) -> io::Result<TcpListener> {
@@ -443,6 +484,76 @@ async fn read_socks_username(socket: &mut TcpStream) -> anyhow::Result<String> {
     Ok(username)
 }
 
+async fn read_http_connect_request(socket: &mut TcpStream) -> anyhow::Result<SocksRoute> {
+    let header = read_http_header_block(socket).await?;
+    let text = std::str::from_utf8(&header).context("HTTP proxy request is not UTF-8")?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    if !method.eq_ignore_ascii_case("CONNECT") {
+        return Err(anyhow!("only HTTP CONNECT is supported"));
+    }
+    let (host, port) = parse_connect_target(target)?;
+    let mut source_agent_id = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("proxy-authorization") {
+            source_agent_id = Some(parse_proxy_basic_identity(value.trim())?);
+        }
+    }
+    let mut route = parse_route(&host, port)?;
+    route.source_agent_id = source_agent_id;
+    Ok(route)
+}
+
+async fn read_http_header_block(socket: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while buf.len() < 8192 {
+        buf.push(socket.read_u8().await?);
+        if buf.ends_with(b"\r\n\r\n") {
+            return Ok(buf);
+        }
+    }
+    Err(anyhow!("HTTP proxy headers too large"))
+}
+
+fn parse_connect_target(target: &str) -> anyhow::Result<(String, u16)> {
+    if let Some(rest) = target.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once("]:")
+            .ok_or_else(|| anyhow!("invalid IPv6 CONNECT target"))?;
+        let port = port.parse().context("invalid IPv6 CONNECT port")?;
+        return Ok((host.to_string(), port));
+    }
+    let (host, port) = target
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("invalid CONNECT target"))?;
+    let port = port.parse().context("invalid CONNECT port")?;
+    Ok((host.to_string(), port))
+}
+
+fn parse_proxy_basic_identity(value: &str) -> anyhow::Result<String> {
+    let encoded = value
+        .strip_prefix("Basic ")
+        .or_else(|| value.strip_prefix("basic "))
+        .ok_or_else(|| anyhow!("HTTP proxy auth must be Basic"))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .context("HTTP proxy identity is not Base64")?;
+    let text = String::from_utf8(decoded).context("HTTP proxy identity is not UTF-8")?;
+    let (user, password) = text
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid HTTP proxy identity"))?;
+    if user.is_empty() || password != "treer" {
+        return Err(anyhow!("invalid Treer HTTP proxy agent identity"));
+    }
+    Ok(user.to_string())
+}
+
 fn parse_route(domain: &str, port: u16) -> anyhow::Result<SocksRoute> {
     let route = domain.trim_end_matches('.').to_ascii_lowercase();
     if route.is_empty() || route.len() > 253 {
@@ -461,6 +572,7 @@ async fn source_stream(
     mut incoming: mpsc::Receiver<NetworkBinaryFrame>,
     runtime: &NetworkRuntime,
     stream_id: &str,
+    protocol: ClientProtocol,
 ) -> anyhow::Result<()> {
     let route = incoming
         .recv()
@@ -471,19 +583,19 @@ async fn source_stream(
             let target: NetworkDirectTarget = match serde_json::from_slice(&route.payload) {
                 Ok(target) => target,
                 Err(error) => {
-                    write_socks_reply(&mut socket, 0x05).await?;
+                    write_proxy_failure(&mut socket, protocol).await?;
                     return Err(error).context("invalid direct network target");
                 }
             };
             if target.host.is_empty() || target.port == 0 {
-                write_socks_reply(&mut socket, 0x05).await?;
+                write_proxy_failure(&mut socket, protocol).await?;
                 return Err(anyhow!("direct network target is invalid"));
             }
             let mut destination =
                 match TcpStream::connect((target.host.as_str(), target.port)).await {
                     Ok(socket) => socket,
                     Err(error) => {
-                        write_socks_reply(&mut socket, 0x05).await?;
+                        write_proxy_failure(&mut socket, protocol).await?;
                         return Err(error).with_context(|| {
                             format!(
                                 "failed to connect directly to {}:{}",
@@ -492,7 +604,7 @@ async fn source_stream(
                         });
                     }
                 };
-            write_socks_reply(&mut socket, 0).await?;
+            write_proxy_success(&mut socket, protocol).await?;
             tokio::io::copy_bidirectional(&mut socket, &mut destination)
                 .await
                 .context("direct network stream failed")?;
@@ -500,7 +612,7 @@ async fn source_stream(
         }
         NetworkBinaryKind::Opened => {
             let result = async {
-                write_socks_reply(&mut socket, 0).await?;
+                write_proxy_success(&mut socket, protocol).await?;
                 bridge_stream(socket, incoming, runtime, stream_id, INITIAL_WINDOW).await
             }
             .await;
@@ -516,11 +628,11 @@ async fn source_stream(
             result
         }
         NetworkBinaryKind::Reset => {
-            write_socks_reply(&mut socket, 0x05).await?;
+            write_proxy_failure(&mut socket, protocol).await?;
             Err(decode_reset(&route))
         }
         _ => {
-            write_socks_reply(&mut socket, 0x05).await?;
+            write_proxy_failure(&mut socket, protocol).await?;
             let error = anyhow!("unexpected network route frame {:?}", route.kind);
             let _ = runtime
                 .send(NetworkBinaryFrame {
@@ -536,6 +648,39 @@ async fn source_stream(
 
 async fn write_socks_reply(socket: &mut TcpStream, status: u8) -> io::Result<()> {
     socket.write_all(&[5, status, 0, 1, 0, 0, 0, 0, 0, 0]).await
+}
+
+async fn write_http_error(socket: &mut TcpStream, status: u16) -> io::Result<()> {
+    let reason = match status {
+        400 => "Bad Request",
+        407 => "Proxy Authentication Required",
+        501 => "Not Implemented",
+        _ => "Bad Gateway",
+    };
+    socket
+        .write_all(
+            format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+}
+
+async fn write_proxy_success(socket: &mut TcpStream, protocol: ClientProtocol) -> io::Result<()> {
+    match protocol {
+        ClientProtocol::Socks => write_socks_reply(socket, 0).await,
+        ClientProtocol::HttpConnect => {
+            socket
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+        }
+    }
+}
+
+async fn write_proxy_failure(socket: &mut TcpStream, protocol: ClientProtocol) -> io::Result<()> {
+    match protocol {
+        ClientProtocol::Socks => write_socks_reply(socket, 0x05).await,
+        ClientProtocol::HttpConnect => write_http_error(socket, 502).await,
+    }
 }
 
 async fn bridge_stream<S>(
@@ -697,6 +842,120 @@ mod tests {
         let route = server.await.expect("SOCKS server task");
         assert_eq!(route.destination, "api.internal");
         assert_eq!(route.source_agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn http_connect_username_becomes_the_source_agent_identity() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept HTTP client");
+            let protocol = peek_proxy_protocol(&socket)
+                .await
+                .expect("peek HTTP CONNECT");
+            assert_eq!(protocol, ClientProtocol::HttpConnect);
+            read_proxy_request(&mut socket, protocol)
+                .await
+                .expect("HTTP CONNECT request")
+        });
+        let mut client = TcpStream::connect(address)
+            .await
+            .expect("connect HTTP proxy");
+        let identity = base64::engine::general_purpose::STANDARD.encode("agent-a:treer");
+        let request = format!(
+            "CONNECT api.internal:80 HTTP/1.1\r\nHost: api.internal:80\r\nProxy-Authorization: Basic {identity}\r\n\r\n"
+        );
+        client
+            .write_all(request.as_bytes())
+            .await
+            .expect("HTTP CONNECT request");
+        let route = server.await.expect("HTTP proxy task");
+        assert_eq!(route.destination, "api.internal");
+        assert_eq!(route.port, 80);
+        assert_eq!(route.source_agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn http_connect_direct_route_bridges_locally() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind target server");
+        let target_port = target.local_addr().expect("target address").port();
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.expect("accept target connection");
+            let mut request = [0_u8; 18];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read target request");
+            assert_eq!(&request, b"GET / HTTP/1.0\r\n\r\n");
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("write target response");
+        });
+
+        let api_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reserve API port");
+        let api_address = api_reservation.local_addr().expect("API address");
+        drop(api_reservation);
+        let runtime = NetworkRuntime::bind_near(api_address, false)
+            .await
+            .expect("bind network runtime");
+        let mut client = TcpStream::connect(runtime.listen_address())
+            .await
+            .expect("connect HTTP proxy");
+        let identity = base64::engine::general_purpose::STANDARD.encode("agent-a:treer");
+        client
+            .write_all(
+                format!(
+                    "CONNECT direct.test:80 HTTP/1.1\r\nProxy-Authorization: Basic {identity}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("HTTP CONNECT request");
+
+        let source_open = next_frame(&runtime).await;
+        assert_eq!(source_open.kind, NetworkBinaryKind::Open);
+        let open = serde_json::from_slice::<NetworkOpenRequest>(&source_open.payload)
+            .expect("decode network open");
+        assert_eq!(open.destination, "direct.test");
+        assert_eq!(open.source_agent_id.as_deref(), Some("agent-a"));
+        runtime
+            .handle_incoming(NetworkBinaryFrame {
+                kind: NetworkBinaryKind::Direct,
+                stream_id: source_open.stream_id,
+                payload: serde_json::to_vec(&NetworkDirectTarget {
+                    host: Ipv4Addr::LOCALHOST.to_string(),
+                    port: target_port,
+                })
+                .expect("encode direct target"),
+            })
+            .await
+            .expect("apply direct route");
+
+        let mut established = [0_u8; 39];
+        client
+            .read_exact(&mut established)
+            .await
+            .expect("HTTP CONNECT reply");
+        assert_eq!(&established, b"HTTP/1.1 200 Connection Established\r\n\r\n");
+        client
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .await
+            .expect("write HTTP request");
+        client.shutdown().await.expect("half-close HTTP request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .expect("HTTP response timeout")
+            .expect("read HTTP response");
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        target_task.await.expect("target task");
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@
 /dist/
 /output/
 /.treer/
+.env
 /.vscode/
 .DS_Store
 web/node_modules/

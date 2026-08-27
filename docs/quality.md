@@ -23,15 +23,18 @@ available on the allocated node, skip the PostgreSQL-backed tests and report
 that limitation instead of treating the partial run as the complete gate.
 
 `just check` verifies documentation links, release tooling, the control-plane
-and Mail frontends, Mail/Telegram/AIS adapter tests, Rust build/format/tests,
-and Clippy with warnings denied. Focused commands are:
+and Mail frontends, Mail/Telegram/Soul/updater tests, AIS adapter tests, Rust
+build/format/tests, and Clippy with warnings denied. Focused commands are:
 
 ```sh
 just app-test
+just updater-test
 just messaging-e2e
 just web-test
 just ais-e2e
 cargo test -p treer-proxy message_
+cargo test -p treer-proxy -- updater::
+cargo test -p treer-proxy -- admin_update_
 node scripts/check-docs.mjs
 ```
 
@@ -46,7 +49,8 @@ node scripts/check-docs.mjs
 | Mail | Python HTTP contract, frontend build, resumable SQLite/PostgreSQL migration | No unattended real-browser audit |
 | Telegram | Fake Bot API, mapping, ack crash ordering, restart, rate-limit and ambiguous-send tests | No live Telegram canary, webhook, or active-active mode |
 | Distribution | NATS event/outbox and multi-Proxy routing tests | No automated partition/failure CI |
-| Release | Four-platform metadata/checksums and signed-manifest Node tests | Installed updater does not enforce signatures |
+| Release | Four-platform metadata/checksums, GHCR publish workflow, and signed-manifest Node tests | Installed machine updater does not enforce signatures |
+| Self-host update | Updater unit tests; Proxy admin forward tests; `/admin` e2e | No unattended Compose apply against live Docker |
 | Security | Explicit trust tier and Policy tests | Missing allow-by-default hardening and production isolation backend |
 
 ## Review Triggers
@@ -63,6 +67,7 @@ node scripts/check-docs.mjs
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
 | Documentation | `node scripts/check-docs.mjs` |
 | Release publishing | `node --test scripts/release-r2.test.mjs` plus isolated R2 verification |
+| Self-host GHCR or updater | `just updater-test`, Proxy admin update tests, and `/admin` e2e |
 
 Documentation describes the current source, not future intent. Dated research
 is historical and does not override implementation, protocol types, or tests.

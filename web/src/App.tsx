@@ -44,8 +44,12 @@ import {
   UserRound,
   Users,
   X,
+  CircleCheck,
+  CircleDashed,
+  Download,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type PlatformAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type PlatformAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
 import { cn } from "@/lib/utils"
@@ -365,6 +369,7 @@ function AdminPanel() {
         <AdminCountCard label="Agents" icon={<TerminalSquare className="size-3.5" />} value={dashboard?.agent_count} active={inventory === "agents"} onClick={() => setInventory(inventory === "agents" ? null : "agents")} />
       </div>
       {inventory && <AdminInventoryPanel kind={inventory} preview={preview} onError={setError} onChanged={loadDashboard} />}
+      <ControlPlaneUpdate preview={preview} onError={setError} />
       <section className="mt-12" data-tour="admin-invite">
         <h2 className="text-sm font-semibold">User invitations</h2>
         <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
@@ -576,6 +581,115 @@ function AdminInventoryPanel({ kind, preview, onError, onChanged }: { kind: Excl
   </div>
 }
 
+function ControlPlaneUpdate({ preview, onError }: { preview?: boolean; onError: (message: string) => void }) {
+  const [status, setStatus] = useState<ControlPlaneUpdateStatus | null>(null)
+  const [configured, setConfigured] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const next = await api<ControlPlaneUpdateStatus>("/api/admin/update")
+      setConfigured(true)
+      setStatus(next)
+      return next
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 404) {
+        setConfigured(false)
+        setStatus(null)
+        return null
+      }
+      throw reason
+    }
+  }, [])
+
+  useEffect(() => {
+    if (preview) {
+      setConfigured(false)
+      return
+    }
+    loadStatus().catch((reason) => onError(reason instanceof Error ? reason.message : "Unable to load control-plane status"))
+  }, [preview, loadStatus, onError])
+
+  async function checkForUpdates() {
+    setBusy(true)
+    try {
+      const next = await api<ControlPlaneUpdateStatus>("/api/admin/update/check")
+      setConfigured(true)
+      setStatus(next)
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "Unable to check for updates")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function applyUpdate() {
+    setBusy(true)
+    onError("")
+    try {
+      const accepted = await api<ControlPlaneUpdateStatus>("/api/admin/update", { method: "POST", body: "{}" })
+      setStatus(accepted)
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000))
+        try {
+          const next = await loadStatus()
+          if (!next) return
+          if (next.job?.state === "running") continue
+          if (next.job?.state === "failed") {
+            onError(next.job.error || "Control-plane update failed")
+            return
+          }
+          return
+        } catch {
+          // Proxy and updater bounce while Compose recreates them.
+        }
+      }
+      onError("The update is still running. Refresh this page after the control plane returns.")
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "Unable to apply the update")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (configured === null) return null
+  if (!configured) {
+    return <section className="mt-12">
+      <h2 className="text-sm font-semibold">Control plane</h2>
+      <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">Control-plane updates are not configured on this deployment. Hosted Railway uses its own release promotion. Self-hosted Compose exposes this panel through the updater sidecar.</p>
+    </section>
+  }
+
+  const jobRunning = status?.job?.state === "running" || busy
+  const digestLabel = (value?: string | null) => value ? value.replace(/^sha256:/, "").slice(0, 12) : "unknown"
+
+  return <section className="mt-12">
+    <h2 className="text-sm font-semibold">Control plane</h2>
+    <p className="mt-1 text-xs text-muted-foreground">Updates pull immutable GHCR tags for Proxy, App, and the updater sidecar. Enrolled machines still run <span className="font-mono">treer-agent-server update</span> on each host.</p>
+    <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+      <div>
+        <div className="text-sm font-medium">Channel {status?.channel ?? "—"}</div>
+        <div className="mt-2 space-y-1">
+          {(status?.services ?? []).map((service) => (
+            <div key={service.name} className="flex flex-wrap items-baseline gap-x-3 text-xs">
+              <span className="w-16 font-medium">{service.name}</span>
+              <span className="text-muted-foreground">{service.present ? service.version || "running" : "missing"}</span>
+              <span className="font-mono text-[10px] text-muted-foreground">{digestLabel(service.digest)}</span>
+              {service.update_available && <span className="text-emerald-700">update available</span>}
+            </div>
+          ))}
+        </div>
+        {status?.job?.state === "failed" && <div className="mt-2 text-xs text-destructive">{status.job.error}</div>}
+        {jobRunning && <div className="mt-2 text-xs text-muted-foreground">Applying images. This page may briefly lose the Proxy connection.</div>}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={() => { void checkForUpdates() }} disabled={jobRunning}><RotateCw />Check for updates</Button>
+        <Button size="sm" onClick={() => { void applyUpdate() }} disabled={jobRunning || !(status?.update_available || (status?.services ?? []).some((service) => service.update_available))}><Download />Apply update</Button>
+      </div>
+    </div>
+  </section>
+}
+
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`
   const units = ["KB", "MB", "GB", "TB"]
@@ -705,6 +819,7 @@ function WorkspaceApp() {
   const [agentCwd, setAgentCwd] = useState(".")
   const [agentCommandLine, setAgentCommandLine] = useState("codex")
   const [agentRecipeUrl, setAgentRecipeUrl] = useState("")
+  const [agentRecipeKind, setAgentRecipeKind] = useState("")
   const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
   const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
@@ -860,6 +975,11 @@ function WorkspaceApp() {
   const selectedAgentInterface = selectedAgentMachineOnline && selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
   const onlineMachines = snapshot?.servers.filter((machine) => machine.status === "online") ?? []
   const selectedCreateProfile = launchProfiles.find((profile) => profile.profile_id === agentProfileId)
+  const selectedCreateMachine = onlineMachines.find((machine) => machine.server_id === agentServerId)
+  const selectedProfileKind = selectedCreateProfile ? agentKindFromCommand(selectedCreateProfile.command) : null
+  const selectedProfileInstalled = selectedProfileKind ? isAgentInstalled(selectedCreateMachine, selectedProfileKind) : null
+  const selectedProfileInstall = selectedProfileKind ? catalogEntry(selectedProfileKind) : undefined
+  const recipeInstallers = availableCatalog(selectedCreateMachine)
   const organization = organizations.find((item) => item.organization_id === organizationId)
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
@@ -955,6 +1075,12 @@ function WorkspaceApp() {
     if (createAgentOpen && !onlineMachines.some((machine) => machine.server_id === agentServerId)) setAgentServerId(onlineMachines[0]?.server_id ?? "")
   }, [createAgentOpen, onlineMachines, agentServerId])
 
+  const availableAgentKey = (selectedCreateMachine?.available_agents ?? []).join(",")
+  useEffect(() => {
+    const kinds = availableCatalog(selectedCreateMachine).map((entry) => entry.kind)
+    setAgentRecipeKind((current) => (current && kinds.includes(current) ? current : (kinds[0] ?? "")))
+  }, [agentServerId, availableAgentKey, selectedCreateMachine])
+
   async function createOrganization(event: FormEvent) {
     event.preventDefault()
     try {
@@ -1014,7 +1140,8 @@ function WorkspaceApp() {
       if (agentProfileId === "terminal") {
         agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "command", name: agentName, cwd: agentCwd, args: [], cols: 120, rows: 36 }) })
       } else if (agentProfileId === "recipe") {
-        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "codex", name: agentName, cwd: ".", args: [], recipe: agentRecipeUrl.trim(), cols: 120, rows: 36 }) })
+        const kind = agentRecipeKind || recipeInstallers[0]?.kind || "auto"
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind, name: agentName, cwd: ".", args: [], recipe: agentRecipeUrl.trim(), cols: 120, rows: 36 }) })
       } else if (agentProfileId === "manual") {
         const parsed = parseCommandLine(agentCommandLine)
         const kind = parsed.command === "codex" || parsed.command === "claude" ? parsed.command : "command"
@@ -1034,9 +1161,22 @@ function WorkspaceApp() {
       setAgentNameCustomized(false)
       setAgentCommandLine("codex")
       setAgentRecipeUrl("")
+      setAgentRecipeKind("")
     }
     setCreateAgentOpen(true)
     if (!preview) void loadLaunchProfiles().catch(showError)
+  }
+
+  async function installSelectedAgent() {
+    if (!workspaceId || !selectedProfileInstall?.install || !agentServerId) return
+    const script = installThenStartScript(selectedProfileInstall)
+    if (!script) return
+    try {
+      const agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "shell", name: agentName || `install-${selectedProfileInstall.kind}`, cwd: ".", args: ["bash", "-lc", script], cols: 120, rows: 36 }) })
+      setCreateAgentOpen(false)
+      showAgentTerminal(agent.agent_id)
+      await refreshSnapshot()
+    } catch (reason) { showError(reason) }
   }
 
   function changeAgentCommandLine(commandLine: string) {
@@ -1637,7 +1777,7 @@ function WorkspaceApp() {
 
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent data-tour="create-agent-dialog"><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger data-tour="agent-launch"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /><span className="mt-1 block text-[10px] text-muted-foreground">Treer prompts this installer with the bundled install skill. Each created Agent is one thread.</span></Field></div>}{selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button><Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && !agentRecipeUrl.trim())}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent data-tour="create-agent-dialog"><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger data-tour="agent-launch"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => { const kind = agentKindFromCommand(profile.command); const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null; return <SelectItem key={profile.profile_id} value={profile.profile_id} className={installed === false ? "text-muted-foreground" : undefined} trailing={installed === true ? <CircleCheck className="size-3.5 text-emerald-700" /> : installed === false ? <CircleDashed className="size-3.5" /> : null}>{profile.name}</SelectItem> })}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Installer"><Select value={agentRecipeKind} onValueChange={setAgentRecipeKind} disabled={!recipeInstallers.length}><SelectTrigger><SelectValue placeholder={recipeInstallers.length ? "Select an installed agent" : "No installed agent on this machine"} /></SelectTrigger><SelectContent>{recipeInstallers.map((entry) => <SelectItem key={entry.kind} value={entry.kind} trailing={<CircleCheck className="size-3.5 text-emerald-700" />}>{entry.label}</SelectItem>)}</SelectContent></Select><span className="mt-1 block text-[10px] text-muted-foreground">{recipeInstallers.length ? "Only agents already installed on the selected machine can run a recipe." : "Install Claude, Cursor, Codex, or another agent on this machine first."}</span></Field><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /></Field></div>}{selectedCreateProfile && selectedProfileInstalled === false && selectedProfileInstall?.install ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">{selectedProfileInstall.label} is not installed on {machineName(selectedCreateMachine)}. Install it in a terminal, then log in there.</div> : selectedCreateProfile ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span> : null}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>{selectedProfileInstalled === false && selectedProfileInstall?.install ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId}><Download />Install {selectedProfileInstall.label}</Button> : <Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind))}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button>}</DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl" data-tour="add-machine-dialog"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 

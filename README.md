@@ -24,7 +24,36 @@ operations.
 
 The dated [source-level project review](docs/research/2026-08-18-project-review.md)
 contains the original technology survey, detailed information-flow diagrams,
-and comparisons with Herdr and AgentENV.
+and comparisons with Herdr and AgentENV. Self-hosted Compose, GHCR images, and
+`/admin` control-plane updates are in [deploy/README.md](deploy/README.md).
+
+## Self-hosted deployment
+
+A single-host install runs PostgreSQL, NATS, Proxy, the browser App, and an
+updater sidecar from published GHCR images. Copy `.env.example`, set
+`ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `DATABASE_URL`, and a long random
+`TREER_UPDATER_TOKEN`, then pull and start:
+
+```bash
+cp .env.example .env
+docker compose pull
+docker compose up -d
+```
+
+The App is on port 3000, the Proxy on 8787. Open `/admin` with `ADMIN_PASSWORD`
+to invite users and to update the control-plane images. Apply talks to the
+updater sidecar; Proxy never mounts the Docker socket. After the control plane
+moves, each enrolled machine still runs `treer-agent-server update`. Default
+`TREER_IMAGE_TAG=stable`. Pin `canary` or a version tag such as `v0.1.3` when
+you want that channel instead.
+
+Set `TREER_PROXY_PUBLIC_URL` to the URL other machines can reach and
+`TREER_APP_PUBLIC_URL` to the exact browser origin. Operator detail, rollback,
+and GHCR tag rules are in [deploy/README.md](deploy/README.md).
+
+Local source builds overlay `compose.dev.yaml` and pass `--build`. The hosted
+Railway plus Cloudflare path is a separate source rebuild of Proxy plus a
+Worker App; see [Managed deployment](#managed-deployment).
 
 ## Run the prototype
 
@@ -309,7 +338,9 @@ and Agent totals. Click a count to expand that inventory: users can be searched,
 issued a one-time password-reset link, and signed out of every session; machines
 list enrolled hosts and expand to their live Agents. The same page still creates
 single-use user invitations and can list pending invites, organizations, and
-recent admin activity. A user who
+recent admin activity. On a self-hosted Compose stack it also checks and applies
+GHCR image updates for Proxy, App, and the updater sidecar. Workspace Settings
+does not include that control. A user who
 registers from an administrator invitation receives an organization named
 `<preferred name> Personal` and owns it. Treer does not seed an initial
 organization or workspace.
@@ -394,23 +425,10 @@ Controller connections may land on different replicas.
 Each Controller heartbeat also rechecks its machine against PostgreSQL, so a
 revoked machine is disconnected even if NATS delivery is interrupted.
 
-For a single-host deployment with separate PostgreSQL, NATS, Proxy, and App
-processes, use the checked-in Compose stack:
-
-```bash
-ADMIN_PASSWORD='replace-this' \
-POSTGRES_PASSWORD='replace-this-too' \
-DATABASE_URL='postgres://treer:replace-this-too@postgres:5432/treer' \
-docker compose up --build -d
-curl -fsS http://127.0.0.1:8222/jsz
-```
-
-This persists PostgreSQL and JetStream data in separate volumes. NATS client
-and monitoring ports bind only to host loopback; the Proxy is available on port
-8787 and the App on port 3000. Set `TREER_PROXY_PUBLIC_URL` when other machines
-must reach the Proxy and `TREER_APP_PUBLIC_URL` to the exact browser origin. If
-credentials contain URL-reserved characters, percent-encode them in
-`DATABASE_URL`.
+The checked-in Compose stack starts NATS next to PostgreSQL, Proxy, App, and
+the updater. See [Self-hosted deployment](#self-hosted-deployment). NATS client
+and monitoring ports bind only to host loopback. If credentials contain
+URL-reserved characters, percent-encode them in `DATABASE_URL`.
 
 For a Proxy started outside Compose, configure:
 
@@ -552,14 +570,17 @@ proxy environment variables, because its loopback SOCKS listener is outside the
 agent network namespace and normal application traffic must enter the TUN
 adapter. `TREER_NETWORK_PROXY` remains available for diagnostics. Set
 `TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
-transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
-`all_proxy` instead. In this mode, `NO_PROXY` and `no_proxy` contain
-`127.0.0.1,localhost,::1`, so Controller and App loopback calls do not enter
-the SOCKS path. Treer also configures Git to invoke its network bridge, so native
-`git://` remotes retain workspace virtual-host routing even though Git does not
-honor `ALL_PROXY`. Other TCP clients can use the same stdio bridge as their proxy
-command: `treer network connect HOST PORT`. Native macOS currently uses this
-compatibility mode; use a Linux container when transparent capture is required.
+transparent namespace wrapper and inject the same loopback listener through
+`ALL_PROXY`/`all_proxy` as SOCKS5h and through `HTTP_PROXY`/`HTTPS_PROXY` as
+HTTP CONNECT. HTTP-only clients such as Codex's reqwest stack cannot speak
+SOCKS5; they use the HTTP proxy variables instead. In this mode, `NO_PROXY` and
+`no_proxy` contain `127.0.0.1,localhost,::1`, so Controller and App loopback
+calls do not enter the proxy path. Treer also configures Git to invoke its
+network bridge, so native `git://` remotes retain workspace virtual-host routing
+even though Git does not honor `ALL_PROXY`. Other TCP clients can use the same
+stdio bridge as their proxy command: `treer network connect HOST PORT`. Native
+macOS currently uses this compatibility mode; use a Linux container when
+transparent capture is required.
 A transparent Agent can expose a namespace-local loopback listener by
 registering an Agent-scoped service
 (`treer network service create … --agent self`); the Controller reaches it
@@ -866,7 +887,7 @@ Both are embedded at build time so the printed instructions match the binary.
 Create an installer that receives the install skill as its first prompt:
 
 ```bash
-treer agent admin create --machine SERVER_ID --kind codex --name installer \
+treer agent admin create --machine SERVER_ID --kind auto --name installer \
   --recipe https://github.com/example/recipe.git
 ```
 

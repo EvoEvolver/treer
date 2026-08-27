@@ -279,6 +279,15 @@ impl ControllerRuntime {
         Ok(())
     }
 
+    pub fn available_agent_kinds(&self) -> Vec<String> {
+        let search_path = join_agent_path(self.inner.treer_binary.as_deref());
+        interactive_agent_specs()
+            .iter()
+            .filter(|spec| command_on_path(spec.command, &search_path))
+            .map(|spec| spec.kind.to_string())
+            .collect()
+    }
+
     pub fn list(&self) -> Vec<AgentInfo> {
         let Ok(agents) = self.inner.agents.read() else {
             return Vec::new();
@@ -304,7 +313,7 @@ impl ControllerRuntime {
                 "agent name cannot be empty",
             ));
         }
-        let launch = resolve_launch(&request)?;
+        let (kind, launch) = resolve_launch(&request)?;
         if !valid_workload_credential(&workload_credential) {
             return Err(ProtocolError::new(
                 "invalid_workload_credential",
@@ -315,7 +324,7 @@ impl ControllerRuntime {
             agent_id: agent_id.clone(),
             workspace_id: self.inner.workspace_id.clone(),
             server_id: self.inner.server_id.clone(),
-            kind: request.kind,
+            kind,
             name: request.name,
             cwd: request.cwd.clone(),
             workload_credential: workload_credential.clone(),
@@ -409,16 +418,11 @@ impl ControllerRuntime {
         }
         if let Some(treer_binary) = &self.inner.treer_binary {
             env.insert("TREER_BIN".to_string(), treer_binary.display().to_string());
-            if let Some(parent) = treer_binary.parent() {
-                let mut paths = vec![parent.to_path_buf()];
-                if let Some(current_path) = std::env::var_os("PATH") {
-                    paths.extend(std::env::split_paths(&current_path));
-                }
-                if let Ok(path) = std::env::join_paths(paths) {
-                    env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
-                }
-            }
         }
+        env.insert(
+            "PATH".to_string(),
+            join_agent_path(self.inner.treer_binary.as_deref()),
+        );
         env
     }
 
@@ -1205,20 +1209,41 @@ fn workload_credential_matches(expected: &str, supplied: &str) -> bool {
         && expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() == 1
 }
 
-fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolError> {
+fn resolve_launch(request: &CreateAgentRequest) -> Result<(String, AgentLaunch), ProtocolError> {
+    resolve_launch_with_path(request, &join_agent_path(None))
+}
+
+fn resolve_launch_with_path(
+    request: &CreateAgentRequest,
+    search_path: &str,
+) -> Result<(String, AgentLaunch), ProtocolError> {
     let mut launch = match request.kind.as_str() {
-        "codex" => shell_agent_launch(
-            "codex",
-            "--dangerously-bypass-approvals-and-sandbox",
-            &request.args,
-            false,
-        ),
-        "claude" => shell_agent_launch(
-            "claude",
-            "--dangerously-skip-permissions",
-            &request.args,
-            true,
-        ),
+        "auto" => {
+            let spec = first_available_interactive_agent(search_path)
+                .unwrap_or_else(default_interactive_agent);
+            shell_agent_launch(
+                spec.command,
+                spec.default_arg,
+                &request.args,
+                spec.confirm_workspace_trust,
+                spec.install,
+            )
+        }
+        "codex" | "claude" | "cursor" | "cursor-agent" | "grok" | "opencode" | "pi" => {
+            let spec = interactive_agent_spec(&request.kind).ok_or_else(|| {
+                ProtocolError::new(
+                    "invalid_request",
+                    format!("unsupported agent kind {}", request.kind),
+                )
+            })?;
+            shell_agent_launch(
+                spec.command,
+                spec.default_arg,
+                &request.args,
+                spec.confirm_workspace_trust,
+                spec.install,
+            )
+        }
         "shell" => request.args.split_first().map_or_else(
             || AgentLaunch {
                 command: interactive_shell(),
@@ -1248,7 +1273,15 @@ fn resolve_launch(request: &CreateAgentRequest) -> Result<AgentLaunch, ProtocolE
         }
     };
     launch.publish_ports = validate_publish_ports(&request.publish_ports)?;
-    Ok(launch)
+    let kind = match request.kind.as_str() {
+        "auto" => first_available_interactive_agent(search_path)
+            .unwrap_or_else(default_interactive_agent)
+            .kind
+            .to_string(),
+        "cursor-agent" => "cursor".to_string(),
+        other => other.to_string(),
+    };
+    Ok((kind, launch))
 }
 
 fn validate_publish_ports(ports: &[u16]) -> Result<Vec<u16>, ProtocolError> {
@@ -1269,16 +1302,164 @@ fn validate_publish_ports(ports: &[u16]) -> Result<Vec<u16>, ProtocolError> {
     Ok(ports.to_vec())
 }
 
+#[derive(Clone, Copy)]
+struct InteractiveAgentSpec {
+    kind: &'static str,
+    command: &'static str,
+    default_arg: Option<&'static str>,
+    confirm_workspace_trust: bool,
+    install: Option<&'static str>,
+}
+
+fn interactive_agent_specs() -> &'static [InteractiveAgentSpec] {
+    &[
+        InteractiveAgentSpec {
+            kind: "claude",
+            command: "claude",
+            default_arg: Some("--dangerously-skip-permissions"),
+            confirm_workspace_trust: true,
+            install: Some("curl -fsSL https://claude.ai/install.sh | bash"),
+        },
+        InteractiveAgentSpec {
+            kind: "cursor",
+            command: "cursor-agent",
+            default_arg: None,
+            confirm_workspace_trust: false,
+            install: Some("curl https://cursor.com/install -fsS | bash"),
+        },
+        InteractiveAgentSpec {
+            kind: "grok",
+            command: "grok",
+            default_arg: Some("--always-approve"),
+            confirm_workspace_trust: false,
+            install: None,
+        },
+        InteractiveAgentSpec {
+            kind: "opencode",
+            command: "opencode",
+            default_arg: None,
+            confirm_workspace_trust: false,
+            install: Some("npm install -g opencode-ai"),
+        },
+        InteractiveAgentSpec {
+            kind: "pi",
+            command: "pi",
+            default_arg: None,
+            confirm_workspace_trust: false,
+            install: None,
+        },
+        InteractiveAgentSpec {
+            kind: "codex",
+            command: "codex",
+            default_arg: Some("--dangerously-bypass-approvals-and-sandbox"),
+            confirm_workspace_trust: false,
+            install: Some("npm install -g @openai/codex"),
+        },
+    ]
+}
+
+fn default_interactive_agent() -> InteractiveAgentSpec {
+    *interactive_agent_specs()
+        .iter()
+        .find(|spec| spec.kind == "codex")
+        .expect("codex is the default installer")
+}
+
+fn interactive_agent_spec(kind: &str) -> Option<InteractiveAgentSpec> {
+    let kind = if kind == "cursor-agent" {
+        "cursor"
+    } else {
+        kind
+    };
+    interactive_agent_specs()
+        .iter()
+        .copied()
+        .find(|spec| spec.kind == kind)
+}
+
+fn first_available_interactive_agent(search_path: &str) -> Option<InteractiveAgentSpec> {
+    interactive_agent_specs()
+        .iter()
+        .copied()
+        .find(|spec| command_on_path(spec.command, search_path))
+}
+
+fn command_on_path(command: &str, search_path: &str) -> bool {
+    std::env::split_paths(search_path).any(|directory| {
+        let candidate = directory.join(command);
+        candidate.is_file()
+    })
+}
+
+fn join_agent_path(treer_binary: Option<&std::path::Path>) -> String {
+    let mut paths = Vec::new();
+    if let Some(parent) = treer_binary.and_then(std::path::Path::parent) {
+        paths.push(parent.to_path_buf());
+    }
+    paths.extend(user_agent_path_dirs());
+    if let Some(current_path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&current_path));
+    }
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    std::env::join_paths(paths)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| std::env::var("PATH").unwrap_or_default())
+}
+
+fn user_agent_path_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".cargo/bin"));
+        dirs.push(home.join(".grok/bin"));
+        dirs.push(home.join("Library/pnpm"));
+        dirs.push(home.join("Library/pnpm/bin"));
+        dirs.push(home.join(".local/share/fnm/aliases/default/bin"));
+        dirs.push(home.join(".fnm/aliases/default/bin"));
+        dirs.push(home.join(".nvm/current/bin"));
+        dirs.push(home.join(".npm-global/bin"));
+    }
+    dirs.push(std::path::PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(std::path::PathBuf::from("/usr/local/bin"));
+    dirs
+}
+
 fn shell_agent_launch(
     agent_command: &str,
-    default_arg: &str,
+    default_arg: Option<&str>,
     args: &[String],
     confirm_workspace_trust: bool,
+    install: Option<&str>,
 ) -> AgentLaunch {
-    let launch_args = std::iter::once(default_arg.to_string())
-        .chain(args.iter().cloned())
-        .collect::<Vec<_>>();
-    let mut launch = interactive_shell_command_launch(agent_command, &launch_args);
+    let mut launch_args = Vec::new();
+    if let Some(default_arg) = default_arg {
+        launch_args.push(default_arg.to_string());
+    }
+    launch_args.extend(args.iter().cloned());
+    let agent_line = shell_join(agent_command, &launch_args);
+    let script = if let Some(install) = install {
+        format!(
+            "if ! command -v {} >/dev/null 2>&1; then echo 'treer: installing missing {}' >&2; {}; fi; {}",
+            shell_quote(agent_command),
+            agent_command,
+            install,
+            agent_line
+        )
+    } else {
+        agent_line
+    };
+    let mut input = script.into_bytes();
+    input.push(b'\r');
+    let mut launch = AgentLaunch {
+        command: interactive_shell(),
+        args: vec!["-i".to_string()],
+        initial_writes: vec![HostWrite {
+            data: input,
+            delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
+        }],
+        publish_ports: Vec::new(),
+    };
     if confirm_workspace_trust {
         launch.initial_writes.push(HostWrite {
             data: vec![b'\r'],
@@ -1466,6 +1647,31 @@ fn agent_network_proxy_url(base: &str, agent_id: &str) -> String {
     url.to_string()
 }
 
+fn http_proxy_url(network_proxy_url: &str) -> String {
+    let Ok(parsed) = url::Url::parse(network_proxy_url) else {
+        return network_proxy_url.to_string();
+    };
+    let mut rewritten = String::from("http://");
+    if !parsed.username().is_empty() {
+        rewritten.push_str(parsed.username());
+        if let Some(password) = parsed.password() {
+            rewritten.push(':');
+            rewritten.push_str(password);
+        }
+        rewritten.push('@');
+    }
+    match (parsed.host_str(), parsed.port()) {
+        (Some(host), Some(port)) => {
+            rewritten.push_str(host);
+            rewritten.push(':');
+            rewritten.push_str(&port.to_string());
+        }
+        (Some(host), None) => rewritten.push_str(host),
+        _ => return network_proxy_url.to_string(),
+    }
+    rewritten
+}
+
 fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap<String, String> {
     let mut env = BTreeMap::from([("TREER_NETWORK_PROXY".to_string(), network_proxy_url.clone())]);
     if transparent {
@@ -1483,7 +1689,11 @@ fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap
         }
     } else {
         env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
-        env.insert("all_proxy".to_string(), network_proxy_url);
+        env.insert("all_proxy".to_string(), network_proxy_url.clone());
+        let http_proxy = http_proxy_url(&network_proxy_url);
+        for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+            env.insert(name.to_string(), http_proxy.clone());
+        }
         env.insert("GIT_PROXY_COMMAND".to_string(), "treer".to_string());
         env.insert("TREER_GIT_PROXY_MODE".to_string(), "1".to_string());
         for name in ["NO_PROXY", "no_proxy"] {
@@ -1553,9 +1763,10 @@ mod tests {
 
         let launch = shell_agent_launch(
             "codex",
-            "--dangerously-bypass-approvals-and-sandbox",
+            Some("--dangerously-bypass-approvals-and-sandbox"),
             &args,
             false,
+            Some("npm install -g @openai/codex"),
         );
 
         assert!(!launch.command.is_empty());
@@ -1563,7 +1774,7 @@ mod tests {
         assert_eq!(
             launch.initial_writes,
             [HostWrite {
-                data: b"'codex' '--dangerously-bypass-approvals-and-sandbox' '--model' 'gpt 5' 'it'\\''s' ''\r".to_vec(),
+                data: b"if ! command -v 'codex' >/dev/null 2>&1; then echo 'treer: installing missing codex' >&2; npm install -g @openai/codex; fi; 'codex' '--dangerously-bypass-approvals-and-sandbox' '--model' 'gpt 5' 'it'\\''s' ''\r".to_vec(),
                 delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
             }]
         );
@@ -1583,12 +1794,12 @@ mod tests {
             recipe: None,
         };
 
-        let launch = resolve_launch(&request).expect("resolve claude launch");
+        let (_kind, launch) = resolve_launch(&request).expect("resolve claude launch");
 
         assert_eq!(launch.initial_writes.len(), 2);
         assert_eq!(
             launch.initial_writes[0].data,
-            b"'claude' '--dangerously-skip-permissions' '--model' 'sonnet'\r"
+            b"if ! command -v 'claude' >/dev/null 2>&1; then echo 'treer: installing missing claude' >&2; curl -fsSL https://claude.ai/install.sh | bash; fi; 'claude' '--dangerously-skip-permissions' '--model' 'sonnet'\r"
         );
         assert_eq!(launch.initial_writes[1].data, b"\r");
         assert_eq!(
@@ -1615,7 +1826,7 @@ mod tests {
             recipe: None,
         };
 
-        let launch = resolve_launch(&request).expect("resolve shell command launch");
+        let (_kind, launch) = resolve_launch(&request).expect("resolve shell command launch");
 
         assert!(!launch.command.is_empty());
         assert_eq!(launch.args, ["-i"]);
@@ -1642,7 +1853,7 @@ mod tests {
             recipe: None,
         };
 
-        let launch = resolve_launch(&request).expect("resolve command launch");
+        let (_kind, launch) = resolve_launch(&request).expect("resolve command launch");
 
         assert_eq!(launch.command, "/bin/sh");
         assert_eq!(launch.args, ["-c", "pwd"]);
@@ -1663,11 +1874,79 @@ mod tests {
             recipe: None,
         };
 
-        let launch = resolve_launch(&request).expect("resolve terminal launch");
+        let (_kind, launch) = resolve_launch(&request).expect("resolve terminal launch");
 
         assert!(!launch.command.is_empty());
         assert_eq!(launch.args, ["-i"]);
         assert!(launch.initial_writes.is_empty());
+    }
+
+    #[test]
+    fn auto_kind_selects_the_first_cli_on_the_search_path() {
+        let root =
+            std::env::temp_dir().join(format!("treer-auto-kind-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).expect("temp path");
+        let cursor = root.join("cursor-agent");
+        std::fs::write(&cursor, "#!/bin/sh\n").expect("write cursor stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod cursor stub");
+        }
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "auto".to_string(),
+            name: "installer".to_string(),
+            cwd: ".".to_string(),
+            args: Vec::new(),
+            cols: 120,
+            rows: 36,
+            publish_ports: Vec::new(),
+            recipe: None,
+        };
+
+        let (kind, launch) =
+            resolve_launch_with_path(&request, &root.to_string_lossy()).expect("resolve auto");
+        assert_eq!(kind, "cursor");
+        let script = String::from_utf8(launch.initial_writes[0].data.clone()).expect("utf8");
+        assert!(script.contains("'cursor-agent'"));
+        assert!(!script.contains("npm install -g @openai/codex"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_kind_falls_back_to_codex_when_nothing_is_on_path() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "auto".to_string(),
+            name: "installer".to_string(),
+            cwd: ".".to_string(),
+            args: Vec::new(),
+            cols: 120,
+            rows: 36,
+            publish_ports: Vec::new(),
+            recipe: None,
+        };
+        let empty =
+            std::env::temp_dir().join(format!("treer-empty-path-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&empty).expect("empty path");
+        let (kind, launch) =
+            resolve_launch_with_path(&request, &empty.to_string_lossy()).expect("resolve auto");
+        assert_eq!(kind, "codex");
+        let script = String::from_utf8(launch.initial_writes[0].data.clone()).expect("utf8");
+        assert!(script.contains("npm install -g @openai/codex"));
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn agent_path_includes_user_local_and_fnm_dirs() {
+        let path = join_agent_path(Some(std::path::Path::new("/opt/treer/bin/treer")));
+        assert!(path.contains("/opt/treer/bin"));
+        if let Some(home) = std::env::var_os("HOME") {
+            let local = std::path::Path::new(&home).join(".local/bin");
+            assert!(path.contains(&*local.to_string_lossy()));
+        }
     }
 
     #[test]
@@ -1697,10 +1976,15 @@ mod tests {
     #[test]
     fn compatibility_networking_exposes_the_socks_proxy() {
         let proxy = "socks5h://agent-a:treer@127.0.0.1:8791";
+        let http_proxy = "http://agent-a:treer@127.0.0.1:8791";
         let env = network_environment(proxy.to_string(), false);
 
         assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(proxy));
         assert_eq!(env.get("all_proxy").map(String::as_str), Some(proxy));
+        assert_eq!(env.get("HTTP_PROXY").map(String::as_str), Some(http_proxy));
+        assert_eq!(env.get("http_proxy").map(String::as_str), Some(http_proxy));
+        assert_eq!(env.get("HTTPS_PROXY").map(String::as_str), Some(http_proxy));
+        assert_eq!(env.get("https_proxy").map(String::as_str), Some(http_proxy));
         assert_eq!(
             env.get("GIT_PROXY_COMMAND").map(String::as_str),
             Some("treer")

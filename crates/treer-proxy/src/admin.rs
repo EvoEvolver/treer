@@ -507,6 +507,7 @@ mod tests {
                 git_commit: "host".to_string(),
             },
             labels: Default::default(),
+            available_agents: None,
             status: ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,

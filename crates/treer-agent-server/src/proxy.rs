@@ -46,6 +46,7 @@ pub struct ProxyClient {
     pub network: NetworkRuntime,
     controller_instance_id: String,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
+    advertised_agents: Arc<Mutex<Vec<String>>>,
 }
 
 impl ProxyClient {
@@ -56,6 +57,7 @@ impl ProxyClient {
         runtime: ControllerRuntime,
         network: NetworkRuntime,
     ) -> Self {
+        let advertised_agents = server.available_agents.clone().unwrap_or_default();
         Self {
             proxy_ws,
             machine_token,
@@ -64,7 +66,18 @@ impl ProxyClient {
             network,
             controller_instance_id: format!("ctl_{}", uuid::Uuid::new_v4().simple()),
             command_cache: Arc::new(Mutex::new(HashMap::new())),
+            advertised_agents: Arc::new(Mutex::new(advertised_agents)),
         }
+    }
+
+    fn advertised_server(&self) -> ServerInfo {
+        let kinds = self.runtime.available_agent_kinds();
+        let mut server = self.server.clone();
+        server.available_agents = Some(kinds.clone());
+        if let Ok(mut advertised) = self.advertised_agents.lock() {
+            *advertised = kinds;
+        }
+        server
     }
 
     pub async fn run_forever(self) {
@@ -110,7 +123,7 @@ impl ProxyClient {
             &AgentServerMessage::Register {
                 protocol: PROTOCOL_VERSION,
                 controller_instance_id: self.controller_instance_id.clone(),
-                server: self.server.clone(),
+                server: self.advertised_server(),
             },
         )
         .await?;
@@ -118,7 +131,7 @@ impl ProxyClient {
             &mut outgoing,
             &AgentServerMessage::Snapshot {
                 snapshot: AgentServerSnapshot {
-                    server: self.server.clone(),
+                    server: self.advertised_server(),
                     agents: self.runtime.list(),
                 },
             },
@@ -140,13 +153,31 @@ impl ProxyClient {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     send(&mut outgoing, &AgentServerMessage::Heartbeat { sent_at: Utc::now() }).await?;
+                    let kinds = self.runtime.available_agent_kinds();
+                    let changed = self
+                        .advertised_agents
+                        .lock()
+                        .map(|advertised| *advertised != kinds)
+                        .unwrap_or(false);
+                    if changed {
+                        send(
+                            &mut outgoing,
+                            &AgentServerMessage::Snapshot {
+                                snapshot: AgentServerSnapshot {
+                                    server: self.advertised_server(),
+                                    agents: self.runtime.list(),
+                                },
+                            },
+                        )
+                        .await?;
+                    }
                 }
                 event = events.recv() => match event {
                     Ok(agent) => send(&mut outgoing, &AgentServerMessage::AgentEvent { agent }).await?,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         send(&mut outgoing, &AgentServerMessage::Snapshot {
                             snapshot: AgentServerSnapshot {
-                                server: self.server.clone(),
+                                server: self.advertised_server(),
                                 agents: self.runtime.list(),
                             },
                         }).await?;
@@ -524,6 +555,7 @@ pub fn server_info(
     hostname: String,
     root: String,
     host_build: treer_protocol::BuildInfo,
+    available_agents: Vec<String>,
 ) -> ServerInfo {
     let now = Utc::now();
     ServerInfo {
@@ -543,6 +575,7 @@ pub fn server_info(
             ("treer.network".to_string(), "1".to_string()),
             ("treer.shutdown".to_string(), "1".to_string()),
         ]),
+        available_agents: Some(available_agents),
         status: ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
@@ -637,7 +670,9 @@ mod tests {
                 version: "0.1.2".to_string(),
                 git_commit: "0123456789abcdef".to_string(),
             },
+            vec!["claude".to_string()],
         );
+        assert_eq!(server.available_agents, Some(vec!["claude".into()]));
         assert_eq!(
             server.labels.get("treer.shutdown").map(String::as_str),
             Some("1")

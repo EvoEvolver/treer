@@ -18,19 +18,19 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use treer_protocol::{
-    installer_base_prompt, installer_composer_ready, recipe_url, validate_recipe_url,
-    AcknowledgeMessagesRequest, AgentCommand, AgentInfo, AgentLaunchProfile, ApiError,
-    AppIdentityVerifyRequest, AppPrincipal, AppPrincipalKind, CreateAgentLaunchProfileRequest,
-    CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
-    CreateVirtualNetworkHostRequest, GetMessageResponse, ImportMessagesRequest, InputAgentRequest,
-    LaunchAgentProfileRequest, ListMessagesQuery, MachineEnrollmentRequest,
-    MachineEnrollmentResponse, MachineService, MessagePrincipal, MessagePrincipalKind,
-    PromptAgentRequest, ProtocolError, ReceiveMessagesRequest, RenameRequest,
-    ResolveAppRecipientsRequest, ResolveAppRecipientsResponse, SendMessageRequest, ServiceIngress,
-    ServiceIngressAccess, TerminalClientMessage, TerminalCursor, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    installer_base_prompt, installer_composer_ready, pick_existing_installer_agent,
+    recipe_installer_kind_allowed, recipe_url, validate_recipe_url, AcknowledgeMessagesRequest,
+    AgentCommand, AgentInfo, AgentLaunchProfile, ApiError, AppIdentityVerifyRequest, AppPrincipal,
+    AppPrincipalKind, CreateAgentLaunchProfileRequest, CreateAgentRequest,
+    CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
+    GetMessageResponse, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
+    ListMessagesQuery, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
+    MessagePrincipal, MessagePrincipalKind, PromptAgentRequest, ProtocolError,
+    ReceiveMessagesRequest, RenameRequest, ResolveAppRecipientsRequest,
+    ResolveAppRecipientsResponse, SendMessageRequest, ServiceIngress, ServiceIngressAccess,
+    TerminalClientMessage, TerminalCursor, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, VirtualNetworkHostsSnapshot,
+    WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -58,6 +58,7 @@ use crate::policy::{
     RESOURCE_MESSAGE_MAILBOX, RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
+use crate::updater::UpdaterClient;
 
 fn control_audit_actor<'a>(
     session: Option<&'a CurrentSession>,
@@ -318,6 +319,7 @@ pub fn router(
     ingress: IngressConfig,
     messages: MessageStore,
     rollout: CapabilityRollout,
+    updater: UpdaterClient,
 ) -> Router {
     let cors = browser.cors_layer();
     let workload_identity = WorkloadIdentityApi {
@@ -678,6 +680,11 @@ pub fn router(
     let admin = admin::routes()
         .route("/api/admin/me", get(auth::admin_me))
         .route("/api/admin/logout", post(auth::admin_logout))
+        .route(
+            "/api/admin/update",
+            get(crate::updater::status).post(crate::updater::apply),
+        )
+        .route("/api/admin/update/check", get(crate::updater::check))
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
             auth::require_admin,
@@ -733,6 +740,7 @@ pub fn router(
         .layer(Extension(browser))
         .layer(Extension(ingress))
         .layer(Extension(messages))
+        .layer(Extension(updater))
         .with_state(state)
 }
 
@@ -4372,10 +4380,10 @@ async fn execute_agent_create(
         if let Err(message) = validate_recipe_url(recipe) {
             return Err(ApiFailure::bad_request("invalid_recipe", &message));
         }
-        if !matches!(request.kind.as_str(), "codex" | "claude" | "shell") {
+        if !recipe_installer_kind_allowed(&request.kind) {
             return Err(ApiFailure::bad_request(
                 "recipe_requires_interactive_agent",
-                "recipe install requires kind codex, claude, or shell",
+                "recipe install requires an interactive agent kind or auto",
             ));
         }
     }
@@ -4392,6 +4400,40 @@ async fn execute_agent_create(
         PolicyResource::new(RESOURCE_MACHINE, &server_id),
     )
     .await?;
+    if let Some(recipe) = recipe.as_deref() {
+        if let Ok(snapshot) = state.snapshot(workspace_id).await {
+            let filter = if request.kind == "auto" {
+                None
+            } else {
+                Some(request.kind.as_str())
+            };
+            if let Some(existing) =
+                pick_existing_installer_agent(&snapshot.agents, &server_id, filter)
+            {
+                let agent_id = existing.agent_id.clone();
+                let mut data = serde_json::to_value(existing).unwrap_or_else(|_| json!({}));
+                match prompt_installer_recipe(state, workspace_id, &server_id, &agent_id, recipe)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Some(object) = data.as_object_mut() {
+                            object.insert("installer_reused".into(), json!(true));
+                            object.insert("installer_prompted".into(), json!(true));
+                        }
+                        return Ok(data);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            %workspace_id,
+                            %agent_id,
+                            "failed to prompt an existing installer; creating a new agent"
+                        );
+                    }
+                }
+            }
+        }
+    }
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
     let agent_name = request.name.clone();
     let workload_credential = auth
@@ -4878,49 +4920,49 @@ pub struct ApiFailure {
 }
 
 impl ApiFailure {
-    fn unauthorized(code: &str, message: &str) -> Self {
+    pub(crate) fn unauthorized(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             error: ProtocolError::new(code, message),
         }
     }
 
-    fn forbidden(code: &str, message: &str) -> Self {
+    pub(crate) fn forbidden(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
             error: ProtocolError::new(code, message),
         }
     }
 
-    fn bad_request(code: &str, message: &str) -> Self {
+    pub(crate) fn bad_request(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             error: ProtocolError::new(code, message),
         }
     }
 
-    fn not_found(code: &str, message: &str) -> Self {
+    pub(crate) fn not_found(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             error: ProtocolError::new(code, message),
         }
     }
 
-    fn bad_gateway(code: &str, message: &str) -> Self {
+    pub(crate) fn bad_gateway(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
             error: ProtocolError::new(code, message),
         }
     }
 
-    fn service_unavailable(code: &str, message: &str) -> Self {
+    pub(crate) fn service_unavailable(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             error: ProtocolError::new(code, message),
         }
     }
 
-    fn internal(code: &str, message: &str) -> Self {
+    pub(crate) fn internal(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             error: ProtocolError::new(code, message),
@@ -5043,6 +5085,7 @@ mod tests {
                 git_commit: "host-test".to_string(),
             },
             labels: Default::default(),
+            available_agents: None,
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,
@@ -5129,6 +5172,86 @@ mod tests {
         .expect("ingress config")
     }
 
+    async fn admin_router(updater: crate::updater::UpdaterClient) -> Router {
+        let auth = AuthStore::for_test("admin-password").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        router(
+            AppState::new(),
+            test_config(),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            updater,
+        )
+    }
+
+    async fn admin_cookie(app: Router) -> (Router, HeaderValue) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/admin/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"password":"admin-password"}"#))
+                    .expect("login request"),
+            )
+            .await
+            .expect("login response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("admin cookie")
+            .to_str()
+            .expect("cookie text");
+        let token = set_cookie.split(';').next().expect("cookie pair");
+        (app, HeaderValue::from_str(token).expect("cookie header"))
+    }
+
+    async fn spawn_updater_sidecar() -> Url {
+        let app = Router::new()
+            .route(
+                "/v1/status",
+                get(|| async {
+                    Json(serde_json::json!({"channel":"stable","services":[],"job":null}))
+                }),
+            )
+            .route(
+                "/v1/apply",
+                post(|| async {
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(serde_json::json!({
+                            "channel": "stable",
+                            "job": {"id": "job1", "state": "running", "error": null}
+                        })),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind sidecar");
+        let addr = listener.local_addr().expect("sidecar address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("sidecar server");
+        });
+        tokio::task::yield_now().await;
+        Url::parse(&format!("http://{addr}/")).expect("sidecar URL")
+    }
+
     #[test]
     fn ingress_config_matches_one_wildcard_label_and_builds_urls() {
         let config = test_ingress_config();
@@ -5166,6 +5289,7 @@ mod tests {
             test_ingress_config(),
             messages,
             CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
         );
         let response = app
             .oneshot(
@@ -5212,6 +5336,7 @@ mod tests {
             test_ingress_config(),
             messages,
             CapabilityRollout::new(false),
+            crate::updater::UpdaterClient::disabled(),
         );
 
         for path in [
@@ -5349,6 +5474,7 @@ mod tests {
             test_ingress_config(),
             messages,
             CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
         );
         let response = app
             .oneshot(
@@ -5398,6 +5524,7 @@ mod tests {
             test_ingress_config(),
             messages,
             CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
         );
         let response = app
             .oneshot(
@@ -5420,6 +5547,77 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
             Some(&HeaderValue::from_static("true"))
         );
+    }
+
+    #[tokio::test]
+    async fn admin_update_requires_an_admin_session() {
+        let app = admin_router(crate::updater::UpdaterClient::disabled()).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/update")
+                    .body(Body::empty())
+                    .expect("update request"),
+            )
+            .await
+            .expect("update response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_update_is_unconfigured_without_a_sidecar() {
+        let app = admin_router(crate::updater::UpdaterClient::disabled()).await;
+        let (app, cookie) = admin_cookie(app).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/update")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("update request"),
+            )
+            .await
+            .expect("update response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let error: ApiError = serde_json::from_slice(&body).expect("decode");
+        assert_eq!(error.error.code, "updater_unconfigured");
+    }
+
+    #[tokio::test]
+    async fn admin_update_forwards_to_the_sidecar() {
+        let sidecar = spawn_updater_sidecar().await;
+        let updater =
+            crate::updater::UpdaterClient::new(sidecar, "secret".to_string()).expect("client");
+        let app = admin_router(updater).await;
+        let (app, cookie) = admin_cookie(app).await;
+        let status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/update")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("status response");
+        assert_eq!(status.status(), StatusCode::OK);
+        let apply = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/admin/update")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("apply request"),
+            )
+            .await
+            .expect("apply response");
+        assert_eq!(apply.status(), StatusCode::ACCEPTED);
     }
 
     #[test]
@@ -6151,6 +6349,7 @@ mod tests {
                 git_commit: "host-test".to_string(),
             },
             labels: Default::default(),
+            available_agents: None,
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,
@@ -6301,6 +6500,7 @@ mod tests {
                 git_commit: "host-test".to_string(),
             },
             labels: Default::default(),
+            available_agents: None,
             status: treer_protocol::ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,

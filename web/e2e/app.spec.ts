@@ -42,6 +42,7 @@ const machineA = {
   controller_build: build,
   host_build: build,
   status: "online",
+  available_agents: ["claude"],
 }
 
 const machineB = {
@@ -103,6 +104,15 @@ const recipeProfile = {
   updated_by: "u1",
 }
 
+const codexProfile = {
+  ...recipeProfile,
+  profile_id: "alp-codex",
+  name: "Codex",
+  description: "OpenAI Codex",
+  cwd: ".",
+  command: "codex",
+}
+
 const snapshot = {
   revision: 1,
   workspace,
@@ -155,7 +165,7 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-2/ingresses") return ok(route, { ingresses: [] })
     if (path === "/workspaces/ws-1/traffic") return ok(route, { traffic })
     if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
-    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile] })
+    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile] })
     if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
 
     return route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
@@ -341,7 +351,19 @@ test("create agent dialog can install a git recipe", async ({ page }) => {
   await page.getByRole("dialog").getByRole("combobox").first().click()
   await page.getByRole("option", { name: "Install recipe" }).click()
   await expect(page.getByPlaceholder("https://github.com/example/recipe.git")).toBeVisible()
+  await expect(page.getByText("Only agents already installed on the selected machine can run a recipe.")).toBeVisible()
   await expect(page.getByRole("button", { name: "Install recipe" })).toBeVisible()
+})
+
+test("create agent dialog can install a missing CLI", async ({ page }) => {
+  await page.goto("/")
+  await agentsTab(page).click()
+  await page.getByRole("button", { name: "New" }).click()
+  await expect(page.getByRole("dialog")).toBeVisible()
+  await page.getByRole("dialog").getByRole("combobox").first().click()
+  await page.getByRole("option", { name: "Codex", exact: true }).click()
+  await expect(page.getByText("Codex is not installed on workstation")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Install Codex" })).toBeVisible()
 })
 
 test("create agent dialog lists an installed recipe launch profile", async ({ page }) => {
@@ -388,6 +410,7 @@ test("opening Settings shows a floating panel with Usage & billing, Account, and
   await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Usage & billing" })).toBeVisible()
   await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Account" })).toBeVisible()
   await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" })).toBeVisible()
+  await expect(settings.getByText("Control plane")).toHaveCount(0)
   await expect(page.locator("header").getByText("Settings")).toHaveCount(0)
 })
 
