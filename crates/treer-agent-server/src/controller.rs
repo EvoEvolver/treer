@@ -1647,6 +1647,31 @@ fn agent_network_proxy_url(base: &str, agent_id: &str) -> String {
     url.to_string()
 }
 
+fn http_proxy_url(network_proxy_url: &str) -> String {
+    let Ok(parsed) = url::Url::parse(network_proxy_url) else {
+        return network_proxy_url.to_string();
+    };
+    let mut rewritten = String::from("http://");
+    if !parsed.username().is_empty() {
+        rewritten.push_str(parsed.username());
+        if let Some(password) = parsed.password() {
+            rewritten.push(':');
+            rewritten.push_str(password);
+        }
+        rewritten.push('@');
+    }
+    match (parsed.host_str(), parsed.port()) {
+        (Some(host), Some(port)) => {
+            rewritten.push_str(host);
+            rewritten.push(':');
+            rewritten.push_str(&port.to_string());
+        }
+        (Some(host), None) => rewritten.push_str(host),
+        _ => return network_proxy_url.to_string(),
+    }
+    rewritten
+}
+
 fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap<String, String> {
     let mut env = BTreeMap::from([("TREER_NETWORK_PROXY".to_string(), network_proxy_url.clone())]);
     if transparent {
@@ -1664,7 +1689,11 @@ fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap
         }
     } else {
         env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
-        env.insert("all_proxy".to_string(), network_proxy_url);
+        env.insert("all_proxy".to_string(), network_proxy_url.clone());
+        let http_proxy = http_proxy_url(&network_proxy_url);
+        for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+            env.insert(name.to_string(), http_proxy.clone());
+        }
         env.insert("GIT_PROXY_COMMAND".to_string(), "treer".to_string());
         env.insert("TREER_GIT_PROXY_MODE".to_string(), "1".to_string());
         for name in ["NO_PROXY", "no_proxy"] {
@@ -1947,10 +1976,15 @@ mod tests {
     #[test]
     fn compatibility_networking_exposes_the_socks_proxy() {
         let proxy = "socks5h://agent-a:treer@127.0.0.1:8791";
+        let http_proxy = "http://agent-a:treer@127.0.0.1:8791";
         let env = network_environment(proxy.to_string(), false);
 
         assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(proxy));
         assert_eq!(env.get("all_proxy").map(String::as_str), Some(proxy));
+        assert_eq!(env.get("HTTP_PROXY").map(String::as_str), Some(http_proxy));
+        assert_eq!(env.get("http_proxy").map(String::as_str), Some(http_proxy));
+        assert_eq!(env.get("HTTPS_PROXY").map(String::as_str), Some(http_proxy));
+        assert_eq!(env.get("https_proxy").map(String::as_str), Some(http_proxy));
         assert_eq!(
             env.get("GIT_PROXY_COMMAND").map(String::as_str),
             Some("treer")

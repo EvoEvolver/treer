@@ -544,14 +544,17 @@ proxy environment variables, because its loopback SOCKS listener is outside the
 agent network namespace and normal application traffic must enter the TUN
 adapter. `TREER_NETWORK_PROXY` remains available for diagnostics. Set
 `TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
-transparent namespace wrapper and inject the SOCKS URL through `ALL_PROXY` and
-`all_proxy` instead. In this mode, `NO_PROXY` and `no_proxy` contain
-`127.0.0.1,localhost,::1`, so Controller and App loopback calls do not enter
-the SOCKS path. Treer also configures Git to invoke its network bridge, so native
-`git://` remotes retain workspace virtual-host routing even though Git does not
-honor `ALL_PROXY`. Other TCP clients can use the same stdio bridge as their proxy
-command: `treer network connect HOST PORT`. Native macOS currently uses this
-compatibility mode; use a Linux container when transparent capture is required.
+transparent namespace wrapper and inject the same loopback listener through
+`ALL_PROXY`/`all_proxy` as SOCKS5h and through `HTTP_PROXY`/`HTTPS_PROXY` as
+HTTP CONNECT. HTTP-only clients such as Codex's reqwest stack cannot speak
+SOCKS5; they use the HTTP proxy variables instead. In this mode, `NO_PROXY` and
+`no_proxy` contain `127.0.0.1,localhost,::1`, so Controller and App loopback
+calls do not enter the proxy path. Treer also configures Git to invoke its
+network bridge, so native `git://` remotes retain workspace virtual-host routing
+even though Git does not honor `ALL_PROXY`. Other TCP clients can use the same
+stdio bridge as their proxy command: `treer network connect HOST PORT`. Native
+macOS currently uses this compatibility mode; use a Linux container when
+transparent capture is required.
 A transparent Agent can expose a namespace-local loopback listener by
 registering an Agent-scoped service
 (`treer network service create … --agent self`); the Controller reaches it
