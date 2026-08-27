@@ -7,6 +7,7 @@ import {
   ArrowRight,
   ArrowUp,
   Activity,
+  Building2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -44,7 +45,7 @@ import {
   Users,
   X,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type AgentLaunchProfile, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type PlatformAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
 import { cn } from "@/lib/utils"
@@ -267,12 +268,15 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
 }
 
 const PREVIEW_ADMIN_INVITE = "https://treer.example/?invite=inv_preview"
+const EMPTY_ADMIN_DASHBOARD: AdminDashboard = { user_count: 0, organization_count: 0, machine_count: 0, agent_count: 0 }
+type AdminInventory = "users" | "machines" | "agents" | "organizations" | "invitations" | "activity" | null
 
 function AdminPanel() {
   const preview = firstRunTourMode() === "preview"
   const [authenticated, setAuthenticated] = useState<boolean | undefined>(preview ? true : undefined)
   const [password, setPassword] = useState("")
-  const [dashboard, setDashboard] = useState<AdminDashboard | null>(preview ? { machine_count: 0, agent_count: 0 } : null)
+  const [dashboard, setDashboard] = useState<AdminDashboard | null>(preview ? EMPTY_ADMIN_DASHBOARD : null)
+  const [inventory, setInventory] = useState<AdminInventory>(null)
   const [inviteUrl, setInviteUrl] = useState("")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
@@ -316,7 +320,7 @@ function AdminPanel() {
   async function logout() {
     if (preview) return
     await api("/api/admin/logout", { method: "POST", body: "{}" })
-    setAuthenticated(false); setDashboard(null); setInviteUrl("")
+    setAuthenticated(false); setDashboard(null); setInviteUrl(""); setInventory(null)
   }
 
   const tourHostRef = useRef<AdminTourHost | null>(null)
@@ -355,15 +359,34 @@ function AdminPanel() {
         <div className="flex gap-1"><Button size="sm" variant="outline" onClick={replayAdminTour}><ListChecks />Replay tour</Button><Button size="sm" onClick={loadDashboard} disabled={preview}><RotateCw />Refresh</Button></div>
       </div>
       {error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
-      <div className="grid grid-cols-2 border-y" data-tour="admin-overview">
-        <div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div>
-        <div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div>
+      <div className="grid grid-cols-3 border-y" data-tour="admin-overview">
+        <AdminCountCard label="Users" icon={<Users className="size-3.5" />} value={dashboard?.user_count} active={inventory === "users"} onClick={() => setInventory(inventory === "users" ? null : "users")} />
+        <AdminCountCard label="Machines" icon={<Server className="size-3.5" />} value={dashboard?.machine_count} active={inventory === "machines"} bordered onClick={() => setInventory(inventory === "machines" ? null : "machines")} />
+        <AdminCountCard label="Agents" icon={<TerminalSquare className="size-3.5" />} value={dashboard?.agent_count} active={inventory === "agents"} onClick={() => setInventory(inventory === "agents" ? null : "agents")} />
       </div>
+      {inventory && <AdminInventoryPanel kind={inventory} preview={preview} onError={setError} onChanged={loadDashboard} />}
       <section className="mt-12" data-tour="admin-invite">
         <h2 className="text-sm font-semibold">User invitations</h2>
         <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
           <div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div>
-          <Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant={inventory === "invitations" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "invitations" ? null : "invitations")}>Pending invitations</Button>
+            <Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button>
+          </div>
+        </div>
+      </section>
+      <section className="mt-12">
+        <h2 className="text-sm font-semibold">Organizations</h2>
+        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div><div className="text-sm font-medium">All organizations</div><div className="mt-1 text-xs text-muted-foreground">{dashboard?.organization_count ?? "—"} personal and shared organizations on this deployment.</div></div>
+          <Button size="sm" variant={inventory === "organizations" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "organizations" ? null : "organizations")}><Building2 />View organizations</Button>
+        </div>
+      </section>
+      <section className="mt-12">
+        <h2 className="text-sm font-semibold">Admin activity</h2>
+        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div><div className="text-sm font-medium">Recent operator actions</div><div className="mt-1 text-xs text-muted-foreground">Password resets, session revokes, and invitation changes.</div></div>
+          <Button size="sm" variant={inventory === "activity" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "activity" ? null : "activity")}><ScrollText />View activity</Button>
         </div>
       </section>
     </div>
@@ -371,6 +394,187 @@ function AdminPanel() {
   </main>
 }
 
+function AdminCountCard({ label, icon, value, active, bordered, onClick }: { label: string; icon: React.ReactNode; value?: number; active: boolean; bordered?: boolean; onClick: () => void }) {
+  return <button type="button" onClick={onClick} className={cn("py-6 text-left transition-colors hover:bg-accent/40", bordered && "border-x px-6", !bordered && "px-0", active && "bg-accent/50")}>
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">{icon}{label}</div>
+    <div className="mt-2 text-3xl font-semibold tabular-nums">{value ?? "-"}</div>
+  </button>
+}
+
+function AdminInventoryPanel({ kind, preview, onError, onChanged }: { kind: Exclude<AdminInventory, null>; preview: boolean; onError: (message: string) => void; onChanged: () => Promise<void> }) {
+  const [query, setQuery] = useState("")
+  const [users, setUsers] = useState<AdminUser[]>([])
+  const [machines, setMachines] = useState<AdminMachine[]>([])
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [organizations, setOrganizations] = useState<AdminOrganization[]>([])
+  const [invitations, setInvitations] = useState<AdminInvitation[]>([])
+  const [events, setEvents] = useState<PlatformAuditEvent[]>([])
+  const [openMachine, setOpenMachine] = useState<string | null>(null)
+  const [machineDetail, setMachineDetail] = useState<AdminMachine | null>(null)
+  const [userDetail, setUserDetail] = useState<AdminUserDetail | null>(null)
+  const [resetUrl, setResetUrl] = useState("")
+  const [resetEmailed, setResetEmailed] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    if (preview) return
+    setLoading(true)
+    try {
+      if (kind === "users") {
+        const data = await api<{ users: AdminUser[] }>(`/api/admin/users${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ""}`)
+        setUsers(data.users)
+      } else if (kind === "machines") {
+        setMachines((await api<{ machines: AdminMachine[] }>("/api/admin/machines")).machines)
+      } else if (kind === "agents") {
+        setAgents((await api<{ agents: Agent[] }>("/api/admin/agents")).agents)
+      } else if (kind === "organizations") {
+        setOrganizations((await api<{ organizations: AdminOrganization[] }>("/api/admin/organizations")).organizations)
+      } else if (kind === "invitations") {
+        setInvitations((await api<{ invitations: AdminInvitation[] }>("/api/admin/invitations")).invitations)
+      } else {
+        setEvents((await api<{ events: PlatformAuditEvent[] }>("/api/admin/activity")).events)
+      }
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "Unable to load admin inventory")
+    } finally {
+      setLoading(false)
+    }
+  }, [kind, preview, query, onError])
+
+  useEffect(() => { void load() }, [load])
+
+  async function openUser(userId: string) {
+    try { setUserDetail((await api<{ user: AdminUserDetail }>(`/api/admin/users/${userId}`)).user) }
+    catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to load user") }
+  }
+
+  async function resetPassword(userId: string) {
+    try {
+      const data = await api<{ url: string; emailed: boolean }>(`/api/admin/users/${userId}/password-reset`, { method: "POST", body: "{}" })
+      setResetUrl(data.url)
+      setResetEmailed(data.emailed)
+      await load()
+    } catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to issue password reset") }
+  }
+
+  async function revokeSessions(userId: string) {
+    try {
+      await api(`/api/admin/users/${userId}/revoke-sessions`, { method: "POST", body: "{}" })
+      await load()
+    } catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to sign the user out") }
+  }
+
+  async function toggleMachine(serverId: string) {
+    if (openMachine === serverId) { setOpenMachine(null); setMachineDetail(null); return }
+    setOpenMachine(serverId)
+    try { setMachineDetail((await api<{ machine: AdminMachine }>(`/api/admin/machines/${serverId}`)).machine) }
+    catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to load machine") }
+  }
+
+  async function revokeInvite(token: string) {
+    try {
+      await api(`/api/admin/invitations/${encodeURIComponent(token)}`, { method: "DELETE" })
+      await load()
+      await onChanged()
+    } catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to revoke invitation") }
+  }
+
+  const title = kind === "users" ? "Users" : kind === "machines" ? "Machines" : kind === "agents" ? "Agents" : kind === "organizations" ? "Organizations" : kind === "invitations" ? "Pending invitations" : "Admin activity"
+
+  return <div className="border-b">
+    <div className="flex items-center justify-between gap-3 py-3">
+      <div className="text-sm font-medium">{title}</div>
+      {kind === "users" && <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name or email" className="h-8 max-w-xs text-xs" />}
+    </div>
+    {loading && <div className="py-6 text-xs text-muted-foreground">Loading…</div>}
+    {!loading && kind === "users" && (users.length ? users.map((user) => (
+      <div key={user.user_id} className="grid gap-3 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <div className="min-w-0"><div className="truncate text-sm font-medium">{user.preferred_name}</div><div className="mt-0.5 truncate text-[11px] text-muted-foreground">{user.email}</div></div>
+        <div className="flex flex-wrap gap-1">
+          <Button size="sm" variant="outline" onClick={() => void openUser(user.user_id)}>Details</Button>
+          <Button size="sm" variant="outline" onClick={() => void resetPassword(user.user_id)}>Reset password</Button>
+          <Button size="sm" variant="outline" onClick={() => void revokeSessions(user.user_id)}>Sign out everywhere</Button>
+        </div>
+      </div>
+    )) : <EmptyState icon={<Users />} label="No users match this search" />)}
+    {!loading && kind === "machines" && (machines.length ? machines.map((machine) => (
+      <div key={machine.server_id} className="border-t">
+        <button type="button" className="flex w-full items-center gap-3 py-3 text-left" onClick={() => void toggleMachine(machine.server_id)}>
+          <ChevronDown className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", openMachine === machine.server_id && "rotate-180")} />
+          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{machine.name}</span><span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{machine.hostname || machine.server_id} · {machine.workspace_name}</span></span>
+          <Status value={machine.status} />
+        </button>
+        {openMachine === machine.server_id && <div className="pb-3 pl-7">
+          {(machineDetail?.agents ?? []).length ? machineDetail!.agents!.map((agent) => (
+            <div key={agent.agent_id} className="flex items-center justify-between gap-3 py-1.5 text-sm">
+              <span className="min-w-0 truncate">{agent.name}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
+              <Status value={agent.status} />
+            </div>
+          )) : <div className="py-2 text-[11px] text-muted-foreground">No live agents on this machine.</div>}
+        </div>}
+      </div>
+    )) : <EmptyState icon={<Server />} label="No enrolled machines" />)}
+    {!loading && kind === "agents" && (agents.length ? Object.entries(agents.reduce<Record<string, Agent[]>>((groups, agent) => {
+      const key = agent.server_id
+      groups[key] = groups[key] ? [...groups[key], agent] : [agent]
+      return groups
+    }, {})).map(([serverId, group]) => (
+      <div key={serverId} className="border-t py-3">
+        <div className="text-[11px] text-muted-foreground">{serverId}</div>
+        {group.map((agent) => (
+          <div key={agent.agent_id} className="mt-1 flex items-center justify-between gap-3 text-sm">
+            <span className="truncate">{agent.name}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
+            <Status value={agent.status} />
+          </div>
+        ))}
+      </div>
+    )) : <EmptyState icon={<TerminalSquare />} label="No live agents" />)}
+    {!loading && kind === "organizations" && (organizations.length ? organizations.map((organization) => (
+      <div key={organization.organization_id} className="grid gap-1 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <div><div className="text-sm font-medium">{organization.name}</div><div className="mt-0.5 text-[11px] text-muted-foreground">{organization.owner_email || "No owner"} · {organization.workspace_count} workspaces · {organization.machine_count} machines</div></div>
+      </div>
+    )) : <EmptyState icon={<Building2 />} label="No organizations" />)}
+    {!loading && kind === "invitations" && (invitations.length ? invitations.map((invitation) => (
+      <div key={invitation.token} className="grid gap-3 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <div className="min-w-0 font-mono text-[11px] text-muted-foreground">{invitation.created_at}</div>
+        <div className="flex gap-1">
+          <Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(invitation.url)}><Copy />Copy</Button>
+          <Button size="sm" variant="outline" onClick={() => void revokeInvite(invitation.token)}>Revoke</Button>
+        </div>
+      </div>
+    )) : <EmptyState icon={<KeyRound />} label="No pending invitations" />)}
+    {!loading && kind === "activity" && (events.length ? events.map((event) => (
+      <div key={event.event_id} className="border-t py-3 text-sm">
+        <div className="font-medium">{event.action}</div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground">{event.occurred_at} · {event.resource_kind} {event.resource_name || event.resource_id}</div>
+      </div>
+    )) : <EmptyState icon={<ScrollText />} label="No admin activity yet" />)}
+    <Dialog open={Boolean(userDetail)} onOpenChange={(open) => !open && setUserDetail(null)}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader><DialogTitle>{userDetail?.preferred_name}</DialogTitle><DialogDescription>{userDetail?.email}</DialogDescription></DialogHeader>
+        {userDetail && <div className="space-y-3 text-sm">
+          <div className="text-xs text-muted-foreground">Verified {userDetail.email_verified ? "yes" : "no"} · OAuth {userDetail.oauth_providers.join(", ") || "none"}</div>
+          <div>
+            <div className="text-xs font-medium text-muted-foreground">Organizations</div>
+            {userDetail.organizations.map((organization) => <div key={organization.organization_id}>{organization.name} · {organization.role}</div>)}
+          </div>
+          <div>
+            <div className="text-xs font-medium text-muted-foreground">Workspaces</div>
+            {userDetail.workspaces.map((workspace) => <div key={workspace.workspace_id}>{workspace.name}</div>)}
+            {userDetail.workspaces.length === 0 && <div className="text-muted-foreground">None</div>}
+          </div>
+        </div>}
+      </DialogContent>
+    </Dialog>
+    <Dialog open={Boolean(resetUrl)} onOpenChange={(open) => !open && setResetUrl("")}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Password reset</DialogTitle><DialogDescription>{resetEmailed ? "A reset email was sent. The link also works if you copy it." : "Email sending is not configured. Copy this one-time link."}</DialogDescription></DialogHeader>
+        <Textarea readOnly value={resetUrl} className="min-h-24 font-mono text-xs" />
+        <DialogFooter><Button variant="outline" onClick={() => setResetUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(resetUrl)}><Copy />Copy link</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </div>
+}
 
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`

@@ -304,8 +304,12 @@ require a separate privileged installation flow.
 
 The platform administrator is not a Treer user and does not belong to an
 organization. Open `/admin` and use the password supplied in `ADMIN_PASSWORD`
-to access the separate admin dashboard. It reports the current platform-wide
-machine and Agent totals and creates single-use user invitations. A user who
+to access the separate admin dashboard. It reports platform-wide user, machine,
+and Agent totals. Click a count to expand that inventory: users can be searched,
+issued a one-time password-reset link, and signed out of every session; machines
+list enrolled hosts and expand to their live Agents. The same page still creates
+single-use user invitations and can list pending invites, organizations, and
+recent admin activity. A user who
 registers from an administrator invitation receives an organization named
 `<preferred name> Personal` and owns it. Treer does not seed an initial
 organization or workspace.

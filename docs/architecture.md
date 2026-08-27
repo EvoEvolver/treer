@@ -33,7 +33,9 @@ crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
 
 The React app in `web/` is the browser control plane. Workspace views cover
-terminals, launch profiles, network, machine overview, and audit. The sidebar
+terminals, launch profiles, network, machine overview, and audit. `/admin` is
+the platform-administrator inventory: user, machine, and Agent counts expand
+into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
 `localStorage` (`treer-theme`) and currently offers English only; Usage &
