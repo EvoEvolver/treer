@@ -4272,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "treer-agent-host"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -4290,7 +4290,7 @@ dependencies = [
 
 [[package]]
 name = "treer-agent-runtime"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "portable-pty",
@@ -4304,7 +4304,7 @@ dependencies = [
 
 [[package]]
 name = "treer-agent-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -4339,11 +4339,11 @@ dependencies = [
 
 [[package]]
 name = "treer-build-info"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "treer-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4364,7 +4364,7 @@ dependencies = [
 
 [[package]]
 name = "treer-host-protocol"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bincode",
  "chrono",
@@ -4373,7 +4373,7 @@ dependencies = [
 
 [[package]]
 name = "treer-protocol"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "serde",
@@ -4382,7 +4382,7 @@ dependencies = [
 
 [[package]]
 name = "treer-proxy"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "argon2",

@@ -709,7 +709,7 @@ pub fn validate_recipe_url(url: &str) -> Result<(), String> {
 
 pub fn installer_base_prompt(recipe_url: &str) -> String {
     format!(
-        "{INSTALL_SKILL}\n\n## This install\n\nRecipe URL: {recipe_url}\n\nStart now. Do not ask for confirmation.\n"
+        "{INSTALL_SKILL}\n\n## This install\n\nRecipe URL: {recipe_url}\n\nInspect the recipe, list the agents it can install, and ask the human which ones to install. Do not run apply.sh until they answer.\n"
     )
 }
 
@@ -719,6 +719,7 @@ pub fn installer_composer_ready(text: &str) -> bool {
     }
     text.contains("Ask Codex")
         || text.contains("YOLO mode")
+        || text.contains("OpenAI Codex (")
         || text.contains("Ask Claude")
         || text.contains("Grok Build")
         || text.contains("cursor-agent")
@@ -2209,6 +2210,8 @@ mod tests {
         assert!(!installer_composer_ready("Do you trust the contents"));
         assert!(installer_composer_ready("Ask Codex to do anything"));
         assert!(installer_composer_ready("Ask Claude to do anything"));
+        assert!(installer_composer_ready("OpenAI Codex (v0.150.1)"));
+        assert!(prompt.contains("ask the human which ones to install"));
         assert!(recipe_installer_kind_allowed("auto"));
         assert!(recipe_installer_kind_allowed("cursor"));
         assert!(!recipe_installer_kind_allowed("command"));

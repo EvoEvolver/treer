@@ -3658,6 +3658,27 @@ async fn prompt_installer_recipe(
     Ok(())
 }
 
+fn queue_installer_recipe_prompt(
+    state: AppState,
+    workspace_id: String,
+    server_id: String,
+    agent_id: String,
+    recipe: String,
+) {
+    tokio::spawn(async move {
+        if let Err(error) =
+            prompt_installer_recipe(&state, &workspace_id, &server_id, &agent_id, &recipe).await
+        {
+            tracing::warn!(
+                ?error,
+                %workspace_id,
+                %agent_id,
+                "failed to prompt installer with bundled skill"
+            );
+        }
+    });
+}
+
 fn require_agent_can_probe_service(
     subject: &PolicySubject,
     service: &MachineService,
@@ -4412,25 +4433,18 @@ async fn execute_agent_create(
             {
                 let agent_id = existing.agent_id.clone();
                 let mut data = serde_json::to_value(existing).unwrap_or_else(|_| json!({}));
-                match prompt_installer_recipe(state, workspace_id, &server_id, &agent_id, recipe)
-                    .await
-                {
-                    Ok(()) => {
-                        if let Some(object) = data.as_object_mut() {
-                            object.insert("installer_reused".into(), json!(true));
-                            object.insert("installer_prompted".into(), json!(true));
-                        }
-                        return Ok(data);
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            ?error,
-                            %workspace_id,
-                            %agent_id,
-                            "failed to prompt an existing installer; creating a new agent"
-                        );
-                    }
+                queue_installer_recipe_prompt(
+                    state.clone(),
+                    workspace_id.to_string(),
+                    server_id.clone(),
+                    agent_id,
+                    recipe.to_string(),
+                );
+                if let Some(object) = data.as_object_mut() {
+                    object.insert("installer_reused".into(), json!(true));
+                    object.insert("installer_prompted".into(), json!("queued"));
                 }
+                return Ok(data);
             }
         }
     }
@@ -4451,23 +4465,15 @@ async fn execute_agent_create(
         )
         .await?;
     if let Some(recipe) = recipe.as_deref() {
-        match prompt_installer_recipe(state, workspace_id, &server_id, &agent_id, recipe).await {
-            Ok(()) => {
-                if let Some(object) = data.as_object_mut() {
-                    object.insert("installer_prompted".into(), json!(true));
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    %workspace_id,
-                    %agent_id,
-                    "failed to prompt installer with bundled skill"
-                );
-                if let Some(object) = data.as_object_mut() {
-                    object.insert("installer_prompt_error".into(), json!(error.message));
-                }
-            }
+        queue_installer_recipe_prompt(
+            state.clone(),
+            workspace_id.to_string(),
+            server_id.clone(),
+            agent_id.clone(),
+            recipe.to_string(),
+        );
+        if let Some(object) = data.as_object_mut() {
+            object.insert("installer_prompted".into(), json!("queued"));
         }
     }
     let (actor_kind, actor_id) = control_audit_actor(session, subject);
