@@ -200,6 +200,19 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     expires_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS platform_audit_events (
+    sequence BIGSERIAL PRIMARY KEY,
+    event_id TEXT UNIQUE NOT NULL,
+    occurred_at TEXT NOT NULL,
+    action TEXT NOT NULL,
+    resource_kind TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    resource_name TEXT,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS platform_audit_events_sequence
+    ON platform_audit_events(sequence DESC);
+
 CREATE TABLE IF NOT EXISTS machine_enrollments (
     enrollment_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

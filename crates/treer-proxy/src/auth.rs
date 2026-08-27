@@ -32,7 +32,6 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::audit::{self, NewAuditEvent, NewWorkspaceAuditEvent};
-use crate::state::AppState;
 
 const SESSION_COOKIE: &str = "treer_session";
 const ADMIN_SESSION_COOKIE: &str = "treer_admin_session";
@@ -212,10 +211,10 @@ struct CloudflareEmailSender {
     from: Arc<str>,
 }
 
-struct PendingPasswordReset {
-    token_id: String,
-    recipient: String,
-    url: Url,
+pub(crate) struct PendingPasswordReset {
+    pub token_id: String,
+    pub recipient: String,
+    pub url: Url,
 }
 
 #[derive(Clone, Debug)]
@@ -525,6 +524,25 @@ struct CloudflareEmailError {
 impl AuthStore {
     pub fn pool(&self) -> PgPool {
         self.pool.clone()
+    }
+
+    pub(crate) fn app_public_url(&self) -> &Url {
+        &self.app_public_url
+    }
+
+    pub(crate) fn has_email_sender(&self) -> bool {
+        self.email_sender.is_some()
+    }
+
+    pub(crate) fn spawn_password_reset_email(&self, recipient: String, url: Url) {
+        let Some(sender) = self.email_sender.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            if let Err(error) = sender.send_password_reset(&recipient, &url).await {
+                tracing::error!(%error, "failed to send admin-issued password reset email");
+            }
+        });
     }
 
     pub(crate) async fn record_workspace_audit(
@@ -857,6 +875,20 @@ impl AuthStore {
 
     pub async fn active_machine_count(&self) -> Result<i64, AuthFailure> {
         sqlx::query_scalar("SELECT COUNT(*) FROM machines WHERE revoked_at IS NULL")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AuthFailure::database)
+    }
+
+    pub async fn user_count(&self) -> Result<i64, AuthFailure> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AuthFailure::database)
+    }
+
+    pub async fn organization_count(&self) -> Result<i64, AuthFailure> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM organizations")
             .fetch_one(&self.pool)
             .await
             .map_err(AuthFailure::database)
@@ -2859,7 +2891,7 @@ impl AuthStore {
         Ok(())
     }
 
-    async fn create_password_reset(
+    pub(crate) async fn create_password_reset(
         &self,
         email: &str,
     ) -> Result<Option<PendingPasswordReset>, AuthFailure> {
@@ -3198,7 +3230,7 @@ impl AuthStore {
         Ok((token, url))
     }
 
-    async fn create_personal_invitation(&self) -> Result<(String, Url), AuthFailure> {
+    pub(crate) async fn create_personal_invitation(&self) -> Result<(String, Url), AuthFailure> {
         let token = format!("inv_{}", Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO invitations(token, created_at, created_by, kind) \
@@ -4316,23 +4348,6 @@ pub async fn admin_logout(
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response())
 }
 
-pub async fn admin_dashboard(
-    Extension(auth): Extension<AuthStore>,
-    State(state): State<AppState>,
-) -> Result<Json<Value>, AuthFailure> {
-    Ok(Json(json!({
-        "machine_count": auth.active_machine_count().await?,
-        "agent_count": state.platform_agent_count().await,
-    })))
-}
-
-pub async fn admin_create_invitation(
-    Extension(auth): Extension<AuthStore>,
-) -> Result<Json<Value>, AuthFailure> {
-    let (token, url) = auth.create_personal_invitation().await?;
-    Ok(Json(json!({ "token": token, "url": url.as_str() })))
-}
-
 fn session_response(auth: &AuthStore, session: &CurrentSession) -> Response {
     let cookie = format!(
         "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
@@ -5145,7 +5160,7 @@ pub struct AuthFailure {
 }
 
 impl AuthFailure {
-    fn not_found(code: &str, message: &str) -> Self {
+    pub(crate) fn not_found(code: &str, message: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, code, message)
     }
 
@@ -5165,11 +5180,15 @@ impl AuthFailure {
         Self::new(StatusCode::CONFLICT, code, message)
     }
 
+    pub(crate) fn too_many_requests(code: &str, message: &str) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, code, message)
+    }
+
     fn internal(code: &str, message: String) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, code, message)
     }
 
-    fn database(error: sqlx::Error) -> Self {
+    pub(crate) fn database(error: sqlx::Error) -> Self {
         tracing::error!(%error, "authentication database error");
         Self::internal("database_error", "database operation failed".to_string())
     }
