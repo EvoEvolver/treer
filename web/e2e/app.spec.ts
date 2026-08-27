@@ -90,6 +90,27 @@ const virtualHost = {
   target_port: 3000,
 }
 
+const managedApp = {
+  app_id: "app-1",
+  workspace_id: "ws-1",
+  name: "Soul Archive",
+  server_id: "srv-a",
+  command: "python3",
+  args: ["apps/soul/server.py"],
+  cwd: ".",
+  port: 9420,
+  hostname: "soul.demo.internal",
+  service_id: "svc-app-1",
+  desired_state: "running" as const,
+  runtime_agent_id: "appw-1",
+  restart_count: 1,
+  status: "running" as const,
+  created_at: NOW,
+  created_by: "u1",
+  updated_at: NOW,
+  updated_by: "u1",
+}
+
 const recipeProfile = {
   profile_id: "alp-recipe",
   workspace_id: "ws-1",
@@ -167,6 +188,11 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
     if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile] })
     if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
+    if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [managedApp] })
+    if (path === "/workspaces/ws-1/apps" && route.request().method() === "POST") return ok(route, { app: managedApp })
+    if (/^\/workspaces\/ws-1\/apps\/[^/]+\/(start|stop|restart)$/.test(path) && route.request().method() === "POST") return ok(route, { app: managedApp })
+    if (/^\/workspaces\/ws-1\/apps\/[^/]+$/.test(path) && route.request().method() === "DELETE") return ok(route, {})
+    if (path === "/workspaces/ws-2/apps" && route.request().method() === "GET") return ok(route, { apps: [] })
 
     return route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
   })
@@ -237,16 +263,50 @@ test("org dropdown contains Members and Audit entries", async ({ page }) => {
   await expect(page.getByRole("menuitem", { name: "Audit" })).toBeVisible()
 })
 
-test("workspace dropdown opens Profiles and Network", async ({ page }) => {
+test("workspace dropdown opens Profiles, Apps and Network", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: /Workspace/ }).click()
   await page.getByRole("menuitem", { name: "Profiles" }).click()
   await expect(page.getByRole("heading", { name: "Profiles" })).toBeVisible()
 
-  await page.getByRole("button", { name: /Workspace|Profiles/ }).click()
+  await page.getByRole("button", { name: "Workspace views" }).click()
+  await page.getByRole("menuitem", { name: "Apps" }).click()
+  await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
+
+  await page.getByRole("button", { name: "Workspace views" }).click()
   await page.getByRole("menuitem", { name: "Network" }).click()
   await expect(page.getByRole("heading", { name: "Network" })).toBeVisible()
   await expect(page.getByRole("heading", { name: "Machine services" })).toBeVisible()
+})
+
+test("managed App view exposes lifecycle actions and creation", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: /Workspace/ }).click()
+  await page.getByRole("menuitem", { name: "Apps" }).click()
+
+  await expect(page.getByText("Soul Archive")).toBeVisible()
+  await expect(page.getByText("soul.demo.internal:9420")).toBeVisible()
+  const restarting = page.waitForRequest((request) => request.url().includes("/apps/app-1/restart") && request.method() === "POST")
+  await page.getByRole("button", { name: "Restart Soul Archive" }).click()
+  await restarting
+
+  await page.getByRole("button", { name: "New App" }).click()
+  const dialog = page.getByRole("dialog", { name: "New App" })
+  await dialog.getByLabel("Name", { exact: true }).fill("Docs")
+  await dialog.getByLabel("Command", { exact: true }).fill("python3 -m http.server 8080")
+  await dialog.getByLabel("UI port", { exact: true }).fill("8080")
+  await dialog.getByLabel("Virtual hostname", { exact: true }).fill("docs.demo.internal")
+  const creating = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/ws-1/apps") && request.method() === "POST")
+  await dialog.getByRole("button", { name: "Create App" }).click()
+  const request = await creating
+  expect(request.postDataJSON()).toMatchObject({
+    server_id: "srv-a",
+    name: "Docs",
+    command: "python3",
+    args: ["-m", "http.server", "8080"],
+    port: 8080,
+    hostname: "docs.demo.internal",
+  })
 })
 
 test("service registration can target an Agent's private loopback", async ({ page }) => {

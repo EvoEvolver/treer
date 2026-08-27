@@ -306,6 +306,39 @@ CREATE TABLE IF NOT EXISTS virtual_network_hosts (
     FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS app_deployments (
+    app_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    args JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cwd TEXT NOT NULL DEFAULT '',
+    port BIGINT NOT NULL CHECK(port BETWEEN 1 AND 65535),
+    hostname TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    desired_state TEXT NOT NULL DEFAULT 'running'
+        CHECK(desired_state IN ('running', 'stopped')),
+    runtime_agent_id TEXT,
+    restart_count BIGINT NOT NULL DEFAULT 0 CHECK(restart_count >= 0),
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_name_lower
+    ON app_deployments(workspace_id, lower(name));
+CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_hostname_lower
+    ON app_deployments(workspace_id, lower(hostname));
+CREATE INDEX IF NOT EXISTS app_deployments_server
+    ON app_deployments(workspace_id, server_id);
+CREATE INDEX IF NOT EXISTS app_deployments_runtime_agent
+    ON app_deployments(workspace_id, runtime_agent_id)
+    WHERE runtime_agent_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS service_ingresses (
     ingress_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

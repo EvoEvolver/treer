@@ -21,11 +21,12 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AcknowledgeMessagesRequest, AgentInfo, AgentStatus, ApiError, CreateAgentLaunchProfileRequest,
-    CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
-    CreateVirtualNetworkHostRequest, GetMessageResponse, ImportMessagesRequest, InputAgentRequest,
-    LaunchAgentProfileRequest, LegacyMailMessage, MachineServiceProtocol, MessageExternalSource,
-    ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
-    ServerInfo, ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
+    CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, GetMessageResponse,
+    ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest, LegacyMailMessage,
+    MachineServiceProtocol, MessageExternalSource, ReceiveMessagesRequest,
+    RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest, ServerInfo,
+    ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
     WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
     AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER,
@@ -69,6 +70,11 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    #[command(about = "Manage long-running workspace Apps")]
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
+    },
     #[command(about = "Discover human members of the workspace organization")]
     Member {
         #[command(subcommand)]
@@ -103,6 +109,39 @@ enum Command {
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+enum AppCommand {
+    #[command(about = "List Apps in the current workspace")]
+    List,
+    #[command(about = "Show an App by unique name or id")]
+    Show { target: String },
+    #[command(about = "Create and start an App with one HTTP UI endpoint")]
+    Create {
+        #[arg(long)]
+        machine: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        hostname: String,
+        #[arg(value_name = "COMMAND")]
+        executable: String,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    #[command(about = "Start a stopped App")]
+    Start { target: String },
+    #[command(about = "Stop an App without deleting its service or virtual host")]
+    Stop { target: String },
+    #[command(about = "Replace an App runtime while preserving its service and virtual host")]
+    Restart { target: String },
+    #[command(about = "Stop and permanently delete an App and its routes")]
+    Delete { target: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -742,6 +781,7 @@ async fn run_cli() -> anyhow::Result<()> {
     );
     let value = match command {
         Command::Agent { command } => run_agent_command(&client, command).await?,
+        Command::App { command } => run_app_command(&client, command).await?,
         Command::Member { command } => match command {
             MemberCommand::List => client.value(Method::GET, "api/humans", None).await?,
         },
@@ -840,6 +880,72 @@ fn resolve_self(
             format!("current machine {server_id} is missing from workspace discovery")
         })?;
     Ok((machine.clone(), agent.clone()))
+}
+
+async fn run_app_command(client: &ApiClient, command: AppCommand) -> anyhow::Result<Value> {
+    match command {
+        AppCommand::List => client.value(Method::GET, "api/apps", None).await,
+        AppCommand::Show { target } => {
+            let target = normalize_target(&target)?;
+            client
+                .value(
+                    Method::GET,
+                    &format!("api/apps/{}", path_segment(&target)),
+                    None,
+                )
+                .await
+        }
+        AppCommand::Create {
+            machine,
+            name,
+            cwd,
+            port,
+            hostname,
+            executable,
+            args,
+        } => {
+            let server_id = resolve_service_machine(client, machine.as_deref()).await?;
+            client
+                .value(
+                    Method::POST,
+                    "api/apps",
+                    Some(serde_json::to_value(CreateAppDeploymentRequest {
+                        server_id: Some(server_id),
+                        name,
+                        command: executable,
+                        args,
+                        cwd,
+                        port,
+                        hostname,
+                    })?),
+                )
+                .await
+        }
+        AppCommand::Start { target } => app_action(client, &target, "start").await,
+        AppCommand::Stop { target } => app_action(client, &target, "stop").await,
+        AppCommand::Restart { target } => app_action(client, &target, "restart").await,
+        AppCommand::Delete { target } => {
+            let target = normalize_target(&target)?;
+            client
+                .value(
+                    Method::DELETE,
+                    &format!("api/apps/{}", path_segment(&target)),
+                    None,
+                )
+                .await
+        }
+    }
+}
+
+async fn app_action(client: &ApiClient, target: &str, action: &str) -> anyhow::Result<Value> {
+    let target = normalize_target(target)?;
+    client
+        .value(
+            Method::POST,
+            &format!("api/apps/{}/{}", path_segment(&target), action),
+            Some(json!({})),
+        )
+        .await
 }
 
 async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow::Result<Value> {
@@ -2737,6 +2843,54 @@ mod tests {
                     }
                 }
             }) if url == "https://github.com/example/recipe.git"
+        ));
+    }
+
+    #[test]
+    fn managed_app_commands_parse() {
+        let create = Args::try_parse_from([
+            "treer",
+            "app",
+            "create",
+            "--machine",
+            "builder",
+            "--name",
+            "soul",
+            "--port",
+            "9420",
+            "--hostname",
+            "soul.internal",
+            "python3",
+            "--",
+            "apps/soul/soul.py",
+        ])
+        .expect("App create should parse");
+        assert!(matches!(
+            create.command,
+            Some(Command::App {
+                command: AppCommand::Create {
+                    machine: Some(machine),
+                    name,
+                    port: 9420,
+                    hostname,
+                    executable,
+                    args,
+                    ..
+                }
+            }) if machine == "builder"
+                && name == "soul"
+                && hostname == "soul.internal"
+                && executable == "python3"
+                && args == ["apps/soul/soul.py"]
+        ));
+
+        let restart = Args::try_parse_from(["treer", "app", "restart", "soul"])
+            .expect("App restart should parse");
+        assert!(matches!(
+            restart.command,
+            Some(Command::App {
+                command: AppCommand::Restart { target }
+            }) if target == "soul"
         ));
     }
 }

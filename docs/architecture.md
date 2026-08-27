@@ -11,6 +11,7 @@ flowchart LR
     Controller <--> Host[Agent Host]
     Host --> Runtime[Agent runtime and PTY]
     Runtime --> Agent[Codex / Claude / Cursor / shell]
+    Runtime --> ManagedApp[Managed App process]
     Mail[Mail App] -->|App OAuth + bearer API| Proxy
     Telegram[Telegram App] -->|treer CLI as managed Agent| Controller
     Telegram <--> TG[Telegram Bot API]
@@ -34,9 +35,9 @@ crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
 
 The React app in `web/` is the browser control plane. Workspace views cover
-terminals, launch profiles, network, machine overview, and audit. `/admin` is
-the platform-administrator inventory: user, machine, and Agent counts expand
-into lists, password-reset links, and live Agents per machine. The sidebar
+terminals, launch profiles, managed Apps, network, machine overview, and audit.
+`/admin` is the platform-administrator inventory: user, machine, and Agent
+counts expand into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
 `localStorage` (`treer-theme`) and currently offers English only; Usage &
@@ -76,9 +77,30 @@ Managed Agents can request a 60-second workload token for a registered service.
 Apps may validate tokens through `/.treer/apps/identity/verify`; verification
 also checks current service existence and, for humans, current membership.
 
-Apps are ordinary processes. Treer does not install, sandbox, supervise, or
-grant a special capability to them. Mail stores a local cookie-to-App-token
-mapping. Telegram runs inside a dedicated managed Agent and uses that Agent's
+## Managed App Lifecycle
+
+A Managed App is a durable Proxy record for one command, one machine, and one
+HTTP UI port. Creation transactionally allocates a stable machine service and
+virtual host. Start, stop, restart, delete, list, and show are available through
+the browser, public API, Controller-local API, and `treer app` CLI. User-triggered
+lifecycle changes append workspace audit events.
+
+The first runtime adapter launches `kind=app` through the existing Host process
+contract. The backing runtime receives its own workload credential, private
+network namespace, and declared `publish_ports` bridge, but is hidden from the
+ordinary Agent snapshot and list. App status is projected from that runtime;
+the durable App, service, and hostname never depend on its runtime ID.
+
+When an App runtime exits, the Proxy schedules a bounded-backoff replacement.
+When a Controller reconnects and publishes its first snapshot, the Proxy
+reconciles every desired-running App assigned to that machine. Compare-and-set
+runtime claims prevent concurrent reconcilers from intentionally launching the
+same generation. A future Host pipes supervisor can replace the PTY-backed
+adapter without changing the App API or durable ownership model.
+
+Managed Apps do not install packages, inject secrets, migrate App-owned data,
+or create a security boundary. Mail stores a local cookie-to-App-token mapping.
+Telegram can still run inside a dedicated ordinary Agent and use that Agent's
 normal CLI identity. Telegram users remain external metadata, not Treer human
 principals.
 
@@ -208,7 +230,7 @@ installer.
 
 Covered organization, workspace, and membership mutations write their audit
 event in the same PostgreSQL transaction. Successful Agent create, rename, stop,
-and delete operations and machine rename and delete operations append runtime
+and delete operations, App lifecycle operations, and machine rename and delete operations append runtime
 audit events after the Controller result; an audit write failure is logged
 without turning a completed runtime mutation into a retryable API failure.
 

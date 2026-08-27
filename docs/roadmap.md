@@ -168,10 +168,12 @@ service-audience public APIs. Agent-run Apps use the installed `treer` CLI and
 the managed Agent's identity. Apps own channel configuration, secrets,
 presentation, and external delivery mappings; Core owns canonical Message.
 
-There is no App installer, manifest, broker, or same-UID isolation claim.
-Process supervision and sandboxing belong to deployment. Core still applies
-authentication, immutable scope, and workspace Policy to every request. Mail is
-the browser App; Telegram is the first managed-Agent external adapter. The
+The first Managed App lifecycle mode persists one command, one HTTP UI port, a
+stable service, and a virtual host, then replaces its hidden runtime after exit
+or Controller reconnect. There is still no App installer, manifest, secret
+broker, state migration, health contract, or same-UID isolation claim. Core
+applies authentication, immutable scope, and workspace Policy to every request.
+Mail is the browser App; Telegram remains a managed-Agent external adapter. The
 maintained contract lives in [`apps/README.md`](../apps/README.md).
 
 ### Identity, policy, and delegation
@@ -267,9 +269,9 @@ Additional execution modes should implement the same control-plane contract:
 - managed secrets and explicit credential ownership.
 
 Long-lived machine services and ephemeral Agent processes are different
-resources. Service registration should not silently make Treer supervise the
-service process; supervised services can be introduced as an explicit lifecycle
-mode with health, restart, deployment revision, and ownership.
+resources. Ordinary service registration does not make Treer supervise the
+process. Managed Apps are the explicit first lifecycle mode, with durable
+ownership and restart but without health checks or deployment revisions yet.
 
 ### Services and network
 

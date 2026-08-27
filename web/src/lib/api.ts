@@ -63,6 +63,30 @@ export interface AgentLaunchProfile {
   updated_by: string
 }
 
+export interface AppDeployment {
+  app_id: string
+  workspace_id: string
+  name: string
+  server_id: string
+  command: string
+  args: string[]
+  cwd: string
+  port: number
+  hostname: string
+  service_id: string
+  desired_state: "running" | "stopped"
+  runtime_agent_id?: string
+  restart_count: number
+  status: "pending" | "running" | "stopped" | "exited" | "unavailable"
+  pid?: number
+  exit_code?: number
+  last_error?: string
+  created_at: string
+  created_by: string
+  updated_at: string
+  updated_by: string
+}
+
 export interface Snapshot {
   revision: number
   workspace: Workspace

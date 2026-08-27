@@ -21,7 +21,8 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use subtle::ConstantTimeEq;
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentLaunchProfile,
-    AgentServerSnapshot, ApiError, CreateAgentLaunchProfileRequest, CreateMachineServiceRequest,
+    AgentServerSnapshot, ApiError, AppDeployment, AppDeploymentStatus, AppDesiredState,
+    CreateAgentLaunchProfileRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
     CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, MachineService,
     MachineServiceProtocol, OrganizationAuditEvent, ProtocolError, ServerInfo, ServiceIngress,
     ServiceIngressAccess, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
@@ -1327,6 +1328,309 @@ impl AuthStore {
             .await?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(profile)
+    }
+
+    pub async fn list_app_deployments(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<AppDeployment>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
+             service_id, desired_state, runtime_agent_id, restart_count, last_error, \
+             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             WHERE workspace_id = $1 ORDER BY lower(name), app_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(app_deployment_from_row).collect()
+    }
+
+    pub async fn list_app_deployments_for_server(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+    ) -> Result<Vec<AppDeployment>, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
+             service_id, desired_state, runtime_agent_id, restart_count, last_error, \
+             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             WHERE workspace_id = $1 AND server_id = $2 ORDER BY app_id",
+        )
+        .bind(workspace_id)
+        .bind(server_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(app_deployment_from_row).collect()
+    }
+
+    pub async fn resolve_app_deployment(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<AppDeployment, AuthFailure> {
+        let row = sqlx::query(
+            "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
+             service_id, desired_state, runtime_agent_id, restart_count, last_error, \
+             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             WHERE workspace_id = $1 AND (app_id = $2 OR lower(name) = lower($2))",
+        )
+        .bind(workspace_id)
+        .bind(target.trim())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| AuthFailure::not_found("app_not_found", "App does not exist"))?;
+        app_deployment_from_row(row)
+    }
+
+    pub async fn resolve_app_deployment_by_runtime(
+        &self,
+        workspace_id: &str,
+        runtime_agent_id: &str,
+    ) -> Result<Option<AppDeployment>, AuthFailure> {
+        let row = sqlx::query(
+            "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
+             service_id, desired_state, runtime_agent_id, restart_count, last_error, \
+             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             WHERE workspace_id = $1 AND runtime_agent_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(runtime_agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        row.map(app_deployment_from_row).transpose()
+    }
+
+    pub async fn create_app_deployment(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        server_id: String,
+        request: CreateAppDeploymentRequest,
+    ) -> Result<AppDeployment, AuthFailure> {
+        let update_guard = self.virtual_hosts_update.lock().await;
+        let name = validate_resource_name(&request.name, "App")?;
+        let command = validate_launch_profile_command(&request.command)?;
+        let args = validate_launch_profile_args(request.args)?;
+        let cwd = validate_launch_profile_cwd(&request.cwd)?;
+        if request.port == 0 {
+            return Err(AuthFailure::bad_request(
+                "invalid_app",
+                "App port must be between 1 and 65535",
+            ));
+        }
+        let hostname = normalize_virtual_hostname(&request.hostname)?;
+        let now = Utc::now();
+        let service = MachineService {
+            service_id: format!("svc_{}", Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            name: name.clone(),
+            server_id: server_id.clone(),
+            target_agent_id: None,
+            target_host: "127.0.0.1".to_string(),
+            target_port: request.port,
+            protocol: MachineServiceProtocol::Http,
+            created_at: now,
+            created_by: actor.to_string(),
+            updated_at: now,
+            updated_by: actor.to_string(),
+        };
+        let deployment = AppDeployment {
+            app_id: format!("app_{}", Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            name,
+            server_id,
+            command,
+            args,
+            cwd,
+            port: request.port,
+            hostname: hostname.clone(),
+            service_id: service.service_id.clone(),
+            desired_state: AppDesiredState::Running,
+            runtime_agent_id: None,
+            restart_count: 0,
+            status: AppDeploymentStatus::Pending,
+            pid: None,
+            exit_code: None,
+            last_error: None,
+            created_at: now,
+            created_by: actor.to_string(),
+            updated_at: now,
+            updated_by: actor.to_string(),
+        };
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO machine_services(service_id, workspace_id, name, server_id, target_agent_id, \
+             target_host, target_port, protocol, created_at, created_by, updated_at, updated_by) \
+             VALUES($1, $2, $3, $4, NULL, $5, $6, 'http', $7, $8, $9, $10)",
+        )
+        .bind(&service.service_id)
+        .bind(&service.workspace_id)
+        .bind(&service.name)
+        .bind(&service.server_id)
+        .bind(&service.target_host)
+        .bind(i64::from(service.target_port))
+        .bind(service.created_at.to_rfc3339())
+        .bind(&service.created_by)
+        .bind(service.updated_at.to_rfc3339())
+        .bind(&service.updated_by)
+        .execute(&mut *transaction)
+        .await
+        .map_err(app_deployment_write_error)?;
+        sqlx::query(
+            "INSERT INTO virtual_network_hosts(workspace_id, hostname, service_id, created_at, created_by) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(workspace_id)
+        .bind(&hostname)
+        .bind(&service.service_id)
+        .bind(now.to_rfc3339())
+        .bind(actor)
+        .execute(&mut *transaction)
+        .await
+        .map_err(app_deployment_write_error)?;
+        sqlx::query(
+            "INSERT INTO app_deployments(app_id, workspace_id, name, server_id, command, args, cwd, \
+             port, hostname, service_id, desired_state, runtime_agent_id, restart_count, last_error, \
+             created_at, created_by, updated_at, updated_by) \
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', NULL, 0, NULL, $11, $12, $13, $14)",
+        )
+        .bind(&deployment.app_id)
+        .bind(&deployment.workspace_id)
+        .bind(&deployment.name)
+        .bind(&deployment.server_id)
+        .bind(&deployment.command)
+        .bind(serde_json::to_value(&deployment.args).map_err(|error| {
+            AuthFailure::internal("app_encode_error", error.to_string())
+        })?)
+        .bind(&deployment.cwd)
+        .bind(i64::from(deployment.port))
+        .bind(&deployment.hostname)
+        .bind(&deployment.service_id)
+        .bind(deployment.created_at.to_rfc3339())
+        .bind(&deployment.created_by)
+        .bind(deployment.updated_at.to_rfc3339())
+        .bind(&deployment.updated_by)
+        .execute(&mut *transaction)
+        .await
+        .map_err(app_deployment_write_error)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        drop(update_guard);
+        self.refresh_virtual_network_hosts()
+            .await
+            .map_err(|error| {
+                AuthFailure::internal("virtual_host_refresh_failed", format!("{error:#}"))
+            })?;
+        Ok(deployment)
+    }
+
+    pub async fn claim_app_runtime(
+        &self,
+        workspace_id: &str,
+        app_id: &str,
+        expected_runtime_agent_id: Option<&str>,
+        runtime_agent_id: &str,
+        actor: &str,
+    ) -> Result<Option<AppDeployment>, AuthFailure> {
+        let row = sqlx::query(
+            "UPDATE app_deployments SET runtime_agent_id = $1, \
+             restart_count = restart_count + CASE WHEN runtime_agent_id IS NULL THEN 0 ELSE 1 END, \
+             last_error = NULL, updated_at = $2, updated_by = $3 \
+             WHERE workspace_id = $4 AND app_id = $5 AND desired_state = 'running' \
+             AND runtime_agent_id IS NOT DISTINCT FROM $6 \
+             RETURNING app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
+             service_id, desired_state, runtime_agent_id, restart_count, last_error, \
+             created_at, created_by, updated_at, updated_by",
+        )
+        .bind(runtime_agent_id)
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .bind(workspace_id)
+        .bind(app_id)
+        .bind(expected_runtime_agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        row.map(app_deployment_from_row).transpose()
+    }
+
+    pub async fn set_app_desired_state(
+        &self,
+        workspace_id: &str,
+        target: &str,
+        desired_state: AppDesiredState,
+        actor: &str,
+    ) -> Result<AppDeployment, AuthFailure> {
+        let current = self.resolve_app_deployment(workspace_id, target).await?;
+        let row = sqlx::query(
+            "UPDATE app_deployments SET desired_state = $1, updated_at = $2, updated_by = $3 \
+             WHERE workspace_id = $4 AND app_id = $5 RETURNING app_id, workspace_id, name, server_id, \
+             command, args, cwd, port, hostname, service_id, desired_state, runtime_agent_id, \
+             restart_count, last_error, created_at, created_by, updated_at, updated_by",
+        )
+        .bind(app_desired_state_str(desired_state))
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .bind(workspace_id)
+        .bind(&current.app_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        app_deployment_from_row(row)
+    }
+
+    pub async fn set_app_last_error(
+        &self,
+        workspace_id: &str,
+        app_id: &str,
+        error: Option<&str>,
+    ) -> Result<(), AuthFailure> {
+        sqlx::query(
+            "UPDATE app_deployments SET last_error = $1, updated_at = $2 \
+             WHERE workspace_id = $3 AND app_id = $4",
+        )
+        .bind(error)
+        .bind(Utc::now().to_rfc3339())
+        .bind(workspace_id)
+        .bind(app_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    pub async fn delete_app_deployment(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<AppDeployment, AuthFailure> {
+        let update_guard = self.virtual_hosts_update.lock().await;
+        let deployment = self.resolve_app_deployment(workspace_id, target).await?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM app_deployments WHERE workspace_id = $1 AND app_id = $2")
+            .bind(workspace_id)
+            .bind(&deployment.app_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM machine_services WHERE workspace_id = $1 AND service_id = $2")
+            .bind(workspace_id)
+            .bind(&deployment.service_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        drop(update_guard);
+        self.refresh_virtual_network_hosts()
+            .await
+            .map_err(|error| {
+                AuthFailure::internal("virtual_host_refresh_failed", format!("{error:#}"))
+            })?;
+        Ok(deployment)
     }
 
     pub async fn list_machine_services(
@@ -4733,6 +5037,81 @@ fn agent_launch_profile_from_row(
     })
 }
 
+fn app_deployment_from_row(row: sqlx::postgres::PgRow) -> Result<AppDeployment, AuthFailure> {
+    let args = serde_json::from_value::<Vec<String>>(row.get("args")).map_err(|error| {
+        AuthFailure::internal(
+            "database_error",
+            format!("App deployment has invalid args: {error}"),
+        )
+    })?;
+    let port = u16::try_from(row.get::<i64, _>("port")).map_err(|_| {
+        AuthFailure::internal(
+            "database_error",
+            "App deployment has invalid port".to_string(),
+        )
+    })?;
+    let restart_count = u64::try_from(row.get::<i64, _>("restart_count")).map_err(|_| {
+        AuthFailure::internal(
+            "database_error",
+            "App deployment has invalid restart count".to_string(),
+        )
+    })?;
+    let desired_state = match row.get::<String, _>("desired_state").as_str() {
+        "running" => AppDesiredState::Running,
+        "stopped" => AppDesiredState::Stopped,
+        value => {
+            return Err(AuthFailure::internal(
+                "database_error",
+                format!("App deployment has invalid desired state {value}"),
+            ))
+        }
+    };
+    Ok(AppDeployment {
+        app_id: row.get("app_id"),
+        workspace_id: row.get("workspace_id"),
+        name: row.get("name"),
+        server_id: row.get("server_id"),
+        command: row.get("command"),
+        args,
+        cwd: row.get("cwd"),
+        port,
+        hostname: row.get("hostname"),
+        service_id: row.get("service_id"),
+        desired_state,
+        runtime_agent_id: row.get("runtime_agent_id"),
+        restart_count,
+        status: AppDeploymentStatus::Pending,
+        pid: None,
+        exit_code: None,
+        last_error: row.get("last_error"),
+        created_at: parse_database_timestamp(&row, "created_at", "App deployment")?,
+        created_by: row.get("created_by"),
+        updated_at: parse_database_timestamp(&row, "updated_at", "App deployment")?,
+        updated_by: row.get("updated_by"),
+    })
+}
+
+const fn app_desired_state_str(state: AppDesiredState) -> &'static str {
+    match state {
+        AppDesiredState::Running => "running",
+        AppDesiredState::Stopped => "stopped",
+    }
+}
+
+fn app_deployment_write_error(error: sqlx::Error) -> AuthFailure {
+    if error
+        .as_database_error()
+        .is_some_and(|error| error.is_unique_violation())
+    {
+        AuthFailure::conflict(
+            "app_conflict",
+            "App name, service name, or virtual hostname already exists",
+        )
+    } else {
+        AuthFailure::database(error)
+    }
+}
+
 fn validate_launch_profile_description(value: &str) -> Result<String, AuthFailure> {
     let value = value.trim();
     if value.chars().count() > MAX_LAUNCH_PROFILE_DESCRIPTION_CHARS
@@ -5529,6 +5908,81 @@ mod tests {
             .resolve_virtual_network_host("default", "web.internal")
             .await
             .expect("resolve deleted alias")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_restarts() {
+        let store = AuthStore::for_test("owner-password").await;
+        store.seed_test_workspace("apps").await;
+        let app = store
+            .create_app_deployment(
+                "apps",
+                "owner",
+                "machine-a".to_string(),
+                CreateAppDeploymentRequest {
+                    server_id: Some("machine-a".to_string()),
+                    name: "Soul".to_string(),
+                    command: "python3".to_string(),
+                    args: vec!["apps/soul/soul.py".to_string()],
+                    cwd: ".".to_string(),
+                    port: 9420,
+                    hostname: "soul.internal".to_string(),
+                },
+            )
+            .await
+            .expect("create App deployment");
+        let service = store
+            .resolve_machine_service("apps", &app.service_id)
+            .await
+            .expect("resolve App service");
+        assert_eq!(service.target_agent_id, None);
+        assert_eq!(service.target_port, 9420);
+        let host = store
+            .resolve_virtual_network_host("apps", "soul.internal")
+            .await
+            .expect("resolve App virtual host")
+            .expect("App virtual host");
+        assert_eq!(host.service_id, app.service_id);
+
+        let first = store
+            .claim_app_runtime("apps", &app.app_id, None, "appw_first", "reconciler")
+            .await
+            .expect("claim first runtime")
+            .expect("first runtime claim");
+        assert_eq!(first.restart_count, 0);
+        let second = store
+            .claim_app_runtime(
+                "apps",
+                &app.app_id,
+                Some("appw_first"),
+                "appw_second",
+                "reconciler",
+            )
+            .await
+            .expect("replace runtime")
+            .expect("replacement runtime claim");
+        assert_eq!(second.restart_count, 1);
+        assert_eq!(second.service_id, app.service_id);
+        assert_eq!(second.hostname, "soul.internal");
+
+        let stopped = store
+            .set_app_desired_state("apps", &app.app_id, AppDesiredState::Stopped, "owner")
+            .await
+            .expect("stop App");
+        assert_eq!(stopped.desired_state, AppDesiredState::Stopped);
+        store
+            .delete_app_deployment("apps", &app.app_id)
+            .await
+            .expect("delete App");
+        assert!(store
+            .resolve_machine_service("apps", &app.service_id)
+            .await
+            .is_err());
+        assert!(store
+            .resolve_virtual_network_host("apps", "soul.internal")
+            .await
+            .expect("resolve deleted host")
             .is_none());
     }
 

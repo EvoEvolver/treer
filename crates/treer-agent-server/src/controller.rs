@@ -1253,7 +1253,7 @@ fn resolve_launch_with_path(
             },
             |(command, args)| interactive_shell_command_launch(command, args),
         ),
-        "command" => {
+        "command" | "app" => {
             let (command, args) = request.args.split_first().map_or_else(
                 || (interactive_shell(), vec!["-i".to_string()]),
                 |(command, args)| (command.clone(), args.to_vec()),
@@ -1858,6 +1858,34 @@ mod tests {
         assert_eq!(launch.command, "/bin/sh");
         assert_eq!(launch.args, ["-c", "pwd"]);
         assert!(launch.initial_writes.is_empty());
+    }
+
+    #[test]
+    fn managed_apps_spawn_directly_and_publish_their_ui_port() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "app".to_string(),
+            name: "docs".to_string(),
+            cwd: ".".to_string(),
+            args: vec![
+                "python3".to_string(),
+                "-m".to_string(),
+                "http.server".to_string(),
+                "8080".to_string(),
+            ],
+            cols: 120,
+            rows: 36,
+            publish_ports: vec![8080],
+            recipe: None,
+        };
+
+        let (kind, launch) = resolve_launch(&request).expect("resolve App launch");
+
+        assert_eq!(kind, "app");
+        assert_eq!(launch.command, "python3");
+        assert_eq!(launch.args, ["-m", "http.server", "8080"]);
+        assert!(launch.initial_writes.is_empty());
+        assert_eq!(launch.publish_ports, [8080]);
     }
 
     #[test]

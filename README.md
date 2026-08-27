@@ -80,9 +80,19 @@ uses a synthetic local user. Omit it and set `ADMIN_PASSWORD` for shared or
 deployed servers.
 
 Core Message routes are rollout-gated and default off. Enable the Proxy gate
-above only after the database migration and policy defaults are ready. Apps are
-ordinary processes; their supervisor, operating-system account, secrets, and
-isolation are deployment responsibilities.
+above only after the database migration and policy defaults are ready. Treer
+can supervise a single-process HTTP App while preserving its service and
+virtual host across runtime replacement and Controller reconnects:
+
+```bash
+treer app create --machine build-machine --name docs --port 8080 \
+  --hostname docs.internal python3 -- -m http.server 8080
+treer app list
+treer app restart docs
+```
+
+Managed Apps do not add a new security boundary or secret store. More complex
+Apps may still use an external supervisor and register ordinary Treer services.
 
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
 places the current platform's `treer-agent-host`, `treer-agent-server`, and

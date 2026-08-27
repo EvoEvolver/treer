@@ -46,6 +46,7 @@ node scripts/check-docs.mjs
 | Frontend | Control-plane and Mail typecheck/build; mocked desktop/mobile browser workflows | No screenshot visual regression suite |
 | Core Message | Store/API/CLI tests for DAG visibility, delivery, idempotency, Policy revision, body-free outbox, and migration | No retention/export/delete, attachments, or load/failure suite |
 | App identity | OAuth/PKCE, audience, membership/service invalidation, directory, and App Message routes | No refresh-token contract or unattended browser test |
+| Managed App lifecycle | Transactional service/vhost ownership, runtime replacement, direct launch, CLI parsing, frontend build, and mocked browser lifecycle | PTY-backed first adapter; no health check, deployment revision, or Host pipes supervisor |
 | Mail | Python HTTP contract, frontend build, resumable SQLite/PostgreSQL migration | No unattended real-browser audit |
 | Telegram | Fake Bot API, mapping, ack crash ordering, restart, rate-limit and ambiguous-send tests | No live Telegram canary, webhook, or active-active mode |
 | Distribution | NATS event/outbox and multi-Proxy routing tests | No automated partition/failure CI |
@@ -62,6 +63,7 @@ node scripts/check-docs.mjs
 | Core Message | DAG/visibility, delivery, idempotency, ack, Policy, outbox body exclusion, and migration tests |
 | Mail or Telegram | App unit tests, external API fixture, restart/migration, and frontend build when applicable |
 | Host/Controller lifecycle | Idempotency and process-survival tests |
+| Managed App lifecycle | Stable service/vhost transaction, direct runtime launch, reconnect/restart behavior, CLI parse, and browser workflow |
 | Network or ingress | Authentication/header, streaming, WebSocket, containment, and Canary coverage |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |

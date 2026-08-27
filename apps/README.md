@@ -1,7 +1,10 @@
 # Workspace Apps
 
-Apps are ordinary services started and supervised by an operator or a managed
-Agent. Treer does not install, sandbox, or grant special trust to their code.
+Treer supports two deployment forms. A Managed App is a single HTTP process
+created with `treer app create`; Treer persists its command, machine, service,
+and virtual host, and restores the process after exit or Controller reconnect.
+An externally managed App is started by an operator or another supervisor and
+registers an ordinary service. Neither form grants special trust to App code.
 
 Browser-facing Apps use the standard App OAuth endpoints and a short-lived,
 service-audience bearer token. Agent-facing Apps may use the local `treer` CLI
@@ -25,6 +28,7 @@ network access remain deployment concerns.
   session APIs, Claude Code stream-json, and Grok Build / Cursor ACP. They
   register semantic capabilities without a bundled browser page.
 
-Each App is source code, configuration schema, documentation, and tests. There
-is deliberately no App manifest, package installer, local command broker, or
+Each bundled App is source code, configuration schema, documentation, and
+tests. Managed Apps currently accept one command and one HTTP UI port; there is
+no package manifest, installer, secret broker, migration protocol, or
 App-specific session capability.

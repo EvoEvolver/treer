@@ -32,8 +32,9 @@ a filesystem sandbox. The current coding-agent launch modes can execute with
 the machine account's authority. Same-account processes may inspect files,
 process metadata, local configuration, or credentials available to each other.
 
-Apps do not create a security boundary. They are ordinary processes with the
-same operating-system and network authority supplied by their supervisor.
+Apps do not create a security boundary. Managed Apps currently run through the
+same Host and sandbox backend as command Agents, under the installing machine
+account. Externally managed Apps inherit their supervisor's authority.
 Treer Policy limits what authenticated requests Core accepts; it cannot stop an
 App from using other same-machine credentials or services it can reach. Run
 untrusted code under a separate user, container, VM, microVM, or stronger
@@ -92,6 +93,10 @@ Linux `publish_ports` maps a namespace TCP port onto the machine loopback. It
 is not an internet listener. Any process on that machine that can reach
 `127.0.0.1` can reach the published service. Agent-scoped services use a
 separate Unix bridge into the same namespace and do not open a host TCP port.
+Managed Apps use `publish_ports` for their declared HTTP UI port, then route the
+stable service and virtual hostname to that loopback listener. Their command,
+arguments, working directory, and hostname are plaintext Proxy metadata; the
+Managed App API deliberately has no secret field.
 
 ## Policy And Rollout
 

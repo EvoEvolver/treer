@@ -16,13 +16,13 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
     AcknowledgeMessagesRequest, ApiError, BuildInfo, CreateAgentLaunchProfileRequest,
-    CreateAgentRequest, CreateMachineServiceRequest, CreateServiceIngressRequest,
-    CreateVirtualNetworkHostRequest, ImportMessagesRequest, InputAgentRequest,
-    LaunchAgentProfileRequest, ListMessagesQuery, PromptAgentRequest, ProtocolError,
-    ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
-    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
-    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, ImportMessagesRequest,
+    InputAgentRequest, LaunchAgentProfileRequest, ListMessagesQuery, PromptAgentRequest,
+    ProtocolError, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
+    SendMessageRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, WorkloadIdentityTokenRequest,
+    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -167,6 +167,17 @@ pub fn router(state: LocalApiState) -> Router {
         )
         .route("/api/local/agents", get(list_local_agents))
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route(
+            "/api/apps",
+            get(list_app_deployments).post(create_app_deployment),
+        )
+        .route(
+            "/api/apps/{app_id}",
+            get(get_app_deployment).delete(delete_app_deployment),
+        )
+        .route("/api/apps/{app_id}/start", post(start_app_deployment))
+        .route("/api/apps/{app_id}/stop", post(stop_app_deployment))
+        .route("/api/apps/{app_id}/restart", post(restart_app_deployment))
         .route(
             "/api/launch-profiles",
             get(list_agent_launch_profiles).post(create_agent_launch_profile),
@@ -751,6 +762,100 @@ async fn create_agent(
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
                 source_agent.as_ref(),
             )
+            .await?,
+    ))
+}
+
+async fn list_app_deployments(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("apps", source_agent.as_ref()).await?))
+}
+
+async fn get_app_deployment(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(&format!("apps/{app_id}"), source_agent.as_ref())
+            .await?,
+    ))
+}
+
+async fn create_app_deployment(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateAppDeploymentRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                "apps",
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn start_app_deployment(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    app_lifecycle_action(state, headers, app_id, "start").await
+}
+
+async fn stop_app_deployment(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    app_lifecycle_action(state, headers, app_id, "stop").await
+}
+
+async fn restart_app_deployment(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    app_lifecycle_action(state, headers, app_id, "restart").await
+}
+
+async fn app_lifecycle_action(
+    state: LocalApiState,
+    headers: HeaderMap,
+    app_id: String,
+    action: &str,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("apps/{app_id}/{action}"),
+                &json!({}),
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn delete_app_deployment(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(&format!("apps/{app_id}"), source_agent.as_ref())
             .await?,
     ))
 }

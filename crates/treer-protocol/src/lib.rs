@@ -682,6 +682,72 @@ pub struct CreateAgentRequest {
     pub recipe: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppDesiredState {
+    #[default]
+    Running,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppDeploymentStatus {
+    #[default]
+    Pending,
+    Running,
+    Stopped,
+    Exited,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppDeployment {
+    pub app_id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub server_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: String,
+    pub port: u16,
+    pub hostname: String,
+    pub service_id: String,
+    pub desired_state: AppDesiredState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_agent_id: Option<String>,
+    #[serde(default)]
+    pub restart_count: u64,
+    #[serde(default)]
+    pub status: AppDeploymentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAppDeploymentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: String,
+    pub port: u16,
+    pub hostname: String,
+}
+
 pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKILL.md");
 
 pub fn recipe_url(request: &CreateAgentRequest) -> Option<&str> {

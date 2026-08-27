@@ -90,6 +90,27 @@ their email addresses:
 treer member list
 ```
 
+## Manage long-running Apps
+
+A Managed App is one supervised command with one HTTP UI endpoint. Its service
+and virtual hostname remain stable when the runtime exits or the Controller
+reconnects:
+
+```bash
+treer app create --machine build-machine --name docs --cwd . --port 8080 \
+  --hostname docs.internal python3 -- -m http.server 8080
+treer app list
+treer app show docs
+treer app stop docs
+treer app start docs
+treer app restart docs
+treer app delete docs
+```
+
+Use this only for a single-process HTTP App. It does not install dependencies,
+store secrets, migrate state, or isolate hostile code. Use ordinary service and
+virtual-host registration for externally supervised or non-HTTP processes.
+
 ## Manage machine services and virtual hosts
 
 Machine services are durable records for long-running processes. Host-network
