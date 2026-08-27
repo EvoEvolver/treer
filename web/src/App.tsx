@@ -1,5 +1,6 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import type * as React from "react"
+import { Route, Routes, useLocation, useNavigate, useParams } from "react-router"
 import {
   ArrowDown,
   ArrowLeft,
@@ -90,6 +91,14 @@ function replaceWorkspace(items: Workspace[], updated: Workspace) {
   return items
     .map((item) => item.workspace_id === updated.workspace_id ? updated : item)
     .sort((left, right) => left.name.localeCompare(right.name) || left.workspace_id.localeCompare(right.workspace_id))
+}
+
+function workspacePath(organizationId: string | null, workspaceId: string | null) {
+  if (!organizationId) return "/"
+  const organizationPath = `/orgs/${encodeURIComponent(organizationId)}`
+  return workspaceId
+    ? `${organizationPath}/workspaces/${encodeURIComponent(workspaceId)}`
+    : organizationPath
 }
 
 function defaultAgentName(kind: string) {
@@ -435,10 +444,19 @@ function LaunchProfilesView({ profiles, loading, onEdit, onLaunch, onDelete }: {
 }
 
 function WorkspaceApp() {
+  const route = useParams<{ organizationId?: string; workspaceId?: string }>()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const routeSelectionRef = useRef({ organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null })
+  routeSelectionRef.current = { organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null }
+  const replaceWorkspaceRoute = useCallback((organizationId: string | null, workspaceId: string | null) => {
+    navigate({ pathname: workspacePath(organizationId, workspaceId), search: location.search, hash: location.hash }, { replace: true })
+  }, [navigate, location.search, location.hash])
   const preview = firstRunTourMode() === "preview"
   const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
   const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
   const [organizationId, setOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
+  const organizationIdRef = useRef<string | null>(preview ? PREVIEW_ORG.organization_id : null)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [workspaceId, setWorkspaceId] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
@@ -535,12 +553,18 @@ function WorkspaceApp() {
   const loadOrganizations = useCallback(async (preferred?: string) => {
     const data = await api<{ organizations: Organization[] }>("/api/organizations")
     setOrganizations(data.organizations)
-    setOrganizationId((current) => {
-      if (preferred && data.organizations.some((item) => item.organization_id === preferred)) return preferred
-      if (current && data.organizations.some((item) => item.organization_id === current)) return current
-      return data.organizations[0]?.organization_id ?? null
-    })
-  }, [])
+    const routeSelection = routeSelectionRef.current
+    const selected = preferred && data.organizations.some((item) => item.organization_id === preferred)
+      ? preferred
+      : routeSelection.organizationId && data.organizations.some((item) => item.organization_id === routeSelection.organizationId)
+        ? routeSelection.organizationId
+        : organizationIdRef.current && data.organizations.some((item) => item.organization_id === organizationIdRef.current)
+          ? organizationIdRef.current
+          : data.organizations[0]?.organization_id ?? null
+    organizationIdRef.current = selected
+    setOrganizationId(selected)
+    replaceWorkspaceRoute(selected, routeSelection.organizationId === selected ? routeSelection.workspaceId : null)
+  }, [replaceWorkspaceRoute])
 
   useEffect(() => { if (user && !preview) loadOrganizations().catch(showError) }, [user, preview, loadOrganizations, showError])
 
@@ -560,11 +584,18 @@ function WorkspaceApp() {
     api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`).then((data) => {
       if (cancelled) return
       setWorkspaces(data.workspaces)
-      setWorkspaceId(data.workspaces[0]?.workspace_id ?? null)
+      const routeSelection = routeSelectionRef.current
+      const selected = routeSelection.organizationId === organizationId
+        && routeSelection.workspaceId
+        && data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)
+        ? routeSelection.workspaceId
+        : data.workspaces[0]?.workspace_id ?? null
+      setWorkspaceId(selected)
+      replaceWorkspaceRoute(organizationId, selected)
       if (!data.workspaces.length) setConnection("no workspace")
     }).catch(showError)
     return () => { cancelled = true }
-  }, [organizationId, preview, showError])
+  }, [organizationId, preview, replaceWorkspaceRoute, showError])
 
   const refreshSnapshot = useCallback(async () => {
     if (preview || !workspaceId) return
@@ -704,6 +735,18 @@ function WorkspaceApp() {
     if (isMobile) setMobileTerminalOpen(true)
   }
 
+  function selectOrganization(value: string) {
+    organizationIdRef.current = value
+    setOrganizationId(value)
+    setWorkspaceId(null)
+    replaceWorkspaceRoute(value, null)
+  }
+
+  function selectWorkspace(value: string) {
+    setWorkspaceId(value)
+    replaceWorkspaceRoute(organizationId, value)
+  }
+
   useEffect(() => {
     if (createAgentOpen && !onlineMachines.some((machine) => machine.server_id === agentServerId)) setAgentServerId(onlineMachines[0]?.server_id ?? "")
   }, [createAgentOpen, onlineMachines, agentServerId])
@@ -731,7 +774,7 @@ function WorkspaceApp() {
       const data = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", body: JSON.stringify({ organization_id: organizationId, name: workspaceName }) })
       setCreateWorkspaceOpen(false); setWorkspaceName("")
       const list = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
-      setWorkspaces(list.workspaces); setWorkspaceId(data.workspace.workspace_id)
+      setWorkspaces(list.workspaces); selectWorkspace(data.workspace.workspace_id)
     } catch (reason) { showError(reason) }
   }
 
@@ -1270,13 +1313,13 @@ function WorkspaceApp() {
         {preview && <div className="treer-tour-banner"><span>Tour preview · empty first-run account, no server writes</span></div>}
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
-          <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={setOrganizationId}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
+          <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
           <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_64px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
           <div data-tour="workspace-select">
-            <Select value={workspaceId ?? undefined} onValueChange={setWorkspaceId} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+            <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
           </div>
           <div className="flex">
             <IconButton label="Rename workspace" disabled={!workspace} onClick={() => { if (workspace) { setWorkspaceName(workspace.name); setRenameWorkspaceOpen(true) } }}><Pencil /></IconButton>
@@ -1577,5 +1620,10 @@ function AgentItem({ agent, machine, selected, onClick, onRename, onStop, onDele
 }
 
 export default function App() {
-  return window.location.pathname === "/admin" ? <AdminPanel /> : <WorkspaceApp />
+  return <Routes>
+    <Route path="/admin" element={<AdminPanel />} />
+    <Route path="/orgs/:organizationId/workspaces/:workspaceId" element={<WorkspaceApp />} />
+    <Route path="/orgs/:organizationId" element={<WorkspaceApp />} />
+    <Route path="*" element={<WorkspaceApp />} />
+  </Routes>
 }
