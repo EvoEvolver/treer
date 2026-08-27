@@ -23,7 +23,7 @@ available on the allocated node, skip the PostgreSQL-backed tests and report
 that limitation instead of treating the partial run as the complete gate.
 
 `just check` verifies documentation links, release tooling, the control-plane
-and Mail frontends, Mail/Telegram/Soul/updater tests, Rust
+and Mail frontends, Mail/Telegram/Soul/updater tests, AIS adapter tests, Rust
 build/format/tests, and Clippy with warnings denied. Focused commands are:
 
 ```sh
@@ -31,6 +31,7 @@ just app-test
 just updater-test
 just messaging-e2e
 just web-test
+just ais-e2e
 cargo test -p treer-proxy message_
 cargo test -p treer-proxy -- updater::
 cargo test -p treer-proxy -- admin_update_
@@ -63,6 +64,7 @@ node scripts/check-docs.mjs
 | Host/Controller lifecycle | Idempotency and process-survival tests |
 | Network or ingress | Authentication/header, streaming, WebSocket, containment, and Canary coverage |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
+| Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
 | Documentation | `node scripts/check-docs.mjs` |
 | Release publishing | `node --test scripts/release-r2.test.mjs` plus isolated R2 verification |
 | Self-host GHCR or updater | `just updater-test`, Proxy admin update tests, and `/admin` e2e |

@@ -76,3 +76,70 @@
   touch-action: none;
 }
 .xterm .xterm-viewport { scrollbar-color: #41484d #0f1215; }
+
+.treer-tour-popover.driver-popover {
+  max-width: 22rem;
+  padding: 1rem 1rem 0.85rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  box-shadow: 0 18px 40px rgba(15, 18, 21, 0.16);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+.treer-tour-popover .driver-popover-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: hsl(var(--foreground));
+}
+.treer-tour-popover .driver-popover-description {
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: hsl(var(--muted-foreground));
+}
+.treer-tour-popover .driver-popover-description p + p { margin-top: 0.55rem; }
+.treer-tour-popover .driver-popover-description code {
+  font-size: 0.72rem;
+  padding: 0.05rem 0.28rem;
+  border-radius: 0.25rem;
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+.treer-tour-popover .driver-popover-progress-text {
+  font-size: 0.7rem;
+  color: hsl(var(--muted-foreground));
+}
+.treer-tour-popover .driver-popover-footer button {
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-shadow: none;
+}
+.treer-tour-popover .driver-popover-next-btn,
+.treer-tour-popover .driver-popover-done-btn {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border: 0;
+  text-shadow: none;
+}
+.treer-tour-popover .driver-popover-prev-btn {
+  background: transparent;
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+  text-shadow: none;
+}
+.treer-tour-popover .driver-popover-close-btn {
+  color: hsl(var(--muted-foreground));
+}
+.treer-tour-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.7rem;
+  color: #694a73;
+  background: #e8deee;
+  border-bottom: 1px solid hsl(var(--border));
+}

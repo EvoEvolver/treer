@@ -1,3 +1,4 @@
+mod admin;
 mod agent_socket;
 mod api;
 mod audit;

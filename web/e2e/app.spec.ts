@@ -14,10 +14,22 @@ const organization = {
   role: "owner" as const,
 }
 
+const secondOrganization = {
+  organization_id: "org-2",
+  name: "Research",
+  role: "member" as const,
+}
+
 const workspace = {
   workspace_id: "ws-1",
   name: "Demo",
   organization_id: "org-1",
+}
+
+const secondWorkspace = {
+  workspace_id: "ws-2",
+  name: "Experiments",
+  organization_id: "org-2",
 }
 
 const build = { version: "0.1.2", git_commit: "abcdef1234567890" }
@@ -135,16 +147,26 @@ async function mockApi(page: Page) {
       }
       return ok(route, currentUser)
     }
-    if (path === "/organizations") return ok(route, { organizations: [organization] })
+    if (path === "/organizations") return ok(route, { organizations: [organization, secondOrganization] })
     if (path === "/organizations/org-1/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "owner" }] })
     if (path === "/organizations/org-1/audit-events") return ok(route, { events: [] })
-    if (path === "/workspaces") return ok(route, { workspaces: url.searchParams.get("organization_id") === "org-1" ? [workspace] : [] })
+    if (path === "/workspaces") return ok(route, {
+      workspaces: url.searchParams.get("organization_id") === "org-1"
+        ? [workspace]
+        : url.searchParams.get("organization_id") === "org-2" ? [secondWorkspace] : [],
+    })
     if (path === "/workspaces/ws-1/snapshot") return ok(route, snapshot)
+    if (path === "/workspaces/ws-2/snapshot") return ok(route, { ...snapshot, workspace: secondWorkspace, servers: [], agents: [] })
     if (path === "/workspaces/ws-1/virtual-hosts") return ok(route, { hosts: [virtualHost] })
+    if (path === "/workspaces/ws-2/virtual-hosts") return ok(route, { hosts: [] })
     if (path === "/workspaces/ws-1/services") return ok(route, { services: [serviceA] })
+    if (path === "/workspaces/ws-2/services") return ok(route, { services: [] })
     if (path === "/workspaces/ws-1/ingresses") return ok(route, { ingresses: [] })
+    if (path === "/workspaces/ws-2/ingresses") return ok(route, { ingresses: [] })
     if (path === "/workspaces/ws-1/traffic") return ok(route, { traffic })
+    if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
     if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile] })
+    if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
 
     return route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
   })
@@ -165,6 +187,7 @@ test("opens app, shows org, workspace, machines and agents", async ({ page }) =>
   await page.goto("/")
   await expect(page.locator("aside").getByText("Acme")).toBeVisible()
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1/workspaces/ws-1")
 
   await machinesTab(page).click()
   await expect(workstationRow(page)).toBeVisible()
@@ -173,6 +196,19 @@ test("opens app, shows org, workspace, machines and agents", async ({ page }) =>
   await agentsTab(page).click()
   await expect(page.getByRole("button", { name: /^api-server / })).toBeVisible()
   await expect(page.getByRole("button", { name: /^worker / })).toBeVisible()
+})
+
+test("restores organization and workspace from the URL after reload", async ({ page }) => {
+  await page.goto("/orgs/org-2/workspaces/ws-2?source=bookmark")
+  await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
+  await expect.poll(() => new URL(page.url()).searchParams.get("source")).toBe("bookmark")
+
+  await page.reload()
+
+  await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-2/workspaces/ws-2")
 })
 
 test("agent list row menu can rename and delete", async ({ page }) => {

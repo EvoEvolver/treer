@@ -6,6 +6,14 @@ import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import {
+  envelopeTranscriptEntry,
+  groupTranscriptTurns,
+  isUserPromptEntry,
+  parseTranscriptPageQuery,
+  transcriptPageFromEntries,
+} from "../ais-kit/index.mjs";
+
 const execFileAsync = promisify(execFile);
 const extensionPath = fileURLToPath(import.meta.url);
 const publicDir = join(dirname(extensionPath), "public");
@@ -128,16 +136,26 @@ export function snapshotFromContext(context, runtime) {
   };
 }
 
+export {
+  envelopeTranscriptEntry,
+  groupTranscriptTurns,
+  isUserPromptEntry,
+  parseTranscriptPageQuery,
+};
+
 export function transcriptEntries(context, offset, limit) {
   const sessionId = context?.sessionManager.getSessionId?.() ?? "pi-session";
   const entries = context?.sessionManager.getBranch?.() ?? [];
-  return entries.slice(offset, offset + limit).map((entry, index) => ({
-    id: String(entry.id ?? entry.entryId ?? `${sessionId}:${offset + index}`),
-    kind: String(entry.type ?? "unknown"),
-    role: typeof entry.message?.role === "string" ? entry.message.role : null,
-    content: entry.message?.content ?? entry,
-    created_at: typeof entry.timestamp === "string" ? entry.timestamp : null,
-  }));
+  return entries
+    .slice(offset, offset + limit)
+    .map((entry, index) => envelopeTranscriptEntry(entry, sessionId, offset + index));
+}
+
+export function transcriptPage(context, page, limit) {
+  const sessionId = context?.sessionManager.getSessionId?.() ?? "pi-session";
+  const raw = context?.sessionManager.getBranch?.() ?? [];
+  const enveloped = raw.map((entry, index) => envelopeTranscriptEntry(entry, sessionId, index));
+  return transcriptPageFromEntries(enveloped, page, limit);
 }
 
 function json(value) {
@@ -266,17 +284,11 @@ export default function piUiExtension(pi) {
           });
         }
         if (request.method === "GET" && url.pathname === "/v1/transcript") {
-          const entries = context?.sessionManager.getBranch() ?? [];
-          const cursor = Math.max(0, Number.parseInt(url.searchParams.get("cursor") ?? "0", 10) || 0);
-          const limit = Math.min(1000, Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "100", 10) || 100));
-          const page = transcriptEntries(context, cursor, limit);
-          const next = cursor + page.length;
+          const { page, limit } = parseTranscriptPageQuery(url.searchParams);
           return sendJson(response, 200, {
             agent_id: process.env.TREER_AGENT_ID || "",
             interface_instance_id: instanceId,
-            cursor: String(cursor),
-            next_cursor: next < entries.length ? String(next) : null,
-            entries: page,
+            ...transcriptPage(context, page, limit),
           });
         }
         if (request.method === "GET" && url.pathname === "/v1/events") {

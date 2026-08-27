@@ -6,11 +6,14 @@ import piUiExtension, {
   createForkedAgent,
   forkAgentName,
   forkLaunchArgs,
+  groupTranscriptTurns,
   normalizePort,
+  parseTranscriptPageQuery,
   promptOptions,
   registerTreerInterface,
   snapshotFromContext,
   transcriptEntries,
+  transcriptPage,
 } from "./extension.mjs";
 
 test("normalizes the configured loopback port", () => {
@@ -169,6 +172,68 @@ test("projects Pi entries into stable Treer transcript envelopes", () => {
   ]);
 });
 
+test("groups a conversation turn from a user prompt through the next prompt", () => {
+  const entries = [
+    { type: "model_change", model: "test" },
+    { type: "message", id: "u1", message: { role: "user", content: "first" } },
+    { type: "message", id: "t1", message: { role: "tool", content: "ran" } },
+    { type: "message", id: "a1", message: { role: "assistant", content: "ok" } },
+    { type: "compaction" },
+    { type: "message", id: "u2", message: { role: "user", content: "second" } },
+    { type: "message", id: "a2", message: { role: "assistant", content: "done" } },
+  ];
+  const turns = groupTranscriptTurns(entries);
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns[0].map((entry) => entry.id ?? entry.type), [
+    "model_change",
+    "u1",
+    "t1",
+    "a1",
+    "compaction",
+  ]);
+  assert.deepEqual(turns[1].map((entry) => entry.id), ["u2", "a2"]);
+  assert.deepEqual(groupTranscriptTurns([
+    { type: "compaction" },
+    { type: "model_change", model: "test" },
+  ]).map((turn) => turn.map((entry) => entry.type)), [[
+    "compaction",
+    "model_change",
+  ]]);
+});
+
+test("pages the AIS transcript one conversation turn at a time", () => {
+  const context = {
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getBranch: () => [
+        { type: "model_change", model: "test" },
+        { type: "message", id: "u1", message: { role: "user", content: "first" } },
+        { type: "message", id: "a1", message: { role: "assistant", content: "ok" } },
+        { type: "message", id: "u2", message: { role: "user", content: "second" } },
+        { type: "message", id: "a2", message: { role: "assistant", content: "done" } },
+      ],
+    },
+  };
+  const first = transcriptPage(context, 0, 1);
+  assert.equal(first.page, 0);
+  assert.equal(first.page_count, 2);
+  assert.equal(first.next_page, 1);
+  assert.equal(first.cursor, "0");
+  assert.equal(first.next_cursor, "1");
+  assert.deepEqual(first.entries.map((entry) => entry.id), ["session-1:0", "u1", "a1"]);
+  const second = transcriptPage(context, 1, 1);
+  assert.equal(second.page, 1);
+  assert.equal(second.next_page, null);
+  assert.deepEqual(second.entries.map((entry) => entry.id), ["u2", "a2"]);
+  const both = transcriptPage(context, 0, 2);
+  assert.equal(both.next_page, null);
+  assert.equal(both.entries.length, 5);
+  assert.deepEqual(parseTranscriptPageQuery(new URLSearchParams("cursor=3")), {
+    page: 3,
+    limit: 1,
+  });
+});
+
 test("serves the AIS contract and deduplicates prompt operations", async () => {
   const previousPort = process.env.PI_UI_PORT;
   const previousRegister = process.env.PI_UI_AUTO_REGISTER;
@@ -186,7 +251,11 @@ test("serves the AIS contract and deduplicates prompt operations", async () => {
     cwd: "/workspace",
     isIdle: () => true,
     sessionManager: {
-      getBranch: () => [{ type: "message", id: "one", message: { role: "user", content: "hello" } }],
+      getBranch: () => [
+        { type: "message", id: "one", message: { role: "user", content: "hello" } },
+        { type: "message", id: "reply", message: { role: "assistant", content: "hi" } },
+        { type: "message", id: "two", message: { role: "user", content: "again" } },
+      ],
       getSessionFile: () => "/tmp/session.jsonl",
       getSessionId: () => "session-1",
       getSessionName: () => "Test",
@@ -200,9 +269,17 @@ test("serves the AIS contract and deduplicates prompt operations", async () => {
     assert.equal(manifest.protocol, "treer.agent-interface/v1");
     assert.equal(manifest.instance_id, control.instanceId);
 
-    const transcript = await (await fetch(`${base}/v1/transcript?limit=10`)).json();
-    assert.equal(transcript.entries[0].id, "one");
-    assert.equal(transcript.entries[0].content, "hello");
+    const transcript = await (await fetch(`${base}/v1/transcript`)).json();
+    assert.equal(transcript.page, 0);
+    assert.equal(transcript.page_count, 2);
+    assert.equal(transcript.next_page, 1);
+    assert.equal(transcript.cursor, "0");
+    assert.deepEqual(transcript.entries.map((entry) => entry.id), ["one", "reply"]);
+
+    const next = await (await fetch(`${base}/v1/transcript?page=1`)).json();
+    assert.equal(next.page, 1);
+    assert.equal(next.next_page, null);
+    assert.deepEqual(next.entries.map((entry) => entry.id), ["two"]);
 
     const request = {
       method: "POST",

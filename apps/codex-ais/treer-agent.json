@@ -1,0 +1,7 @@
+{
+  "name": "Codex AIS",
+  "description": "Codex app-server with a per-Agent Treer Interface adapter. One Agent is one thread.",
+  "run": {
+    "command": "./scripts/treer-agent.sh"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Claude Code AIS",
+  "description": "Claude Code stream-json session with a per-Agent Treer Interface adapter. One Agent is one session.",
+  "run": {
+    "command": "./scripts/treer-agent.sh"
+  }
+}

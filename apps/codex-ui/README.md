@@ -6,6 +6,7 @@ one embedded page. There is no thread list or session switcher in the UI.
 
 The private HTTP listener exposes the browser page plus
 `treer.agent-interface/v1` prompt, transcript, state, and abort operations.
+`GET /v1/transcript` pages by Codex turn (`page`/`cursor`, `limit` default 1).
 Treer reaches it through the Agent network bridge; no service record or
 published port is required.
 

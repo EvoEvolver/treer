@@ -66,13 +66,16 @@ pub async fn transcript(
     let mut path = "/v1/transcript".to_string();
     let mut separator = '?';
     if let Some(cursor) = cursor {
+        let encoded =
+            percent_encoding::utf8_percent_encode(cursor, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
         path.push(separator);
         separator = '&';
+        path.push_str("page=");
+        path.push_str(&encoded);
+        path.push('&');
         path.push_str("cursor=");
-        path.push_str(
-            &percent_encoding::utf8_percent_encode(cursor, percent_encoding::NON_ALPHANUMERIC)
-                .to_string(),
-        );
+        path.push_str(&encoded);
     }
     if let Some(limit) = limit {
         path.push(separator);
@@ -239,6 +242,57 @@ mod tests {
             .await
             .expect("read manifest");
         assert_eq!(value.instance_id, "pi-test");
+        server.await.expect("test server");
+    }
+
+    #[tokio::test]
+    async fn requests_transcript_pages_by_turn() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test AIS");
+        let port = listener.local_addr().expect("AIS address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept transcript request");
+            let mut request = vec![0_u8; 2048];
+            let count = socket.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with("GET /v1/transcript?page=2&cursor=2&limit=1 "));
+            let body = serde_json::json!({
+                "agent_id": "agent-test",
+                "interface_instance_id": "pi-test",
+                "page": 2,
+                "page_count": 4,
+                "next_page": 3,
+                "cursor": "2",
+                "next_cursor": "3",
+                "entries": []
+            })
+            .to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write response");
+        });
+        let descriptor = AgentInterfaceDescriptor {
+            protocol: AGENT_INTERFACE_PROTOCOL_V1.to_string(),
+            instance_id: "pi-test".to_string(),
+            port,
+            capabilities: vec!["transcript.read".to_string()],
+            ui_path: None,
+            registered_at: Utc::now(),
+        };
+        let value = transcript("agent-test", &descriptor, Some("2"), Some(1), false)
+            .await
+            .expect("read transcript");
+        assert_eq!(value.page, Some(2));
+        assert_eq!(value.page_count, Some(4));
+        assert_eq!(value.next_page, Some(3));
         server.await.expect("test server");
     }
 }

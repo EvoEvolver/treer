@@ -35,6 +35,7 @@ use treer_protocol::{
 use url::Url;
 use uuid::Uuid;
 
+use crate::admin;
 use crate::agent_socket;
 use crate::audit::NewWorkspaceAuditEvent;
 use crate::auth::{self, AuthStore, CurrentSession, MachineSession, ProfileMutationActor};
@@ -676,14 +677,9 @@ pub fn router(
             auth_store.clone(),
             auth::require_user,
         ));
-    let admin = Router::new()
+    let admin = admin::routes()
         .route("/api/admin/me", get(auth::admin_me))
         .route("/api/admin/logout", post(auth::admin_logout))
-        .route("/api/admin/dashboard", get(auth::admin_dashboard))
-        .route(
-            "/api/admin/invitations",
-            post(auth::admin_create_invitation),
-        )
         .route(
             "/api/admin/update",
             get(crate::updater::status).post(crate::updater::apply),
@@ -4637,7 +4633,10 @@ async fn read_agent_transcript(
         agent_policy_resource(&agent),
     )
     .await?;
-    let cursor = query.get("cursor").cloned();
+    let cursor = query
+        .get("page")
+        .cloned()
+        .or_else(|| query.get("cursor").cloned());
     let limit = query.get("limit").and_then(|value| value.parse().ok());
     let data = state
         .send_command(

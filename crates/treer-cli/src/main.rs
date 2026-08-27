@@ -205,12 +205,17 @@ enum AgentCommand {
         #[arg(long, default_value_t = 100)]
         lines: usize,
     },
-    #[command(about = "Read a structured transcript from an Agent Interface Server")]
+    #[command(about = "Read a structured transcript, one conversation turn per page")]
     Transcript {
         target: String,
+        /// 0-based conversation turn. A turn starts at a user prompt.
+        #[arg(long)]
+        page: Option<u32>,
+        /// Alias for `--page`.
         #[arg(long)]
         cursor: Option<String>,
-        #[arg(long, default_value_t = 100)]
+        /// Number of turns to return. Default is one turn.
+        #[arg(long, default_value_t = 1)]
         limit: usize,
     },
     #[command(about = "Send raw terminal key presses")]
@@ -850,9 +855,10 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
         AgentCommand::Read { target, lines } => read_agent(client, &target, lines).await,
         AgentCommand::Transcript {
             target,
+            page,
             cursor,
             limit,
-        } => read_agent_transcript(client, &target, cursor, limit).await,
+        } => read_agent_transcript(client, &target, page, cursor, limit).await,
         AgentCommand::SendKeys { target, keys } => {
             let target = normalize_target(&target)?;
             let data = encode_keys(&keys)?;
@@ -1639,6 +1645,7 @@ async fn read_agent(client: &ApiClient, target: &str, lines: usize) -> anyhow::R
 async fn read_agent_transcript(
     client: &ApiClient,
     target: &str,
+    page: Option<u32>,
     cursor: Option<String>,
     limit: usize,
 ) -> anyhow::Result<Value> {
@@ -1648,9 +1655,14 @@ async fn read_agent_transcript(
         path_segment(&target),
         limit.min(1000)
     );
-    if let Some(cursor) = cursor {
+    let page = page
+        .map(|value| value.to_string())
+        .or_else(|| cursor.filter(|value| !value.is_empty()));
+    if let Some(page) = page {
+        path.push_str("&page=");
+        path.push_str(&path_segment(&page));
         path.push_str("&cursor=");
-        path.push_str(&path_segment(&cursor));
+        path.push_str(&path_segment(&page));
     }
     client.value(Method::GET, &path, None).await
 }
@@ -2526,6 +2538,8 @@ mod tests {
             "agent",
             "transcript",
             "reviewer",
+            "--page",
+            "2",
             "--cursor",
             "10",
             "--limit",
@@ -2537,6 +2551,7 @@ mod tests {
             Some(Command::Agent {
                 command: AgentCommand::Transcript {
                     target,
+                    page: Some(2),
                     cursor: Some(cursor),
                     limit: 25,
                 }

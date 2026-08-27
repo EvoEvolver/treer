@@ -105,6 +105,74 @@ pub(crate) async fn list(
         .collect()
 }
 
+pub(crate) struct NewPlatformAuditEvent<'a> {
+    pub action: &'a str,
+    pub resource_kind: &'a str,
+    pub resource_id: &'a str,
+    pub resource_name: Option<&'a str>,
+    pub payload: Value,
+}
+
+pub(crate) async fn record_platform(
+    pool: &PgPool,
+    event: NewPlatformAuditEvent<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO platform_audit_events(\
+         event_id, occurred_at, action, resource_kind, resource_id, resource_name, payload) \
+         VALUES($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(format!("aud_{}", Uuid::new_v4().simple()))
+    .bind(Utc::now().to_rfc3339())
+    .bind(event.action)
+    .bind(event.resource_kind)
+    .bind(event.resource_id)
+    .bind(event.resource_name)
+    .bind(event.payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct PlatformAuditEvent {
+    pub sequence: i64,
+    pub event_id: String,
+    pub occurred_at: String,
+    pub action: String,
+    pub resource_kind: String,
+    pub resource_id: String,
+    pub resource_name: Option<String>,
+    pub payload: Value,
+}
+
+pub(crate) async fn list_platform(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<PlatformAuditEvent>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT sequence, event_id, occurred_at, action, resource_kind, resource_id, \
+         resource_name, payload \
+         FROM platform_audit_events ORDER BY sequence DESC LIMIT $1",
+    )
+    .bind(limit.clamp(1, 100))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| PlatformAuditEvent {
+            sequence: row.get("sequence"),
+            event_id: row.get("event_id"),
+            occurred_at: row.get("occurred_at"),
+            action: row.get("action"),
+            resource_kind: row.get("resource_kind"),
+            resource_id: row.get("resource_id"),
+            resource_name: row.get("resource_name"),
+            payload: row.get("payload"),
+        })
+        .collect())
+}
+
 pub(crate) async fn record_workspace(
     pool: &PgPool,
     event: NewWorkspaceAuditEvent<'_>,

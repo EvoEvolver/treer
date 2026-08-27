@@ -55,7 +55,7 @@ boundary.
 | Local operator credential | One Controller install; protects the local API but is not a same-account sandbox |
 | Workload identity token | One Agent/machine/service audience for 60 seconds |
 | Human App token | One user/workspace/service audience; verification rechecks membership and service |
-| Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts |
+| Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts; can list emails and issue password-reset links |
 | Updater token | Shared Bearer secret between Proxy and the Compose updater sidecar; never exposed to browsers |
 | Mail cookie | Local opaque handle to an App token; compromise of Mail state grants that token until expiry |
 | Telegram bot token | One Telegram bot; Telegram and any process that can inspect it can act as the bot |

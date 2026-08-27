@@ -1,0 +1,7 @@
+{
+  "name": "OpenCode AIS",
+  "description": "OpenCode HTTP server with a per-Agent Treer Interface adapter. One Agent is one session.",
+  "run": {
+    "command": "./scripts/treer-agent.sh"
+  }
+}

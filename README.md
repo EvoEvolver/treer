@@ -193,15 +193,24 @@ TREER_ENROLLMENT_KEY='enr_v1_...' \
   --proxy 'https://PROXY_HOST/'
 ```
 
-`connect` decodes the workspace ID from the key, exchanges it for a long-lived
-machine credential, uses the current directory as the workspace root, registers
-the Host service, and starts it. Linux uses a host-pinned systemd user service
-with restart; macOS uses a per-user LaunchAgent with `KeepAlive`. Linux setup
-checks systemd linger and prints an actionable warning when the service will
-stop after the last login session exits. It does not attempt a privileged
-linger change. Override `TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`,
-`TREER_RUNTIME_DIR`, or `TREER_AGENT_SERVER_LISTEN` when needed. The first
-available loopback port starting at `8790` is saved per installed machine.
+`connect` decodes the workspace ID from the key, uses the current directory as
+the workspace root, registers the Host service, and starts it. Before exchanging
+the single-use key, it validates local paths and binaries and probes the selected
+service manager. Linux `auto` mode prefers a host-pinned systemd user service;
+macOS prefers a per-user LaunchAgent with `KeepAlive`. If the persistent user
+service is unavailable, `auto` prints the reason and an explicit downgrade
+warning, starts the Host in the foreground, and keeps the command attached to
+it. Keep that terminal open or run it under a process supervisor. Force an
+early error instead with `--service-mode systemd`, or choose the fallback
+directly with `--service-mode foreground`.
+
+Linux setup checks systemd linger and prints an actionable warning when the
+service will stop after the last login session exits. It does not attempt a
+privileged linger change. `connect` reports success only after both the local
+Controller health endpoint and its Proxy-backed API are ready. Override
+`TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`, `TREER_RUNTIME_DIR`, or
+`TREER_AGENT_SERVER_LISTEN` when needed. The first available loopback port
+starting at `8790` is saved per installed machine.
 
 Setup is interactive by default. Before enrollment it explains that the Agent
 Server is a persistent proxy and agent host running with the current user's
@@ -268,6 +277,7 @@ treer-agent-server --tui --workspace default
 treer-agent-server service status
 treer-agent-server service logs --follow
 treer-agent-server service restart-controller
+treer-agent-server service repair
 treer-agent-server service stop
 treer-agent-server service start
 treer-agent-server service restart
@@ -292,6 +302,18 @@ new Host binary.
 preserves running agents. `restart` restarts the long-lived Host itself and
 therefore terminates the agents and PTYs owned by that Host.
 
+If enrollment saved the machine configuration but service registration or
+startup failed, repair it without another enrollment key:
+
+```bash
+treer-agent-server service --workspace WORKSPACE_ID repair
+treer-agent-server service --workspace WORKSPACE_ID repair --service-mode systemd
+```
+
+The default `auto` repair may visibly downgrade to foreground mode under the
+same rules as `connect`; in that case the repair command remains attached to
+the Host.
+
 `--tui` opens an interactive dashboard for the installed workspace. It shows
 the local Controller health, Proxy reachability, and Host-owned Agents on this
 machine. The Agent list remains available from local state while the Proxy is
@@ -303,7 +325,7 @@ Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 Add `--workspace WORKSPACE_ID` after `service` when managing a workspace other
 than `default`. On Linux, an administrator can run `loginctl enable-linger
 USER` when the service must survive the final logout; otherwise keep a
-foreground Controller on a fixed host, for example in tmux. On macOS, a
+foreground Host on a fixed machine, for example in tmux. On macOS, a
 LaunchAgent starts at user login; an always-on pre-login LaunchDaemon would
 require a separate privileged installation flow.
 
@@ -311,13 +333,17 @@ require a separate privileged installation flow.
 
 The platform administrator is not a Treer user and does not belong to an
 organization. Open `/admin` and use the password supplied in `ADMIN_PASSWORD`
-to access the separate admin dashboard. It reports the current platform-wide
-machine and Agent totals and creates single-use user invitations. On a
-self-hosted Compose stack it also checks and applies GHCR image updates for
-Proxy, App, and the updater sidecar. Workspace Settings does not include that
-control. A user who registers from an administrator invitation receives an
-organization named `<preferred name> Personal` and owns it. Treer does not seed
-an initial organization or workspace.
+to access the separate admin dashboard. It reports platform-wide user, machine,
+and Agent totals. Click a count to expand that inventory: users can be searched,
+issued a one-time password-reset link, and signed out of every session; machines
+list enrolled hosts and expand to their live Agents. The same page still creates
+single-use user invitations and can list pending invites, organizations, and
+recent admin activity. On a self-hosted Compose stack it also checks and applies
+GHCR image updates for Proxy, App, and the updater sidecar. Workspace Settings
+does not include that control. A user who
+registers from an administrator invitation receives an organization named
+`<preferred name> Personal` and owns it. Treer does not seed an initial
+organization or workspace.
 
 Organization owners and administrators can create member invitations from
 **Members**. Registering from an organization invitation only joins that
@@ -698,14 +724,15 @@ treer agent attach reviewer
 treer agent admin delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
 treer agent read reviewer --lines 80
-treer agent transcript reviewer --limit 100
+treer agent transcript reviewer --page 0
 treer agent send-keys reviewer ctrl-c
 ```
 
 An Agent may register a `treer.agent-interface/v1` server on its private
 loopback. The Controller verifies its manifest and automatically sends semantic
 prompts to it when `prompt.submit` is declared; otherwise prompt continues to
-use terminal input. Structured transcript reads require `transcript.read`.
+use terminal input. Structured transcript reads require `transcript.read` and return one
+conversation turn per page.
 When `--ui-path` is present, Treer embeds that path and transparently tunnels
 its relative HTTP and WebSocket traffic to the same Interface port:
 
@@ -714,7 +741,7 @@ treer interface register --port 4180 --instance-id pi-1 \
   --capability prompt.submit --capability transcript.read \
   --capability state.observe --ui-path /
 treer interface show
-treer agent transcript self --limit 100
+treer agent transcript self --page 0
 treer interface clear
 ```
 
@@ -723,7 +750,10 @@ the Interface manifest before restoring it after a hot restart. Interface
 processes register once at startup and should deduplicate prompts by
 `operation_id`. Raw keys, terminal attach, stop, and delete remain PTY/Host
 operations. The bundled Pi UI and single-Agent [Codex UI](apps/codex-ui/README.md)
-perform this registration automatically.
+perform this registration automatically. Launch-profile sidecars without a
+bundled page live under `apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`,
+`apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`. Built-in `--kind
+codex` and `--kind claude` stay on the terminal path.
 
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles

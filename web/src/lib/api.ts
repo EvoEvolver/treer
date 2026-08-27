@@ -78,6 +78,8 @@ export interface Member {
 }
 
 export interface AdminDashboard {
+  user_count: number
+  organization_count: number
   machine_count: number
   agent_count: number
 }
@@ -104,6 +106,63 @@ export interface ControlPlaneUpdateStatus {
   services: ControlPlaneService[]
   job?: ControlPlaneJob | null
   update_available?: boolean
+}
+
+export interface AdminUser {
+  user_id: string
+  email: string
+  preferred_name: string
+  email_verified: boolean
+  created_at: string
+}
+
+export interface AdminUserDetail extends AdminUser {
+  password_login: boolean
+  oauth_providers: string[]
+  organizations: Array<{ organization_id: string; name: string; role: string }>
+  workspaces: Array<{ workspace_id: string; name: string; organization_id: string }>
+}
+
+export interface AdminMachine {
+  server_id: string
+  name: string
+  hostname: string
+  workspace_id: string
+  workspace_name: string
+  created_at: string
+  enrolled_by: string
+  status: string
+  last_seen_at?: string | null
+  root?: string | null
+  agents?: Agent[]
+}
+
+export interface AdminOrganization {
+  organization_id: string
+  name: string
+  created_at: string
+  owner_id?: string | null
+  owner_name?: string | null
+  owner_email?: string | null
+  workspace_count: number
+  machine_count: number
+}
+
+export interface AdminInvitation {
+  token: string
+  created_at: string
+  url: string
+}
+
+export interface PlatformAuditEvent {
+  sequence: number
+  event_id: string
+  occurred_at: string
+  action: string
+  resource_kind: string
+  resource_id: string
+  resource_name?: string | null
+  payload: Record<string, unknown>
 }
 
 export interface VirtualNetworkHost {

@@ -34,7 +34,9 @@ crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
 
 The React app in `web/` is the browser control plane. Workspace views cover
-terminals, launch profiles, network, machine overview, and audit. The sidebar
+terminals, launch profiles, network, machine overview, and audit. `/admin` is
+the platform-administrator inventory: user, machine, and Agent counts expand
+into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
 `localStorage` (`treer-theme`) and currently offers English only; Usage &
@@ -102,6 +104,16 @@ runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
 
+The Host is supervised by a per-user systemd service on Linux or a LaunchAgent
+on macOS when that user manager is available. Installation probes supervision
+before consuming a single-use enrollment key. Automatic mode visibly falls
+back to an attached foreground Host when persistent supervision is unavailable;
+the persisted service-manager choice keeps later lifecycle commands consistent.
+Startup is complete only when the Controller identity endpoint and a
+Proxy-backed API request both succeed. Because service configuration is saved
+before native registration, `service repair` can reconstruct a partial
+installation without another enrollment key.
+
 Proxy replicas fence machine connections through a distributed ownership
 lease. An explicit duplicate-Controller error makes the older Controller stop
 reconnecting, while a stale or expired lease makes it reconnect and claim a
@@ -152,11 +164,31 @@ an idempotency key. An interface with `state.observe` owns working, idle, and
 blocked state; Host exit state remains authoritative. Terminal attach, raw
 input, resize, stop, and delete remain Host/PTY operations.
 
-Pi UI and Codex UI are the bundled AIS implementations. Pi exposes the v1
-routes from its extension. Codex UI owns one `codex app-server` thread per Treer
-Agent and deliberately has no thread list or session switcher. Each serves its
-browser UI and semantic routes from the same private listener; its verified
-descriptor is the single registration for both capabilities and presentation.
+Pi UI and Codex UI are the bundled browser AIS implementations. Pi exposes the
+v1 routes from its extension. Codex UI owns one `codex app-server` thread per
+Treer Agent and deliberately has no thread list or session switcher. Each
+serves its browser UI and semantic routes from the same private listener; its
+verified descriptor is the single registration for both capabilities and
+presentation.
+
+Launch-profile sidecars in `apps/codex-ais`, `apps/opencode-ais`,
+`apps/dsh-ais`, `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`
+register the same protocol without a bundled page. They bind one Treer Agent to
+one downstream thread/session beside `codex app-server`, `opencode serve`, a
+dedicated DeepSeek Harness host (`dsh --profile web`) or SDK runtime, Claude
+Code stream-json, Grok Build ACP (`grok agent stdio`), and Cursor ACP
+(`cursor-agent acp`). Neither Grok Build nor Cursor ships a Codex-style
+app-server; ACP over stdio is their first-party editor integration. The Cursor
+sidecar uses `cursor-agent`, not `agent`, because Grok Build also installs an
+`agent` symlink. Built-in `--kind codex` and `--kind claude` remain TUI/PTY
+paths. Shared helpers live in `apps/ais-kit`.
+
+`GET /v1/transcript` pages by conversation turn. A turn starts at a user prompt
+and includes the following entries until the next user prompt. Leading non-user
+session entries attach to the first turn; a log with no user prompt is a single
+page. `page` (or `cursor`) is the 0-based turn index. `limit` is the number of
+turns and defaults to 1. The response includes `page`, `page_count`,
+`next_page`, and string `cursor` / `next_cursor` aliases.
 
 Creating an Agent with a `recipe` git URL lets the operator pick an already
 installed interactive CLI on that machine. Treer reuses an idle Agent of that

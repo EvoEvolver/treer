@@ -92,6 +92,13 @@ enum ServiceCommand {
     Restart,
     #[command(about = "Hot restart only the replaceable Controller")]
     RestartController,
+    #[command(
+        about = "Repair and activate a partially installed service without a new enrollment key"
+    )]
+    Repair {
+        #[arg(long, value_enum, default_value_t = service::ServiceMode::Auto)]
+        service_mode: service::ServiceMode,
+    },
     #[command(about = "Show service-manager status")]
     Status,
     #[command(about = "Show service logs")]
@@ -115,6 +122,9 @@ struct ConnectArgs {
     root: PathBuf,
     #[arg(long, env = "TREER_AGENT_SERVER_LISTEN")]
     listen: Option<SocketAddr>,
+    /// Select persistent systemd/launchd supervision or a foreground fallback.
+    #[arg(long, value_enum, default_value_t = service::ServiceMode::Auto)]
+    service_mode: service::ServiceMode,
     /// Set or replace the persistent machine name.
     #[arg(long, env = "TREER_MACHINE_NAME")]
     name: Option<String>,
@@ -323,10 +333,17 @@ fn transparent_network_executable() -> Result<Option<PathBuf>> {
 
 async fn run_service_command(args: ServiceArgs) -> Result<()> {
     match args.command {
-        ServiceCommand::Start => service::start(&args.workspace),
+        ServiceCommand::Start => {
+            let activation = service::start_and_wait(&args.workspace).await?;
+            service::wait_for_foreground(activation).await
+        }
         ServiceCommand::Stop => service::stop(&args.workspace),
         ServiceCommand::Restart => service::restart(&args.workspace),
         ServiceCommand::RestartController => service::restart_controller(&args.workspace),
+        ServiceCommand::Repair { service_mode } => {
+            let activation = service::repair_and_wait(&args.workspace, service_mode).await?;
+            service::wait_for_foreground(activation).await
+        }
         ServiceCommand::Status => service::status(&args.workspace),
         ServiceCommand::Logs { lines, follow } => service::logs(&args.workspace, lines, follow),
         ServiceCommand::Uninstall => service::uninstall(&args.workspace),
@@ -351,6 +368,8 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     )?;
     service::save_machine_identity(&identity)?;
     let proxy = normalize_http_url(args.proxy.clone())?;
+    let selection = service::preflight_registration(&enrollment.workspace_id, args.service_mode)?;
+    selection.announce();
     if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
         let installed_proxy = normalize_http_url(
             Url::parse(&config.proxy).context("invalid proxy URL in installed service config")?,
@@ -377,39 +396,55 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
             config.operator_credential = new_operator_credential();
         }
         config.proxy = proxy.to_string();
-        service::refresh_registration(config)?;
+        config.service_manager = selection.manager;
+        let activation = service::refresh_registration_and_wait(config)
+            .await
+            .with_context(|| {
+                format!(
+                    "machine credential was saved but service activation failed; repair it with `treer-agent-server service --workspace {} repair`",
+                    enrollment.workspace_id
+                )
+            })?;
         println!(
             "treer: reusing machine {} for workspace {}",
             identity.name, enrollment.workspace_id
         );
-        return Ok(());
+        return service::wait_for_foreground(activation).await;
     }
-    service::preflight_registration(&enrollment.workspace_id)?;
     let root = std::fs::canonicalize(&args.root)
         .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
+    let listen = service::resolve_listen(&enrollment.workspace_id, args.listen).await?;
+    let install_hostname = service::current_hostname()?;
     let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity).await?;
     if response.workspace_id != enrollment.workspace_id {
         anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
     }
-    let listen = service::resolve_listen(&response.workspace_id, args.listen).await?;
     let host_socket = service::host_socket_path(&response.server_id)?;
+    let workspace = response.workspace_id.clone();
     service::register(service::ServiceConfig {
         proxy: proxy.to_string(),
-        workspace: response.workspace_id.clone(),
+        workspace: workspace.clone(),
         server_id: response.server_id,
         machine_token: response.machine_token,
         operator_credential: new_operator_credential(),
         root,
         listen: listen.to_string(),
         host_socket,
-        install_hostname: service::current_hostname()?,
+        install_hostname,
+        service_manager: selection.manager,
+    })
+    .with_context(|| {
+        format!(
+            "machine enrollment was saved but service registration failed; repair it with `treer-agent-server service --workspace {workspace} repair`"
+        )
     })?;
-    service::start(&response.workspace_id)?;
-    println!(
-        "treer: connected workspace {} to {}",
-        response.workspace_id, proxy
-    );
-    Ok(())
+    let activation = service::start_and_wait(&workspace).await.with_context(|| {
+        format!(
+            "machine enrollment was saved but service activation failed; repair it with `treer-agent-server service --workspace {workspace} repair`"
+        )
+    })?;
+    println!("treer: connected workspace {} to {}", workspace, proxy);
+    service::wait_for_foreground(activation).await
 }
 
 fn new_operator_credential() -> String {
@@ -675,6 +710,52 @@ mod tests {
                 .workspace_id,
             "workspace-a"
         );
+        assert_eq!(connect.service_mode, service::ServiceMode::Auto);
+    }
+
+    #[test]
+    fn connect_and_repair_accept_explicit_service_modes() {
+        let key = format_machine_enrollment_key(
+            "workspace-a",
+            "abc123",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("enrollment key");
+        let args = Args::try_parse_from([
+            "treer-agent-server",
+            "connect",
+            "--proxy",
+            "https://treer.example",
+            "--key",
+            &key,
+            "--service-mode",
+            "foreground",
+        ])
+        .expect("parse foreground connect");
+        let Some(Command::Connect(connect)) = args.command else {
+            panic!("expected connect command");
+        };
+        assert_eq!(connect.service_mode, service::ServiceMode::Foreground);
+
+        let args = Args::try_parse_from([
+            "treer-agent-server",
+            "service",
+            "--workspace",
+            "workspace-a",
+            "repair",
+            "--service-mode",
+            "systemd",
+        ])
+        .expect("parse systemd repair");
+        let Some(Command::Service(ServiceArgs {
+            workspace,
+            command: ServiceCommand::Repair { service_mode },
+        })) = args.command
+        else {
+            panic!("expected service repair command");
+        };
+        assert_eq!(workspace, "workspace-a");
+        assert_eq!(service_mode, service::ServiceMode::Systemd);
     }
 
     fn setup_args(name: Option<&str>, non_interactive: bool, accept_risk: bool) -> ConnectArgs {
@@ -683,6 +764,7 @@ mod tests {
             enrollment_key: "test-key".to_string(),
             root: PathBuf::from("."),
             listen: None,
+            service_mode: service::ServiceMode::Auto,
             name: name.map(str::to_string),
             non_interactive,
             accept_risk,

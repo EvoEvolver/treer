@@ -152,6 +152,12 @@ pub struct AgentTranscriptResponse {
     pub agent_id: String,
     pub interface_instance_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -2266,7 +2272,7 @@ mod tests {
         let command = AgentCommand::Transcript {
             agent_id: "agent-1".to_string(),
             cursor: Some("42".to_string()),
-            limit: Some(100),
+            limit: Some(1),
         };
         let encoded = serde_json::to_value(&command).expect("serialize interface command");
         assert_eq!(encoded["action"], "transcript");
@@ -2290,6 +2296,32 @@ mod tests {
             serde_json::from_value::<AgentInterfaceDescriptor>(encoded)
                 .expect("deserialize descriptor"),
             descriptor
+        );
+
+        let transcript = AgentTranscriptResponse {
+            agent_id: "agent-1".to_string(),
+            interface_instance_id: "pi-one".to_string(),
+            page: Some(0),
+            page_count: Some(2),
+            next_page: Some(1),
+            cursor: Some("0".to_string()),
+            next_cursor: Some("1".to_string()),
+            entries: vec![AgentTranscriptEntry {
+                id: "entry-1".to_string(),
+                kind: "message".to_string(),
+                role: Some("user".to_string()),
+                content: serde_json::json!("hello"),
+                created_at: Some("2026-08-24T12:00:00Z".to_string()),
+            }],
+        };
+        let encoded = serde_json::to_value(&transcript).expect("serialize transcript page");
+        assert_eq!(encoded["page"], 0);
+        assert_eq!(encoded["page_count"], 2);
+        assert_eq!(encoded["next_page"], 1);
+        assert_eq!(
+            serde_json::from_value::<AgentTranscriptResponse>(encoded)
+                .expect("deserialize transcript page"),
+            transcript
         );
     }
 }

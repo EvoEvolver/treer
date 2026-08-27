@@ -1,11 +1,13 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import type * as React from "react"
+import { Route, Routes, useLocation, useNavigate, useParams } from "react-router"
 import {
   ArrowDown,
   ArrowLeft,
   ArrowRight,
   ArrowUp,
   Activity,
+  Building2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -46,9 +48,10 @@ import {
   CircleDashed,
   Download,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type Agent, type AgentLaunchProfile, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type PlatformAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
+import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
 import { cn } from "@/lib/utils"
 import { SettingsDialog } from "@/components/settings"
 import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pane"
@@ -70,6 +73,19 @@ type AuthConfig = { github: boolean; google: boolean; invitation_required: boole
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 type DeleteTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 
+const PREVIEW_USER: User = { user_id: "usr_preview", email: "you@example.com", preferred_name: "You" }
+const PREVIEW_ORG: Organization = { organization_id: "org_preview", name: "You Personal", role: "owner" }
+const PREVIEW_WORKSPACE: Workspace = { workspace_id: "ws_preview", name: "lab" }
+const PREVIEW_NOW = "2026-08-25T00:00:00.000Z"
+const PREVIEW_PROFILES: AgentLaunchProfile[] = [
+  { profile_id: "codex", workspace_id: "ws_preview", name: "Codex", description: "OpenAI Codex", cwd: ".", command: "codex", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+  { profile_id: "claude", workspace_id: "ws_preview", name: "Claude", description: "Anthropic Claude Code", cwd: ".", command: "claude", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+  { profile_id: "pi", workspace_id: "ws_preview", name: "Pi", description: "Pi coding agent", cwd: ".", command: "pi", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+  { profile_id: "opencode", workspace_id: "ws_preview", name: "OpenCode", description: "OpenCode", cwd: ".", command: "opencode", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
+]
+const PREVIEW_INSTALL = "curl -fsSL 'https://treer.example/install.sh' | sh"
+const PREVIEW_CONNECT = "TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy 'https://treer.example/'"
+
 const activeStatuses = new Set(["starting", "working", "idle", "blocked"])
 
 function initials(value: string) {
@@ -80,6 +96,14 @@ function replaceWorkspace(items: Workspace[], updated: Workspace) {
   return items
     .map((item) => item.workspace_id === updated.workspace_id ? updated : item)
     .sort((left, right) => left.name.localeCompare(right.name) || left.workspace_id.localeCompare(right.workspace_id))
+}
+
+function workspacePath(organizationId: string | null, workspaceId: string | null) {
+  if (!organizationId) return "/"
+  const organizationPath = `/orgs/${encodeURIComponent(organizationId)}`
+  return workspaceId
+    ? `${organizationPath}/workspaces/${encodeURIComponent(workspaceId)}`
+    : organizationPath
 }
 
 function defaultAgentName(kind: string) {
@@ -116,8 +140,16 @@ function authorizationReturnUrl() {
   }
 }
 
+function machineOnline(machine?: Machine) {
+  return machine?.status === "online"
+}
+
+function agentDisplayStatus(agent: Agent, machine?: Machine) {
+  return machineOnline(machine) ? agent.status : "offline"
+}
+
 function Status({ value }: { value: string }) {
-  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 text-[10px] font-medium capitalize text-zinc-500", value === "idle" && "text-emerald-700", ["working", "starting"].includes(value) && "text-sky-700", value === "blocked" && "text-amber-700", ["failed", "exited"].includes(value) && "text-red-600")}><span className="size-1.5 rounded-full bg-current opacity-75" />{value}</span>
+  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 text-[10px] font-medium capitalize text-zinc-500", value === "idle" && "text-emerald-700", ["working", "starting"].includes(value) && "text-sky-700", value === "blocked" && "text-amber-700", ["failed", "exited", "offline"].includes(value) && "text-red-600")}><span className="size-1.5 rounded-full bg-current opacity-75" />{value}</span>
 }
 
 function IconButton({ label, children, ...props }: React.ComponentProps<typeof Button> & { label: string }) {
@@ -239,26 +271,34 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void
   </main>
 }
 
+const PREVIEW_ADMIN_INVITE = "https://treer.example/?invite=inv_preview"
+const EMPTY_ADMIN_DASHBOARD: AdminDashboard = { user_count: 0, organization_count: 0, machine_count: 0, agent_count: 0 }
+type AdminInventory = "users" | "machines" | "agents" | "organizations" | "invitations" | "activity" | null
+
 function AdminPanel() {
-  const [authenticated, setAuthenticated] = useState<boolean | undefined>(undefined)
+  const preview = firstRunTourMode() === "preview"
+  const [authenticated, setAuthenticated] = useState<boolean | undefined>(preview ? true : undefined)
   const [password, setPassword] = useState("")
-  const [dashboard, setDashboard] = useState<AdminDashboard | null>(null)
+  const [dashboard, setDashboard] = useState<AdminDashboard | null>(preview ? EMPTY_ADMIN_DASHBOARD : null)
+  const [inventory, setInventory] = useState<AdminInventory>(null)
   const [inviteUrl, setInviteUrl] = useState("")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   const loadDashboard = useCallback(async () => {
+    if (preview) return
     setDashboard(await api<AdminDashboard>("/api/admin/dashboard"))
-  }, [])
+  }, [preview])
 
   useEffect(() => {
+    if (preview) return
     api<{ admin: boolean }>("/api/admin/me")
       .then(() => { setAuthenticated(true); return loadDashboard() })
       .catch((reason) => {
         if (reason instanceof ApiError && reason.status === 401) setAuthenticated(false)
         else setError(reason instanceof Error ? reason.message : "Unable to load admin panel")
       })
-  }, [loadDashboard])
+  }, [preview, loadDashboard])
 
   async function login(event: FormEvent) {
     event.preventDefault(); setSubmitting(true); setError("")
@@ -270,6 +310,10 @@ function AdminPanel() {
   }
 
   async function createInvite() {
+    if (preview) {
+      setInviteUrl(PREVIEW_ADMIN_INVITE)
+      return
+    }
     setError("")
     try {
       const data = await api<{ url: string }>("/api/admin/invitations", { method: "POST", body: "{}" })
@@ -278,18 +322,266 @@ function AdminPanel() {
   }
 
   async function logout() {
+    if (preview) return
     await api("/api/admin/logout", { method: "POST", body: "{}" })
-    setAuthenticated(false); setDashboard(null); setInviteUrl("")
+    setAuthenticated(false); setDashboard(null); setInviteUrl(""); setInventory(null)
   }
+
+  const tourHostRef = useRef<AdminTourHost | null>(null)
+  tourHostRef.current = {
+    openInvite: () => { void createInvite() },
+    closeInvite: () => setInviteUrl(""),
+  }
+
+  function replayAdminTour() {
+    clearAdminTour()
+    if (tourHostRef.current) startAdminTour(tourHostRef.current, { persist: !preview })
+  }
+
+  useEffect(() => {
+    if (!authenticated) return
+    if (!shouldAutoStartAdminTour()) return
+    const timer = window.setTimeout(() => {
+      if (!tourHostRef.current) return
+      startAdminTour(tourHostRef.current, { persist: !preview })
+    }, 450)
+    return () => {
+      window.clearTimeout(timer)
+      stopFirstRunTour()
+    }
+  }, [authenticated, preview])
 
   if (authenticated === undefined) return <div className="grid min-h-dvh place-items-center bg-sidebar text-sm text-muted-foreground">Loading admin...</div>
   if (!authenticated) return <main className="grid min-h-dvh place-items-center bg-sidebar p-4"><form onSubmit={login} className="w-full max-w-[390px] rounded-lg border bg-background p-7 shadow-sm"><div className="mb-6 grid size-9 place-items-center rounded-md bg-[#37352f] text-white"><ShieldCheck className="size-4" /></div><h1 className="text-xl font-semibold">Treer administration</h1><p className="mt-1 text-sm text-muted-foreground">Platform access is separate from user accounts.</p><div className="mt-6 space-y-2"><Label htmlFor="admin-password">Admin password</Label><Input id="admin-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></div><div className="mt-3 min-h-5 text-xs text-destructive">{error}</div><div className="mt-4 flex justify-end"><Button type="submit" disabled={submitting}>{submitting ? "Please wait" : "Open admin panel"}</Button></div></form></main>
 
-  return <main className="min-h-dvh bg-sidebar"><header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" className="hidden sm:inline-flex" asChild><a href="/">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout}><LogOut /></Button></div></div></header><div className="mx-auto max-w-4xl px-5 py-10"><div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div><Button size="sm" onClick={loadDashboard}><RotateCw />Refresh</Button></div>{error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}<div className="grid grid-cols-2 border-y"><div className="border-r py-6 pr-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5" />Machines</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.machine_count ?? "-"}</div></div><div className="py-6 pl-6"><div className="flex items-center gap-2 text-xs text-muted-foreground"><TerminalSquare className="size-3.5" />Agents</div><div className="mt-2 text-3xl font-semibold tabular-nums">{dashboard?.agent_count ?? "-"}</div></div></div><ControlPlaneUpdate onError={setError} /><section className="mt-12"><h2 className="text-sm font-semibold">User invitations</h2><div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div><Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button></div></section></div><Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog></main>
+  return <main className="min-h-dvh bg-sidebar">
+    {preview && <div className="treer-tour-banner"><span>Tour preview · admin panel, no server writes</span></div>}
+    <header className="border-b bg-background"><div className="mx-auto flex h-14 w-full max-w-4xl items-center justify-between px-5"><div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold"><span className="grid size-7 shrink-0 place-items-center rounded bg-[#37352f] text-white"><ShieldCheck className="size-3.5" /></span><span className="truncate">Treer administration</span></div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" asChild><a href="/" data-tour="admin-workspace-link">User workspace</a></Button><Button size="icon" variant="ghost" aria-label="Log out" onClick={logout} disabled={preview}><LogOut /></Button></div></div></header>
+    <div className="mx-auto max-w-4xl px-5 py-10">
+      <div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><h1 className="text-2xl font-semibold">Platform overview</h1><p className="mt-1 text-sm text-muted-foreground">Current resources across all organizations.</p></div>
+        <div className="flex gap-1"><Button size="sm" variant="outline" onClick={replayAdminTour}><ListChecks />Replay tour</Button><Button size="sm" onClick={loadDashboard} disabled={preview}><RotateCw />Refresh</Button></div>
+      </div>
+      {error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
+      <div className="grid grid-cols-3 border-y" data-tour="admin-overview">
+        <AdminCountCard label="Users" icon={<Users className="size-3.5" />} value={dashboard?.user_count} active={inventory === "users"} onClick={() => setInventory(inventory === "users" ? null : "users")} />
+        <AdminCountCard label="Machines" icon={<Server className="size-3.5" />} value={dashboard?.machine_count} active={inventory === "machines"} bordered onClick={() => setInventory(inventory === "machines" ? null : "machines")} />
+        <AdminCountCard label="Agents" icon={<TerminalSquare className="size-3.5" />} value={dashboard?.agent_count} active={inventory === "agents"} onClick={() => setInventory(inventory === "agents" ? null : "agents")} />
+      </div>
+      {inventory && <AdminInventoryPanel kind={inventory} preview={preview} onError={setError} onChanged={loadDashboard} />}
+      <ControlPlaneUpdate preview={preview} onError={setError} />
+      <section className="mt-12" data-tour="admin-invite">
+        <h2 className="text-sm font-semibold">User invitations</h2>
+        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div><div className="text-sm font-medium">Invite a new user</div><div className="mt-1 text-xs text-muted-foreground">Registration creates a personal organization owned by that user.</div></div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant={inventory === "invitations" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "invitations" ? null : "invitations")}>Pending invitations</Button>
+            <Button size="sm" onClick={createInvite}><KeyRound />Create invitation</Button>
+          </div>
+        </div>
+      </section>
+      <section className="mt-12">
+        <h2 className="text-sm font-semibold">Organizations</h2>
+        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div><div className="text-sm font-medium">All organizations</div><div className="mt-1 text-xs text-muted-foreground">{dashboard?.organization_count ?? "—"} personal and shared organizations on this deployment.</div></div>
+          <Button size="sm" variant={inventory === "organizations" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "organizations" ? null : "organizations")}><Building2 />View organizations</Button>
+        </div>
+      </section>
+      <section className="mt-12">
+        <h2 className="text-sm font-semibold">Admin activity</h2>
+        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div><div className="text-sm font-medium">Recent operator actions</div><div className="mt-1 text-xs text-muted-foreground">Password resets, session revokes, and invitation changes.</div></div>
+          <Button size="sm" variant={inventory === "activity" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "activity" ? null : "activity")}><ScrollText />View activity</Button>
+        </div>
+      </section>
+    </div>
+    <Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent data-tour="admin-invite-dialog"><DialogHeader><DialogTitle>User invitation</DialogTitle><DialogDescription>This one-time registration link creates the user's personal organization.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
+  </main>
 }
 
+function AdminCountCard({ label, icon, value, active, bordered, onClick }: { label: string; icon: React.ReactNode; value?: number; active: boolean; bordered?: boolean; onClick: () => void }) {
+  return <button type="button" onClick={onClick} className={cn("py-6 text-left transition-colors hover:bg-accent/40", bordered && "border-x px-6", !bordered && "px-0", active && "bg-accent/50")}>
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">{icon}{label}</div>
+    <div className="mt-2 text-3xl font-semibold tabular-nums">{value ?? "-"}</div>
+  </button>
+}
 
-function ControlPlaneUpdate({ onError }: { onError: (message: string) => void }) {
+function AdminInventoryPanel({ kind, preview, onError, onChanged }: { kind: Exclude<AdminInventory, null>; preview: boolean; onError: (message: string) => void; onChanged: () => Promise<void> }) {
+  const [query, setQuery] = useState("")
+  const [users, setUsers] = useState<AdminUser[]>([])
+  const [machines, setMachines] = useState<AdminMachine[]>([])
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [organizations, setOrganizations] = useState<AdminOrganization[]>([])
+  const [invitations, setInvitations] = useState<AdminInvitation[]>([])
+  const [events, setEvents] = useState<PlatformAuditEvent[]>([])
+  const [openMachine, setOpenMachine] = useState<string | null>(null)
+  const [machineDetail, setMachineDetail] = useState<AdminMachine | null>(null)
+  const [userDetail, setUserDetail] = useState<AdminUserDetail | null>(null)
+  const [resetUrl, setResetUrl] = useState("")
+  const [resetEmailed, setResetEmailed] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    if (preview) return
+    setLoading(true)
+    try {
+      if (kind === "users") {
+        const data = await api<{ users: AdminUser[] }>(`/api/admin/users${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ""}`)
+        setUsers(data.users)
+      } else if (kind === "machines") {
+        setMachines((await api<{ machines: AdminMachine[] }>("/api/admin/machines")).machines)
+      } else if (kind === "agents") {
+        setAgents((await api<{ agents: Agent[] }>("/api/admin/agents")).agents)
+      } else if (kind === "organizations") {
+        setOrganizations((await api<{ organizations: AdminOrganization[] }>("/api/admin/organizations")).organizations)
+      } else if (kind === "invitations") {
+        setInvitations((await api<{ invitations: AdminInvitation[] }>("/api/admin/invitations")).invitations)
+      } else {
+        setEvents((await api<{ events: PlatformAuditEvent[] }>("/api/admin/activity")).events)
+      }
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "Unable to load admin inventory")
+    } finally {
+      setLoading(false)
+    }
+  }, [kind, preview, query, onError])
+
+  useEffect(() => { void load() }, [load])
+
+  async function openUser(userId: string) {
+    try { setUserDetail((await api<{ user: AdminUserDetail }>(`/api/admin/users/${userId}`)).user) }
+    catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to load user") }
+  }
+
+  async function resetPassword(userId: string) {
+    try {
+      const data = await api<{ url: string; emailed: boolean }>(`/api/admin/users/${userId}/password-reset`, { method: "POST", body: "{}" })
+      setResetUrl(data.url)
+      setResetEmailed(data.emailed)
+      await load()
+    } catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to issue password reset") }
+  }
+
+  async function revokeSessions(userId: string) {
+    try {
+      await api(`/api/admin/users/${userId}/revoke-sessions`, { method: "POST", body: "{}" })
+      await load()
+    } catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to sign the user out") }
+  }
+
+  async function toggleMachine(serverId: string) {
+    if (openMachine === serverId) { setOpenMachine(null); setMachineDetail(null); return }
+    setOpenMachine(serverId)
+    try { setMachineDetail((await api<{ machine: AdminMachine }>(`/api/admin/machines/${serverId}`)).machine) }
+    catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to load machine") }
+  }
+
+  async function revokeInvite(token: string) {
+    try {
+      await api(`/api/admin/invitations/${encodeURIComponent(token)}`, { method: "DELETE" })
+      await load()
+      await onChanged()
+    } catch (reason) { onError(reason instanceof Error ? reason.message : "Unable to revoke invitation") }
+  }
+
+  const title = kind === "users" ? "Users" : kind === "machines" ? "Machines" : kind === "agents" ? "Agents" : kind === "organizations" ? "Organizations" : kind === "invitations" ? "Pending invitations" : "Admin activity"
+
+  return <div className="border-b">
+    <div className="flex items-center justify-between gap-3 py-3">
+      <div className="text-sm font-medium">{title}</div>
+      {kind === "users" && <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name or email" className="h-8 max-w-xs text-xs" />}
+    </div>
+    {loading && <div className="py-6 text-xs text-muted-foreground">Loading…</div>}
+    {!loading && kind === "users" && (users.length ? users.map((user) => (
+      <div key={user.user_id} className="grid gap-3 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <div className="min-w-0"><div className="truncate text-sm font-medium">{user.preferred_name}</div><div className="mt-0.5 truncate text-[11px] text-muted-foreground">{user.email}</div></div>
+        <div className="flex flex-wrap gap-1">
+          <Button size="sm" variant="outline" onClick={() => void openUser(user.user_id)}>Details</Button>
+          <Button size="sm" variant="outline" onClick={() => void resetPassword(user.user_id)}>Reset password</Button>
+          <Button size="sm" variant="outline" onClick={() => void revokeSessions(user.user_id)}>Sign out everywhere</Button>
+        </div>
+      </div>
+    )) : <EmptyState icon={<Users />} label="No users match this search" />)}
+    {!loading && kind === "machines" && (machines.length ? machines.map((machine) => (
+      <div key={machine.server_id} className="border-t">
+        <button type="button" className="flex w-full items-center gap-3 py-3 text-left" onClick={() => void toggleMachine(machine.server_id)}>
+          <ChevronDown className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", openMachine === machine.server_id && "rotate-180")} />
+          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{machine.name}</span><span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{machine.hostname || machine.server_id} · {machine.workspace_name}</span></span>
+          <Status value={machine.status} />
+        </button>
+        {openMachine === machine.server_id && <div className="pb-3 pl-7">
+          {(machineDetail?.agents ?? []).length ? machineDetail!.agents!.map((agent) => (
+            <div key={agent.agent_id} className="flex items-center justify-between gap-3 py-1.5 text-sm">
+              <span className="min-w-0 truncate">{agent.name}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
+              <Status value={agent.status} />
+            </div>
+          )) : <div className="py-2 text-[11px] text-muted-foreground">No live agents on this machine.</div>}
+        </div>}
+      </div>
+    )) : <EmptyState icon={<Server />} label="No enrolled machines" />)}
+    {!loading && kind === "agents" && (agents.length ? Object.entries(agents.reduce<Record<string, Agent[]>>((groups, agent) => {
+      const key = agent.server_id
+      groups[key] = groups[key] ? [...groups[key], agent] : [agent]
+      return groups
+    }, {})).map(([serverId, group]) => (
+      <div key={serverId} className="border-t py-3">
+        <div className="text-[11px] text-muted-foreground">{serverId}</div>
+        {group.map((agent) => (
+          <div key={agent.agent_id} className="mt-1 flex items-center justify-between gap-3 text-sm">
+            <span className="truncate">{agent.name}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
+            <Status value={agent.status} />
+          </div>
+        ))}
+      </div>
+    )) : <EmptyState icon={<TerminalSquare />} label="No live agents" />)}
+    {!loading && kind === "organizations" && (organizations.length ? organizations.map((organization) => (
+      <div key={organization.organization_id} className="grid gap-1 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <div><div className="text-sm font-medium">{organization.name}</div><div className="mt-0.5 text-[11px] text-muted-foreground">{organization.owner_email || "No owner"} · {organization.workspace_count} workspaces · {organization.machine_count} machines</div></div>
+      </div>
+    )) : <EmptyState icon={<Building2 />} label="No organizations" />)}
+    {!loading && kind === "invitations" && (invitations.length ? invitations.map((invitation) => (
+      <div key={invitation.token} className="grid gap-3 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <div className="min-w-0 font-mono text-[11px] text-muted-foreground">{invitation.created_at}</div>
+        <div className="flex gap-1">
+          <Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(invitation.url)}><Copy />Copy</Button>
+          <Button size="sm" variant="outline" onClick={() => void revokeInvite(invitation.token)}>Revoke</Button>
+        </div>
+      </div>
+    )) : <EmptyState icon={<KeyRound />} label="No pending invitations" />)}
+    {!loading && kind === "activity" && (events.length ? events.map((event) => (
+      <div key={event.event_id} className="border-t py-3 text-sm">
+        <div className="font-medium">{event.action}</div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground">{event.occurred_at} · {event.resource_kind} {event.resource_name || event.resource_id}</div>
+      </div>
+    )) : <EmptyState icon={<ScrollText />} label="No admin activity yet" />)}
+    <Dialog open={Boolean(userDetail)} onOpenChange={(open) => !open && setUserDetail(null)}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader><DialogTitle>{userDetail?.preferred_name}</DialogTitle><DialogDescription>{userDetail?.email}</DialogDescription></DialogHeader>
+        {userDetail && <div className="space-y-3 text-sm">
+          <div className="text-xs text-muted-foreground">Verified {userDetail.email_verified ? "yes" : "no"} · OAuth {userDetail.oauth_providers.join(", ") || "none"}</div>
+          <div>
+            <div className="text-xs font-medium text-muted-foreground">Organizations</div>
+            {userDetail.organizations.map((organization) => <div key={organization.organization_id}>{organization.name} · {organization.role}</div>)}
+          </div>
+          <div>
+            <div className="text-xs font-medium text-muted-foreground">Workspaces</div>
+            {userDetail.workspaces.map((workspace) => <div key={workspace.workspace_id}>{workspace.name}</div>)}
+            {userDetail.workspaces.length === 0 && <div className="text-muted-foreground">None</div>}
+          </div>
+        </div>}
+      </DialogContent>
+    </Dialog>
+    <Dialog open={Boolean(resetUrl)} onOpenChange={(open) => !open && setResetUrl("")}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Password reset</DialogTitle><DialogDescription>{resetEmailed ? "A reset email was sent. The link also works if you copy it." : "Email sending is not configured. Copy this one-time link."}</DialogDescription></DialogHeader>
+        <Textarea readOnly value={resetUrl} className="min-h-24 font-mono text-xs" />
+        <DialogFooter><Button variant="outline" onClick={() => setResetUrl("")}>Close</Button><Button onClick={() => navigator.clipboard.writeText(resetUrl)}><Copy />Copy link</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </div>
+}
+
+function ControlPlaneUpdate({ preview, onError }: { preview?: boolean; onError: (message: string) => void }) {
   const [status, setStatus] = useState<ControlPlaneUpdateStatus | null>(null)
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
@@ -311,8 +603,12 @@ function ControlPlaneUpdate({ onError }: { onError: (message: string) => void })
   }, [])
 
   useEffect(() => {
+    if (preview) {
+      setConfigured(false)
+      return
+    }
     loadStatus().catch((reason) => onError(reason instanceof Error ? reason.message : "Unable to load control-plane status"))
-  }, [loadStatus, onError])
+  }, [preview, loadStatus, onError])
 
   async function checkForUpdates() {
     setBusy(true)
@@ -466,12 +762,23 @@ function LaunchProfilesView({ profiles, loading, onEdit, onLaunch, onDelete }: {
 }
 
 function WorkspaceApp() {
-  const [user, setUser] = useState<User | null | undefined>(undefined)
-  const [organizations, setOrganizations] = useState<Organization[]>([])
-  const [organizationId, setOrganizationId] = useState<string | null>(null)
+  const route = useParams<{ organizationId?: string; workspaceId?: string }>()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const routeSelectionRef = useRef({ organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null })
+  routeSelectionRef.current = { organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null }
+  const replaceWorkspaceRoute = useCallback((organizationId: string | null, workspaceId: string | null) => {
+    navigate({ pathname: workspacePath(organizationId, workspaceId), search: location.search, hash: location.hash }, { replace: true })
+  }, [navigate, location.search, location.hash])
+  const preview = firstRunTourMode() === "preview"
+  const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
+  const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
+  const [organizationId, setOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
+  const organizationIdRef = useRef<string | null>(preview ? PREVIEW_ORG.organization_id : null)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [workspaceId, setWorkspaceId] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("agents")
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionState>("connecting")
@@ -513,7 +820,8 @@ function WorkspaceApp() {
   const [agentCommandLine, setAgentCommandLine] = useState("codex")
   const [agentRecipeUrl, setAgentRecipeUrl] = useState("")
   const [agentRecipeKind, setAgentRecipeKind] = useState("")
-  const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>([])
+  const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
+  const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
   const [launchProfileName, setLaunchProfileName] = useState("")
   const [launchProfileDescription, setLaunchProfileDescription] = useState("")
@@ -548,11 +856,12 @@ function WorkspaceApp() {
   const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : "Something went wrong"), [])
 
   useEffect(() => {
+    if (preview) return
     api<User>("/api/auth/me").then(setUser).catch((reason) => {
       if (reason instanceof ApiError && reason.status === 401) setUser(null)
       else showError(reason)
     })
-  }, [showError])
+  }, [preview, showError])
 
   useEffect(() => {
     if (!user) return
@@ -563,16 +872,26 @@ function WorkspaceApp() {
   const loadOrganizations = useCallback(async (preferred?: string) => {
     const data = await api<{ organizations: Organization[] }>("/api/organizations")
     setOrganizations(data.organizations)
-    setOrganizationId((current) => {
-      if (preferred && data.organizations.some((item) => item.organization_id === preferred)) return preferred
-      if (current && data.organizations.some((item) => item.organization_id === current)) return current
-      return data.organizations[0]?.organization_id ?? null
-    })
-  }, [])
+    const routeSelection = routeSelectionRef.current
+    const selected = preferred && data.organizations.some((item) => item.organization_id === preferred)
+      ? preferred
+      : routeSelection.organizationId && data.organizations.some((item) => item.organization_id === routeSelection.organizationId)
+        ? routeSelection.organizationId
+        : organizationIdRef.current && data.organizations.some((item) => item.organization_id === organizationIdRef.current)
+          ? organizationIdRef.current
+          : data.organizations[0]?.organization_id ?? null
+    organizationIdRef.current = selected
+    setOrganizationId(selected)
+    replaceWorkspaceRoute(selected, routeSelection.organizationId === selected ? routeSelection.workspaceId : null)
+  }, [replaceWorkspaceRoute])
 
-  useEffect(() => { if (user) loadOrganizations().catch(showError) }, [user, loadOrganizations, showError])
+  useEffect(() => { if (user && !preview) loadOrganizations().catch(showError) }, [user, preview, loadOrganizations, showError])
 
   useEffect(() => {
+    if (preview) {
+      setConnection("no workspace")
+      return
+    }
     let cancelled = false
     setWorkspaceId(null)
     setSnapshot(null)
@@ -584,20 +903,28 @@ function WorkspaceApp() {
     api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`).then((data) => {
       if (cancelled) return
       setWorkspaces(data.workspaces)
-      setWorkspaceId(data.workspaces[0]?.workspace_id ?? null)
+      const routeSelection = routeSelectionRef.current
+      const selected = routeSelection.organizationId === organizationId
+        && routeSelection.workspaceId
+        && data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)
+        ? routeSelection.workspaceId
+        : data.workspaces[0]?.workspace_id ?? null
+      setWorkspaceId(selected)
+      replaceWorkspaceRoute(organizationId, selected)
       if (!data.workspaces.length) setConnection("no workspace")
     }).catch(showError)
     return () => { cancelled = true }
-  }, [organizationId, showError])
+  }, [organizationId, preview, replaceWorkspaceRoute, showError])
 
   const refreshSnapshot = useCallback(async () => {
-    if (!workspaceId) return
+    if (preview || !workspaceId) return
     const data = await api<Snapshot>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`)
     setSnapshot(data)
     setWorkspaces((items) => replaceWorkspace(items, data.workspace))
-  }, [workspaceId])
+  }, [preview, workspaceId])
 
   useEffect(() => {
+    if (preview) return
     if (!workspaceId) {
       setSnapshot(null)
       setSelectedAgentId(null)
@@ -635,7 +962,7 @@ function WorkspaceApp() {
     }
     connect(true)
     return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
-  }, [workspaceId, refreshSnapshot, showError])
+  }, [preview, workspaceId, refreshSnapshot, showError])
 
   useEffect(() => {
     const agents = snapshot?.agents ?? []
@@ -643,7 +970,9 @@ function WorkspaceApp() {
   }, [snapshot])
 
   const selectedAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId)
-  const selectedAgentInterface = selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
+  const selectedAgentMachine = snapshot?.servers.find((machine) => machine.server_id === selectedAgent?.server_id)
+  const selectedAgentMachineOnline = machineOnline(selectedAgentMachine)
+  const selectedAgentInterface = selectedAgentMachineOnline && selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
   const onlineMachines = snapshot?.servers.filter((machine) => machine.status === "online") ?? []
   const selectedCreateProfile = launchProfiles.find((profile) => profile.profile_id === agentProfileId)
   const selectedCreateMachine = onlineMachines.find((machine) => machine.server_id === agentServerId)
@@ -730,6 +1059,18 @@ function WorkspaceApp() {
     if (isMobile) setMobileTerminalOpen(true)
   }
 
+  function selectOrganization(value: string) {
+    organizationIdRef.current = value
+    setOrganizationId(value)
+    setWorkspaceId(null)
+    replaceWorkspaceRoute(value, null)
+  }
+
+  function selectWorkspace(value: string) {
+    setWorkspaceId(value)
+    replaceWorkspaceRoute(organizationId, value)
+  }
+
   useEffect(() => {
     if (createAgentOpen && !onlineMachines.some((machine) => machine.server_id === agentServerId)) setAgentServerId(onlineMachines[0]?.server_id ?? "")
   }, [createAgentOpen, onlineMachines, agentServerId])
@@ -750,12 +1091,20 @@ function WorkspaceApp() {
 
   async function createWorkspace(event: FormEvent) {
     event.preventDefault()
+    if (preview) {
+      setCreateWorkspaceOpen(false)
+      setWorkspaceName("")
+      setWorkspaces([PREVIEW_WORKSPACE])
+      setWorkspaceId(PREVIEW_WORKSPACE.workspace_id)
+      setSnapshot({ revision: 0, workspace: PREVIEW_WORKSPACE, servers: [], agents: [] })
+      return
+    }
     if (!organizationId) return
     try {
       const data = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", body: JSON.stringify({ organization_id: organizationId, name: workspaceName }) })
       setCreateWorkspaceOpen(false); setWorkspaceName("")
       const list = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
-      setWorkspaces(list.workspaces); setWorkspaceId(data.workspace.workspace_id)
+      setWorkspaces(list.workspaces); selectWorkspace(data.workspace.workspace_id)
     } catch (reason) { showError(reason) }
   }
 
@@ -781,6 +1130,10 @@ function WorkspaceApp() {
 
   async function createAgent(event: FormEvent) {
     event.preventDefault()
+    if (preview) {
+      setCreateAgentOpen(false)
+      return
+    }
     if (!workspaceId) return
     try {
       let agent
@@ -801,15 +1154,17 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
-  function openCreateAgent() {
-    setAgentProfileId("terminal")
-    setAgentName(defaultAgentName("terminal"))
-    setAgentNameCustomized(false)
-    setAgentCommandLine("codex")
-    setAgentRecipeUrl("")
-    setAgentRecipeKind("")
+  function openCreateAgent(reset = true) {
+    if (reset || !createAgentOpenRef.current) {
+      setAgentProfileId("terminal")
+      setAgentName(defaultAgentName("terminal"))
+      setAgentNameCustomized(false)
+      setAgentCommandLine("codex")
+      setAgentRecipeUrl("")
+      setAgentRecipeKind("")
+    }
     setCreateAgentOpen(true)
-    void loadLaunchProfiles().catch(showError)
+    if (!preview) void loadLaunchProfiles().catch(showError)
   }
 
   async function installSelectedAgent() {
@@ -861,6 +1216,7 @@ function WorkspaceApp() {
   }
 
   const loadLaunchProfiles = useCallback(async () => {
+    if (preview) return
     if (!workspaceId) {
       setLaunchProfiles([])
       return
@@ -872,7 +1228,7 @@ function WorkspaceApp() {
     } finally {
       setLaunchProfilesLoading(false)
     }
-  }, [workspaceId])
+  }, [preview, workspaceId])
 
   useEffect(() => {
     if (mainView === "profiles") loadLaunchProfiles().catch(showError)
@@ -962,12 +1318,67 @@ function WorkspaceApp() {
   }
 
   async function openInstall() {
-    if (!workspaceId) return
+    if (preview || !workspaceId) {
+      const origin = window.location.origin
+      setInstallCommand(preview ? PREVIEW_INSTALL : `curl -fsSL '${origin}/install.sh' | sh`)
+      setConnectCommand(preview ? PREVIEW_CONNECT : `TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy '${origin}/'`)
+      setInstallOpen(true)
+      return
+    }
     try {
       const data = await api<{ install_command: string; connect_command: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bootstrap`, { method: "POST", body: "{}" })
       setInstallCommand(data.install_command); setConnectCommand(data.connect_command); setInstallOpen(true)
     } catch (reason) { showError(reason) }
   }
+
+  useEffect(() => {
+    createAgentOpenRef.current = createAgentOpen
+  }, [createAgentOpen])
+
+  const tourHostRef = useRef<FirstRunTourHost | null>(null)
+  tourHostRef.current = {
+    setSidebarTab,
+    openCreateWorkspace: () => { setWorkspaceName(""); setCreateWorkspaceOpen(true) },
+    closeCreateWorkspace: () => setCreateWorkspaceOpen(false),
+    prepareWorkspaceForMachineSteps: () => {
+      if (!preview) return
+      setWorkspaces([PREVIEW_WORKSPACE])
+      setWorkspaceId(PREVIEW_WORKSPACE.workspace_id)
+      setSnapshot({ revision: 0, workspace: PREVIEW_WORKSPACE, servers: [], agents: [] })
+      setConnection("no workspace")
+    },
+    openInstall,
+    closeInstall: () => setInstallOpen(false),
+    openCreateAgent,
+    closeCreateAgent: () => setCreateAgentOpen(false),
+    setAgentLaunch: (kind) => {
+      if (kind === "ui-profile") {
+        const profile = launchProfiles.find((item) => item.name === "Codex") ?? launchProfiles[0]
+        changeAgentProfile(profile?.profile_id ?? "terminal")
+        return
+      }
+      changeAgentProfile(kind)
+    },
+  }
+
+  function replayFirstRunTour() {
+    if (!user) return
+    clearFirstRunTour(user.user_id)
+    if (tourHostRef.current) startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
+  }
+
+  useEffect(() => {
+    if (!user) return
+    if (!shouldAutoStartFirstRunTour(user.user_id)) return
+    const timer = window.setTimeout(() => {
+      if (!tourHostRef.current) return
+      startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
+    }, 450)
+    return () => {
+      window.clearTimeout(timer)
+      stopFirstRunTour()
+    }
+  }, [user, preview])
 
   function openRename(target: NonNullable<RenameTarget>) { setRenameTarget(target); setRenameName(target.name) }
 
@@ -1232,6 +1643,7 @@ function WorkspaceApp() {
   }
 
   async function logout() {
+    if (preview) return
     try { await api("/api/auth/logout", { method: "POST", body: "{}" }) }
     finally { window.location.href = "/" }
   }
@@ -1242,17 +1654,20 @@ function WorkspaceApp() {
   return <TooltipProvider delayDuration={350}>
       <main className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[272px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
         <aside className={cn("flex min-h-0 flex-col border-b bg-sidebar md:border-b-0 md:border-r", mobileSidebarHidden && "hidden md:flex")}>
+        {preview && <div className="treer-tour-banner"><span>Tour preview · empty first-run account, no server writes</span></div>}
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
-          <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={setOrganizationId}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
+          <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
           <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_64px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
-          <Select value={workspaceId ?? undefined} onValueChange={setWorkspaceId} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+          <div data-tour="workspace-select">
+            <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+          </div>
           <div className="flex">
             <IconButton label="Rename workspace" disabled={!workspace} onClick={() => { if (workspace) { setWorkspaceName(workspace.name); setRenameWorkspaceOpen(true) } }}><Pencil /></IconButton>
-            <IconButton label="Create workspace" disabled={!organizationId} onClick={() => { setWorkspaceName(""); setCreateWorkspaceOpen(true) }}><Plus /></IconButton>
+            <span data-tour="create-workspace"><IconButton label="Create workspace" disabled={!organizationId} onClick={() => { setWorkspaceName(""); setCreateWorkspaceOpen(true) }}><Plus /></IconButton></span>
           </div>
         </div>
         <div className="px-2 pb-2">
@@ -1263,14 +1678,14 @@ function WorkspaceApp() {
             </DropdownMenuContent></DropdownMenu>
         </div>
 
-        <Tabs defaultValue="agents" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <Tabs value={sidebarTab} onValueChange={(value) => setSidebarTab(value as SidebarTab)} className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <TabsList className="mx-2 grid h-auto grid-cols-2 bg-accent p-0.5">
-            <TabsTrigger value="machines" className="h-8 gap-2 text-xs"><Server className="size-3.5" />Machines <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.servers.length ?? 0}</span></TabsTrigger>
-            <TabsTrigger value="agents" className="h-8 gap-2 text-xs"><TerminalSquare className="size-3.5" />Agents <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.agents.length ?? 0}</span></TabsTrigger>
+            <TabsTrigger value="machines" data-tour="machines-tab" className="h-8 gap-2 text-xs"><Server className="size-3.5" />Machines <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.servers.length ?? 0}</span></TabsTrigger>
+            <TabsTrigger value="agents" data-tour="agents-tab" className="h-8 gap-2 text-xs"><TerminalSquare className="size-3.5" />Agents <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.agents.length ?? 0}</span></TabsTrigger>
           </TabsList>
           <TabsContent value="machines" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></div>
+              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Machines</span><span data-tour="add-machine"><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openInstall} disabled={!workspaceId}><CirclePlus className="size-3.5" />Add</Button></span></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
                 {snapshot?.servers.map((machine) => <MachineItem key={machine.server_id} machine={machine} selected={mainView === "machine" && machine.server_id === selectedMachineId} onClick={() => showMachineOverview(machine.server_id)} onRename={() => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDelete={() => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} />)}
                 {snapshot && !snapshot.servers.length && <EmptyState icon={<Server />} label="No machines connected" />}
@@ -1279,7 +1694,7 @@ function WorkspaceApp() {
           </TabsContent>
           <TabsContent value="agents" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><Button variant="ghost" size="sm" className="h-7 px-2" onClick={openCreateAgent} disabled={!workspaceId || !onlineMachines.length}><Plus className="size-3.5" />New</Button></div>
+              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><span data-tour="create-agent"><Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => openCreateAgent()} disabled={!workspaceId || (!onlineMachines.length && !preview)}><Plus className="size-3.5" />New</Button></span></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
                 {snapshot?.agents.map((agent) => <AgentItem key={agent.agent_id} agent={agent} machine={snapshot.servers.find((item) => item.server_id === agent.server_id)} selected={mainView === "terminal" && agent.agent_id === selectedAgentId} onClick={() => showAgentTerminal(agent.agent_id)} onRename={() => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onStop={() => void stopAgent(agent.agent_id)} onDelete={() => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} />)}
                 {snapshot && !snapshot.agents.length && <EmptyState icon={<TerminalSquare />} label="No agents in this workspace" />}
@@ -1291,7 +1706,7 @@ function WorkspaceApp() {
         <div className="shrink-0 border-t p-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild><button type="button" aria-label="User menu" className="grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-accent"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={openSettings}><SettingsIcon />Settings</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
+            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={openSettings}><SettingsIcon />Settings</DropdownMenuItem><DropdownMenuItem onSelect={replayFirstRunTour}><ListChecks />Replay product tour</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout} disabled={preview}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
           </DropdownMenu>
         </div>
       </aside>
@@ -1309,7 +1724,12 @@ function WorkspaceApp() {
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : mainView === "profiles" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh profiles" onClick={loadLaunchProfiles} disabled={launchProfilesLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openNewLaunchProfile}><Plus />New profile</Button></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={loadAudit} disabled={auditLoading}><RotateCw /></IconButton> : mainView === "network" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div> : null}
         </header>
-        {mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-white", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-[#0f1215] pt-[env(safe-area-inset-top)]")}>
+        {mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
+          <div className="max-w-sm">
+            <p className="text-sm font-medium text-zinc-800">Machine is offline</p>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">{machineName(selectedAgentMachine, selectedAgent.server_id)} is not connected to the control plane. Start the Host on that machine, then open this Agent again.</p>
+          </div>
+        </div> : mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-white", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-[#0f1215] pt-[env(safe-area-inset-top)]")}>
           {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Interface"}</span><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div>}
           <iframe key={`${selectedAgentInterface.instance_id}:${selectedAgentInterface.registered_at}:${interfaceUiRevision}`} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-white" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" />
         </div> : mainView === "terminal" ? mobileTerminalIdle ? null : <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
@@ -1346,7 +1766,7 @@ function WorkspaceApp() {
     <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
 
     <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={organizationName} onValueChange={setOrganizationName} onSubmit={createOrganization} />
-    <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={createWorkspace} />
+    <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={createWorkspace} dataTour="create-workspace-dialog" />
     <SimpleNameDialog open={renameWorkspaceOpen} onOpenChange={setRenameWorkspaceOpen} title="Rename workspace" description="Update the workspace name shown to organization members." label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={renameWorkspace} />
 
     <Dialog open={renameOrganizationOpen} onOpenChange={setRenameOrganizationOpen}><DialogContent><form onSubmit={renameOrganization}><DialogHeader><DialogTitle>Rename organization</DialogTitle><DialogDescription>Update the organization name shown to its members.</DialogDescription></DialogHeader><div className="my-5"><Field label="Organization name"><Input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameOrganizationOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
@@ -1357,9 +1777,9 @@ function WorkspaceApp() {
 
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => { const kind = agentKindFromCommand(profile.command); const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null; return <SelectItem key={profile.profile_id} value={profile.profile_id} className={installed === false ? "text-muted-foreground" : undefined} trailing={installed === true ? <CircleCheck className="size-3.5 text-emerald-700" /> : installed === false ? <CircleDashed className="size-3.5" /> : null}>{profile.name}</SelectItem> })}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <><Field label="Installer"><Select value={agentRecipeKind} onValueChange={setAgentRecipeKind} disabled={!recipeInstallers.length}><SelectTrigger><SelectValue placeholder={recipeInstallers.length ? "Select an installed agent" : "No installed agent on this machine"} /></SelectTrigger><SelectContent>{recipeInstallers.map((entry) => <SelectItem key={entry.kind} value={entry.kind} trailing={<CircleCheck className="size-3.5 text-emerald-700" />}>{entry.label}</SelectItem>)}</SelectContent></Select><span className="mt-1 block text-[10px] text-muted-foreground">{recipeInstallers.length ? "Only agents already installed on the selected machine can run a recipe." : "Install Claude, Cursor, Codex, or another agent on this machine first."}</span></Field><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /></Field></>}{selectedCreateProfile && selectedProfileInstalled === false && selectedProfileInstall?.install ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">{selectedProfileInstall.label} is not installed on {machineName(selectedCreateMachine)}. Install it in a terminal, then log in there.</div> : selectedCreateProfile ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span> : null}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>{selectedProfileInstalled === false && selectedProfileInstall?.install ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId}><Download />Install {selectedProfileInstall.label}</Button> : <Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind))}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button>}</DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent data-tour="create-agent-dialog"><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger data-tour="agent-launch"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => { const kind = agentKindFromCommand(profile.command); const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null; return <SelectItem key={profile.profile_id} value={profile.profile_id} className={installed === false ? "text-muted-foreground" : undefined} trailing={installed === true ? <CircleCheck className="size-3.5 text-emerald-700" /> : installed === false ? <CircleDashed className="size-3.5" /> : null}>{profile.name}</SelectItem> })}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Installer"><Select value={agentRecipeKind} onValueChange={setAgentRecipeKind} disabled={!recipeInstallers.length}><SelectTrigger><SelectValue placeholder={recipeInstallers.length ? "Select an installed agent" : "No installed agent on this machine"} /></SelectTrigger><SelectContent>{recipeInstallers.map((entry) => <SelectItem key={entry.kind} value={entry.kind} trailing={<CircleCheck className="size-3.5 text-emerald-700" />}>{entry.label}</SelectItem>)}</SelectContent></Select><span className="mt-1 block text-[10px] text-muted-foreground">{recipeInstallers.length ? "Only agents already installed on the selected machine can run a recipe." : "Install Claude, Cursor, Codex, or another agent on this machine first."}</span></Field><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /></Field></div>}{selectedCreateProfile && selectedProfileInstalled === false && selectedProfileInstall?.install ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">{selectedProfileInstall.label} is not installed on {machineName(selectedCreateMachine)}. Install it in a terminal, then log in there.</div> : selectedCreateProfile ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span> : null}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>{selectedProfileInstalled === false && selectedProfileInstall?.install ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId}><Download />Install {selectedProfileInstall.label}</Button> : <Button type="submit" disabled={!agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind))}>{agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button>}</DialogFooter></form></DialogContent></Dialog>
 
-    <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl" data-tour="add-machine-dialog"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={createServiceOpen} onOpenChange={(open) => { setCreateServiceOpen(open); if (!open) setEditingService(null) }}>
       <DialogContent className="max-w-xl">
@@ -1429,8 +1849,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return <div className="space-y-2"><Label>{label}</Label>{children}</div>
 }
 
-function SimpleNameDialog({ open, onOpenChange, title, description, label, value, onValueChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; label: string; value: string; onValueChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><form onSubmit={onSubmit}><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader><div className="my-5"><Field label={label}><Input value={value} onChange={(event) => onValueChange(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit">Create</Button></DialogFooter></form></DialogContent></Dialog>
+function SimpleNameDialog({ open, onOpenChange, title, description, label, value, onValueChange, onSubmit, dataTour }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; label: string; value: string; onValueChange: (value: string) => void; onSubmit: (event: FormEvent) => void; dataTour?: string }) {
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent data-tour={dataTour}><form onSubmit={onSubmit}><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader><div className="my-5"><Field label={label}><Input value={value} onChange={(event) => onValueChange(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit">Create</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {
@@ -1504,7 +1924,7 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
           <div className="truncate text-xs font-medium">{agent.name}</div>
           <div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{agent.kind} · {agent.agent_id}</div>
         </div>
-        <div className="flex items-center gap-2"><Status value={agent.status} /><Button size="sm" variant="outline" onClick={() => onOpenAgent(agent.agent_id)}>Terminal</Button></div>
+        <div className="flex items-center gap-2"><Status value={agentDisplayStatus(agent, machine)} /><Button size="sm" variant="outline" onClick={() => onOpenAgent(agent.agent_id)}>Terminal</Button></div>
       </div>)}</div> : <EmptyState icon={<TerminalSquare />} label="No agents running on this machine" />}
     </section>
 
@@ -1539,10 +1959,15 @@ function MachineItem({ machine, selected, onClick, onRename, onDelete }: { machi
 }
 
 function AgentItem({ agent, machine, selected, onClick, onRename, onStop, onDelete }: { agent: Agent; machine?: Machine; selected: boolean; onClick: () => void; onRename: () => void; onStop: () => void; onDelete: () => void }) {
-  const running = activeStatuses.has(agent.status)
-  return <div className={cn("group flex min-h-12 items-center gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-medium">{agent.name}</span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""} · {machineName(machine, agent.server_id)}</span></button><div className="flex shrink-0 flex-col items-end gap-0.5"><Status value={agent.status} /><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className={cn("size-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100", selected && "opacity-100")} aria-label={`Actions for ${agent.name}`}><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem><DropdownMenuItem disabled={!running} onSelect={onStop}><Square />Stop</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
+  const running = machineOnline(machine) && activeStatuses.has(agent.status)
+  return <div className={cn("group flex min-h-12 items-center gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-medium">{agent.name}</span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""} · {machineName(machine, agent.server_id)}</span></button><div className="flex shrink-0 flex-col items-end gap-0.5"><Status value={agentDisplayStatus(agent, machine)} /><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className={cn("size-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100", selected && "opacity-100")} aria-label={`Actions for ${agent.name}`}><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem><DropdownMenuItem disabled={!running} onSelect={onStop}><Square />Stop</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
 }
 
 export default function App() {
-  return window.location.pathname === "/admin" ? <AdminPanel /> : <WorkspaceApp />
+  return <Routes>
+    <Route path="/admin" element={<AdminPanel />} />
+    <Route path="/orgs/:organizationId/workspaces/:workspaceId" element={<WorkspaceApp />} />
+    <Route path="/orgs/:organizationId" element={<WorkspaceApp />} />
+    <Route path="*" element={<WorkspaceApp />} />
+  </Routes>
 }

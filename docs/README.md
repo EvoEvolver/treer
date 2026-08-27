@@ -14,7 +14,7 @@ matching the question; follow its source links for implementation detail.
 | [Quality and maintenance](quality.md) | Verification, documentation rules, current gaps, and review triggers |
 | [Canary environment](canary.md) | Canary deployment, two-machine tests, and environment operations |
 | [Release process](releases.md) | Immutable release manifests, Cloudflare App deployment, and Production promotion |
-| [Workspace Apps](../apps/README.md) | App trust boundary, ownership, and runtime model |
+| [Workspace Apps](../apps/README.md) | App trust boundary, ownership, runtime model, and in-tree AIS adapters |
 | [Treer Mail App](../apps/mail/README.md) | Mail setup, browser OAuth, legacy migration, backup, and limits |
 | [Treer Telegram App](../apps/telegram/README.md) | Telegram setup, bindings, reply mapping, recovery, and limits |
 | [Root README](../README.md) | Installation, deployment, and operator command examples |
