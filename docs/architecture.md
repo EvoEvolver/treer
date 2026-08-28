@@ -150,8 +150,9 @@ credential is running on another host.
 Linux managed Agents run in a private network namespace. Outbound TCP is
 captured onto the Controller SOCKS path. On macOS and other `proxy-env`
 machines the same loopback listener also accepts HTTP CONNECT, and the
-Controller injects `HTTP_PROXY`/`HTTPS_PROXY` so HTTP-only clients can use
-that path. Agent-scoped services use a Unix
+Controller injects `HTTPS_PROXY` so clients without SOCKS support can use that
+path for HTTPS while plain HTTP continues through `ALL_PROXY` as SOCKS5h.
+Agent-scoped services use a Unix
 bridge (`sandbox-exec --service-socket`) so the Controller can reach a
 namespace-local loopback listener without publishing a host TCP port. The
 browser Agent UI iframe uses that same bridge to reach the port and `ui_path`

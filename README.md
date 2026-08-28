@@ -588,11 +588,13 @@ agent network namespace and normal application traffic must enter the TUN
 adapter. `TREER_NETWORK_PROXY` remains available for diagnostics. Set
 `TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
 transparent namespace wrapper and inject the same loopback listener through
-`ALL_PROXY`/`all_proxy` as SOCKS5h and through `HTTP_PROXY`/`HTTPS_PROXY` as
-HTTP CONNECT. HTTP-only clients such as Codex's reqwest stack cannot speak
-SOCKS5; they use the HTTP proxy variables instead. In this mode, `NO_PROXY` and
-`no_proxy` contain `127.0.0.1,localhost,::1`, so Controller and App loopback
-calls do not enter the proxy path. Treer also configures Git to invoke its
+`ALL_PROXY`/`all_proxy` as SOCKS5h and through `HTTPS_PROXY`/`https_proxy` as
+HTTP CONNECT. Plain HTTP continues through SOCKS5h because the HTTP listener
+implements CONNECT tunnels rather than forward-proxy requests. HTTPS-only
+clients such as Codex's reqwest stack use the HTTPS proxy variable instead. In
+this mode, `NO_PROXY` and `no_proxy` contain `127.0.0.1,localhost,::1`, so
+Controller and App loopback calls do not enter the proxy path. Treer also
+configures Git to invoke its
 network bridge, so native `git://` remotes retain workspace virtual-host routing
 even though Git does not honor `ALL_PROXY`. Other TCP clients can use the same
 stdio bridge as their proxy command: `treer network connect HOST PORT`. Native

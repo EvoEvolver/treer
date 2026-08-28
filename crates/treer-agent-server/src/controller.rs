@@ -1701,7 +1701,10 @@ fn network_environment(network_proxy_url: String, transparent: bool) -> BTreeMap
         env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
         env.insert("all_proxy".to_string(), network_proxy_url.clone());
         let http_proxy = http_proxy_url(&network_proxy_url);
-        for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+        // Plain HTTP proxy requests use absolute-form request targets, while this
+        // listener intentionally implements CONNECT only. Let HTTP continue to
+        // use the SOCKS5h ALL_PROXY path and reserve this URL for HTTPS tunnels.
+        for name in ["HTTPS_PROXY", "https_proxy"] {
             env.insert(name.to_string(), http_proxy.clone());
         }
         env.insert("GIT_PROXY_COMMAND".to_string(), "treer".to_string());
@@ -2019,8 +2022,8 @@ mod tests {
 
         assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(proxy));
         assert_eq!(env.get("all_proxy").map(String::as_str), Some(proxy));
-        assert_eq!(env.get("HTTP_PROXY").map(String::as_str), Some(http_proxy));
-        assert_eq!(env.get("http_proxy").map(String::as_str), Some(http_proxy));
+        assert!(!env.contains_key("HTTP_PROXY"));
+        assert!(!env.contains_key("http_proxy"));
         assert_eq!(env.get("HTTPS_PROXY").map(String::as_str), Some(http_proxy));
         assert_eq!(env.get("https_proxy").map(String::as_str), Some(http_proxy));
         assert_eq!(
