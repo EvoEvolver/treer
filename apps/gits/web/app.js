@@ -37,8 +37,15 @@ function clearError() {
   elements.notice.classList.remove("visible");
 }
 
+function applicationUrl(path) {
+  const marker = "/_human";
+  const markerIndex = window.location.pathname.lastIndexOf(marker);
+  const prefix = markerIndex >= 0 ? `${window.location.pathname.slice(0, markerIndex)}/` : "/";
+  return new URL(path.replace(/^\/+/, ""), `${window.location.origin}${prefix}`).toString();
+}
+
 async function json(path, init) {
-  const response = await fetch(path, {
+  const response = await fetch(applicationUrl(path), {
     ...init,
     headers: { Accept: "application/json", ...init?.headers },
   });

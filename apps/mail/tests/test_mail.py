@@ -307,6 +307,12 @@ class MailServerTest(unittest.TestCase):
         self.assertEqual(headers["content-type"], "text/html")
         self.assertIn("Treer Mail", page)
 
+        source = (APP_ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+        self.assertIn("function applicationUrl(path: string)", source)
+        self.assertIn("fetch(applicationUrl(path)", source)
+        vite_config = (APP_ROOT / "web" / "vite.config.ts").read_text(encoding="utf-8")
+        self.assertIn('base: "./"', vite_config)
+
 
 class MigrationTest(unittest.TestCase):
     def setUp(self) -> None:

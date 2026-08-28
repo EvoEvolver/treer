@@ -12,6 +12,13 @@ const state = {
   souls: [],
 };
 
+function applicationUrl(path) {
+  const marker = "/_human";
+  const markerIndex = window.location.pathname.lastIndexOf(marker);
+  const prefix = markerIndex >= 0 ? `${window.location.pathname.slice(0, markerIndex)}/` : "/";
+  return new URL(path.replace(/^\/+/, ""), `${window.location.origin}${prefix}`).toString();
+}
+
 function formatBytes(value) {
   if (!Number.isFinite(value) || value < 0) return "Unknown";
   if (value < 1024) return `${value} B`;
@@ -168,7 +175,7 @@ async function load() {
   elements.refresh.disabled = true;
   elements.summary.textContent = "Loading";
   try {
-    const response = await fetch("/v1/souls", { headers: { Accept: "application/json" } });
+    const response = await fetch(applicationUrl("/v1/souls"), { headers: { Accept: "application/json" } });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Request failed (${response.status})`);
     state.souls = Array.isArray(body.souls) ? body.souls : [];

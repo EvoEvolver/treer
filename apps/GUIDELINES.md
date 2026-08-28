@@ -91,11 +91,18 @@ SPA routes, scripts, stylesheets, fonts, images, and other browser-only assets.
 Serve `/_human` and `/_human/` consistently, either with the same response or a
 redirect into `/_human/`.
 
-Configure frontend build tools with `/_human/` as their base path. Use API paths
-such as `/v1/items` or `/api/session` explicitly; do not let their resolution
-depend on whether the browser URL has a trailing slash. Restrict SPA fallback
-to the `/_human/` subtree so an unknown Agent or API route cannot silently
-return the human `index.html`.
+Human pages must work both on the App origin and below Treer's authenticated
+browser-tunnel prefix. Use document-relative asset URLs such as `./app.js` and
+configure frontend build tools with a relative base such as `./`; root-relative
+URLs like `/_human/app.js` escape the tunnel and reach the Proxy instead.
+
+Resolve API URLs against the App root before `/_human`, while preserving any
+tunnel prefix. For example, a page at either `/_human/` or
+`/api/workspaces/WORKSPACE/virtual-hosts/HOST/proxy/_human/` should resolve
+`/v1/items` to the corresponding App root, not the browser origin root. Keep
+the human entry URL directory-like with a trailing slash, and restrict SPA
+fallback to the `/_human/` subtree so unknown Agent and API routes cannot return
+the human `index.html`.
 
 Browser authentication callbacks may remain under `/api/`, but their default
 and validated `return_to` location should be under `/_human/`. Human session
@@ -122,7 +129,7 @@ Tests should prove that:
 - `/` does not contain or redirect to HTML;
 - `/_human/` returns the human page and its assets resolve below `/_human/`;
 - data routes return JSON even when they fail;
-- the frontend uses absolute API paths; and
+- browser assets and API calls preserve a browser-tunnel path prefix; and
 - unknown paths do not fall through to an unrelated representation.
 
 Keep the App's README focused on deployment, configuration, state, backup, and

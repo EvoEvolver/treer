@@ -148,14 +148,14 @@ print(json.dumps({'agent_id': 'ag_reborn', 'name': 'reborn', 'status': 'running'
         self.assertEqual(status, 200)
         page = body.decode()
         self.assertIn("Treer Soul", page)
-        self.assertIn('src="/_human/app.js"', page)
+        self.assertIn('src="./app.js"', page)
         self.assertNotIn("Upload", page)
         self.assertNotIn("Incarnate", page)
 
         status, script = self.request("GET", "/_human/app.js")
         self.assertEqual(status, 200)
         source = script.decode()
-        self.assertIn('fetch("/v1/souls"', source)
+        self.assertIn('fetch(applicationUrl("/v1/souls")', source)
         self.assertNotIn('method: "POST"', source)
 
         status, stylesheet = self.request("GET", "/_human/app.css")

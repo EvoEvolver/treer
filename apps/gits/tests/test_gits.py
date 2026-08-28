@@ -102,7 +102,12 @@ class GitsServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
         self.assertIn("<title>Gits</title>", page)
-        self.assertIn('src="/_human/app.js"', page)
+        self.assertIn('src="./app.js"', page)
+
+        status, _, script = self.request("GET", "/_human/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn("function applicationUrl(path)", script)
+        self.assertIn("fetch(applicationUrl(path)", script)
 
         status, headers, value = self.request("GET", "/v1/repos")
         self.assertEqual(status, 200)
