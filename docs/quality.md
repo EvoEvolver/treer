@@ -32,6 +32,7 @@ just updater-test
 just messaging-e2e
 just web-test
 just ais-e2e
+just service-canary
 cargo test -p treer-proxy message_
 cargo test -p treer-proxy -- updater::
 cargo test -p treer-proxy -- admin_update_
@@ -50,6 +51,7 @@ node scripts/check-docs.mjs
 | Mail | Python HTTP contract, frontend build, resumable SQLite/PostgreSQL migration | No unattended real-browser audit |
 | Telegram | Fake Bot API, mapping, ack crash ordering, restart, rate-limit and ambiguous-send tests | No live Telegram canary, webhook, or active-active mode |
 | Distribution | NATS event/outbox and multi-Proxy routing tests | No automated partition/failure CI |
+| Host supervision | systemd selection, foreground fallback, partial-unit repair, stale-registration cleanup, and TUI/Web diagnostics | No normal macOS LaunchAgent CI |
 | Release | Four-platform metadata/checksums, GHCR publish workflow, and signed-manifest Node tests | Installed machine updater does not enforce signatures |
 | Self-host update | Updater unit tests; Proxy admin forward tests; `/admin` e2e | No unattended Compose apply against live Docker |
 | Security | Explicit trust tier and Policy tests | Missing allow-by-default hardening and production isolation backend |
@@ -62,7 +64,7 @@ node scripts/check-docs.mjs
 | Proxy auth or membership | Authorization, revocation, and cross-workspace tests |
 | Core Message | DAG/visibility, delivery, idempotency, ack, Policy, outbox body exclusion, and migration tests |
 | Mail or Telegram | App unit tests, external API fixture, restart/migration, and frontend build when applicable |
-| Host/Controller lifecycle | Idempotency and process-survival tests |
+| Host/Controller lifecycle | `just service-canary` plus idempotency and process-survival tests |
 | Managed App lifecycle | Stable service/vhost transaction, direct runtime launch, reconnect/restart behavior, CLI parse, and browser workflow |
 | Network or ingress | Authentication/header, streaming, WebSocket, containment, and Canary coverage |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |

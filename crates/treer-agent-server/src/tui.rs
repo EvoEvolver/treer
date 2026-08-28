@@ -51,6 +51,8 @@ struct App {
     address: Option<SocketAddr>,
     health: Option<Health>,
     proxy_reachable: bool,
+    service_manager: Option<service::ServiceManager>,
+    service_fallback_reason: Option<String>,
     agents: Vec<AgentInfo>,
     table_state: TableState,
     message: String,
@@ -71,6 +73,8 @@ impl App {
             address: None,
             health: None,
             proxy_reachable: false,
+            service_manager: None,
+            service_fallback_reason: None,
             agents: Vec::new(),
             table_state: TableState::default(),
             message: "Loading local Controller state...".to_string(),
@@ -87,6 +91,8 @@ impl App {
                 self.address = None;
                 self.health = None;
                 self.proxy_reachable = false;
+                self.service_manager = None;
+                self.service_fallback_reason = None;
                 self.agents.clear();
                 self.message = format!(
                     "Workspace '{}' is not connected on this machine.",
@@ -101,6 +107,8 @@ impl App {
                 return;
             }
         };
+        self.service_manager = Some(config.service_manager);
+        self.service_fallback_reason = config.service_fallback_reason.clone();
 
         let address = match config.listen.parse::<SocketAddr>() {
             Ok(address) => address,
@@ -217,9 +225,14 @@ impl App {
                 Ok(_) => {
                     self.proxy_reachable = true;
                     if local_agents_available {
-                        self.message =
+                        self.message = if let Some(reason) = &self.service_fallback_reason {
+                            format!(
+                                "Controller and Proxy are reachable. Foreground fallback: {reason}"
+                            )
+                        } else {
                             "Controller and Proxy are reachable; showing local Host state."
-                                .to_string();
+                                .to_string()
+                        };
                     }
                 }
                 Err(error) => {
@@ -434,11 +447,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
     draw_summary(frame, app, sections[1]);
     draw_agents(frame, app, sections[2]);
 
-    let message_style = if app.health.is_some() && app.proxy_reachable {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
+    let message_style =
+        if app.health.is_some() && app.proxy_reachable && app.service_fallback_reason.is_none() {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
     frame.render_widget(
         Paragraph::new(app.message.as_str())
             .style(message_style)
@@ -462,9 +476,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
     let columns = Layout::horizontal([
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
     ])
     .split(area);
     let controller = match (&app.health, app.address) {
@@ -480,6 +495,16 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "UNAVAILABLE"
     };
+    let supervision = app.service_manager.map_or_else(
+        || "UNKNOWN".to_string(),
+        |manager| {
+            if app.service_fallback_reason.is_some() {
+                format!("{}\nFALLBACK", manager.to_string().to_uppercase())
+            } else {
+                manager.to_string().to_uppercase()
+            }
+        },
+    );
     summary_panel(
         frame,
         columns[0],
@@ -491,6 +516,13 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
     summary_panel(
         frame,
         columns[2],
+        "Supervision",
+        &supervision,
+        app.service_fallback_reason.is_none(),
+    );
+    summary_panel(
+        frame,
+        columns[3],
         "Agents",
         &app.agents.len().to_string(),
         app.health.is_some(),
@@ -644,6 +676,8 @@ mod tests {
     fn dashboard_renders_in_a_compact_terminal() {
         let mut app = App::new("default").expect("app");
         app.message = "Controller is not reachable.".to_string();
+        app.service_manager = Some(service::ServiceManager::Foreground);
+        app.service_fallback_reason = Some("Failed to connect to bus".to_string());
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -661,6 +695,8 @@ mod tests {
                 });
         assert!(rendered.contains("Treer Agent Server"));
         assert!(rendered.contains("Controller is not reachable"));
+        assert!(rendered.contains("FOREGROUND"));
+        assert!(rendered.contains("FALLBACK"));
     }
 
     #[test]

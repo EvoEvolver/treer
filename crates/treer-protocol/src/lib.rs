@@ -66,6 +66,21 @@ pub struct BuildInfo {
     pub git_commit: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineSupervisionMode {
+    SystemdUser,
+    Launchd,
+    Foreground,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineSupervision {
+    pub mode: MachineSupervisionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub server_id: String,
@@ -76,6 +91,8 @@ pub struct ServerInfo {
     pub root: String,
     pub controller_build: BuildInfo,
     pub host_build: BuildInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision: Option<MachineSupervision>,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1807,6 +1824,51 @@ fn invalid_enrollment_key() -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_supervision_is_optional_for_older_controllers() {
+        let now = Utc::now();
+        let server = ServerInfo {
+            server_id: "srv_1".to_string(),
+            workspace_id: "default".to_string(),
+            name: "builder".to_string(),
+            hostname: "builder".to_string(),
+            root: "/workspace".to_string(),
+            controller_build: BuildInfo {
+                version: "0.1.0".to_string(),
+                git_commit: "abc123".to_string(),
+            },
+            host_build: BuildInfo {
+                version: "0.1.0".to_string(),
+                git_commit: "abc123".to_string(),
+            },
+            supervision: Some(MachineSupervision {
+                mode: MachineSupervisionMode::Foreground,
+                fallback_reason: Some("user bus unavailable".to_string()),
+            }),
+            labels: BTreeMap::new(),
+            available_agents: None,
+            status: ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+
+        let encoded = serde_json::to_value(&server).expect("serialize server info");
+        assert_eq!(encoded["supervision"]["mode"], "foreground");
+        assert_eq!(
+            encoded["supervision"]["fallback_reason"],
+            "user bus unavailable"
+        );
+
+        let mut legacy = encoded;
+        legacy
+            .as_object_mut()
+            .expect("server info object")
+            .remove("supervision");
+        let decoded: ServerInfo =
+            serde_json::from_value(legacy).expect("deserialize older server info");
+        assert_eq!(decoded.supervision, None);
+    }
 
     #[test]
     fn command_wire_shape_is_stable() {

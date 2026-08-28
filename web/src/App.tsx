@@ -41,6 +41,7 @@ import {
   Square,
   ShieldCheck,
   TerminalSquare,
+  TriangleAlert,
   Trash2,
   UserRound,
   Users,
@@ -126,6 +127,12 @@ function defaultProfileAgentName(profileName: string) {
 function buildLabel(build: Machine["controller_build"]) {
   const commit = build.git_commit === "unknown" ? build.git_commit : build.git_commit.slice(0, 8)
   return `${build.version}@${commit}`
+}
+
+function supervisionLabel(mode: NonNullable<Machine["supervision"]>["mode"]) {
+  if (mode === "systemd_user") return "systemd user"
+  if (mode === "launchd") return "LaunchAgent"
+  return "foreground"
 }
 
 function authorizationReturnUrl() {
@@ -1995,6 +2002,7 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
   if (!machine) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">Machine not found (or disconnected). <Button variant="outline" className="mt-3" onClick={onClose}>Back</Button></div>
   const controller = buildLabel(machine.controller_build)
   const host = buildLabel(machine.host_build)
+  const supervision = machine.supervision ? supervisionLabel(machine.supervision.mode) : "Unknown"
 
   return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
     <div className="mb-8 flex items-start justify-between gap-4">
@@ -2017,9 +2025,11 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
         <dl className="grid gap-2 text-xs">
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Controller</dt><dd className="truncate font-mono">{controller}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Host</dt><dd className="truncate font-mono">{host}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Supervision</dt><dd className="truncate font-mono">{supervision}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Controller commit</dt><dd className="truncate font-mono">{machine.controller_build.git_commit.slice(0, 10)}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Host commit</dt><dd className="truncate font-mono">{machine.host_build.git_commit.slice(0, 10)}</dd></div>
         </dl>
+        {machine.supervision?.fallback_reason && <div className="flex gap-2 border-t pt-3 text-[11px] leading-5 text-amber-700"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" /><p><span className="font-medium">Foreground fallback.</span> {machine.supervision.fallback_reason}</p></div>}
       </section>
 
       <section className="space-y-3 rounded-md border p-4">

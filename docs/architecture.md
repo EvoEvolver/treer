@@ -130,11 +130,16 @@ The Host is supervised by a per-user systemd service on Linux or a LaunchAgent
 on macOS when that user manager is available. Installation probes supervision
 before consuming a single-use enrollment key. Automatic mode visibly falls
 back to an attached foreground Host when persistent supervision is unavailable;
-the persisted service-manager choice keeps later lifecycle commands consistent.
+the persisted service-manager choice and fallback reason keep later lifecycle
+commands and machine diagnostics consistent. The Controller publishes that
+state as an optional machine snapshot field so older Controllers remain valid
+during rolling upgrades. TUI reads the same persisted state locally.
 Startup is complete only when the Controller identity endpoint and a
 Proxy-backed API request both succeed. Because service configuration is saved
 before native registration, `service repair` can reconstruct a partial
-installation without another enrollment key.
+installation without another enrollment key. Manager changes remove the old
+native registration first and reject transitions that would leave a running
+Host owned by the wrong supervisor.
 
 Proxy replicas fence machine connections through a distributed ownership
 lease. An explicit duplicate-Controller error makes the older Controller stop

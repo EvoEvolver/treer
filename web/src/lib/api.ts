@@ -20,6 +20,11 @@ export interface BuildInfo {
   git_commit: string
 }
 
+export interface MachineSupervision {
+  mode: "systemd_user" | "launchd" | "foreground"
+  fallback_reason?: string
+}
+
 export interface Machine {
   server_id: string
   name?: string
@@ -27,6 +32,7 @@ export interface Machine {
   root: string
   controller_build: BuildInfo
   host_build: BuildInfo
+  supervision?: MachineSupervision
   status: string
   available_agents?: string[]
 }

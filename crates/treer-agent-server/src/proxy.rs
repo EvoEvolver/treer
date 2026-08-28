@@ -556,6 +556,7 @@ pub fn server_info(
     root: String,
     host_build: treer_protocol::BuildInfo,
     available_agents: Vec<String>,
+    supervision: Option<treer_protocol::MachineSupervision>,
 ) -> ServerInfo {
     let now = Utc::now();
     ServerInfo {
@@ -569,6 +570,7 @@ pub fn server_info(
             git_commit: treer_build_info::GIT_COMMIT.to_string(),
         },
         host_build,
+        supervision,
         labels: std::collections::BTreeMap::from([
             ("os".to_string(), std::env::consts::OS.to_string()),
             ("arch".to_string(), std::env::consts::ARCH.to_string()),
@@ -671,6 +673,10 @@ mod tests {
                 git_commit: "0123456789abcdef".to_string(),
             },
             vec!["claude".to_string()],
+            Some(treer_protocol::MachineSupervision {
+                mode: treer_protocol::MachineSupervisionMode::SystemdUser,
+                fallback_reason: None,
+            }),
         );
         assert_eq!(server.available_agents, Some(vec!["claude".into()]));
         assert_eq!(
@@ -684,6 +690,10 @@ mod tests {
         );
         assert_eq!(server.host_build.version, "0.1.2");
         assert_eq!(server.host_build.git_commit, "0123456789abcdef");
+        assert_eq!(
+            server.supervision.map(|value| value.mode),
+            Some(treer_protocol::MachineSupervisionMode::SystemdUser)
+        );
     }
 
     #[test]

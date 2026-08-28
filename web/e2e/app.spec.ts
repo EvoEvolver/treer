@@ -41,6 +41,10 @@ const machineA = {
   root: "/Users/test/worker",
   controller_build: build,
   host_build: build,
+  supervision: {
+    mode: "foreground" as const,
+    fallback_reason: "systemctl --user is unavailable: Failed to connect to bus",
+  },
   status: "online",
   available_agents: ["claude"],
 }
@@ -336,6 +340,9 @@ test("clicking a machine opens an overview with identity, agents, services, virt
   await expect(page.getByText("srv-a")).toBeVisible()
   await expect(page.getByText("workstation.lan")).toBeVisible()
   await expect(page.getByTitle("/Users/test/worker")).toBeVisible()
+  await expect(page.getByText("foreground", { exact: true })).toBeVisible()
+  await expect(page.getByText("Foreground fallback.")).toBeVisible()
+  await expect(page.getByText(/Failed to connect to bus/)).toBeVisible()
 
   // Agents on this machine only (not the worker on cloudbox)
   await expect(page.getByText("Agents on this machine")).toBeVisible()

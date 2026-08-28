@@ -506,6 +506,7 @@ mod tests {
                 version: "0.1.2".to_string(),
                 git_commit: "host".to_string(),
             },
+            supervision: None,
             labels: Default::default(),
             available_agents: None,
             status: ServerStatus::Online,

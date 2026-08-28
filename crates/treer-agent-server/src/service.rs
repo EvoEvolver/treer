@@ -4,6 +4,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -12,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use treer_host_protocol::HostDaemonConfig;
-use treer_protocol::OPERATOR_CREDENTIAL_HEADER;
+use treer_protocol::{MachineSupervision, MachineSupervisionMode, OPERATOR_CREDENTIAL_HEADER};
 use url::Url;
 use uuid::Uuid;
 
@@ -49,6 +51,16 @@ pub enum ServiceManager {
     Foreground,
 }
 
+impl std::fmt::Display for ServiceManager {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::SystemdUser => "systemd-user",
+            Self::Launchd => "launchd",
+            Self::Foreground => "foreground",
+        })
+    }
+}
+
 fn default_service_manager() -> ServiceManager {
     #[cfg(target_os = "linux")]
     {
@@ -67,7 +79,7 @@ fn default_service_manager() -> ServiceManager {
 #[derive(Debug)]
 pub struct ServiceSelection {
     pub manager: ServiceManager,
-    fallback_reason: Option<String>,
+    pub fallback_reason: Option<String>,
 }
 
 impl ServiceSelection {
@@ -99,6 +111,8 @@ pub struct ServiceConfig {
     pub install_hostname: String,
     #[serde(default = "default_service_manager")]
     pub service_manager: ServiceManager,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +227,17 @@ impl ServiceConfig {
         let bytes = serde_json::to_vec_pretty(self).context("failed to encode service config")?;
         write_atomic(path, &bytes)
     }
+
+    pub fn supervision(&self) -> MachineSupervision {
+        MachineSupervision {
+            mode: match self.service_manager {
+                ServiceManager::SystemdUser => MachineSupervisionMode::SystemdUser,
+                ServiceManager::Launchd => MachineSupervisionMode::Launchd,
+                ServiceManager::Foreground => MachineSupervisionMode::Foreground,
+            },
+            fallback_reason: self.service_fallback_reason.clone(),
+        }
+    }
 }
 
 pub async fn resolve_listen(workspace: &str, requested: Option<SocketAddr>) -> Result<SocketAddr> {
@@ -284,6 +309,14 @@ pub fn register(config: ServiceConfig) -> Result<()> {
     require_host_binary(&paths)?;
     fs::create_dir_all(&paths.state_dir)
         .with_context(|| format!("failed to create {}", paths.state_dir.display()))?;
+    let previous = match fs::metadata(&paths.config) {
+        Ok(_) => Some(ServiceConfig::load(&paths.config)?),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect {}", paths.config.display()))
+        }
+    };
     config.save(&paths.config)?;
     let host_config = HostDaemonConfig {
         socket_path: config.host_socket.clone(),
@@ -292,10 +325,23 @@ pub fn register(config: ServiceConfig) -> Result<()> {
         root: config.root.clone(),
     };
     save_json(&host_config, &paths.host_config)?;
+    if let Err(error) = platform::transition(previous.as_ref(), &config) {
+        if let Some(previous) = previous {
+            previous
+                .save(&paths.config)
+                .context("failed to restore the previous service configuration")?;
+        }
+        return Err(error);
+    }
     platform::register(&paths, &config)?;
     println!("treer: agent Host service registered");
     println!("treer: configured local API address: {}", config.listen);
     Ok(())
+}
+
+#[cfg(unix)]
+fn host_is_running(socket: &Path) -> bool {
+    UnixStream::connect(socket).is_ok()
 }
 
 pub enum ServiceActivation {
@@ -524,6 +570,7 @@ pub async fn repair_and_wait(workspace: &str, mode: ServiceMode) -> Result<Servi
     let selection = preflight_registration(workspace, mode)?;
     selection.announce();
     config.service_manager = selection.manager;
+    config.service_fallback_reason = selection.fallback_reason;
     let activation = refresh_registration_and_wait(config).await?;
     println!("treer: service registration repaired without a new enrollment key");
     Ok(activation)
@@ -1412,20 +1459,122 @@ mod platform {
         Ok(config_home.join("systemd/user").join(unit_name(server_id)))
     }
 
+    fn wants_path(server_id: &str) -> Result<PathBuf> {
+        let unit_path = unit_path(server_id)?;
+        let parent = unit_path
+            .parent()
+            .context("systemd user unit path has no parent")?;
+        Ok(parent
+            .join("default.target.wants")
+            .join(unit_name(server_id)))
+    }
+
+    pub fn transition(previous: Option<&ServiceConfig>, next: &ServiceConfig) -> Result<()> {
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        if previous.service_manager == next.service_manager {
+            return Ok(());
+        }
+        match (previous.service_manager, next.service_manager) {
+            (ServiceManager::SystemdUser, ServiceManager::Foreground) => {
+                cleanup_systemd_registration(
+                    &unit_path(&previous.server_id)?,
+                    &wants_path(&previous.server_id)?,
+                    &unit_name(&previous.server_id),
+                    host_is_running(&previous.host_socket),
+                )
+            }
+            (ServiceManager::Foreground, ServiceManager::SystemdUser) => {
+                if host_is_running(&previous.host_socket) {
+                    bail!(
+                        "cannot switch a running foreground Host to systemd; stop the foreground command with Ctrl-C, then run repair again"
+                    );
+                }
+                Ok(())
+            }
+            (_, ServiceManager::Launchd) | (ServiceManager::Launchd, _) => {
+                bail!("launchd service configuration cannot run on Linux")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn cleanup_systemd_registration(
+        unit_path: &Path,
+        wants_path: &Path,
+        unit: &str,
+        host_running: bool,
+    ) -> Result<()> {
+        cleanup_systemd_registration_with(
+            env::var_os("TREER_SYSTEMCTL").unwrap_or_else(|| "systemctl".into()),
+            unit_path,
+            wants_path,
+            unit,
+            host_running,
+        )
+    }
+
+    pub(super) fn cleanup_systemd_registration_with(
+        executable: impl AsRef<OsStr>,
+        unit_path: &Path,
+        wants_path: &Path,
+        unit: &str,
+        host_running: bool,
+    ) -> Result<()> {
+        let disable = run_checked(
+            Command::new(executable.as_ref()).args(["--user", "disable", "--now", unit]),
+            "systemctl --user disable --now",
+        );
+        if host_running {
+            disable.context(
+                "the existing systemd Host is still running, so Treer cannot safely downgrade it to foreground mode",
+            )?;
+        } else if let Err(error) = disable {
+            eprintln!(
+                "treer: warning: could not disable the inactive systemd unit ({error:#}); removing its files directly"
+            );
+        }
+        remove_if_exists(wants_path)?;
+        remove_if_exists(unit_path)?;
+        if let Err(error) = run_checked(
+            Command::new(executable.as_ref()).args(["--user", "daemon-reload"]),
+            "systemctl --user daemon-reload",
+        ) {
+            eprintln!(
+                "treer: warning: systemd daemon-reload remains unavailable after removing the stale unit: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
     pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
         match config.service_manager {
             ServiceManager::Foreground => return Ok(()),
             ServiceManager::SystemdUser => {}
             ServiceManager::Launchd => bail!("launchd service configuration cannot run on Linux"),
         }
-        let unit_path = unit_path(&config.server_id)?;
+        register_systemd_with(
+            env::var_os("TREER_SYSTEMCTL").unwrap_or_else(|| "systemctl".into()),
+            paths,
+            config,
+            &unit_path(&config.server_id)?,
+        )
+    }
+
+    pub(super) fn register_systemd_with(
+        executable: impl AsRef<OsStr>,
+        paths: &ServicePaths,
+        config: &ServiceConfig,
+        unit_path: &Path,
+    ) -> Result<()> {
         let parent = unit_path
             .parent()
             .context("systemd user unit path has no parent")?;
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
         write_atomic(
-            &unit_path,
+            unit_path,
             systemd_unit(
                 &paths.host_executable,
                 &paths.host_config,
@@ -1435,12 +1584,12 @@ mod platform {
             .as_bytes(),
         )?;
         run_checked(
-            systemctl_command().args(["--user", "daemon-reload"]),
+            Command::new(executable.as_ref()).args(["--user", "daemon-reload"]),
             "systemctl --user daemon-reload",
         )?;
         let unit = unit_name(&config.server_id);
         run_checked(
-            systemctl_command().args(["--user", "enable", unit.as_str()]),
+            Command::new(executable.as_ref()).args(["--user", "enable", unit.as_str()]),
             "systemctl --user enable",
         )?;
         warn_if_linger_disabled();
@@ -1518,6 +1667,7 @@ mod platform {
     pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
         let unit = unit_name(&config.server_id);
         if config.service_manager == ServiceManager::Foreground {
+            remove_if_exists(&wants_path(&config.server_id)?)?;
             remove_if_exists(&unit_path(&config.server_id)?)?;
             return Ok(());
         }
@@ -1596,6 +1746,42 @@ mod platform {
 
     fn service_target(server_id: &str) -> Result<String> {
         Ok(format!("{}/{}", domain()?, label(server_id)))
+    }
+
+    pub fn transition(previous: Option<&ServiceConfig>, next: &ServiceConfig) -> Result<()> {
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        if previous.service_manager == next.service_manager {
+            return Ok(());
+        }
+        match (previous.service_manager, next.service_manager) {
+            (ServiceManager::Launchd, ServiceManager::Foreground) => {
+                let target = service_target(&previous.server_id)?;
+                let bootout = run_checked(
+                    Command::new("launchctl").args(["bootout", target.as_str()]),
+                    "launchctl bootout",
+                );
+                if host_is_running(&previous.host_socket) {
+                    bootout.context(
+                        "the existing LaunchAgent Host is still running, so Treer cannot safely downgrade it to foreground mode",
+                    )?;
+                }
+                remove_if_exists(&plist_path(&previous.server_id)?)
+            }
+            (ServiceManager::Foreground, ServiceManager::Launchd) => {
+                if host_is_running(&previous.host_socket) {
+                    bail!(
+                        "cannot switch a running foreground Host to launchd; stop the foreground command with Ctrl-C, then run repair again"
+                    );
+                }
+                Ok(())
+            }
+            (_, ServiceManager::SystemdUser) | (ServiceManager::SystemdUser, _) => {
+                bail!("systemd user service configuration cannot run on macOS")
+            }
+            _ => Ok(()),
+        }
     }
 
     pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
@@ -1742,6 +1928,16 @@ mod platform {
 
     fn unsupported() -> Result<()> {
         bail!("service management is currently supported on Linux and macOS")
+    }
+
+    pub fn transition(previous: Option<&ServiceConfig>, next: &ServiceConfig) -> Result<()> {
+        if previous.is_none_or(|previous| previous.service_manager == next.service_manager)
+            || next.service_manager == ServiceManager::Foreground
+        {
+            Ok(())
+        } else {
+            unsupported()
+        }
     }
 
     pub fn register(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
@@ -1910,6 +2106,7 @@ mod tests {
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
             service_manager: default_service_manager(),
+            service_fallback_reason: None,
         };
         assert_eq!(
             controller_epoch(&config).await.as_deref(),
@@ -1946,6 +2143,124 @@ mod tests {
         })
         .expect("foreground selection");
         assert_eq!(foreground.manager, ServiceManager::Foreground);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_canary_healthy_systemd_user_manager_is_selected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let selection = select_linux_service_manager(ServiceMode::Auto, || Ok(()))
+            .expect("healthy systemd selection");
+        assert_eq!(selection.manager, ServiceManager::SystemdUser);
+        assert_eq!(selection.fallback_reason, None);
+
+        let directory = std::env::temp_dir().join(format!(
+            "treer-systemd-canary-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&directory).expect("create canary directory");
+        let log = directory.join("systemctl.log");
+        let systemctl = directory.join("systemctl");
+        fs::write(
+            &systemctl,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+        )
+        .expect("write fake systemctl");
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755))
+            .expect("make fake systemctl executable");
+        let unit = directory.join("treer-agent-server-srv_canary.service");
+        let paths = ServicePaths::new("srv_canary").expect("service paths");
+        let config = ServiceConfig {
+            proxy: "https://treer.example/".to_string(),
+            workspace: "canary".to_string(),
+            server_id: "srv_canary".to_string(),
+            machine_token: "srv_canary.secret".to_string(),
+            operator_credential: "op_canary".to_string(),
+            root: PathBuf::from("/tmp"),
+            listen: "127.0.0.1:8790".to_string(),
+            host_socket: directory.join("host.sock"),
+            install_hostname: current_hostname().expect("hostname"),
+            service_manager: selection.manager,
+            service_fallback_reason: selection.fallback_reason,
+        };
+        platform::register_systemd_with(systemctl.as_os_str(), &paths, &config, &unit)
+            .expect("register systemd unit");
+        let unit_contents = fs::read_to_string(&unit).expect("read generated unit");
+        assert!(unit_contents.contains("Restart=always"));
+        let calls = fs::read_to_string(log).expect("read systemctl calls");
+        assert!(calls.contains("--user daemon-reload"));
+        assert!(calls.contains("--user enable treer-agent-server-srv_canary.service"));
+
+        fs::remove_dir_all(directory).expect("remove canary directory");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_canary_missing_user_bus_visibly_falls_back() {
+        let selection = select_linux_service_manager(ServiceMode::Auto, || {
+            bail!("Failed to connect to bus: No medium found")
+        })
+        .expect("automatic foreground fallback");
+        assert_eq!(selection.manager, ServiceManager::Foreground);
+        assert!(selection
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Failed to connect to bus")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_canary_explicit_systemd_failure_then_repairs_partial_unit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let explicit = select_linux_service_manager(ServiceMode::Systemd, || {
+            bail!("Failed to connect to bus: No medium found")
+        })
+        .expect_err("explicit systemd must fail before enrollment");
+        assert!(explicit.to_string().contains("user manager is unavailable"));
+
+        let directory = std::env::temp_dir().join(format!(
+            "treer-service-canary-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let unit = directory.join("treer-agent-server-test.service");
+        let wants = directory
+            .join("default.target.wants")
+            .join("treer-agent-server-test.service");
+        fs::create_dir_all(wants.parent().expect("wants parent"))
+            .expect("create canary directories");
+        fs::write(&unit, "partial unit").expect("write partial unit");
+        fs::write(&wants, "partial enablement").expect("write partial wants entry");
+        let systemctl = directory.join("systemctl");
+        fs::write(&systemctl, "#!/bin/sh\nexit 1\n").expect("write fake systemctl");
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755))
+            .expect("make fake systemctl executable");
+
+        platform::cleanup_systemd_registration_with(
+            systemctl.as_os_str(),
+            &unit,
+            &wants,
+            "treer-agent-server-test.service",
+            false,
+        )
+        .expect("repair inactive partial registration without a user bus");
+        assert!(!unit.exists());
+        assert!(!wants.exists());
+
+        fs::write(&unit, "active unit").expect("rewrite active unit");
+        let error = platform::cleanup_systemd_registration_with(
+            systemctl.as_os_str(),
+            &unit,
+            &wants,
+            "treer-agent-server-test.service",
+            true,
+        )
+        .expect_err("an active Host must not be orphaned when systemctl is unavailable");
+        assert!(error.to_string().contains("cannot safely downgrade"));
+        assert!(unit.exists());
+
+        fs::remove_dir_all(directory).expect("remove canary directory");
     }
 
     #[cfg(target_os = "linux")]
@@ -1992,6 +2307,7 @@ mod tests {
         }))
         .expect("legacy configuration");
         assert_eq!(config.service_manager, default_service_manager());
+        assert_eq!(config.service_fallback_reason, None);
     }
 
     #[test]
@@ -2039,6 +2355,7 @@ mod tests {
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
             service_manager: default_service_manager(),
+            service_fallback_reason: None,
         };
         let explicit = Url::parse("https://canary.treer.example/").unwrap();
 
@@ -2071,6 +2388,7 @@ mod tests {
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
             service_manager: default_service_manager(),
+            service_fallback_reason: None,
         };
 
         assert_eq!(
@@ -2105,6 +2423,7 @@ mod tests {
                 host_socket: PathBuf::from(format!("/tmp/{server_id}.sock")),
                 install_hostname: current_hostname().expect("local hostname"),
                 service_manager: default_service_manager(),
+                service_fallback_reason: None,
             };
             (ServicePaths::new(server_id).expect("service paths"), config)
         };

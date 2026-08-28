@@ -322,13 +322,20 @@ treer-agent-server service --workspace WORKSPACE_ID repair --service-mode system
 
 The default `auto` repair may visibly downgrade to foreground mode under the
 same rules as `connect`; in that case the repair command remains attached to
-the Host.
+the Host. When switching supervision modes, Treer removes the old systemd unit
+or LaunchAgent before activating the replacement. An inactive partial systemd
+registration can be cleaned even while the user bus is unavailable. A running
+Host is never orphaned: if its current manager cannot stop it, repair exits and
+asks the operator to stop the existing foreground command or restore the user
+manager before retrying.
 
 `--tui` opens an interactive dashboard for the installed workspace. It shows
-the local Controller health, Proxy reachability, and Host-owned Agents on this
-machine. The Agent list remains available from local state while the Proxy is
-unreachable, and the dashboard provides start, stop, full restart, and
-Controller-only restart actions.
+the local Controller health, Proxy reachability, current supervision mode, and
+Host-owned Agents on this machine. A foreground downgrade is highlighted with
+its persisted reason. The same mode and reason appear in the web machine
+overview after the Controller connects. The Agent list remains available from
+local state while the Proxy is unreachable, and the dashboard provides start,
+stop, full restart, and Controller-only restart actions.
 Stop and full restart require confirmation because they terminate Host-owned
 Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 

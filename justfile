@@ -15,6 +15,9 @@ test:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
+service-canary:
+    cargo test -p treer-agent-server service_canary_ -- --nocapture
+
 check:
     node scripts/check-docs.mjs
     node --test scripts/release-r2.test.mjs

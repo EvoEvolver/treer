@@ -158,6 +158,8 @@ struct ServerArgs {
     listen: SocketAddr,
     #[arg(long, env = "TREER_HOST_SOCKET", default_value = ".treer/host.sock")]
     host_socket: PathBuf,
+    #[arg(skip)]
+    supervision: Option<treer_protocol::MachineSupervision>,
 }
 
 #[tokio::main]
@@ -182,6 +184,7 @@ async fn main() -> Result<()> {
         Some(Command::Run { config }) => {
             let config = service::ServiceConfig::load(&config)?;
             service::require_install_hostname(&config)?;
+            let supervision = Some(config.supervision());
             run_server(ServerArgs {
                 proxy: Url::parse(&config.proxy).context("invalid proxy URL in service config")?,
                 workspace: config.workspace,
@@ -194,6 +197,7 @@ async fn main() -> Result<()> {
                     .parse()
                     .context("invalid listen address in service config")?,
                 host_socket: config.host_socket,
+                supervision,
             })
             .await
         }
@@ -262,6 +266,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         root.display().to_string(),
         host_build.clone(),
         runtime.available_agent_kinds(),
+        args.supervision,
     );
 
     let proxy_client = proxy::ProxyClient::new(
@@ -397,6 +402,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         }
         config.proxy = proxy.to_string();
         config.service_manager = selection.manager;
+        config.service_fallback_reason = selection.fallback_reason.clone();
         let activation = service::refresh_registration_and_wait(config)
             .await
             .with_context(|| {
@@ -432,6 +438,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         host_socket,
         install_hostname,
         service_manager: selection.manager,
+        service_fallback_reason: selection.fallback_reason,
     })
     .with_context(|| {
         format!(
