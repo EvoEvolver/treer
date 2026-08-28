@@ -354,6 +354,26 @@ pub fn router(
             get(list_agents).post(create_agent),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/apps",
+            get(list_app_deployments).post(create_app_deployment),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/apps/{app_id}",
+            get(get_app_deployment).delete(delete_app_deployment),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/apps/{app_id}/start",
+            post(start_app_deployment),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/apps/{app_id}/stop",
+            post(stop_app_deployment),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/apps/{app_id}/restart",
+            post(restart_app_deployment),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/launch-profiles",
             get(list_agent_launch_profiles).post(create_agent_launch_profile),
         )
@@ -6021,6 +6041,62 @@ mod tests {
             let error: ApiError = serde_json::from_slice(&body).expect("decode rollout error");
             assert_eq!(error.error.code, "core_messages_disabled");
         }
+    }
+
+    #[tokio::test]
+    async fn machine_route_exposes_managed_apps_to_the_cli() {
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let enrollment = auth
+            .create_machine_enrollment("default", "test")
+            .await
+            .expect("create App route enrollment");
+        let machine = auth
+            .claim_machine_enrollment(&enrollment)
+            .await
+            .expect("claim App route machine");
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://treer.example/").expect("public URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/workspaces/default/apps")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", machine.machine_token),
+                    )
+                    .body(Body::empty())
+                    .expect("App list request"),
+            )
+            .await
+            .expect("App list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read App list response");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("decode App list"),
+            json!({ "apps": [] })
+        );
     }
 
     #[tokio::test]
