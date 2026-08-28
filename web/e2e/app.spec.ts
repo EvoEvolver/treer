@@ -287,7 +287,20 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
   await page.getByRole("menuitem", { name: "Apps" }).click()
 
   await expect(page.getByText("Soul Archive")).toBeVisible()
-  await expect(page.getByText("soul.demo.internal:9420")).toBeVisible()
+  await expect(page.getByText("soul.demo.internal/", { exact: true })).toBeVisible()
+  await expect(page.getByText("soul.demo.internal/_human/", { exact: true })).toBeVisible()
+  await page.evaluate(() => {
+    window.open = ((url?: string | URL) => {
+      document.documentElement.dataset.lastOpenedUrl = String(url)
+      return null
+    }) as typeof window.open
+  })
+  await page.getByRole("button", { name: "Open Soul Archive Agent interface" }).click()
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/")
+  await page.getByRole("button", { name: "Open Soul Archive Human interface" }).click()
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/_human/")
+  await page.getByRole("button", { name: "Open Soul Archive", exact: true }).click()
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/_human/")
   const restarting = page.waitForRequest((request) => request.url().includes("/apps/app-1/restart") && request.method() === "POST")
   await page.getByRole("button", { name: "Restart Soul Archive" }).click()
   await restarting

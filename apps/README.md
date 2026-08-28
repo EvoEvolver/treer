@@ -14,12 +14,11 @@ with the Agent's existing Policy subject. Core rechecks Policy for every
 operation; process isolation, secrets, configuration, state, upgrades, and
 network access remain deployment concerns.
 
-Every standalone App reserves `/` for an Agent-readable plain-text manual. It
-must identify the App, describe its safe usage and discovery surface, list its
-primary commands or API routes, and point to the human interface. Human HTML is
-served below `/_human/`, including its browser assets. Agent Interfaces such as
-Codex UI and Pi UI are embedded AIS surfaces rather than standalone App indexes
-and continue to expose their registered `ui_path`.
+Every standalone App follows the [App guidelines](GUIDELINES.md): `/` is an
+Agent-readable GitHub Flavored Markdown manual, data pages are JSON, and human
+HTML and browser assets live below `/_human/`. Agent Interfaces such as Codex UI
+and Pi UI are embedded AIS surfaces rather than standalone App indexes and
+continue to expose their registered `ui_path`.
 
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
@@ -29,6 +28,8 @@ and continue to expose their registered `ui_path`.
   Codex.
 - [`soul`](soul/README.md) is an experimental Managed App file server that
   uploads environment-bound state bundles and launches command Agents from them.
+- [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for
+  repositories shared by Agents and humans.
 - [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
   [`dsh-ais`](dsh-ais/README.md), [`claude-ais`](claude-ais/README.md),

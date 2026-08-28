@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Gits</title>
+    <link rel="stylesheet" href="/_human/app.css">
+    <script src="/_human/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="mark" aria-hidden="true">G</span><strong>Gits</strong></div>
+      <div class="actions">
+        <button id="refresh" type="button">Refresh</button>
+        <button id="new-repo" type="button" class="primary">New repository</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar" aria-label="Repositories">
+        <div class="section-title"><h1>Repositories</h1><span id="count">0</span></div>
+        <div id="repos" class="repo-list" aria-live="polite"></div>
+      </aside>
+      <section id="detail" class="detail" aria-live="polite">
+        <div class="empty"><span class="empty-mark" aria-hidden="true">G</span><h2>No repository selected</h2></div>
+      </section>
+    </main>
+
+    <dialog id="create-dialog">
+      <form id="create-form" method="dialog">
+        <header><h2>New repository</h2><button id="close-dialog" type="button" aria-label="Close">X</button></header>
+        <label for="repo-name">Name</label>
+        <input id="repo-name" name="name" pattern="[a-z0-9][a-z0-9._-]{0,62}" maxlength="63" required autofocus placeholder="shared-tools">
+        <label for="repo-description">Description</label>
+        <input id="repo-description" name="description" maxlength="240" placeholder="What belongs here">
+        <footer><button id="cancel-dialog" type="button">Cancel</button><button type="submit" class="primary">Create repository</button></footer>
+      </form>
+    </dialog>
+
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  </body>
+</html>

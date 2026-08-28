@@ -16,6 +16,8 @@ const requiredFiles = [
   "docs/canary.md",
   "docs/research/2026-08-18-project-review.md",
   "apps/README.md",
+  "apps/GUIDELINES.md",
+  "apps/gits/README.md",
   "apps/mail/README.md",
   "apps/telegram/README.md",
   "deploy/README.md",
@@ -57,6 +59,10 @@ requireText("AGENTS.md", "apps/README.md");
 requireText("AGENTS.md", "skills/treer/SKILL.md");
 requireText("AGENTS.md", "skills/treer-install/SKILL.md");
 requireText("docs/README.md", "../apps/README.md");
+requireText("docs/README.md", "../apps/GUIDELINES.md");
+requireText("apps/README.md", "GUIDELINES.md");
+requireText("apps/README.md", "gits/README.md");
+requireText("docs/README.md", "../apps/gits/README.md");
 requireText("docs/README.md", "../deploy/README.md");
 requireText(
   "crates/treer-cli/src/main.rs",
