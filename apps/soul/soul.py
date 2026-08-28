@@ -360,12 +360,15 @@ class SoulHandler(BaseHTTPRequestHandler):
         try:
             path = urlsplit(self.path).path.rstrip("/") or "/"
             if path == "/":
+                self._file(APP_ROOT / "AGENT.md", "text/plain; charset=utf-8", head=head)
+                return
+            if path == "/_human":
                 self._file(APP_ROOT / "web" / "index.html", "text/html; charset=utf-8", head=head)
                 return
-            if path == "/app.css":
+            if path == "/_human/app.css":
                 self._file(APP_ROOT / "web" / "app.css", "text/css; charset=utf-8", head=head)
                 return
-            if path == "/app.js":
+            if path == "/_human/app.js":
                 self._file(APP_ROOT / "web" / "app.js", "text/javascript; charset=utf-8", head=head)
                 return
             if path == "/health":

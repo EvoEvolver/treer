@@ -168,7 +168,7 @@ async function load() {
   elements.refresh.disabled = true;
   elements.summary.textContent = "Loading";
   try {
-    const response = await fetch("v1/souls", { headers: { Accept: "application/json" } });
+    const response = await fetch("/v1/souls", { headers: { Accept: "application/json" } });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Request failed (${response.status})`);
     state.souls = Array.isArray(body.souls) ? body.souls : [];

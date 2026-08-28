@@ -224,11 +224,14 @@ class MailServerTest(unittest.TestCase):
         raw = response.read()
         response_headers = {key.lower(): value for key, value in response.getheaders()}
         connection.close()
-        value = json.loads(raw) if raw else None
+        content_type = response_headers.get("content-type", "")
+        value = json.loads(raw) if raw and "json" in content_type else raw.decode() if raw else None
         return response.status, response_headers, value
 
     def login(self) -> None:
-        status, headers, _ = self.request("GET", "/api/auth/start?return_to=%2Finbox")
+        status, headers, _ = self.request(
+            "GET", "/api/auth/start?return_to=%2F_human%2Finbox"
+        )
         self.assertEqual(status, 302)
         authorize = urllib.parse.urlsplit(headers["location"])
         state = urllib.parse.parse_qs(authorize.query)["state"][0]
@@ -236,7 +239,7 @@ class MailServerTest(unittest.TestCase):
             "GET", f"/api/auth/callback?code=fake-code&state={urllib.parse.quote(state)}"
         )
         self.assertEqual(status, 302)
-        self.assertEqual(headers["location"], "/inbox")
+        self.assertEqual(headers["location"], "/_human/inbox")
         self.assertIn("HttpOnly", headers["set-cookie"])
         self.cookie = headers["set-cookie"].split(";", 1)[0]
 
@@ -291,6 +294,18 @@ class MailServerTest(unittest.TestCase):
         self.assertEqual(status, 204)
         status, _, _ = self.request("GET", "/api/auth/session")
         self.assertEqual(status, 401)
+
+    def test_root_is_agent_manual_and_human_ui_has_separate_path(self) -> None:
+        status, headers, manual = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "text/plain; charset=utf-8")
+        self.assertIn("This index is for Agents", manual)
+        self.assertIn("treer message list", manual)
+
+        status, headers, page = self.request("GET", "/_human/")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "text/html")
+        self.assertIn("Treer Mail", page)
 
 
 class MigrationTest(unittest.TestCase):

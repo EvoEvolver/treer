@@ -33,6 +33,7 @@ MAX_RECIPIENTS = 32
 MAX_CONTEXTS = 32
 MAX_PAGE_SIZE = 100
 API_TIMEOUT_SECONDS = 125
+APP_ROOT = Path(__file__).resolve().parent
 RFC3339_NANOSECONDS = re.compile(
     r"^(?P<seconds>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?P<fraction>\.\d+)(?P<zone>Z|[+-]\d{2}:\d{2})$"
@@ -510,7 +511,14 @@ class MailHandler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlsplit(self.path)
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            if path == "/api/health" and method in {"GET", "HEAD"}:
+            if path == "/" and method in {"GET", "HEAD"}:
+                self._bytes(
+                    200,
+                    "text/plain; charset=utf-8",
+                    (APP_ROOT / "AGENT.md").read_bytes(),
+                    head=method == "HEAD",
+                )
+            elif path == "/api/health" and method in {"GET", "HEAD"}:
                 self._json(200, {"status": "ok", "service": "treer-mail"}, head=method == "HEAD")
             elif path == "/api/config" and method == "GET":
                 config = self.server.application.config
@@ -519,7 +527,9 @@ class MailHandler(BaseHTTPRequestHandler):
                     {"service_id": config.service_id, "proxy_public_url": config.proxy_public_url},
                 )
             elif path == "/api/auth/start" and method == "GET":
-                location = self.server.application.start_oauth(query.get("return_to", ["/"])[0])
+                location = self.server.application.start_oauth(
+                    query.get("return_to", ["/_human/"])[0]
+                )
                 self._redirect(location)
             elif path == "/api/auth/callback" and method == "GET":
                 raw, location, max_age = self.server.application.finish_oauth(
@@ -555,7 +565,9 @@ class MailHandler(BaseHTTPRequestHandler):
                 )
             elif path.startswith("/api/"):
                 raise MailError(404, "Mail API route not found", "route_not_found")
-            elif method in {"GET", "HEAD"}:
+            elif method in {"GET", "HEAD"} and (
+                path == "/_human" or path.startswith("/_human/")
+            ):
                 self._static(path, head=method == "HEAD")
             else:
                 raise MailError(405, "method not allowed", "method_not_allowed")
@@ -602,7 +614,9 @@ class MailHandler(BaseHTTPRequestHandler):
 
     def _static(self, request_path: str, *, head: bool) -> None:
         web_root = self.server.application.config.web_dir.resolve()
-        relative = urllib.parse.unquote(request_path).lstrip("/") or "index.html"
+        relative = urllib.parse.unquote(request_path).removeprefix("/_human/")
+        if request_path.rstrip("/") == "/_human":
+            relative = "index.html"
         candidate = (web_root / relative).resolve()
         try:
             candidate.relative_to(web_root)
@@ -797,13 +811,12 @@ def load_config() -> Config:
     if not isinstance(value, dict):
         raise ValueError("App config must contain a JSON object")
     host, port = _listen(value.get("listen", "127.0.0.1:8788"))
-    package = Path(__file__).resolve().parent
     web_value = value.get("web_dir", "web/dist")
     if not isinstance(web_value, str) or not web_value:
         raise ValueError("web_dir must be a non-empty path")
     web_dir = Path(web_value)
     if not web_dir.is_absolute():
-        web_dir = package / web_dir
+        web_dir = APP_ROOT / web_dir
     service_id = _bounded_string(value.get("service_id"), "service ID", 128)
     if not service_id.startswith("svc_"):
         raise ValueError("service_id must be a registered Treer service ID")

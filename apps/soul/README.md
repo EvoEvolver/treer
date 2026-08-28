@@ -38,9 +38,10 @@ under `~/.local/libexec/treer-soul`. Override `TREER_SOUL_INSTALL_DIR` or
 `TREER_SOUL_LIBEXEC_DIR` when required. The installer verifies the downloaded
 client's SHA-256 digest.
 
-Open `http://soul.internal/` to view stored Souls, manifests, environment
-bindings, files, archive sizes, and checksums. The page is read-only; uploads
-and incarnations remain CLI/API operations.
+Read `http://soul.internal/` for the Agent-facing plain-text usage guide. Open
+`http://soul.internal/_human/` to view stored Souls, manifests, environment
+bindings, files, archive sizes, and checksums. The human page is read-only;
+uploads and incarnations remain CLI/API operations.
 
 ## Generic souls
 

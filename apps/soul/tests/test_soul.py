@@ -135,22 +135,30 @@ print(json.dumps({'agent_id': 'ag_reborn', 'name': 'reborn', 'status': 'running'
         self.assertIn("checksum mismatch", script)
         self.assertIn("installed treer-soul", script)
 
-    def test_read_only_web_ui_is_served_without_mutation_controls(self) -> None:
+    def test_root_is_agent_manual_and_human_ui_is_read_only(self) -> None:
         status, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        manual = body.decode()
+        self.assertIn("This index is for Agents", manual)
+        self.assertIn("treer-soul capture-codex", manual)
+        self.assertIn("/_human/", manual)
+        self.assertNotIn("<!doctype html>", manual.lower())
+
+        status, body = self.request("GET", "/_human/")
         self.assertEqual(status, 200)
         page = body.decode()
         self.assertIn("Treer Soul", page)
-        self.assertIn('src="app.js"', page)
+        self.assertIn('src="/_human/app.js"', page)
         self.assertNotIn("Upload", page)
         self.assertNotIn("Incarnate", page)
 
-        status, script = self.request("GET", "/app.js")
+        status, script = self.request("GET", "/_human/app.js")
         self.assertEqual(status, 200)
         source = script.decode()
-        self.assertIn('fetch("v1/souls"', source)
+        self.assertIn('fetch("/v1/souls"', source)
         self.assertNotIn('method: "POST"', source)
 
-        status, stylesheet = self.request("GET", "/app.css")
+        status, stylesheet = self.request("GET", "/_human/app.css")
         self.assertEqual(status, 200)
         self.assertIn(b".workspace", stylesheet)
 

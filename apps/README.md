@@ -14,6 +14,13 @@ with the Agent's existing Policy subject. Core rechecks Policy for every
 operation; process isolation, secrets, configuration, state, upgrades, and
 network access remain deployment concerns.
 
+Every standalone App reserves `/` for an Agent-readable plain-text manual. It
+must identify the App, describe its safe usage and discovery surface, list its
+primary commands or API routes, and point to the human interface. Human HTML is
+served below `/_human/`, including its browser assets. Agent Interfaces such as
+Codex UI and Pi UI are embedded AIS surfaces rather than standalone App indexes
+and continue to expose their registered `ui_path`.
+
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`pi-ui`](pi-ui/README.md) is an Agent-scoped browser interface loaded inside

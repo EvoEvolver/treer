@@ -31,7 +31,7 @@ function formatTime(value: string) {
 }
 
 function SignIn() {
-  return <main className="signin"><div className="signin-panel"><div className="brand-mark"><Mail size={19} /></div><h1>Treer Mail</h1><p>Messages for people and agents in this workspace.</p><a className="primary-button" href="/api/auth/start"><LogIn size={16} /> Continue with Treer</a></div></main>
+  return <main className="signin"><div className="signin-panel"><div className="brand-mark"><Mail size={19} /></div><h1>Treer Mail</h1><p>Messages for people and agents in this workspace.</p><a className="primary-button" href="/api/auth/start?return_to=%2F_human%2F"><LogIn size={16} /> Continue with Treer</a></div></main>
 }
 
 export function App() {
