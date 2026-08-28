@@ -135,6 +135,25 @@ print(json.dumps({'agent_id': 'ag_reborn', 'name': 'reborn', 'status': 'running'
         self.assertIn("checksum mismatch", script)
         self.assertIn("installed treer-soul", script)
 
+    def test_read_only_web_ui_is_served_without_mutation_controls(self) -> None:
+        status, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        page = body.decode()
+        self.assertIn("Treer Soul", page)
+        self.assertIn('src="app.js"', page)
+        self.assertNotIn("Upload", page)
+        self.assertNotIn("Incarnate", page)
+
+        status, script = self.request("GET", "/app.js")
+        self.assertEqual(status, 200)
+        source = script.decode()
+        self.assertIn('fetch("v1/souls"', source)
+        self.assertNotIn('method: "POST"', source)
+
+        status, stylesheet = self.request("GET", "/app.css")
+        self.assertEqual(status, 200)
+        self.assertIn(b".workspace", stylesheet)
+
     def test_codex_capture_restores_rollout_and_uses_supported_resume_command(self) -> None:
         session_id = "01234567-89ab-cdef-0123-456789abcdef"
         source_home = self.root / "source-codex"

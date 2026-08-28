@@ -359,6 +359,15 @@ class SoulHandler(BaseHTTPRequestHandler):
     def _dispatch(self, head: bool) -> None:
         try:
             path = urlsplit(self.path).path.rstrip("/") or "/"
+            if path == "/":
+                self._file(APP_ROOT / "web" / "index.html", "text/html; charset=utf-8", head=head)
+                return
+            if path == "/app.css":
+                self._file(APP_ROOT / "web" / "app.css", "text/css; charset=utf-8", head=head)
+                return
+            if path == "/app.js":
+                self._file(APP_ROOT / "web" / "app.js", "text/javascript; charset=utf-8", head=head)
+                return
             if path == "/health":
                 self._json(200, {"ok": True}, head=head)
                 return
@@ -501,6 +510,12 @@ class SoulHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(size))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if content_type.startswith("text/html"):
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'",
+            )
         self.end_headers()
         if not head:
             with path.open("rb") as stream:
@@ -511,6 +526,7 @@ class SoulHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         if not head:
             self.wfile.write(body)

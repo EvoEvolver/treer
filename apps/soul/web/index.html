@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Treer Soul</title>
+    <link rel="stylesheet" href="app.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <div>
+          <strong>Treer Soul</strong>
+          <span id="summary">Loading</span>
+        </div>
+      </div>
+      <button id="refresh" type="button">Refresh</button>
+    </header>
+
+    <main class="workspace">
+      <aside class="soul-list" aria-label="Souls">
+        <div class="section-heading">
+          <h1>Souls</h1>
+          <span id="count">0</span>
+        </div>
+        <div id="list" class="list" aria-live="polite"></div>
+      </aside>
+
+      <section id="detail" class="detail" aria-live="polite">
+        <div class="empty-state">
+          <div class="empty-mark" aria-hidden="true">S</div>
+          <h2>No soul selected</h2>
+        </div>
+      </section>
+    </main>
+
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  </body>
+</html>

@@ -1789,11 +1789,10 @@ function WorkspaceApp() {
           </div>
         </div>
         <div className="px-2 pb-2">
-          <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className={cn("h-8 w-full justify-start gap-2 px-2 text-xs font-normal", (mainView === "profiles" || mainView === "apps" || mainView === "network") && "bg-accent")} aria-label="Workspace views"><ListChecks className="size-3.5" />{mainView === "profiles" ? "Profiles" : mainView === "apps" ? "Apps" : mainView === "network" ? "Network" : "Workspace"}<ChevronDown className="ml-auto size-3.5 text-muted-foreground" /></Button></DropdownMenuTrigger>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className={cn("h-8 w-full justify-start gap-2 px-2 text-xs font-normal", (mainView === "profiles" || mainView === "apps") && "bg-accent")} aria-label="Workspace views"><ListChecks className="size-3.5" />{mainView === "profiles" ? "Profiles" : mainView === "apps" ? "Apps" : "Workspace"}<ChevronDown className="ml-auto size-3.5 text-muted-foreground" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-56">
               <DropdownMenuItem onSelect={openLaunchProfiles} disabled={!workspaceId}><Rocket />Profiles</DropdownMenuItem>
               <DropdownMenuItem onSelect={openApps} disabled={!workspaceId}><PanelsTopLeft />Apps</DropdownMenuItem>
-              <DropdownMenuItem onSelect={openNetwork} disabled={!workspaceId}><Network />Network</DropdownMenuItem>
             </DropdownMenuContent></DropdownMenu>
         </div>
 

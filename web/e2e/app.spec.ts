@@ -267,7 +267,7 @@ test("org dropdown contains Members and Audit entries", async ({ page }) => {
   await expect(page.getByRole("menuitem", { name: "Audit" })).toBeVisible()
 })
 
-test("workspace dropdown opens Profiles, Apps and Network", async ({ page }) => {
+test("workspace dropdown opens Profiles and Apps without exposing Network", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: /Workspace/ }).click()
   await page.getByRole("menuitem", { name: "Profiles" }).click()
@@ -278,9 +278,7 @@ test("workspace dropdown opens Profiles, Apps and Network", async ({ page }) => 
   await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
 
   await page.getByRole("button", { name: "Workspace views" }).click()
-  await page.getByRole("menuitem", { name: "Network" }).click()
-  await expect(page.getByRole("heading", { name: "Network" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Machine services" })).toBeVisible()
+  await expect(page.getByRole("menuitem", { name: "Network" })).toHaveCount(0)
 })
 
 test("managed App view exposes lifecycle actions and creation", async ({ page }) => {
@@ -311,23 +309,6 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
     port: 8080,
     hostname: "docs.demo.internal",
   })
-})
-
-test("service registration can target an Agent's private loopback", async ({ page }) => {
-  await page.goto("/")
-  await page.getByRole("button", { name: /Workspace/ }).click()
-  await page.getByRole("menuitem", { name: "Network" }).click()
-  await page.getByRole("button", { name: "Add service" }).click()
-
-  const dialog = page.getByRole("dialog", { name: "Register service" })
-  const selects = dialog.getByRole("combobox")
-  await selects.nth(0).click()
-  await page.getByRole("option", { name: /api-server.*workstation/ }).click()
-
-  await expect(selects.nth(1)).toBeDisabled()
-  const targetHost = dialog.getByText("Target host", { exact: true }).locator("..").getByRole("textbox")
-  await expect(targetHost).toBeDisabled()
-  await expect(targetHost).toHaveValue("127.0.0.1")
 })
 
 test("clicking a machine opens an overview with identity, agents, services, virtual hosts, and traffic", async ({ page }) => {
@@ -393,21 +374,6 @@ test("from a machine overview, clicking Terminal opens the agent terminal", asyn
 
   // Returns to the terminal main view; header shows agent name
   await expect(page.locator("header").getByText("api-server")).toBeVisible()
-})
-
-test("mobile: opening network hides sidebar, back button returns to terminal", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto("/")
-
-  await page.getByRole("button", { name: /Workspace/ }).click()
-  await page.getByRole("menuitem", { name: "Network" }).click()
-  await expect(page.getByRole("heading", { name: "Network" })).toBeVisible()
-
-  const aside = page.locator("aside")
-  await expect(aside).toBeHidden()
-
-  await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
-  await expect(aside).toBeVisible()
 })
 
 test("create agent dialog can install a git recipe", async ({ page }) => {
