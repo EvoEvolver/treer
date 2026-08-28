@@ -29,7 +29,11 @@ matching the question; follow its source links for implementation detail.
 Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
-There are no active repository-wide execution plans at this revision.
+
+- [Machine connection UX](research/2026-08-28-machine-connection-ux-plan.md) —
+  truthful Online/local/fenced/stopped status, sleep/wake and duplicate
+  reconnect, one Host per hostname+workspace, `proxy-env` internet bypass, and
+  copyable recovery commands. Implement on `feat/machine-connection-ux`.
 
 ## Historical material
 
