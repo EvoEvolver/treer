@@ -56,7 +56,7 @@ application is not yet a programmable workspace surface.
 | One developer on several machines | Reliable sessions, updates, private services, and diagnosis | Runtime lifecycle, network, local custody, health |
 | Trusted team or research lab | Shared work without losing ownership or context | Visibility, roles, issues, artifacts, activity, audit |
 | Agent swarm | Work must survive process restarts and avoid duplicate execution | Messages, tasks, leases, retries, dependencies, events |
-| Agent-maintained service | Other Agents and humans need a stable endpoint and trustworthy caller identity | Service catalog, virtual hosts, workload identity, policy, logs |
+| Managed App or operator-maintained service | Other Agents and humans need a stable endpoint and trustworthy caller identity | App lifecycle, service catalog, virtual hosts, workload identity, policy, logs |
 | CI or ephemeral execution | Work should be scheduled, bounded, collected, and reclaimed automatically | Templates, queues, placement, quotas, artifacts, cleanup |
 | Public hosted Treer | Tenants must share infrastructure without sharing control or cost | Isolation, HA routing, policy, metering, quotas, billing |
 | Incident response | Operators need to reconstruct what failed across several processes and machines | Logs, metrics, traces, audit, activity timeline, diagnostics |

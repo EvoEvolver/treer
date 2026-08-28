@@ -85,6 +85,12 @@ virtual host. Start, stop, restart, delete, list, and show are available through
 the browser, public API, Controller-local API, and `treer app` CLI. User-triggered
 lifecycle changes append workspace audit events.
 
+Managed App lifecycle is the only Agent-authorized path that allocates a
+service or virtual host. Direct Agent routes for service, virtual-host, and
+ingress mutation return `managed_app_required`, including for older CLIs.
+Logged-in workspace users retain those controls through the browser/public API
+for operator-managed infrastructure.
+
 The first runtime adapter launches `kind=app` through the existing Host process
 contract. The backing runtime receives its own workload credential, private
 network namespace, and declared `publish_ports` bridge, but is hidden from the
@@ -152,13 +158,14 @@ captured onto the Controller SOCKS path. On macOS and other `proxy-env`
 machines the same loopback listener also accepts HTTP CONNECT, and the
 Controller injects `HTTPS_PROXY` so clients without SOCKS support can use that
 path for HTTPS while plain HTTP continues through `ALL_PROXY` as SOCKS5h.
-Agent-scoped services use a Unix
-bridge (`sandbox-exec --service-socket`) so the Controller can reach a
-namespace-local loopback listener without publishing a host TCP port. The
-browser Agent UI iframe uses that same bridge to reach the port and `ui_path`
-declared by the Agent's verified Interface descriptor. No separate service or
-UI registration is required. On a narrow viewport, selecting that Agent opens
-the iframe full-screen, matching the mobile terminal overlay.
+Operator-managed Agent-scoped services use a Unix bridge (`sandbox-exec
+--service-socket`) so the Controller can reach a namespace-local loopback
+listener without publishing a host TCP port. Agents cannot create those
+records themselves. The browser Agent UI iframe uses that same bridge to reach
+the port and `ui_path` declared by the Agent's verified Interface descriptor.
+No separate service or UI registration is required. On a narrow viewport,
+selecting that Agent opens the iframe full-screen, matching the mobile terminal
+overlay.
 `publish_ports` (`sandbox-exec --publish`)
 is only for host-loopback clients that dial `127.0.0.1` themselves; it binds
 that port on the machine and splices accepted connections into the namespace.

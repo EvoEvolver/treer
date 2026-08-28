@@ -48,17 +48,15 @@ use crate::policy::{
     PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_CREATE,
     ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT, ACTION_AGENT_METADATA_READ,
     ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP, ACTION_AGENT_UPDATE,
-    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_CREATE, ACTION_INGRESS_DELETE,
-    ACTION_INGRESS_LIST, ACTION_INGRESS_UPDATE, ACTION_LAUNCH_PROFILE_CREATE,
-    ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST, ACTION_LAUNCH_PROFILE_READ,
-    ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE, ACTION_MACHINE_DELETE,
-    ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT, ACTION_MESSAGE_READ,
-    ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_SERVICE_CREATE, ACTION_SERVICE_DELETE,
-    ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_SERVICE_UPDATE, ACTION_VIRTUAL_HOST_CREATE,
-    ACTION_VIRTUAL_HOST_DELETE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT,
-    RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE,
-    RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE, RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT,
-    RESOURCE_MESSAGE_MAILBOX, RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
+    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_LIST,
+    ACTION_LAUNCH_PROFILE_CREATE, ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST,
+    ACTION_LAUNCH_PROFILE_READ, ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE,
+    ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT,
+    ACTION_MESSAGE_READ, ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_SERVICE_LIST,
+    ACTION_SERVICE_PROBE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE,
+    RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE,
+    RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT, RESOURCE_MESSAGE_MAILBOX,
+    RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame};
 use crate::updater::UpdaterClient;
@@ -397,11 +395,12 @@ pub fn router(
         )
         .route(
             "/agent/workspaces/{workspace_id}/services",
-            get(agent_list_machine_services).post(agent_create_machine_service),
+            get(agent_list_machine_services).post(agent_network_publication_forbidden),
         )
         .route(
             "/agent/workspaces/{workspace_id}/services/{service_id}",
-            axum::routing::patch(agent_update_machine_service).delete(agent_delete_machine_service),
+            axum::routing::patch(agent_network_publication_forbidden)
+                .delete(agent_network_publication_forbidden),
         )
         .route(
             "/agent/workspaces/{workspace_id}/services/{service_id}/probe",
@@ -409,19 +408,20 @@ pub fn router(
         )
         .route(
             "/agent/workspaces/{workspace_id}/virtual-hosts",
-            get(agent_list_virtual_network_hosts).post(agent_create_virtual_network_host),
+            get(agent_list_virtual_network_hosts).post(agent_network_publication_forbidden),
         )
         .route(
             "/agent/workspaces/{workspace_id}/virtual-hosts/{hostname}",
-            axum::routing::delete(agent_delete_virtual_network_host),
+            axum::routing::delete(agent_network_publication_forbidden),
         )
         .route(
             "/agent/workspaces/{workspace_id}/ingresses",
-            get(agent_list_service_ingresses).post(agent_create_service_ingress),
+            get(agent_list_service_ingresses).post(agent_network_publication_forbidden),
         )
         .route(
             "/agent/workspaces/{workspace_id}/ingresses/{ingress_id}",
-            axum::routing::patch(agent_update_service_ingress).delete(agent_delete_service_ingress),
+            axum::routing::patch(agent_network_publication_forbidden)
+                .delete(agent_network_publication_forbidden),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -3481,6 +3481,13 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
     headers.remove("proxy-connection");
 }
 
+async fn agent_network_publication_forbidden() -> ApiFailure {
+    ApiFailure::forbidden(
+        "managed_app_required",
+        "Agents cannot manage services, virtual hosts, or ingresses; deploy an App or use the operator control plane",
+    )
+}
+
 async fn agent_list_machine_services(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -3499,173 +3506,6 @@ async fn agent_list_machine_services(
         ))
         .await?;
     list_machine_services(Extension(auth), Path(workspace_id)).await
-}
-
-async fn agent_create_machine_service(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-    Json(mut request): Json<CreateMachineServiceRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let PolicySubject::Agent {
-        server_id,
-        agent_id,
-    } = &subject
-    else {
-        unreachable!("managed Agent route always produces an Agent subject")
-    };
-    if let Some(target) = request.target_agent_id.as_deref() {
-        let target = if target == "self" {
-            state.resolve_agent(&workspace_id, agent_id).await?
-        } else {
-            state.resolve_agent(&workspace_id, target).await?
-        };
-        if target.agent_id != *agent_id {
-            return Err(ApiFailure::forbidden(
-                "agent_service_target_forbidden",
-                "an Agent may register an Agent service only for itself",
-            ));
-        }
-        request.target_agent_id = Some(target.agent_id);
-        request.server_id = target.server_id;
-    } else {
-        request.server_id = state
-            .resolve_server(&workspace_id, &request.server_id)
-            .await?
-            .server_id;
-        if request.server_id != *server_id {
-            return Err(ApiFailure::forbidden(
-                "service_machine_forbidden",
-                "an Agent may register a machine service only on its own machine",
-            ));
-        }
-    }
-    let resource = machine_service_policy_resource(
-        &format!("new:{}", request.name.trim().to_ascii_lowercase()),
-        &request.name,
-        &request.server_id,
-        request.target_agent_id.as_deref(),
-        &request.target_host,
-        request.target_port,
-    );
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_SERVICE_CREATE,
-            resource,
-        ))
-        .await?;
-    let service = auth
-        .create_machine_service(&workspace_id, &policy_actor_name(&subject), request)
-        .await?;
-    Ok(Json(json!({ "service": service })))
-}
-
-async fn agent_update_machine_service(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path((workspace_id, service_id)): Path<(String, String)>,
-    Json(mut request): Json<UpdateMachineServiceRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let current = auth
-        .resolve_machine_service(&workspace_id, &service_id)
-        .await?;
-    require_agent_owns_service(&subject, &current)?;
-    if let Some(server_id) = request.server_id.as_deref() {
-        let resolved = state
-            .resolve_server(&workspace_id, server_id)
-            .await?
-            .server_id;
-        let PolicySubject::Agent {
-            server_id: own_server_id,
-            ..
-        } = &subject
-        else {
-            unreachable!("managed Agent route always produces an Agent subject")
-        };
-        if &resolved != own_server_id {
-            return Err(ApiFailure::forbidden(
-                "service_machine_forbidden",
-                "an Agent may move a machine service only within its own machine",
-            ));
-        }
-        request.server_id = Some(resolved);
-    }
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_SERVICE_UPDATE,
-            machine_service_policy_resource(
-                &current.service_id,
-                &current.name,
-                &current.server_id,
-                current.target_agent_id.as_deref(),
-                &current.target_host,
-                current.target_port,
-            ),
-        ))
-        .await?;
-    let service = auth
-        .update_machine_service(
-            &workspace_id,
-            &current.service_id,
-            &policy_actor_name(&subject),
-            request,
-        )
-        .await?;
-    refresh_service_ingress_routes(&auth).await?;
-    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
-    Ok(Json(json!({ "service": service })))
-}
-
-async fn agent_delete_machine_service(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path((workspace_id, service_id)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let service = auth
-        .resolve_machine_service(&workspace_id, &service_id)
-        .await?;
-    require_agent_owns_service(&subject, &service)?;
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject,
-            ACTION_SERVICE_DELETE,
-            machine_service_policy_resource(
-                &service.service_id,
-                &service.name,
-                &service.server_id,
-                service.target_agent_id.as_deref(),
-                &service.target_host,
-                service.target_port,
-            ),
-        ))
-        .await?;
-    let service = auth
-        .delete_machine_service(&workspace_id, &service.service_id)
-        .await?;
-    refresh_service_ingress_routes(&auth).await?;
-    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
-    Ok(Json(json!({
-        "deleted": true,
-        "service_id": service.service_id,
-        "name": service.name,
-    })))
 }
 
 async fn agent_probe_machine_service(
@@ -3731,70 +3571,6 @@ async fn agent_list_virtual_network_hosts(
     list_virtual_network_hosts(Extension(auth), Path(workspace_id)).await
 }
 
-async fn agent_create_virtual_network_host(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-    Json(mut request): Json<CreateVirtualNetworkHostRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    request.hostname = auth::normalize_virtual_hostname(&request.hostname)?;
-    let service = auth
-        .resolve_machine_service(&workspace_id, &request.service_id)
-        .await?;
-    request.service_id.clone_from(&service.service_id);
-    let resource = virtual_host_policy_resource(&request.hostname, &service);
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_VIRTUAL_HOST_CREATE,
-            resource,
-        ))
-        .await?;
-    let host = auth
-        .create_virtual_network_host(&workspace_id, &policy_actor_name(&subject), request)
-        .await?;
-    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
-    Ok(Json(json!({ "host": host })))
-}
-
-async fn agent_delete_virtual_network_host(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path((workspace_id, hostname)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let host = auth
-        .resolve_virtual_network_host(&workspace_id, &hostname)
-        .await?
-        .ok_or_else(|| {
-            ApiFailure::not_found("virtual_host_not_found", "virtual host does not exist")
-        })?;
-    let service = auth
-        .resolve_machine_service(&workspace_id, &host.service_id)
-        .await?;
-    let resource = virtual_host_policy_resource(&host.hostname, &service);
-    policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject,
-            ACTION_VIRTUAL_HOST_DELETE,
-            resource,
-        ))
-        .await?;
-    auth.delete_virtual_network_host(&workspace_id, &host.hostname)
-        .await?;
-    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
-    Ok(Json(json!({ "deleted": true, "hostname": host.hostname })))
-}
-
 async fn agent_list_service_ingresses(
     State(state): State<AppState>,
     Extension(api): Extension<ServiceIngressApi>,
@@ -3817,119 +3593,6 @@ async fn agent_list_service_ingresses(
         Path(workspace_id),
     )
     .await
-}
-
-async fn agent_create_service_ingress(
-    State(state): State<AppState>,
-    Extension(api): Extension<ServiceIngressApi>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<String>,
-    Json(mut request): Json<CreateServiceIngressRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let service = api
-        .auth
-        .resolve_machine_service(&workspace_id, &request.service_id)
-        .await?;
-    require_agent_owns_service(&subject, &service)?;
-    request.service_id.clone_from(&service.service_id);
-    api.policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_INGRESS_CREATE,
-            service_ingress_policy_resource("new", request.access, &service),
-        ))
-        .await?;
-    let ingress = api
-        .auth
-        .create_service_ingress(
-            &workspace_id,
-            &policy_actor_name(&subject),
-            api.config.base_domain()?,
-            request,
-        )
-        .await?;
-    Ok(Json(json!({
-        "ingress": service_ingress_json(&api.config, ingress)?
-    })))
-}
-
-async fn agent_update_service_ingress(
-    State(state): State<AppState>,
-    Extension(api): Extension<ServiceIngressApi>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path((workspace_id, ingress_id)): Path<(String, String)>,
-    Json(request): Json<UpdateServiceIngressRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let current = api
-        .auth
-        .resolve_service_ingress(&workspace_id, &ingress_id)
-        .await?;
-    require_agent_owns_service(&subject, &current.service)?;
-    api.policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject.clone(),
-            ACTION_INGRESS_UPDATE,
-            service_ingress_policy_resource(
-                &current.ingress.ingress_id,
-                request.access.unwrap_or(current.ingress.access),
-                &current.service,
-            ),
-        ))
-        .await?;
-    let ingress = api
-        .auth
-        .update_service_ingress(
-            &workspace_id,
-            &current.ingress.ingress_id,
-            &policy_actor_name(&subject),
-            request,
-        )
-        .await?;
-    Ok(Json(json!({
-        "ingress": service_ingress_json(&api.config, ingress)?
-    })))
-}
-
-async fn agent_delete_service_ingress(
-    State(state): State<AppState>,
-    Extension(api): Extension<ServiceIngressApi>,
-    Extension(machine): Extension<MachineSession>,
-    headers: HeaderMap,
-    Path((workspace_id, ingress_id)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
-    let current = api
-        .auth
-        .resolve_service_ingress(&workspace_id, &ingress_id)
-        .await?;
-    require_agent_owns_service(&subject, &current.service)?;
-    api.policy
-        .authorize(&PolicyRequest::new(
-            &workspace_id,
-            subject,
-            ACTION_INGRESS_DELETE,
-            service_ingress_policy_resource(
-                &current.ingress.ingress_id,
-                current.ingress.access,
-                &current.service,
-            ),
-        ))
-        .await?;
-    let ingress = api
-        .auth
-        .delete_service_ingress(&workspace_id, &current.ingress.ingress_id)
-        .await?;
-    Ok(Json(json!({
-        "deleted": true,
-        "ingress_id": ingress.ingress_id,
-        "hostname": ingress.hostname,
-    })))
 }
 
 async fn publish_virtual_network_hosts(
@@ -4133,35 +3796,6 @@ fn profile_actor_label(
     )
 }
 
-fn virtual_host_policy_resource(hostname: &str, service: &MachineService) -> PolicyResource {
-    let resource = PolicyResource::new(RESOURCE_VIRTUAL_HOST, hostname)
-        .with_attribute("service_id", &service.service_id)
-        .with_attribute("destination_server_id", &service.server_id)
-        .with_attribute("target_host", &service.target_host)
-        .with_attribute("target_port", service.target_port.to_string());
-    if let Some(agent_id) = service.target_agent_id.as_deref() {
-        resource.with_attribute("destination_agent_id", agent_id)
-    } else {
-        resource
-    }
-}
-
-fn service_ingress_policy_resource(
-    ingress_id: &str,
-    access: ServiceIngressAccess,
-    service: &MachineService,
-) -> PolicyResource {
-    let resource = PolicyResource::new(RESOURCE_SERVICE_INGRESS, ingress_id)
-        .with_attribute("service_id", &service.service_id)
-        .with_attribute("destination_server_id", &service.server_id)
-        .with_attribute("access", service_ingress_access_name(access));
-    if let Some(agent_id) = service.target_agent_id.as_deref() {
-        resource.with_attribute("destination_agent_id", agent_id)
-    } else {
-        resource
-    }
-}
-
 async fn prompt_installer_recipe(
     state: &AppState,
     workspace_id: &str,
@@ -4254,42 +3888,6 @@ fn require_agent_can_probe_service(
             "ingress_agent_required",
             "a managed agent identity is required to probe a service",
         )),
-    }
-}
-
-fn require_agent_owns_service(
-    subject: &PolicySubject,
-    service: &MachineService,
-) -> Result<(), ApiFailure> {
-    match subject {
-        PolicySubject::Agent {
-            server_id,
-            agent_id,
-        } if server_id == &service.server_id
-            && service
-                .target_agent_id
-                .as_ref()
-                .is_none_or(|target| target == agent_id) =>
-        {
-            Ok(())
-        }
-        PolicySubject::Agent { .. } => Err(ApiFailure::forbidden(
-            "service_not_owned",
-            "agents may manage only services in their own machine or Agent scope",
-        )),
-        PolicySubject::Machine { .. }
-        | PolicySubject::Human { .. }
-        | PolicySubject::Service { .. } => Err(ApiFailure::forbidden(
-            "ingress_agent_required",
-            "a managed agent identity is required to publish a service",
-        )),
-    }
-}
-
-const fn service_ingress_access_name(access: ServiceIngressAccess) -> &'static str {
-    match access {
-        ServiceIngressAccess::Public => "public",
-        ServiceIngressAccess::Workspace => "workspace",
     }
 }
 
@@ -6044,7 +5642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn machine_route_exposes_managed_apps_to_the_cli() {
+    async fn machine_routes_expose_managed_apps_but_deny_direct_network_publication() {
         let auth = AuthStore::for_test("admin-password").await;
         auth.seed_test_workspace("default").await;
         let enrollment = auth
@@ -6077,6 +5675,7 @@ mod tests {
             crate::updater::UpdaterClient::disabled(),
         );
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/agent/workspaces/default/apps")
@@ -6097,6 +5696,47 @@ mod tests {
             serde_json::from_slice::<Value>(&body).expect("decode App list"),
             json!({ "apps": [] })
         );
+
+        for (method, path) in [
+            (Method::POST, "/agent/workspaces/default/services"),
+            (Method::PATCH, "/agent/workspaces/default/services/svc_old"),
+            (Method::DELETE, "/agent/workspaces/default/services/svc_old"),
+            (Method::POST, "/agent/workspaces/default/virtual-hosts"),
+            (
+                Method::DELETE,
+                "/agent/workspaces/default/virtual-hosts/old.internal",
+            ),
+            (Method::POST, "/agent/workspaces/default/ingresses"),
+            (Method::PATCH, "/agent/workspaces/default/ingresses/ing_old"),
+            (
+                Method::DELETE,
+                "/agent/workspaces/default/ingresses/ing_old",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(
+                            header::AUTHORIZATION,
+                            format!("Bearer {}", machine.machine_token),
+                        )
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .expect("network mutation request"),
+                )
+                .await
+                .expect("network mutation response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read network mutation response");
+            let error: ApiError =
+                serde_json::from_slice(&body).expect("decode network mutation error");
+            assert_eq!(error.error.code, "managed_app_required", "{path}");
+        }
     }
 
     #[tokio::test]
@@ -6575,7 +6215,6 @@ mod tests {
                 .code,
             "service_not_owned"
         );
-        assert!(require_agent_owns_service(&installer, &service).is_err());
     }
 
     #[tokio::test]
@@ -6906,119 +6545,6 @@ mod tests {
                 .await
                 .expect("count stored Messages");
         assert_eq!(stored_messages, 1, "all denied sends must be atomic");
-    }
-
-    #[tokio::test]
-    async fn managed_agent_can_manage_services_and_virtual_hosts() {
-        let state = state_with_managed_agent().await;
-        let auth = AuthStore::for_test("admin-password").await;
-        auth.seed_test_workspace("default").await;
-        let policy = PolicyEngine::allow_all();
-        let machine = MachineSession {
-            server_id: Some("machine-a".to_string()),
-            workspace_id: Some("default".to_string()),
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
-
-        let forbidden = agent_create_machine_service(
-            State(state.clone()),
-            Extension(auth.clone()),
-            Extension(policy.clone()),
-            Extension(machine.clone()),
-            headers.clone(),
-            Path("default".to_string()),
-            Json(CreateMachineServiceRequest {
-                name: "Other Agent API".to_string(),
-                server_id: "machine-a".to_string(),
-                target_agent_id: Some("agent-b".to_string()),
-                target_host: "127.0.0.1".to_string(),
-                target_port: 8081,
-                protocol: treer_protocol::MachineServiceProtocol::Http,
-            }),
-        )
-        .await
-        .expect_err("Agent must not register another Agent's service");
-        assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
-
-        let service = agent_create_machine_service(
-            State(state.clone()),
-            Extension(auth.clone()),
-            Extension(policy.clone()),
-            Extension(machine.clone()),
-            headers.clone(),
-            Path("default".to_string()),
-            Json(CreateMachineServiceRequest {
-                name: "API".to_string(),
-                server_id: "machine-a".to_string(),
-                target_agent_id: Some("self".to_string()),
-                target_host: "127.0.0.1".to_string(),
-                target_port: 8080,
-                protocol: treer_protocol::MachineServiceProtocol::Http,
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("create service: {}", error.error.message));
-        let service_id = service.0["service"]["service_id"]
-            .as_str()
-            .expect("service id")
-            .to_string();
-        assert_eq!(service.0["service"]["created_by"], "agent:agent-a");
-        assert_eq!(service.0["service"]["target_agent_id"], "agent-a");
-
-        let created = agent_create_virtual_network_host(
-            State(state.clone()),
-            Extension(auth.clone()),
-            Extension(policy.clone()),
-            Extension(machine.clone()),
-            headers.clone(),
-            Path("default".to_string()),
-            Json(CreateVirtualNetworkHostRequest {
-                hostname: "API.Internal".to_string(),
-                service_id: service_id.clone(),
-            }),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("create virtual host: {}", error.error.message));
-        assert_eq!(created.0["host"]["hostname"], "api.internal");
-        assert_eq!(created.0["host"]["created_by"], "agent:agent-a");
-
-        let listed = agent_list_virtual_network_hosts(
-            State(state.clone()),
-            Extension(auth.clone()),
-            Extension(policy.clone()),
-            Extension(machine.clone()),
-            headers.clone(),
-            Path("default".to_string()),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("list virtual hosts: {}", error.error.message));
-        assert_eq!(listed.0["hosts"].as_array().map(Vec::len), Some(1));
-
-        let deleted = agent_delete_virtual_network_host(
-            State(state.clone()),
-            Extension(auth.clone()),
-            Extension(policy.clone()),
-            Extension(machine.clone()),
-            headers.clone(),
-            Path(("default".to_string(), "api.internal".to_string())),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("delete virtual host: {}", error.error.message));
-        assert_eq!(deleted.0["deleted"], true);
-        assert_eq!(deleted.0["hostname"], "api.internal");
-
-        let deleted_service = agent_delete_machine_service(
-            State(state),
-            Extension(auth),
-            Extension(policy),
-            Extension(machine),
-            headers,
-            Path(("default".to_string(), service_id)),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("delete service: {}", error.error.message));
-        assert_eq!(deleted_service.0["deleted"], true);
     }
 
     #[tokio::test]

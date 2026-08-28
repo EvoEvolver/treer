@@ -12,6 +12,10 @@ workspace members. It is not a safe multi-tenant execution sandbox.
   Controller verifies the private-loopback manifest before advertising it and
   never forwards the workload credential to the interface. Its local recovery
   cache contains only a process-bound descriptor and is revalidated before use.
+- Agent-authenticated routes cannot create, update, or delete machine services,
+  virtual hosts, or service ingresses. That denial is enforced before workspace
+  Policy, so an old CLI cannot restore the capability. Agents may create Managed
+  Apps; Core atomically owns those Apps' service and virtual-host records.
 - Local operator requests use a private Controller credential that is not
   injected into managed Agent environments.
 - Service tokens are short-lived and audience-bound. Human App token
@@ -97,6 +101,10 @@ Managed Apps use `publish_ports` for their declared HTTP UI port, then route the
 stable service and virtual hostname to that loopback listener. Their command,
 arguments, working directory, and hostname are plaintext Proxy metadata; the
 Managed App API deliberately has no secret field.
+
+Only a logged-in workspace user or operator API may directly mutate service,
+virtual-host, and ingress records. Managed Agents can list or probe existing
+records for compatibility but cannot publish their own sandbox listeners.
 
 ## Policy And Rollout
 

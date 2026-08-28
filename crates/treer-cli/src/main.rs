@@ -21,13 +21,10 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AcknowledgeMessagesRequest, AgentInfo, AgentStatus, ApiError, CreateAgentLaunchProfileRequest,
-    CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
-    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, GetMessageResponse,
-    ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest, LegacyMailMessage,
-    MachineServiceProtocol, MessageExternalSource, ReceiveMessagesRequest,
-    RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest, ServerInfo,
-    ServiceIngressAccess, TerminalClientMessage, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    CreateAgentRequest, CreateAppDeploymentRequest, GetMessageResponse, ImportMessagesRequest,
+    InputAgentRequest, LaunchAgentProfileRequest, LegacyMailMessage, MessageExternalSource,
+    ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
+    ServerInfo, TerminalClientMessage, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
     WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
     AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER,
     WORKLOAD_CREDENTIAL_HEADER,
@@ -85,7 +82,7 @@ enum Command {
         #[command(subcommand)]
         command: MachineCommand,
     },
-    #[command(about = "Manage private networking and published services")]
+    #[command(about = "Connect through the Agent's private Treer network")]
     Network {
         #[command(subcommand)]
         command: NetworkCommand,
@@ -377,56 +374,6 @@ enum MachineCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum VirtualHostCommand {
-    #[command(about = "List workspace virtual hosts")]
-    List,
-    #[command(about = "Map a virtual hostname to a registered service")]
-    Create { hostname: String, service: String },
-    #[command(about = "Delete a workspace virtual host")]
-    Delete { hostname: String },
-}
-
-#[derive(Debug, Subcommand)]
-enum ServiceCommand {
-    #[command(about = "List registered services")]
-    List,
-    #[command(about = "Register a long-running service")]
-    Create {
-        name: String,
-        #[arg(long, conflicts_with = "agent")]
-        machine: Option<String>,
-        /// Bind the service to a managed Agent's private loopback. Use "self"
-        /// when running inside that Agent.
-        #[arg(long, conflicts_with = "machine")]
-        agent: Option<String>,
-        #[arg(long, default_value = "127.0.0.1")]
-        target_host: String,
-        #[arg(long)]
-        port: u16,
-        #[arg(long, value_enum, default_value_t = CliServiceProtocol::Tcp)]
-        protocol: CliServiceProtocol,
-    },
-    #[command(about = "Update a registered service")]
-    Update {
-        target: String,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        machine: Option<String>,
-        #[arg(long)]
-        target_host: Option<String>,
-        #[arg(long)]
-        port: Option<u16>,
-        #[arg(long, value_enum)]
-        protocol: Option<CliServiceProtocol>,
-    },
-    #[command(about = "Probe a service from its machine")]
-    Probe { target: String },
-    #[command(about = "Delete a service and its virtual hosts")]
-    Delete { target: String },
-}
-
-#[derive(Debug, Subcommand)]
 enum TokenCommand {
     #[command(about = "Create an audience-bound Bearer token")]
     Create {
@@ -460,76 +407,6 @@ enum InterfaceCommand {
 enum NetworkCommand {
     #[command(about = "Bridge stdin/stdout to a host through the Agent's Treer network")]
     Connect { host: String, port: u16 },
-    #[command(about = "Manage long-running services")]
-    Service {
-        #[command(subcommand)]
-        command: ServiceCommand,
-    },
-    #[command(about = "Manage workspace virtual hosts")]
-    Host {
-        #[command(subcommand)]
-        command: VirtualHostCommand,
-    },
-    #[command(about = "Publish services through wildcard HTTPS ingress")]
-    Publish {
-        #[command(subcommand)]
-        command: PublishCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum PublishCommand {
-    #[command(about = "List published service endpoints")]
-    List,
-    #[command(about = "Publish an HTTP service")]
-    Create {
-        service: String,
-        #[arg(long)]
-        slug: Option<String>,
-        #[arg(long, value_enum, default_value_t = CliIngressAccess::Public)]
-        access: CliIngressAccess,
-    },
-    #[command(about = "Change a published endpoint's access mode")]
-    Access {
-        target: String,
-        access: CliIngressAccess,
-    },
-    #[command(about = "Enable a published endpoint")]
-    Enable { target: String },
-    #[command(about = "Disable a published endpoint without deleting it")]
-    Disable { target: String },
-    #[command(about = "Delete a published endpoint")]
-    Delete { target: String },
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum CliIngressAccess {
-    Public,
-    Workspace,
-}
-
-impl From<CliIngressAccess> for ServiceIngressAccess {
-    fn from(value: CliIngressAccess) -> Self {
-        match value {
-            CliIngressAccess::Public => Self::Public,
-            CliIngressAccess::Workspace => Self::Workspace,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum CliServiceProtocol {
-    Tcp,
-    Http,
-}
-
-impl From<CliServiceProtocol> for MachineServiceProtocol {
-    fn from(value: CliServiceProtocol) -> Self {
-        match value {
-            CliServiceProtocol::Tcp => Self::Tcp,
-            CliServiceProtocol::Http => Self::Http,
-        }
-    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -1383,14 +1260,14 @@ async fn run_machine_command(client: &ApiClient, command: MachineCommand) -> any
     }
 }
 
-async fn run_network_command(client: &ApiClient, command: NetworkCommand) -> anyhow::Result<Value> {
+async fn run_network_command(
+    _client: &ApiClient,
+    command: NetworkCommand,
+) -> anyhow::Result<Value> {
     match command {
         NetworkCommand::Connect { .. } => {
             bail!("network connect must run before API client initialization")
         }
-        NetworkCommand::Service { command } => run_service_command(client, command).await,
-        NetworkCommand::Host { command } => run_virtual_host_command(client, command).await,
-        NetworkCommand::Publish { command } => run_publish_command(client, command).await,
     }
 }
 
@@ -1541,169 +1418,6 @@ async fn run_interface_command(
         }
         InterfaceCommand::Clear => client.value(Method::DELETE, "api/interface", None).await,
     }
-}
-
-async fn run_virtual_host_command(
-    client: &ApiClient,
-    command: VirtualHostCommand,
-) -> anyhow::Result<Value> {
-    match command {
-        VirtualHostCommand::List => client.value(Method::GET, "api/virtual-hosts", None).await,
-        VirtualHostCommand::Create { hostname, service } => {
-            client
-                .value(
-                    Method::POST,
-                    "api/virtual-hosts",
-                    Some(serde_json::to_value(CreateVirtualNetworkHostRequest {
-                        hostname,
-                        service_id: service,
-                    })?),
-                )
-                .await
-        }
-        VirtualHostCommand::Delete { hostname } => {
-            client
-                .value(
-                    Method::DELETE,
-                    &format!("api/virtual-hosts/{}", path_segment(&hostname)),
-                    None,
-                )
-                .await
-        }
-    }
-}
-
-async fn run_service_command(client: &ApiClient, command: ServiceCommand) -> anyhow::Result<Value> {
-    match command {
-        ServiceCommand::List => client.value(Method::GET, "api/services", None).await,
-        ServiceCommand::Create {
-            name,
-            machine,
-            agent,
-            target_host,
-            port,
-            protocol,
-        } => {
-            let server_id = resolve_service_machine(client, machine.as_deref()).await?;
-            client
-                .value(
-                    Method::POST,
-                    "api/services",
-                    Some(serde_json::to_value(CreateMachineServiceRequest {
-                        name,
-                        server_id,
-                        target_agent_id: agent,
-                        target_host,
-                        target_port: port,
-                        protocol: protocol.into(),
-                    })?),
-                )
-                .await
-        }
-        ServiceCommand::Update {
-            target,
-            name,
-            machine,
-            target_host,
-            port,
-            protocol,
-        } => {
-            let server_id = match machine.as_deref() {
-                Some(machine) => Some(resolve_service_machine(client, Some(machine)).await?),
-                None => None,
-            };
-            client
-                .value(
-                    Method::PATCH,
-                    &format!("api/services/{}", path_segment(&target)),
-                    Some(serde_json::to_value(UpdateMachineServiceRequest {
-                        name,
-                        server_id,
-                        target_host,
-                        target_port: port,
-                        protocol: protocol.map(Into::into),
-                    })?),
-                )
-                .await
-        }
-        ServiceCommand::Probe { target } => {
-            client
-                .value(
-                    Method::POST,
-                    &format!("api/services/{}/probe", path_segment(&target)),
-                    Some(json!({})),
-                )
-                .await
-        }
-        ServiceCommand::Delete { target } => {
-            client
-                .value(
-                    Method::DELETE,
-                    &format!("api/services/{}", path_segment(&target)),
-                    None,
-                )
-                .await
-        }
-    }
-}
-
-async fn run_publish_command(client: &ApiClient, command: PublishCommand) -> anyhow::Result<Value> {
-    match command {
-        PublishCommand::List => client.value(Method::GET, "api/publish", None).await,
-        PublishCommand::Create {
-            service,
-            slug,
-            access,
-        } => {
-            client
-                .value(
-                    Method::POST,
-                    "api/publish",
-                    Some(serde_json::to_value(CreateServiceIngressRequest {
-                        service_id: service,
-                        slug,
-                        access: access.into(),
-                    })?),
-                )
-                .await
-        }
-        PublishCommand::Access { target, access } => {
-            update_published_endpoint(client, &target, Some(access.into()), None).await
-        }
-        PublishCommand::Enable { target } => {
-            update_published_endpoint(client, &target, None, Some(true)).await
-        }
-        PublishCommand::Disable { target } => {
-            update_published_endpoint(client, &target, None, Some(false)).await
-        }
-        PublishCommand::Delete { target } => {
-            client
-                .value(
-                    Method::DELETE,
-                    &format!("api/publish/{}", path_segment(&target)),
-                    None,
-                )
-                .await
-        }
-    }
-}
-
-async fn update_published_endpoint(
-    client: &ApiClient,
-    target: &str,
-    access: Option<ServiceIngressAccess>,
-    enabled: Option<bool>,
-) -> anyhow::Result<Value> {
-    client
-        .value(
-            Method::PATCH,
-            &format!("api/publish/{}", path_segment(target)),
-            Some(serde_json::to_value(UpdateServiceIngressRequest {
-                access,
-                enabled,
-            })?),
-        )
-        .await
 }
 
 async fn resolve_service_machine(
@@ -2388,39 +2102,21 @@ mod tests {
     }
 
     #[test]
-    fn virtual_host_commands_parse() {
-        let add = Args::try_parse_from([
-            "treer",
-            "network",
-            "host",
-            "create",
-            "api.internal",
-            "api-service",
-        ])
-        .expect("virtual host add should parse");
-        assert!(matches!(
-            add.command,
-            Some(Command::Network {
-                command: NetworkCommand::Host {
-                    command: VirtualHostCommand::Create {
-                        hostname,
-                        service,
-                    }
-                }
-            }) if hostname == "api.internal"
-                && service == "api-service"
-        ));
-
-        let delete = Args::try_parse_from(["treer", "network", "host", "delete", "api.internal"])
-            .expect("network host delete should parse");
-        assert!(matches!(
-            delete.command,
-            Some(Command::Network {
-                command: NetworkCommand::Host {
-                    command: VirtualHostCommand::Delete { hostname }
-                }
-            }) if hostname == "api.internal"
-        ));
+    fn network_publication_commands_are_not_exposed() {
+        for args in [
+            vec!["treer", "network", "service", "list"],
+            vec![
+                "treer", "network", "service", "create", "api", "--agent", "self", "--port", "8080",
+            ],
+            vec!["treer", "network", "host", "list"],
+            vec!["treer", "network", "host", "create", "api.internal", "api"],
+            vec!["treer", "network", "publish", "list"],
+        ] {
+            assert!(
+                Args::try_parse_from(args).is_err(),
+                "Agent CLI must not expose service publication commands"
+            );
+        }
     }
 
     #[test]
@@ -2516,95 +2212,6 @@ mod tests {
             .expect("read payload");
         assert_eq!(&response, b"pong");
         server.await.expect("SOCKS server task");
-    }
-
-    #[test]
-    fn publish_commands_parse() {
-        let args = Args::try_parse_from([
-            "treer",
-            "network",
-            "publish",
-            "create",
-            "api",
-            "--slug",
-            "issue-tracker",
-            "--access",
-            "workspace",
-        ])
-        .expect("publish create should parse");
-        assert!(matches!(
-            args.command,
-            Some(Command::Network {
-                command: NetworkCommand::Publish {
-                    command: PublishCommand::Create {
-                        service,
-                        slug: Some(slug),
-                        access: CliIngressAccess::Workspace,
-                    }
-                }
-            }) if service == "api" && slug == "issue-tracker"
-        ));
-
-        let args =
-            Args::try_parse_from(["treer", "network", "publish", "disable", "demo.apps.test"])
-                .expect("network publish disable should parse");
-        assert!(matches!(
-            args.command,
-            Some(Command::Network {
-                command: NetworkCommand::Publish {
-                    command: PublishCommand::Disable { target }
-                }
-            }) if target == "demo.apps.test"
-        ));
-    }
-
-    #[test]
-    fn service_commands_parse() {
-        let register = Args::try_parse_from([
-            "treer",
-            "network",
-            "service",
-            "create",
-            "api",
-            "--machine",
-            "builder",
-            "--port",
-            "8080",
-            "--protocol",
-            "http",
-        ])
-        .expect("service register should parse");
-        assert!(matches!(
-            register.command,
-            Some(Command::Network {
-                command: NetworkCommand::Service {
-                    command: ServiceCommand::Create {
-                        name,
-                        machine: Some(machine),
-                        port: 8080,
-                        protocol: CliServiceProtocol::Http,
-                        ..
-                    }
-                }
-            }) if name == "api" && machine == "builder"
-        ));
-
-        let agent_service = Args::try_parse_from([
-            "treer", "network", "service", "create", "api", "--agent", "self", "--port", "8080",
-        ])
-        .expect("Agent service should parse");
-        assert!(matches!(
-            agent_service.command,
-            Some(Command::Network {
-                command: NetworkCommand::Service {
-                    command: ServiceCommand::Create {
-                        machine: None,
-                        agent: Some(agent),
-                        ..
-                    }
-                }
-            }) if agent == "self"
-        ));
     }
 
     #[test]

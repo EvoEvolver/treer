@@ -3,8 +3,9 @@
 Soul is an experimental workspace-local file service. It stores an immutable
 tar bundle whose `manifest.json` maps environment variable names to files, and
 can create a command Agent that downloads the bundle before executing a
-command. It is an ordinary App: Treer does not persist, supervise, authenticate,
-or interpret Soul data.
+command. Deploy it as a Managed App so Treer persists and supervises its
+process, service, and virtual host. Treer does not authenticate or interpret
+Soul data.
 
 The service is intended for trusted workspaces. Any Agent that can reach the
 virtual host can upload or download every Soul and can ask the service Agent to
@@ -13,20 +14,17 @@ through public ingress.
 
 ## Start and register
 
-Run the server inside a dedicated managed Agent or another supervised process:
+Deploy the server from a managed Agent. The dedicated App runtime receives its
+own workload identity and private sandbox; Core owns the service and virtual
+host instead of allowing the calling Agent to register its own listener:
 
 ```bash
-SOUL_DATA_DIR="$HOME/.local/state/treer-soul-server" \
-SOUL_PUBLIC_URL=http://soul.internal \
-python3 apps/soul/soul.py
-```
-
-From the same managed Agent, register its private listener and workspace alias:
-
-```bash
-treer network service create soul-server --agent self --port 9420 --protocol http
-treer network host create soul.internal soul-server
-treer network service probe soul-server
+treer app create --machine self --name soul --cwd . --port 9420 \
+  --hostname soul.internal env -- \
+  SOUL_DATA_DIR=.treer/apps/soul \
+  SOUL_PUBLIC_URL=http://soul.internal \
+  python3 apps/soul/soul.py
+treer app show soul
 ```
 
 Install the client from any managed Agent in that workspace:

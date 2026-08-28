@@ -30,10 +30,10 @@ In concrete terms:
    acknowledgement and an ordered context DAG. Mail and Telegram are
    replaceable workspace Apps over public contracts rather than privileged
    Proxy features.
-5. Agents can register and maintain long-running machine services, expose
-   stable workspace aliases, and publish HTTP services — including ones that
-   live only inside a managed Agent's sandbox — through an optional
-   wildcard HTTPS ingress for humans and other Agents.
+5. Agents can deploy supervised HTTP Apps whose service and stable workspace
+   alias are owned by Core. Logged-in workspace users manage externally
+   supervised machine services and optional wildcard HTTPS ingress. Agents
+   cannot directly publish arbitrary listeners from their own sandbox.
 6. An Agent Interface Server can declare a browser UI path alongside its
    semantic capabilities. The control plane embeds that page in place of the
    Agent terminal, and transparently tunnels relative HTTP and WebSocket

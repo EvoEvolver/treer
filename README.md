@@ -600,15 +600,13 @@ even though Git does not honor `ALL_PROXY`. Other TCP clients can use the same
 stdio bridge as their proxy command: `treer network connect HOST PORT`. Native
 macOS currently uses this compatibility mode; use a Linux container when
 transparent capture is required.
-A transparent Agent can expose a namespace-local loopback listener by
-registering an Agent-scoped service
-(`treer network service create … --agent self`); the Controller reaches it
-through the sandbox's Unix bridge. A registered Agent Interface Server uses the
-same bridge directly; when its descriptor includes `ui_path`, the browser
-iframe reaches that path on the Interface port without a separate service
-record. Create the Agent with `--publish <port>` (`publish_ports`) only when a
-host process must dial `127.0.0.1:<port>` itself. That mapping is inbound
-host-loopback only, not a public internet listener.
+A transparent Agent cannot publish an arbitrary namespace-local listener. Use
+`treer app create` for a supervised HTTP App, or register an Agent Interface
+Server for a semantic Agent UI. AIS uses the sandbox's Unix bridge directly;
+when its descriptor includes `ui_path`, the browser iframe reaches that path on
+the Interface port without a service record. Operator-created Agent-scoped
+services use the same bridge. `publish_ports` remains an internal Managed App
+and runtime mechanism, not an Agent CLI capability.
 
 Managed agents reach the Controller's local API through the reserved TEST-NET-1
 address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
@@ -627,13 +625,12 @@ flow-control window, and terminal and relayed network frames share the same
 authenticated connection.
 
 Network access is allowed by default. A service is a durable record for either a
-long-running host-network process or a managed Agent's private loopback: machine,
-optional Agent, target host, target port, and TCP or HTTP protocol. Agent-scoped
-services always target loopback and cannot be moved to another Agent or machine.
+long-running host-network process or a managed runtime's private loopback:
+machine, optional runtime, target host, target port, and TCP or HTTP protocol.
 Virtual hosts are independent aliases that map any valid hostname to a service.
-Both are managed from the Network view. For example, registering an Agent's port
-`8080` as `api`, then mapping `api.internal` to that service, makes this work
-without publishing port 8080 on the host:
+Logged-in workspace users manage both from the Network view or authenticated
+public API. Managed Agents cannot mutate service, virtual-host, or ingress
+records. An existing alias such as `api.internal` remains directly usable:
 
 ```bash
 curl http://api.internal/
@@ -655,13 +652,13 @@ revisions on the same connection. The Proxy also reloads PostgreSQL and broadcas
 snapshots every five seconds, which repairs missed or out-of-band changes.
 
 HTTP services can also be published through wildcard HTTPS ingress. Configure
-one wildcard domain on the Proxy; creating an endpoint changes only PostgreSQL
-routing metadata and does not create another DNS record or TLS certificate:
+one wildcard domain on the Proxy; a logged-in workspace user creates the
+endpoint from the Network view or authenticated public API. This changes only
+PostgreSQL routing metadata and does not create another DNS record or TLS
+certificate:
 
 ```bash
 export TREER_INGRESS_PUBLIC_URL='https://apps.treer.ai/'
-treer network publish create api --slug issue-tracker --access public
-treer network publish list
 ```
 
 `public` leaves authentication to the application. `workspace` redirects human
@@ -700,27 +697,19 @@ Agent proxy URLs carry the agent ID through SOCKS5 authentication, so network
 policy requests already identify their originating agent; local machine shells
 fall back to a machine-level subject.
 
-Managed agents can control workspace discovery records through the local Agent
-Server without receiving Proxy credentials:
+Managed Agents cannot publish their sandbox through discovery records. The
+`treer network` command exposes only the stdio connection bridge:
 
 ```bash
-treer network service create api --agent self --port 8080 --protocol http
-treer network service probe api
-treer network host list
-treer network host create api.internal api
-treer network host delete api.internal
+treer network connect database.internal 5432
 ```
 
-The Agent Server forwards the caller identity under its machine credential, and
-the Proxy evaluates service and virtual-host actions independently. They
-currently inherit the allow-all default. `--agent self` registers a service on
-the current Agent's private loopback, including in Linux transparent-network
-mode; the Controller reaches it through an Agent-specific Unix bridge without
-publishing a host port. Omit `--agent` to register a machine-level service such
-as a systemd service or a Docker container with a published port. In
-`proxy-env` compatibility mode there is no per-Agent network namespace, so an
-Agent service falls back to machine loopback and its port must be unique on that
-machine.
+Use `treer app create` for a supervised HTTP process with a stable internal
+hostname. Core allocates its service and virtual host atomically and owns their
+lifecycle. Use `treer interface register` for an Agent UI. Proxy rejects direct
+Agent service, virtual-host, and ingress mutations with `managed_app_required`,
+including requests from an older CLI. Logged-in users retain direct network
+record management for operator-supervised machine services.
 
 ## Agent collaboration
 

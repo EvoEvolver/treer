@@ -108,95 +108,23 @@ treer app delete docs
 ```
 
 Use this only for a single-process HTTP App. It does not install dependencies,
-store secrets, migrate state, or isolate hostile code. Use ordinary service and
-virtual-host registration for externally supervised or non-HTTP processes.
+store secrets, migrate state, or isolate hostile code. Service, virtual-host,
+and ingress records are operator-owned. An Agent cannot create or mutate them,
+including through an older CLI. Use the browser control plane for externally
+supervised or non-HTTP processes.
 
-## Manage machine services and virtual hosts
+## Connect to an existing service
 
-Machine services are durable records for long-running processes. Host-network
-services outlive the managed Agent that registers them. Agent-scoped services
-target a managed Agent's private loopback and are deleted with that Agent.
-
-## Register machine services
-
-Register a service on the current Agent's machine, or select another workspace
-machine explicitly:
-
-```bash
-treer network service create api --port 8080 --protocol http
-treer network service create git --machine build-machine --port 9418 --protocol tcp
-treer network service list
-treer network service probe api
-```
-
-#### Agent-scoped: HTTP server inside an Agent sandbox
-
-If your service runs inside an Agent sandbox (its private network namespace),
-register it with `--agent`. Use `--agent self` when creating it from that
-Agent, no port forwarding or host-side helper needed:
-
-```bash
-treer network service create my-dashboard --agent self --port 8766 --protocol http
-treer network service probe my-dashboard
-```
-
-The Controller dials the Agent's private service socket directly. From the
-outside, an agent-scoped service behaves like a regular machine service:
-vhosts, `--service` references, probe, and publish all work the same. Agents in
-other namespaces reach it through the Controller instead of raw TCP.
-
-`--publish` is only for host processes that dial `127.0.0.1` themselves. Do
-not use it for the Treer iframe; an Agent Interface registration with
-`--ui-path` uses the Agent-scoped Unix bridge directly.
-
-Update a destination without changing its virtual hosts. Deleting a service
-also deletes aliases that reference it, but does not stop the external process:
-
-```bash
-treer network service update api --port 8081
-treer network service delete git
-```
-
-Virtual hosts are aliases for registered services. They let every process
-inside a managed Linux Agent reach a service by a stable hostname without
-publishing the destination machine's port. Records are exact; Treer does not
-derive aliases from machine names or reserve a hostname suffix.
-
-Inspect existing records before changing them:
-
-```bash
-treer network host list
-```
-
-Add a record using a service ID or unique service name:
-
-```bash
-treer network host create api.internal api
-treer network host create git.internal git
-```
-
-Managed Agents in compatibility networking mode automatically route native Git
-protocol remotes through Treer without resolving the virtual hostname locally:
-
-```bash
-git clone git://git.internal/project.git
-```
-
-Use the stdio bridge directly when another TCP client accepts a proxy command:
+Use an existing virtual hostname normally from a managed Agent. Use the stdio
+bridge when a TCP client accepts a proxy command:
 
 ```bash
 treer network connect database.internal 5432
 ```
 
-Delete only the named alias; this does not delete or stop its service:
-
-```bash
-treer network host delete api.internal
-```
-
-These commands operate only in `TREER_WORKSPACE_ID`. Service and virtual-host
-operations have separate policy actions. Changes take effect immediately for
-online Controllers; reconnect and periodic full snapshots provide recovery.
+`treer network` intentionally exposes no service, host, or publish mutation
+commands. To expose an HTTP process, deploy it with `treer app create`. To show
+an Agent-native UI, register an Agent Interface Server.
 
 ## Use an Agent Interface Server
 
@@ -248,41 +176,6 @@ stream-json, `apps/grok-ais` for Grok Build ACP, and `apps/cursor-ais` for
 Cursor ACP. Launch Cursor with `cursor-agent`, not `agent`. Each Agent is one
 thread/session. Built-in `--kind codex` and `--kind claude` stay on the terminal
 path and are not Interfaces.
-
-## Publish an HTTP service
-
-Publish a registered HTTP service through the Proxy's wildcard HTTPS domain.
-Any HTTP-registered service is publishable, including agent-scoped services
-backed by a managed Agent's private loopback:
-
-```bash
-treer network publish create my-dashboard --slug dashboard --access public
-treer network publish create api --slug issue-tracker --access public
-treer network publish list
-```
-
-`public` means Treer does not require an identity at the edge; the application
-can still use its own cookies, API keys, or `Authorization` header. Use
-`workspace` to admit organization members and managed Agents only:
-
-```bash
-treer network publish access issue-tracker-a81f.apps.example workspace
-TOKEN=$(treer token create api)
-curl -H "Treer-Authorization: Bearer $TOKEN" \
-  https://issue-tracker-a81f.apps.example/
-```
-
-Pause or remove an endpoint without stopping its machine service:
-
-```bash
-treer network publish disable issue-tracker-a81f.apps.example
-treer network publish enable issue-tracker-a81f.apps.example
-treer network publish delete issue-tracker-a81f.apps.example
-```
-
-An Agent may publish only services on its own machine. Publishing supports HTTP
-and WebSocket traffic; arbitrary TCP remains available only through workspace
-virtual hosts. Treer reserves `/.treer/` on every published hostname.
 
 ## Authenticate to an identity-aware service
 

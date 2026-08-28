@@ -3,8 +3,10 @@
 Treer supports two deployment forms. A Managed App is a single HTTP process
 created with `treer app create`; Treer persists its command, machine, service,
 and virtual host, and restores the process after exit or Controller reconnect.
-An externally managed App is started by an operator or another supervisor and
-registers an ordinary service. Neither form grants special trust to App code.
+An externally managed App is started by an operator or another supervisor; a
+logged-in workspace user then registers its ordinary service through the
+control plane. Managed Agents cannot register service, virtual-host, or ingress
+records directly. Neither form grants special trust to App code.
 
 Browser-facing Apps use the standard App OAuth endpoints and a short-lived,
 service-audience bearer token. Agent-facing Apps may use the local `treer` CLI
@@ -18,7 +20,7 @@ network access remain deployment concerns.
   a Pi Agent.
 - [`codex-ui`](codex-ui/README.md) is Treer's single-Agent browser interface for
   Codex.
-- [`soul`](soul/README.md) is an experimental Agent-scoped file server that
+- [`soul`](soul/README.md) is an experimental Managed App file server that
   uploads environment-bound state bundles and launches command Agents from them.
 - [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),

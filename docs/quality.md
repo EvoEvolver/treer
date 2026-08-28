@@ -66,7 +66,7 @@ node scripts/check-docs.mjs
 | Mail or Telegram | App unit tests, external API fixture, restart/migration, and frontend build when applicable |
 | Host/Controller lifecycle | `just service-canary` plus idempotency and process-survival tests |
 | Managed App lifecycle | Stable service/vhost transaction, direct runtime launch, reconnect/restart behavior, CLI parse, and browser workflow |
-| Network or ingress | Authentication/header, streaming, WebSocket, containment, and Canary coverage |
+| Network or ingress | Authentication/header, streaming, WebSocket, containment, Agent mutation denial, and Canary coverage |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
 | Documentation | `node scripts/check-docs.mjs` |
