@@ -4316,6 +4316,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "percent-encoding",
  "ratatui",
  "reqwest",

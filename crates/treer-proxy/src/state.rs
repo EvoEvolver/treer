@@ -33,6 +33,8 @@ const NETWORK_MAX_CHUNK: usize = 16 * 1024;
 pub enum SocketFrame {
     Text(String),
     Binary(#[serde(with = "serde_bytes")] Vec<u8>),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
     Close,
 }
 
@@ -2643,7 +2645,9 @@ mod tests {
         match frame {
             SocketFrame::Text(text) => text,
             SocketFrame::Binary(_) => panic!("expected text socket frame"),
-            SocketFrame::Close => panic!("expected text socket frame"),
+            SocketFrame::Ping(_) | SocketFrame::Pong(_) | SocketFrame::Close => {
+                panic!("expected text socket frame")
+            }
         }
     }
 
@@ -2653,7 +2657,9 @@ mod tests {
                 NetworkBinaryFrame::decode(&encoded).expect("decode network frame")
             }
             SocketFrame::Text(_) => panic!("expected binary network frame"),
-            SocketFrame::Close => panic!("expected binary network frame"),
+            SocketFrame::Ping(_) | SocketFrame::Pong(_) | SocketFrame::Close => {
+                panic!("expected binary network frame")
+            }
         }
     }
 
@@ -3261,6 +3267,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn original_controller_can_reclaim_after_the_replacement_disconnects() {
+        let state = AppState::new();
+        let server = test_server();
+        let first_connection = Uuid::new_v4();
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        state
+            .register_server_instance(
+                server.clone(),
+                first_connection,
+                "ctl_11111111111111111111111111111111".to_string(),
+                first_tx,
+            )
+            .await
+            .expect("register first controller");
+
+        let second_connection = Uuid::new_v4();
+        let (second_tx, _second_rx) = mpsc::unbounded_channel();
+        state
+            .register_server_instance(
+                server.clone(),
+                second_connection,
+                "ctl_22222222222222222222222222222222".to_string(),
+                second_tx,
+            )
+            .await
+            .expect("register replacement controller");
+        assert!(first_rx.recv().await.is_some());
+        assert_eq!(first_rx.recv().await, Some(SocketFrame::Close));
+
+        state
+            .disconnect_server("alpha", "server", second_connection)
+            .await;
+
+        let reclaim_connection = Uuid::new_v4();
+        let (reclaim_tx, _reclaim_rx) = mpsc::unbounded_channel();
+        state
+            .register_server_instance(
+                server,
+                reclaim_connection,
+                "ctl_11111111111111111111111111111111".to_string(),
+                reclaim_tx,
+            )
+            .await
+            .expect("original controller reclaims the machine");
+        state
+            .heartbeat("alpha", "server", reclaim_connection)
+            .await
+            .expect("reclaimed connection owns the machine");
+    }
+
+    #[tokio::test]
     async fn machine_shutdown_uses_the_confirmed_command_channel() {
         let state = AppState::new();
         let server = test_server();
@@ -3735,7 +3792,9 @@ mod tests {
                 TerminalBinaryFrame::decode(&encoded).expect("decode terminal input")
             }
             SocketFrame::Text(_) => panic!("expected binary terminal input"),
-            SocketFrame::Close => panic!("expected binary terminal input"),
+            SocketFrame::Ping(_) | SocketFrame::Pong(_) | SocketFrame::Close => {
+                panic!("expected binary terminal input")
+            }
         };
         assert_eq!(input.kind, TerminalBinaryKind::Input);
         assert_eq!(input.session_id, session_id);

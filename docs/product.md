@@ -1,7 +1,7 @@
 # Product direction
 
 - Status: maintained
-- Last source review: 2026-08-21 at `239f9c6`
+- Last source review: 2026-08-28 at `feat/machine-connection-ux`
 
 ## Purpose
 
@@ -39,7 +39,11 @@ In concrete terms:
    Agent terminal, and transparently tunnels relative HTTP and WebSocket
    traffic to the Agent-private Interface port.
 7. Machines connect outward to the Proxy; local Agent Server and service ports
-   do not need to be publicly exposed.
+   do not need to be publicly exposed. A workspace member can tell whether a
+   machine is Online, local-only, fenced as a duplicate, or stopped, and can
+   copy a recovery command that includes the real workspace ID. Lid-close
+   sleep and Proxy bounces reconnect without re-enrollment. One hostname in
+   one workspace is one supervised Host.
 8. The central Proxy is open source and can be privately deployed.
 9. Organization owners and administrators can review management activity and
    the current workspace's recent relayed machine traffic in the web app.

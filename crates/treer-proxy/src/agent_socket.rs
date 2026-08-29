@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, State, WebSocketUpgrade};
@@ -7,6 +8,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};
 use treer_protocol::{
     AgentServerMessage, NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest,
@@ -22,6 +24,13 @@ use crate::state::{AppState, SocketFrame, TerminalReadyPayload};
 struct PendingTerminalReady {
     stream_epoch: String,
     gap: bool,
+}
+
+const WS_PING_INTERVAL: Duration = Duration::from_secs(20);
+const WS_DEAD_INTERVAL: Duration = Duration::from_secs(60);
+
+fn websocket_peer_is_dead(last_activity: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_activity) >= WS_DEAD_INTERVAL
 }
 
 pub async fn upgrade(
@@ -52,6 +61,8 @@ async fn handle(
             let message = match frame {
                 SocketFrame::Text(encoded) => Message::Text(encoded.into()),
                 SocketFrame::Binary(encoded) => Message::Binary(encoded.into()),
+                SocketFrame::Ping(payload) => Message::Ping(payload.into()),
+                SocketFrame::Pong(payload) => Message::Pong(payload.into()),
                 SocketFrame::Close => Message::Close(None),
             };
             if socket_tx.send(message).await.is_err() {
@@ -62,9 +73,31 @@ async fn handle(
 
     let mut identity: Option<(String, String)> = None;
     let mut pending_terminal_ready: HashMap<String, PendingTerminalReady> = HashMap::new();
-    while let Some(message) = socket_rx.next().await {
-        let Ok(message) = message else {
-            break;
+    let mut last_activity = Instant::now();
+    let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    ping_interval.tick().await;
+    loop {
+        let message = tokio::select! {
+            message = socket_rx.next() => {
+                let Some(message) = message else {
+                    break;
+                };
+                let Ok(message) = message else {
+                    break;
+                };
+                last_activity = Instant::now();
+                message
+            }
+            _ = ping_interval.tick() => {
+                if websocket_peer_is_dead(last_activity, Instant::now()) {
+                    debug!("closing silent machine websocket");
+                    let _ = outgoing_tx.send(SocketFrame::Close);
+                    break;
+                }
+                let _ = outgoing_tx.send(SocketFrame::Ping(Vec::new()));
+                continue;
+            }
         };
         let Message::Text(text) = message else {
             match message {
@@ -157,6 +190,10 @@ async fn handle(
                         send_error(&outgoing_tx, error);
                     }
                 }
+                Message::Ping(payload) => {
+                    let _ = outgoing_tx.send(SocketFrame::Pong(payload.to_vec()));
+                }
+                Message::Pong(_) => {}
                 Message::Close(_) => break,
                 _ => {}
             }
@@ -650,6 +687,17 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+
+    #[test]
+    fn silent_sockets_are_dead_after_the_idle_interval() {
+        let now = Instant::now();
+        assert!(!websocket_peer_is_dead(now, now));
+        assert!(!websocket_peer_is_dead(
+            now,
+            now + WS_DEAD_INTERVAL - Duration::from_secs(1)
+        ));
+        assert!(websocket_peer_is_dead(now, now + WS_DEAD_INTERVAL));
+    }
 
     #[test]
     fn virtual_host_replaces_destination_host_and_optional_port() {

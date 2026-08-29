@@ -1,7 +1,8 @@
 # Machine connection UX execution plan
 
-- Status: active
+- Status: completed
 - Started: 2026-08-28
+- Completed: 2026-08-28
 - Branch / worktree: `feat/machine-connection-ux` at `/Users/mac/dev/treer-machine-connection`
 
 Maintained current-state documents remain authoritative until each phase
@@ -256,11 +257,11 @@ and no phase checkbox below remains open.
 Use this as the implementation order. Check a box only after that phase's
 **Done when** is true in source and tests.
 
-- [ ] Phase 1 — Truthful local status and copyable recovery
-- [ ] Phase 2 — Reconnect through sleep, Proxy bounce, and duplicate
-- [ ] Phase 3 — One supervised Host per hostname and workspace
-- [ ] Phase 4 — `proxy-env` local classification / internet bypass
-- [ ] Phase 5 — Maintained docs and `just check`
+- [x] Phase 1 — Truthful local status and copyable recovery
+- [x] Phase 2 — Reconnect through sleep, Proxy bounce, and duplicate
+- [x] Phase 3 — One supervised Host per hostname and workspace
+- [x] Phase 4 — `proxy-env` local classification / internet bypass
+- [x] Phase 5 — Maintained docs and `just check`
 
 ## File map (expected)
 
@@ -290,5 +291,30 @@ gate.
 
 ## Result
 
-_Empty until phase 5. Record what shipped, remaining manual checks, and the
-commit that closed the plan._
+Shipped on `feat/machine-connection-ux`:
+
+- Local `/api/health` publishes `proxy_connected`, `connection_state`
+  (`online` / `local` / `fenced`), and last Proxy error. `service start`
+  waits on that lease, not `/api/agents`.
+- `treer-agent-server service` no longer implies workspace `default`.
+  Status with no `--workspace` lists installs; other commands use a unique
+  install or print the table and exit 2. Offline web cards copy
+  `restart-controller` / `start` with the real `ws_…` ID.
+- `duplicate_machine_connection` and `stale_connection` stay in the
+  reconnect loop. Proxy WebSocket ping ≤ 20s, dead ≤ 60s. Unix `SIGCONT`
+  aborts a stale socket. Newest authenticated connection owns the
+  `server_id`.
+- `connect` reuses the installed hostname+workspace `server_id`. A second
+  Controller for a live listen socket is a hard error with pid/address.
+  Hostname collisions in the webpage show `srv_` suffix and listen port.
+- `proxy-env` dials non-virtual-host destinations locally without Open
+  RPC. `reset_all` only resets relayed streams.
+
+Remaining manual check: macOS lid close / open on a LaunchAgent Host, confirm
+the webpage returns Online without `service restart`, and
+`curl -x $HTTPS_PROXY https://api.github.com/user` still returns HTTP while
+the Controller WebSocket is stopped.
+
+PostgreSQL-backed Proxy tests require `TREER_TEST_DATABASE_URL` or Docker;
+when those are unavailable, run the focused crate tests and record the
+skipped gate.

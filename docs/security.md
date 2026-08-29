@@ -50,6 +50,13 @@ operations to callers already authorized by Proxy Policy. Interface ports stay
 on Agent-private loopback; the Controller is the external routing and policy
 boundary.
 
+`proxy-env` is not a full traffic intercept. The injected HTTP CONNECT and
+SOCKS listeners classify destinations locally: workspace virtual-host names
+and the reserved local-API address stay on the Treer path; ordinary internet
+destinations are dialed on the machine and never wait on the Proxy. Linux
+`transparent` mode still captures all Agent TCP through the TUN. Do not describe
+macOS `proxy-env` as a forced proxy for GitHub or other public sites.
+
 ## Credentials
 
 | Credential | Scope and limit |

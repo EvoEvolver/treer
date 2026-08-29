@@ -23,6 +23,12 @@ struct Health {
     workspace_id: String,
     server_id: String,
     controller_epoch: String,
+    #[serde(default)]
+    proxy_connected: bool,
+    #[serde(default)]
+    connection_state: Option<String>,
+    #[serde(default)]
+    proxy_last_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +138,7 @@ impl App {
                         if health.workspace_id == self.workspace
                             && health.server_id == config.server_id =>
                     {
+                        self.proxy_reachable = health.proxy_connected;
                         self.health = Some(health);
                     }
                     Ok(_) => {
@@ -200,30 +207,9 @@ impl App {
                 }
             };
 
-            let proxy_agents_url = format!("http://{address}/api/agents");
-            let proxy_result = self
-                .client
-                .get(proxy_agents_url)
-                .header(OPERATOR_CREDENTIAL_HEADER, &config.operator_credential)
-                .send()
-                .await;
-            self.apply_proxy_probe(proxy_result, local_agents_available)
-                .await;
-        }
-
-        self.clamp_selection();
-        self.last_refresh = Some(Instant::now());
-    }
-
-    async fn apply_proxy_probe(
-        &mut self,
-        result: Result<reqwest::Response, reqwest::Error>,
-        local_agents_available: bool,
-    ) {
-        match result {
-            Ok(response) => match response.error_for_status() {
-                Ok(_) => {
-                    self.proxy_reachable = true;
+            if let Some(health) = &self.health {
+                self.proxy_reachable = health.proxy_connected;
+                if health.proxy_connected {
                     if local_agents_available {
                         self.message = if let Some(reason) = &self.service_fallback_reason {
                             format!(
@@ -234,23 +220,21 @@ impl App {
                                 .to_string()
                         };
                     }
-                }
-                Err(error) => {
-                    self.proxy_reachable = false;
-                    if local_agents_available {
-                        self.mark_proxy_unreachable(format!("Proxy request failed: {error}"));
-                    }
-                }
-            },
-            Err(error) => {
-                self.proxy_reachable = false;
-                if local_agents_available {
-                    self.mark_proxy_unreachable(format!(
-                        "Proxy is not reachable through Controller: {error}"
-                    ));
+                } else if local_agents_available {
+                    let detail = match health.connection_state.as_deref() {
+                        Some("fenced") => "Proxy fenced this Controller as a duplicate".to_string(),
+                        _ => health
+                            .proxy_last_error
+                            .clone()
+                            .unwrap_or_else(|| "Proxy lease is not current".to_string()),
+                    };
+                    self.mark_proxy_unreachable(detail);
                 }
             }
         }
+
+        self.clamp_selection();
+        self.last_refresh = Some(Instant::now());
     }
 
     fn mark_proxy_unreachable(&mut self, detail: String) {

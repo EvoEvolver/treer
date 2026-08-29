@@ -140,24 +140,37 @@ the persisted service-manager choice and fallback reason keep later lifecycle
 commands and machine diagnostics consistent. The Controller publishes that
 state as an optional machine snapshot field so older Controllers remain valid
 during rolling upgrades. TUI reads the same persisted state locally.
-Startup is complete only when the Controller identity endpoint and a
-Proxy-backed API request both succeed. Because service configuration is saved
-before native registration, `service repair` can reconstruct a partial
-installation without another enrollment key. Manager changes remove the old
-native registration first and reject transitions that would leave a running
-Host owned by the wrong supervisor.
+Startup is complete only when the Controller identity endpoint reports
+`proxy_connected`. Local `/api/agents` success is not a Proxy lease. Because
+service configuration is saved before native registration, `service repair` can
+reconstruct a partial installation without another enrollment key. Manager
+changes remove the old native registration first and reject transitions that
+would leave a running Host owned by the wrong supervisor. `connect` reuses the
+existing `server_id` for an already-installed hostname and workspace; a second
+Controller for that `server_id` fails if the listen socket is already live.
+Service commands without `--workspace` list local installs or, when exactly one
+exists, use it. They no longer imply the workspace name `default`.
 
 Proxy replicas fence machine connections through a distributed ownership
-lease. An explicit duplicate-Controller error makes the older Controller stop
-reconnecting, while a stale or expired lease makes it reconnect and claim a
-fresh connection. A stale lease alone is not evidence that the machine
-credential is running on another host.
+lease. The newest authenticated connection owns the `server_id` and the previous
+socket is closed with `duplicate_machine_connection`. Duplicate and
+`stale_connection` are retryable: the loser stays in the reconnect loop with
+capped exponential backoff until it is owner again, the credential is revoked,
+or the server is deleted. The Proxy sends WebSocket pings at most every 20
+seconds and closes a silent socket within 60 seconds so a sleeping Mac is not
+advertised Online. On Unix `SIGCONT` (lid open / thaw), the Controller aborts a
+socket whose last activity is older than that dead interval and reconnects.
 
 Linux managed Agents run in a private network namespace. Outbound TCP is
 captured onto the Controller SOCKS path. On macOS and other `proxy-env`
 machines the same loopback listener also accepts HTTP CONNECT, and the
 Controller injects `HTTPS_PROXY` so clients without SOCKS support can use that
 path for HTTPS while plain HTTP continues through `ALL_PROXY` as SOCKS5h.
+`proxy-env` classifies locally from the virtual-host snapshot: destinations in
+that snapshot, or the reserved local-API address `192.0.2.1`, still take the
+Treer Open/relay path; every other destination is dialed on this machine
+immediately and does not wait on the Proxy socket. Disconnect resets relayed
+streams only.
 Operator-managed Agent-scoped services use a Unix bridge (`sandbox-exec
 --service-socket`) so the Controller can reach a namespace-local loopback
 listener without publishing a host TCP port. Agents cannot create those

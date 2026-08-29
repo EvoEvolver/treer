@@ -359,6 +359,25 @@ test("clicking a machine opens an overview with identity, agents, services, virt
   await expect(page.getByRole("heading", { name: "workstation" })).toBeHidden()
 })
 
+test("offline machines show copyable recovery commands with the workspace id", async ({ page }) => {
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
+    revision: 1,
+    workspace,
+    servers: [
+      { ...machineA, status: "offline" },
+      { ...machineB, hostname: "workstation.lan", name: "workstation", status: "offline", labels: { "treer.listen": "127.0.0.1:8794" } },
+    ],
+    agents: [agentA, agentB],
+  }))
+  await page.goto("/")
+  await machinesTab(page).click()
+  await expect(page.getByText("workstation · srv-b :8794")).toBeVisible()
+  await page.getByRole("button", { name: /^workstation / }).first().click()
+  await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Copy restart-controller" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Copy start" })).toBeVisible()
+})
+
 test("machine overview only shows agents for the selected machine", async ({ page }) => {
   await page.goto("/")
   await machinesTab(page).click()

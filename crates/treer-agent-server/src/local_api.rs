@@ -251,6 +251,7 @@ pub fn router(state: LocalApiState) -> Router {
 }
 
 async fn health(State(state): State<LocalApiState>) -> Json<Value> {
+    let proxy = state.runtime.proxy_link_status();
     Json(json!({
         "status": "ok",
         "service": "treer-agent-server",
@@ -262,6 +263,10 @@ async fn health(State(state): State<LocalApiState>) -> Json<Value> {
             git_commit: treer_build_info::GIT_COMMIT.to_string(),
         },
         "host_build": state.host_build,
+        "proxy_connected": proxy.connected,
+        "proxy_last_error": proxy.last_error,
+        "proxy_last_error_code": proxy.last_error_code,
+        "connection_state": proxy.connection_state(),
     }))
 }
 

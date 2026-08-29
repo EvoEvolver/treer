@@ -76,8 +76,8 @@ struct UpdateArgs {
 
 #[derive(Debug, ClapArgs)]
 struct ServiceArgs {
-    #[arg(long, default_value = "default", global = true)]
-    workspace: String,
+    #[arg(long, global = true)]
+    workspace: Option<String>,
     #[command(subcommand)]
     command: ServiceCommand,
 }
@@ -140,8 +140,8 @@ struct ConnectArgs {
 struct ServerArgs {
     #[arg(long, env = "TREER_PROXY_URL", default_value = "http://127.0.0.1:8787")]
     proxy: Url,
-    #[arg(long, env = "TREER_WORKSPACE_ID", default_value = "default")]
-    workspace: String,
+    #[arg(long, env = "TREER_WORKSPACE_ID")]
+    workspace: Option<String>,
     #[arg(long, env = "TREER_SERVER_ID")]
     server_id: Option<String>,
     #[arg(long, env = "TREER_MACHINE_TOKEN")]
@@ -175,7 +175,12 @@ async fn main() -> Result<()> {
         if args.command.is_some() {
             anyhow::bail!("--tui cannot be combined with a subcommand");
         }
-        return tui::run(&args.server.workspace).await;
+        let workspace = args
+            .server
+            .workspace
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        return tui::run(&workspace).await;
     }
     match args.command {
         None => run_server(args.server).await,
@@ -187,7 +192,7 @@ async fn main() -> Result<()> {
             let supervision = Some(config.supervision());
             run_server(ServerArgs {
                 proxy: Url::parse(&config.proxy).context("invalid proxy URL in service config")?,
-                workspace: config.workspace,
+                workspace: Some(config.workspace),
                 server_id: Some(config.server_id),
                 machine_token: Some(config.machine_token),
                 operator_credential: Some(config.operator_credential),
@@ -214,8 +219,14 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_server(args: ServerArgs) -> Result<()> {
+async fn run_server(mut args: ServerArgs) -> Result<()> {
     require_loopback_listen(args.listen)?;
+    args.workspace = Some(
+        args.workspace
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string()),
+    );
+    let workspace = args.workspace.clone().expect("workspace defaulted");
     let root = std::fs::canonicalize(&args.root)
         .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
     let server_id = match args.server_id {
@@ -223,6 +234,19 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         None => load_or_create_server_id(&root)?,
     };
     let hostname = service::current_hostname().unwrap_or_else(|_| server_id.clone());
+    if let Some(occupant) = service::occupying_controller(args.listen).await {
+        if occupant.server_id == server_id {
+            let pid = occupant
+                .pid
+                .map(|pid| format!(" (pid {pid})"))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "Controller for {} is already listening on {}{pid}",
+                occupant.server_id,
+                args.listen
+            );
+        }
+    }
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("failed to bind local API at {}", args.listen))?;
@@ -246,7 +270,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         sync,
         host_events,
         controller::ControllerConfig {
-            workspace_id: args.workspace.clone(),
+            workspace_id: workspace.clone(),
             server_id: server_id.clone(),
             agent_server_url,
             network_proxy_url: network.proxy_url(),
@@ -259,15 +283,18 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     runtime.restore_cached_interfaces().await;
     let proxy_http = normalize_http_url(args.proxy.clone())?;
     let proxy_ws = agent_websocket_url(args.proxy)?;
-    let server = proxy::server_info(
+    let mut server = proxy::server_info(
         server_id.clone(),
-        args.workspace.clone(),
+        workspace.clone(),
         hostname,
         root.display().to_string(),
         host_build.clone(),
         runtime.available_agent_kinds(),
         args.supervision,
     );
+    server
+        .labels
+        .insert("treer.listen".to_string(), listen_address.to_string());
 
     let proxy_client = proxy::ProxyClient::new(
         proxy_ws,
@@ -280,7 +307,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
 
     let local_state = local_api::LocalApiState::new(
         proxy_http,
-        args.workspace.clone(),
+        workspace.clone(),
         server_id.clone(),
         args.machine_token,
         args.operator_credential,
@@ -292,7 +319,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
         address = %listen_address,
         network_proxy = %network.listen_address(),
         %server_id,
-        workspace = %args.workspace,
+        %workspace,
         root = %root.display(),
         "treer agent server listening"
     );
@@ -337,21 +364,42 @@ fn transparent_network_executable() -> Result<Option<PathBuf>> {
 }
 
 async fn run_service_command(args: ServiceArgs) -> Result<()> {
-    match args.command {
-        ServiceCommand::Start => {
-            let activation = service::start_and_wait(&args.workspace).await?;
-            service::wait_for_foreground(activation).await
+    let list_when_omitted = matches!(args.command, ServiceCommand::Status);
+    let target =
+        match service::resolve_service_command(args.workspace.as_deref(), list_when_omitted) {
+            Ok(target) => target,
+            Err(error) if error.downcast_ref::<service::AmbiguousServices>().is_some() => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+            Err(error) => return Err(error),
+        };
+    match (args.command, target) {
+        (ServiceCommand::Status, service::ServiceCommandTarget::Inventory(services)) => {
+            service::print_installed_services(&services).await
         }
-        ServiceCommand::Stop => service::stop(&args.workspace),
-        ServiceCommand::Restart => service::restart(&args.workspace),
-        ServiceCommand::RestartController => service::restart_controller(&args.workspace),
-        ServiceCommand::Repair { service_mode } => {
-            let activation = service::repair_and_wait(&args.workspace, service_mode).await?;
-            service::wait_for_foreground(activation).await
+        (command, service::ServiceCommandTarget::Install(config)) => {
+            let workspace = config.workspace;
+            match command {
+                ServiceCommand::Start => {
+                    let activation = service::start_and_wait(&workspace).await?;
+                    service::wait_for_foreground(activation).await
+                }
+                ServiceCommand::Stop => service::stop(&workspace),
+                ServiceCommand::Restart => service::restart(&workspace),
+                ServiceCommand::RestartController => service::restart_controller(&workspace),
+                ServiceCommand::Repair { service_mode } => {
+                    let activation = service::repair_and_wait(&workspace, service_mode).await?;
+                    service::wait_for_foreground(activation).await
+                }
+                ServiceCommand::Status => service::status(&workspace),
+                ServiceCommand::Logs { lines, follow } => service::logs(&workspace, lines, follow),
+                ServiceCommand::Uninstall => service::uninstall(&workspace),
+            }
         }
-        ServiceCommand::Status => service::status(&args.workspace),
-        ServiceCommand::Logs { lines, follow } => service::logs(&args.workspace, lines, follow),
-        ServiceCommand::Uninstall => service::uninstall(&args.workspace),
+        (_, service::ServiceCommandTarget::Inventory(_)) => {
+            anyhow::bail!("internal error: service inventory is only valid for status")
+        }
     }
 }
 
@@ -688,7 +736,7 @@ mod tests {
                 .expect("parse TUI mode");
         assert!(args.tui);
         assert!(args.command.is_none());
-        assert_eq!(args.server.workspace, "workspace-a");
+        assert_eq!(args.server.workspace.as_deref(), Some("workspace-a"));
     }
 
     #[test]
@@ -761,8 +809,22 @@ mod tests {
         else {
             panic!("expected service repair command");
         };
-        assert_eq!(workspace, "workspace-a");
+        assert_eq!(workspace.as_deref(), Some("workspace-a"));
         assert_eq!(service_mode, service::ServiceMode::Systemd);
+    }
+
+    #[test]
+    fn service_commands_do_not_imply_a_default_workspace() {
+        let args = Args::try_parse_from(["treer-agent-server", "service", "status"])
+            .expect("parse service status");
+        let Some(Command::Service(ServiceArgs {
+            workspace,
+            command: ServiceCommand::Status,
+        })) = args.command
+        else {
+            panic!("expected service status command");
+        };
+        assert_eq!(workspace, None);
     }
 
     fn setup_args(name: Option<&str>, non_interactive: bool, accept_risk: bool) -> ConnectArgs {

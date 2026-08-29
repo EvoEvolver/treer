@@ -263,6 +263,18 @@ Core Message routes have an operator-controlled rollout gate and default off. A
 `core_messages_disabled` result means the deployment is not enabled for the
 workflow; report it instead of inventing another integration path.
 
+If a machine shows Offline while Agents still exist, do not re-enroll it.
+Recover on that host with the real workspace ID (`ws_…` from `treer status` or
+the copied web command). `service status` with no `--workspace` lists local
+installs. `service start` is ready only when the Controller reports
+`proxy_connected`; a live loopback API is not a Proxy lease. Duplicate fencing
+and lid-close sleep reconnect automatically; if they do not, copy:
+
+```bash
+treer-agent-server service --workspace "$TREER_WORKSPACE_ID" restart-controller
+treer-agent-server service --workspace "$TREER_WORKSPACE_ID" start
+```
+
 Delete a machine only when it and all of its agents should be removed from the
 workspace. This revokes its credential but does not uninstall the service on
 that machine:
