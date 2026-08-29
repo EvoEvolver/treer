@@ -35,6 +35,7 @@ export interface Machine {
   supervision?: MachineSupervision
   status: string
   available_agents?: string[]
+  labels?: Record<string, string>
 }
 
 export interface Agent {

@@ -29,10 +29,14 @@ matching the question; follow its source links for implementation detail.
 Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
-There are no active repository-wide execution plans at this revision.
+
+_None._
 
 ## Historical material
 
+- The completed [machine connection UX plan](research/2026-08-28-machine-connection-ux-plan.md)
+  records truthful Online/local/fenced/stopped status, sleep/wake reconnect,
+  one Host per hostname+workspace, and `proxy-env` internet bypass.
 - The proposed [Agent communication policy design](research/2026-08-19-agent-policy-design.md)
   defines the identity propagation, policy document, cache, and rollout needed
   to govern Agent discovery, mail, prompt injection, and terminal control.

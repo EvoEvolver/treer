@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context};
 use base64::Engine;
@@ -38,6 +38,7 @@ struct NetworkInner {
     outgoing: mpsc::Sender<NetworkBinaryFrame>,
     outgoing_rx: Mutex<mpsc::Receiver<NetworkBinaryFrame>>,
     streams: Mutex<HashMap<String, mpsc::Sender<NetworkBinaryFrame>>>,
+    virtual_hosts: RwLock<HashSet<String>>,
     transparent_networking: bool,
 }
 
@@ -56,6 +57,7 @@ impl NetworkRuntime {
                 outgoing,
                 outgoing_rx: Mutex::new(outgoing_rx),
                 streams: Mutex::new(HashMap::new()),
+                virtual_hosts: RwLock::new(HashSet::new()),
                 transparent_networking,
             }),
         };
@@ -111,6 +113,36 @@ impl NetworkRuntime {
             .await?;
         }
         Ok(())
+    }
+
+    pub fn set_virtual_hostnames(&self, hosts: impl IntoIterator<Item = impl AsRef<str>>) {
+        let mut virtual_hosts = self
+            .inner
+            .virtual_hosts
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        virtual_hosts.clear();
+        virtual_hosts.extend(
+            hosts
+                .into_iter()
+                .map(|host| normalize_hostname(host.as_ref())),
+        );
+    }
+
+    pub fn clear_virtual_hostnames(&self) {
+        self.inner
+            .virtual_hosts
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
+    fn is_virtual_host(&self, host: &str) -> bool {
+        self.inner
+            .virtual_hosts
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&normalize_hostname(host))
     }
 
     pub async fn reset_all(&self) {
@@ -191,6 +223,19 @@ impl NetworkRuntime {
             tokio::spawn(async move {
                 if let Err(error) = bridge_local_api(socket, local_api_address, protocol).await {
                     debug!(%error, "local agent API stream closed");
+                }
+            });
+            return;
+        }
+        if !self.inner.transparent_networking
+            && !self.is_virtual_host(&route.host)
+            && !self.is_virtual_host(&route.destination)
+        {
+            let host = route.host.clone();
+            let port = route.port;
+            tokio::spawn(async move {
+                if let Err(error) = bridge_internet_direct(socket, host, port, protocol).await {
+                    debug!(%error, "direct internet stream closed");
                 }
             });
             return;
@@ -554,6 +599,31 @@ fn parse_proxy_basic_identity(value: &str) -> anyhow::Result<String> {
     Ok(user.to_string())
 }
 
+fn normalize_hostname(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+async fn bridge_internet_direct(
+    mut socket: TcpStream,
+    host: String,
+    port: u16,
+    protocol: ClientProtocol,
+) -> anyhow::Result<()> {
+    let mut destination = match TcpStream::connect((host.as_str(), port)).await {
+        Ok(destination) => destination,
+        Err(error) => {
+            write_proxy_failure(&mut socket, protocol).await?;
+            return Err(error)
+                .with_context(|| format!("failed to connect directly to {host}:{port}"));
+        }
+    };
+    write_proxy_success(&mut socket, protocol).await?;
+    tokio::io::copy_bidirectional(&mut socket, &mut destination)
+        .await
+        .context("direct internet stream failed")?;
+    Ok(())
+}
+
 fn parse_route(domain: &str, port: u16) -> anyhow::Result<SocksRoute> {
     let route = domain.trim_end_matches('.').to_ascii_lowercase();
     if route.is_empty() || route.len() > 253 {
@@ -905,6 +975,7 @@ mod tests {
         let runtime = NetworkRuntime::bind_near(api_address, false)
             .await
             .expect("bind network runtime");
+        runtime.set_virtual_hostnames(["direct.test"]);
         let mut client = TcpStream::connect(runtime.listen_address())
             .await
             .expect("connect HTTP proxy");
@@ -1040,6 +1111,7 @@ mod tests {
         let runtime = NetworkRuntime::bind_near(api_address, false)
             .await
             .expect("bind network runtime");
+        runtime.set_virtual_hostnames(["direct.test"]);
         let mut client = TcpStream::connect(runtime.listen_address())
             .await
             .expect("connect SOCKS client");
@@ -1101,6 +1173,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_host_dials_locally_without_proxy_open() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind target server");
+        let target_port = target.local_addr().expect("target address").port();
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.expect("accept target connection");
+            let mut request = [0_u8; 18];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read target request");
+            assert_eq!(&request, b"GET / HTTP/1.0\r\n\r\n");
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("write target response");
+        });
+
+        let api_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reserve API port");
+        let api_address = api_reservation.local_addr().expect("API address");
+        drop(api_reservation);
+        let runtime = NetworkRuntime::bind_near(api_address, false)
+            .await
+            .expect("bind network runtime");
+        let mut client = TcpStream::connect(runtime.listen_address())
+            .await
+            .expect("connect HTTP proxy");
+        let identity = base64::engine::general_purpose::STANDARD.encode("agent-a:treer");
+        client
+            .write_all(
+                format!(
+                    "CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nProxy-Authorization: Basic {identity}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("HTTP CONNECT request");
+
+        let mut established = [0_u8; 39];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut established))
+            .await
+            .expect("HTTP CONNECT reply timeout")
+            .expect("HTTP CONNECT reply");
+        assert_eq!(&established, b"HTTP/1.1 200 Connection Established\r\n\r\n");
+        client
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .await
+            .expect("write HTTP request");
+        client.shutdown().await.expect("half-close HTTP request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .expect("HTTP response timeout")
+            .expect("read HTTP response");
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), runtime.next_outgoing())
+                .await
+                .is_err(),
+            "public internet must not wait on Proxy Open frames"
+        );
+        runtime.reset_all().await;
+        target_task.await.expect("target task");
+    }
+
+    #[tokio::test]
+    async fn virtual_host_still_sends_open_when_present_in_the_snapshot() {
+        let api_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reserve API port");
+        let api_address = api_reservation.local_addr().expect("API address");
+        drop(api_reservation);
+        let runtime = NetworkRuntime::bind_near(api_address, false)
+            .await
+            .expect("bind network runtime");
+        runtime.set_virtual_hostnames(["api.internal"]);
+        let mut client = TcpStream::connect(runtime.listen_address())
+            .await
+            .expect("connect HTTP proxy");
+        let identity = base64::engine::general_purpose::STANDARD.encode("agent-a:treer");
+        client
+            .write_all(
+                format!(
+                    "CONNECT api.internal:80 HTTP/1.1\r\nProxy-Authorization: Basic {identity}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("HTTP CONNECT request");
+        let source_open = next_frame(&runtime).await;
+        assert_eq!(source_open.kind, NetworkBinaryKind::Open);
+        let open = serde_json::from_slice::<NetworkOpenRequest>(&source_open.payload)
+            .expect("decode network open");
+        assert_eq!(open.destination, "api.internal");
+    }
+
+    #[tokio::test]
+    async fn reset_all_does_not_kill_direct_internet_streams() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind target server");
+        let target_port = target.local_addr().expect("target address").port();
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.expect("accept target connection");
+            let mut request = [0_u8; 18];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read target request");
+            assert_eq!(&request, b"GET / HTTP/1.0\r\n\r\n");
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("write target response");
+        });
+
+        let api_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reserve API port");
+        let api_address = api_reservation.local_addr().expect("API address");
+        drop(api_reservation);
+        let runtime = NetworkRuntime::bind_near(api_address, false)
+            .await
+            .expect("bind network runtime");
+        let mut client = TcpStream::connect(runtime.listen_address())
+            .await
+            .expect("connect HTTP proxy");
+        let identity = base64::engine::general_purpose::STANDARD.encode("agent-a:treer");
+        client
+            .write_all(
+                format!(
+                    "CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nProxy-Authorization: Basic {identity}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("HTTP CONNECT request");
+        let mut established = [0_u8; 39];
+        client
+            .read_exact(&mut established)
+            .await
+            .expect("HTTP CONNECT reply");
+        runtime.reset_all().await;
+        client
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .await
+            .expect("write HTTP request");
+        client.shutdown().await.expect("half-close HTTP request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .expect("HTTP response timeout")
+            .expect("read HTTP response");
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        target_task.await.expect("target task");
+    }
+
+    #[tokio::test]
     async fn distinct_leg_ids_support_same_machine_tcp_round_trip() {
         let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1128,6 +1361,7 @@ mod tests {
         let runtime = NetworkRuntime::bind_near(api_address, false)
             .await
             .expect("bind network runtime");
+        runtime.set_virtual_hostnames(["test.api"]);
         let mut client = TcpStream::connect(runtime.listen_address())
             .await
             .expect("connect SOCKS client");

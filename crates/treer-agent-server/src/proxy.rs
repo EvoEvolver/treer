@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use tokio::sync::Notify;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
@@ -18,10 +19,11 @@ use treer_protocol::{
 };
 use url::Url;
 
-use crate::controller::{ControllerRuntime, TerminalSnapshot};
+use crate::controller::{ControllerRuntime, ProxyLinkStatus, TerminalSnapshot};
 use crate::network::NetworkRuntime;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const PROXY_DEAD_INTERVAL: Duration = Duration::from_secs(60);
 const RESULT_CACHE_LIMIT: usize = 256;
 
 #[derive(Clone)]
@@ -47,6 +49,8 @@ pub struct ProxyClient {
     controller_instance_id: String,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
     advertised_agents: Arc<Mutex<Vec<String>>>,
+    last_activity: Arc<Mutex<Instant>>,
+    continue_signal: Arc<Notify>,
 }
 
 impl ProxyClient {
@@ -58,6 +62,23 @@ impl ProxyClient {
         network: NetworkRuntime,
     ) -> Self {
         let advertised_agents = server.available_agents.clone().unwrap_or_default();
+        let continue_signal = Arc::new(Notify::new());
+        #[cfg(unix)]
+        {
+            let signal = continue_signal.clone();
+            tokio::spawn(async move {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(
+                    libc::SIGCONT,
+                )) {
+                    Ok(mut stream) => {
+                        while stream.recv().await.is_some() {
+                            signal.notify_waiters();
+                        }
+                    }
+                    Err(error) => warn!(%error, "failed to listen for SIGCONT"),
+                }
+            });
+        }
         Self {
             proxy_ws,
             machine_token,
@@ -67,7 +88,28 @@ impl ProxyClient {
             controller_instance_id: format!("ctl_{}", uuid::Uuid::new_v4().simple()),
             command_cache: Arc::new(Mutex::new(HashMap::new())),
             advertised_agents: Arc::new(Mutex::new(advertised_agents)),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+            continue_signal,
         }
+    }
+
+    fn touch_activity(&self) {
+        if let Ok(mut last_activity) = self.last_activity.lock() {
+            *last_activity = Instant::now();
+        }
+    }
+
+    fn mark_proxy_link(&self, connected: bool, code: Option<&str>, message: Option<&str>) {
+        let previous = self.runtime.proxy_link_status();
+        self.runtime.set_proxy_link_status(ProxyLinkStatus {
+            connected,
+            last_error: message
+                .map(str::to_string)
+                .or_else(|| previous.last_error.filter(|_| !connected)),
+            last_error_code: code
+                .map(str::to_string)
+                .or_else(|| previous.last_error_code.filter(|_| !connected)),
+        });
     }
 
     fn advertised_server(&self) -> ServerInfo {
@@ -84,16 +126,22 @@ impl ProxyClient {
         let mut delay = Duration::from_millis(300);
         loop {
             match self.run_connection().await {
-                Ok(ConnectionDisposition::Reconnect) => warn!("proxy connection closed"),
-                Ok(ConnectionDisposition::StopDuplicate) => {
+                Ok(ConnectionDisposition::Reconnect) => {
+                    self.mark_proxy_link(false, None, None);
+                    warn!("proxy connection closed");
+                }
+                Ok(ConnectionDisposition::Stop) => {
                     self.network.reset_all().await;
                     warn!(
                         controller_instance_id = %self.controller_instance_id,
-                        "another Controller claimed this machine identity; stopping Proxy reconnects"
+                        "stopping Proxy reconnects"
                     );
                     break;
                 }
-                Err(err) => warn!(error = %format_args!("{err:#}"), "proxy connection failed"),
+                Err(err) => {
+                    self.mark_proxy_link(false, None, Some(&format!("{err:#}")));
+                    warn!(error = %format_args!("{err:#}"), "proxy connection failed");
+                }
             }
             self.network.reset_all().await;
             tokio::time::sleep(delay).await;
@@ -118,6 +166,8 @@ impl ProxyClient {
             .await
             .with_context(|| format!("failed to connect to {}", self.proxy_ws))?;
         let (mut outgoing, mut incoming) = socket.split();
+        self.touch_activity();
+        self.mark_proxy_link(true, None, None);
         send(
             &mut outgoing,
             &AgentServerMessage::Register {
@@ -295,13 +345,30 @@ impl ProxyClient {
                     let frame = frame.ok_or_else(|| anyhow!("network runtime stopped"))?;
                     send_network_binary(&mut outgoing, frame).await?;
                 }
+                _ = self.continue_signal.notified() => {
+                    let last = self
+                        .last_activity
+                        .lock()
+                        .map(|value| *value)
+                        .unwrap_or_else(|_| Instant::now());
+                    if should_reconnect_after_continue(last, Instant::now()) {
+                        warn!("SIGCONT with a stale proxy socket; reconnecting");
+                        return Ok(ConnectionDisposition::Reconnect);
+                    }
+                }
                 message = incoming.next() => {
                     let Some(message) = message else {
                         return Err(anyhow!("proxy closed the websocket"));
                     };
                     let message = message.context("failed to read proxy websocket")?;
+                    self.touch_activity();
                     let Message::Text(text) = message else {
                         match message {
+                            Message::Ping(payload) => {
+                                outgoing.send(Message::Pong(payload)).await?;
+                                continue;
+                            }
+                            Message::Pong(_) => continue,
                             Message::Binary(encoded) => {
                                 if NetworkBinaryFrame::is_network_frame(&encoded) {
                                     let frame = NetworkBinaryFrame::decode(&encoded)
@@ -350,6 +417,7 @@ impl ProxyClient {
                         .context("failed to decode proxy message")?;
                     match message {
                         ProxyMessage::Registered { .. } => {
+                            self.network.clear_virtual_hostnames();
                             if let Err(error) = self.runtime.reset_virtual_hosts() {
                                 warn!(code = %error.code, message = %error.message, "failed to reset virtual-host snapshot");
                             }
@@ -357,6 +425,9 @@ impl ProxyClient {
                         ProxyMessage::VirtualNetworkHosts { snapshot } => {
                             let revision = snapshot.revision;
                             let count = snapshot.hosts.len();
+                            self.network.set_virtual_hostnames(
+                                snapshot.hosts.iter().map(|host| host.hostname.as_str()),
+                            );
                             match self.runtime.replace_virtual_hosts(snapshot) {
                                 Ok(true) => info!(revision, count, "virtual hosts refreshed"),
                                 Ok(false) => tracing::debug!(revision, "ignored stale virtual-host snapshot"),
@@ -366,6 +437,11 @@ impl ProxyClient {
                         ProxyMessage::Error { error } => {
                             warn!(code = %error.code, message = %error.message, "proxy rejected a message");
                             if let Some(disposition) = connection_error_disposition(&error.code) {
+                                self.mark_proxy_link(
+                                    false,
+                                    Some(&error.code),
+                                    Some(&error.message),
+                                );
                                 return Ok(disposition);
                             }
                         }
@@ -522,15 +598,21 @@ impl ProxyClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionDisposition {
     Reconnect,
-    StopDuplicate,
+    Stop,
 }
 
 fn connection_error_disposition(code: &str) -> Option<ConnectionDisposition> {
     match code {
-        "duplicate_machine_connection" => Some(ConnectionDisposition::StopDuplicate),
-        "stale_connection" => Some(ConnectionDisposition::Reconnect),
+        "duplicate_machine_connection" | "stale_connection" => {
+            Some(ConnectionDisposition::Reconnect)
+        }
+        "machine_revoked" | "server_deleted" => Some(ConnectionDisposition::Stop),
         _ => None,
     }
+}
+
+fn should_reconnect_after_continue(last_activity: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_activity) >= PROXY_DEAD_INTERVAL
 }
 
 fn schedule_machine_shutdown(workspace: String) {
@@ -559,6 +641,12 @@ pub fn server_info(
     supervision: Option<treer_protocol::MachineSupervision>,
 ) -> ServerInfo {
     let now = Utc::now();
+    let labels = std::collections::BTreeMap::from([
+        ("os".to_string(), std::env::consts::OS.to_string()),
+        ("arch".to_string(), std::env::consts::ARCH.to_string()),
+        ("treer.network".to_string(), "1".to_string()),
+        ("treer.shutdown".to_string(), "1".to_string()),
+    ]);
     ServerInfo {
         server_id,
         workspace_id,
@@ -571,12 +659,7 @@ pub fn server_info(
         },
         host_build,
         supervision,
-        labels: std::collections::BTreeMap::from([
-            ("os".to_string(), std::env::consts::OS.to_string()),
-            ("arch".to_string(), std::env::consts::ARCH.to_string()),
-            ("treer.network".to_string(), "1".to_string()),
-            ("treer.shutdown".to_string(), "1".to_string()),
-        ]),
+        labels,
         available_agents: Some(available_agents),
         status: ServerStatus::Online,
         connected_at: now,
@@ -697,16 +780,37 @@ mod tests {
     }
 
     #[test]
-    fn stale_cluster_ownership_reconnects_but_a_duplicate_controller_stops() {
+    fn duplicate_and_stale_connections_reconnect_until_revoked() {
         assert_eq!(
             connection_error_disposition("stale_connection"),
             Some(ConnectionDisposition::Reconnect)
         );
         assert_eq!(
             connection_error_disposition("duplicate_machine_connection"),
-            Some(ConnectionDisposition::StopDuplicate)
+            Some(ConnectionDisposition::Reconnect)
         );
-        assert_eq!(connection_error_disposition("machine_revoked"), None);
+        assert_eq!(
+            connection_error_disposition("machine_revoked"),
+            Some(ConnectionDisposition::Stop)
+        );
+        assert_eq!(
+            connection_error_disposition("server_deleted"),
+            Some(ConnectionDisposition::Stop)
+        );
+    }
+
+    #[test]
+    fn sleep_wake_reconnects_when_the_socket_is_past_the_dead_interval() {
+        let now = Instant::now();
+        assert!(!should_reconnect_after_continue(now, now));
+        assert!(should_reconnect_after_continue(
+            now,
+            now + PROXY_DEAD_INTERVAL
+        ));
+        assert!(!should_reconnect_after_continue(
+            now,
+            now + PROXY_DEAD_INTERVAL - Duration::from_secs(1)
+        ));
     }
 
     #[tokio::test]

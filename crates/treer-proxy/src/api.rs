@@ -4979,6 +4979,8 @@ async fn stream_terminal(
                 let message = match frame {
                     SocketFrame::Text(encoded) => Message::Text(encoded.into()),
                     SocketFrame::Binary(data) => Message::Binary(data.into()),
+                    SocketFrame::Ping(payload) => Message::Ping(payload.into()),
+                    SocketFrame::Pong(payload) => Message::Pong(payload.into()),
                     SocketFrame::Close => Message::Close(None),
                 };
                 if outgoing.send(message).await.is_err() {

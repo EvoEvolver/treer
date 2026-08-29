@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use treer_host_protocol::HostDaemonConfig;
-use treer_protocol::{MachineSupervision, MachineSupervisionMode, OPERATOR_CREDENTIAL_HEADER};
+use treer_protocol::{MachineSupervision, MachineSupervisionMode};
 use url::Url;
 use uuid::Uuid;
 
@@ -277,29 +277,59 @@ fn address_is_available(address: SocketAddr) -> bool {
 }
 
 async fn local_api_matches(address: &SocketAddr, workspace: &str, server_id: &str) -> bool {
-    let Ok(client) = reqwest::Client::builder()
+    occupying_controller(*address)
+        .await
+        .is_some_and(|occupant| {
+            occupant.workspace_id == workspace && occupant.server_id == server_id
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OccupyingController {
+    pub server_id: String,
+    pub workspace_id: String,
+    pub pid: Option<u32>,
+}
+
+pub async fn occupying_controller(address: SocketAddr) -> Option<OccupyingController> {
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
         .no_proxy()
         .build()
-    else {
-        return false;
-    };
-    let Ok(response) = client
+        .ok()?;
+    let response = client
         .get(format!("http://{address}/api/health"))
         .send()
         .await
-    else {
-        return false;
-    };
-    let Ok(value) = response.json::<serde_json::Value>().await else {
-        return false;
-    };
-    value.get("service").and_then(|value| value.as_str()) == Some("treer-agent-server")
-        && value.get("workspace_id").and_then(|value| value.as_str()) == Some(workspace)
-        && value
-            .get("server_id")
-            .and_then(|value| value.as_str())
-            .is_none_or(|value| value == server_id)
+        .ok()?;
+    let value = response.json::<serde_json::Value>().await.ok()?;
+    if value.get("service").and_then(|value| value.as_str()) != Some("treer-agent-server") {
+        return None;
+    }
+    Some(OccupyingController {
+        workspace_id: value.get("workspace_id")?.as_str()?.to_string(),
+        server_id: value.get("server_id")?.as_str()?.to_string(),
+        pid: listen_pid(address),
+    })
+}
+
+fn listen_pid(address: SocketAddr) -> Option<u32> {
+    let output = Command::new("lsof")
+        .args([
+            "-nP",
+            "-t",
+            "-sTCP:LISTEN",
+            &format!("-iTCP:{}", address.port()),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.trim().parse().ok())
 }
 
 pub fn register(config: ServiceConfig) -> Result<()> {
@@ -1002,38 +1032,47 @@ async fn wait_for_controller(config: &ServiceConfig, previous_epoch: Option<&str
     }
 }
 
-async fn proxy_is_reachable(config: &ServiceConfig) -> bool {
-    let Some(mut url) = controller_health_url(config) else {
-        return false;
-    };
-    url.set_path("/api/agents");
-    let Ok(client) = reqwest::Client::builder()
+async fn controller_health_document(config: &ServiceConfig) -> Option<serde_json::Value> {
+    let health_url = controller_health_url(config)?;
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(900))
         .no_proxy()
         .build()
-    else {
-        return false;
-    };
-    matches!(
-        client
-            .get(url)
-            .header(OPERATOR_CREDENTIAL_HEADER, &config.operator_credential)
-            .send()
-            .await,
-        Ok(response) if response.status().is_success()
-    )
+        .ok()?;
+    let value = client
+        .get(health_url)
+        .send()
+        .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    let matches = value.get("service").and_then(|value| value.as_str())
+        == Some("treer-agent-server")
+        && value.get("workspace_id").and_then(|value| value.as_str())
+            == Some(config.workspace.as_str())
+        && value.get("server_id").and_then(|value| value.as_str())
+            == Some(config.server_id.as_str());
+    matches.then_some(value)
 }
 
 async fn wait_for_controller_and_proxy(config: &ServiceConfig) -> Result<()> {
     let deadline = Instant::now() + CONTROLLER_START_TIMEOUT;
     loop {
-        let controller_ready = controller_epoch(config).await.is_some();
-        if controller_ready && proxy_is_reachable(config).await {
+        let health = controller_health_document(config).await;
+        let controller_ready = health.is_some();
+        let proxy_connected = health.as_ref().is_some_and(|value| {
+            value
+                .get("proxy_connected")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+        });
+        if controller_ready && proxy_connected {
             return Ok(());
         }
         if Instant::now() >= deadline {
             let waiting_for = if controller_ready {
-                "Proxy connection"
+                "Proxy lease"
             } else {
                 "Controller health"
             };
@@ -1044,6 +1083,189 @@ async fn wait_for_controller_and_proxy(config: &ServiceConfig) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+#[derive(Debug)]
+pub struct AmbiguousServices {
+    pub hostname: String,
+    pub services: Vec<ServiceConfig>,
+}
+
+impl std::fmt::Display for AmbiguousServices {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}",
+            format_ambiguous_services(&self.hostname, &self.services)
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousServices {}
+
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ServiceCommandTarget {
+    Install(ServiceConfig),
+    Inventory(Vec<ServiceConfig>),
+}
+
+pub(crate) fn resolve_service_command(
+    requested: Option<&str>,
+    list_when_omitted: bool,
+) -> Result<ServiceCommandTarget> {
+    let services = installed_services()?;
+    match classify_service_request(
+        requested,
+        list_when_omitted,
+        &services
+            .iter()
+            .map(|(_, config)| config.workspace.as_str())
+            .collect::<Vec<_>>(),
+    ) {
+        ServiceRequestClass::Inventory => Ok(ServiceCommandTarget::Inventory(
+            services.into_iter().map(|(_, config)| config).collect(),
+        )),
+        ServiceRequestClass::Unique => {
+            let (_, config) = services
+                .into_iter()
+                .next()
+                .expect("unique classification requires one install");
+            Ok(ServiceCommandTarget::Install(config))
+        }
+        ServiceRequestClass::Selected => {
+            let workspace = requested.expect("selected classification requires a workspace");
+            installed_service(workspace).map(|(_, config)| ServiceCommandTarget::Install(config))
+        }
+        ServiceRequestClass::NoneInstalled => {
+            bail!("{}", no_install_hint())
+        }
+        ServiceRequestClass::Ambiguous => Err(AmbiguousServices {
+            hostname: current_hostname().unwrap_or_else(|_| "this host".to_string()),
+            services: services.into_iter().map(|(_, config)| config).collect(),
+        }
+        .into()),
+        ServiceRequestClass::Missing(workspace) => {
+            let hostname = current_hostname().unwrap_or_else(|_| "this host".to_string());
+            if services.is_empty() {
+                bail!("{}", no_install_hint());
+            }
+            bail!(
+                "no agent-server service for workspace {workspace} is installed on {hostname}\n{}",
+                format_service_table(
+                    &hostname,
+                    &services
+                        .iter()
+                        .map(|(_, config)| config)
+                        .collect::<Vec<_>>()
+                )
+            )
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ServiceRequestClass {
+    Inventory,
+    Unique,
+    Selected,
+    NoneInstalled,
+    Ambiguous,
+    Missing(String),
+}
+
+fn classify_service_request(
+    requested: Option<&str>,
+    list_when_omitted: bool,
+    workspaces: &[&str],
+) -> ServiceRequestClass {
+    match requested.map(str::trim).filter(|value| !value.is_empty()) {
+        None => {
+            if list_when_omitted {
+                ServiceRequestClass::Inventory
+            } else if workspaces.is_empty() {
+                ServiceRequestClass::NoneInstalled
+            } else if workspaces.len() == 1 {
+                ServiceRequestClass::Unique
+            } else {
+                ServiceRequestClass::Ambiguous
+            }
+        }
+        Some(workspace) => {
+            if workspaces.contains(&workspace) {
+                ServiceRequestClass::Selected
+            } else {
+                ServiceRequestClass::Missing(workspace.to_string())
+            }
+        }
+    }
+}
+
+fn no_install_hint() -> String {
+    let hostname = current_hostname().unwrap_or_else(|_| "this host".to_string());
+    format!(
+        "no agent-server service is installed on {hostname}\nConnect this machine from the workspace Add machine dialog, then run the copied connect command, or:\n  TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy '<proxy-url>'"
+    )
+}
+
+fn format_service_table(hostname: &str, services: &[&ServiceConfig]) -> String {
+    let mut lines = vec![format!("installed agent-server services on {hostname}:")];
+    lines.push("workspace  server_id  listen  proxy  manager".to_string());
+    for config in services {
+        lines.push(format!(
+            "{}  {}  {}  {}  {}",
+            config.workspace, config.server_id, config.listen, config.proxy, config.service_manager
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_ambiguous_services(hostname: &str, services: &[ServiceConfig]) -> String {
+    format!(
+        "{}\npass --workspace <workspace_id> to select one of these installs",
+        format_service_table(hostname, &services.iter().collect::<Vec<_>>())
+    )
+}
+
+pub(crate) async fn print_installed_services(services: &[ServiceConfig]) -> Result<()> {
+    let hostname = current_hostname().unwrap_or_else(|_| "this host".to_string());
+    if services.is_empty() {
+        println!("{}", no_install_hint());
+        return Ok(());
+    }
+    println!("installed agent-server services on {hostname}");
+    println!(
+        "{:<36}  {:<36}  {:<18}  {:<10}  proxy",
+        "workspace", "server_id", "listen", "manager"
+    );
+    for config in services {
+        let health = controller_health_document(config).await;
+        let proxy = match health.as_ref().and_then(|value| {
+            value
+                .get("connection_state")
+                .and_then(|value| value.as_str())
+        }) {
+            Some(state) => state.to_string(),
+            None if health.is_some() => {
+                if health.as_ref().and_then(|value| {
+                    value
+                        .get("proxy_connected")
+                        .and_then(|value| value.as_bool())
+                }) == Some(true)
+                {
+                    "online".to_string()
+                } else {
+                    "local".to_string()
+                }
+            }
+            None => "stopped".to_string(),
+        };
+        println!(
+            "{:<36}  {:<36}  {:<18}  {:<10}  {proxy}",
+            config.workspace, config.server_id, config.listen, config.service_manager
+        );
+    }
+    Ok(())
 }
 
 pub fn status(workspace: &str) -> Result<()> {
@@ -1066,7 +1288,7 @@ pub fn uninstall(workspace: &str) -> Result<()> {
 }
 
 #[derive(Debug)]
-struct ServicePaths {
+pub(crate) struct ServicePaths {
     executable: PathBuf,
     host_executable: PathBuf,
     config: PathBuf,
@@ -2083,6 +2305,8 @@ mod tests {
                         "workspace_id": "default",
                         "server_id": "srv_test",
                         "controller_epoch": "epoch-test",
+                        "proxy_connected": true,
+                        "connection_state": "online",
                     }))
                 }),
             )
@@ -2115,6 +2339,11 @@ mod tests {
         wait_for_controller_and_proxy(&config)
             .await
             .expect("Controller and Proxy readiness");
+        let occupant = occupying_controller(address)
+            .await
+            .expect("occupying Controller");
+        assert_eq!(occupant.server_id, "srv_test");
+        assert_eq!(occupant.workspace_id, "default");
 
         server.abort();
     }
@@ -2533,5 +2762,60 @@ mod tests {
         assert!(!encoded.contains("mac_address"));
         assert!(!encoded.contains("hardware_address"));
         fs::remove_dir_all(directory).expect("remove identity directory");
+    }
+
+    #[test]
+    fn service_commands_list_or_select_local_installs() {
+        assert_eq!(
+            classify_service_request(None, true, &["ws_a", "ws_b"]),
+            ServiceRequestClass::Inventory
+        );
+        assert_eq!(
+            classify_service_request(None, false, &["ws_a"]),
+            ServiceRequestClass::Unique
+        );
+        assert_eq!(
+            classify_service_request(None, false, &["ws_a", "ws_b"]),
+            ServiceRequestClass::Ambiguous
+        );
+        assert_eq!(
+            classify_service_request(None, false, &[]),
+            ServiceRequestClass::NoneInstalled
+        );
+        assert_eq!(
+            classify_service_request(Some("default"), false, &["ws_a"]),
+            ServiceRequestClass::Missing("default".to_string())
+        );
+        assert_eq!(
+            classify_service_request(Some("ws_a"), false, &["ws_a", "ws_b"]),
+            ServiceRequestClass::Selected
+        );
+        assert_eq!(
+            classify_service_request(Some("default"), false, &["default"]),
+            ServiceRequestClass::Selected
+        );
+    }
+
+    #[test]
+    fn service_table_includes_workspace_and_listen() {
+        let config = ServiceConfig {
+            proxy: "https://treer.example/".to_string(),
+            workspace: "ws_a39c30b35d6043918353e321cdd8ce96".to_string(),
+            server_id: "srv_94cc4cee0123456789abcdef01234567".to_string(),
+            machine_token: "token".to_string(),
+            operator_credential: "operator".to_string(),
+            root: PathBuf::from("/tmp"),
+            listen: "127.0.0.1:8794".to_string(),
+            host_socket: PathBuf::from("/tmp/host.sock"),
+            install_hostname: "Mac.home.com".to_string(),
+            service_manager: default_service_manager(),
+            service_fallback_reason: None,
+        };
+        let table = format_service_table("Mac.home.com", &[&config]);
+        assert!(table.contains("ws_a39c30b35d6043918353e321cdd8ce96"));
+        assert!(table.contains("127.0.0.1:8794"));
+        assert!(!table.contains("pass --workspace"));
+        let ambiguous = format_ambiguous_services("Mac.home.com", &[config]);
+        assert!(ambiguous.contains("pass --workspace <workspace_id>"));
     }
 }

@@ -216,8 +216,8 @@ directly with `--service-mode foreground`.
 
 Linux setup checks systemd linger and prints an actionable warning when the
 service will stop after the last login session exits. It does not attempt a
-privileged linger change. `connect` reports success only after both the local
-Controller health endpoint and its Proxy-backed API are ready. Override
+privileged linger change. `connect` reports success only after the local
+Controller health endpoint reports `proxy_connected`. Override
 `TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`, `TREER_RUNTIME_DIR`, or
 `TREER_AGENT_SERVER_LISTEN` when needed. The first available loopback port
 starting at `8790` is saved per installed machine.
@@ -283,7 +283,7 @@ the agent-facing `treer` command:
 
 ```bash
 treer-agent-server update
-treer-agent-server --tui --workspace default
+treer-agent-server --tui --workspace WORKSPACE_ID
 treer-agent-server service status
 treer-agent-server service logs --follow
 treer-agent-server service restart-controller
@@ -292,6 +292,19 @@ treer-agent-server service stop
 treer-agent-server service start
 treer-agent-server service restart
 treer-agent-server service uninstall
+```
+
+`service status` with no `--workspace` lists every local install (`workspace`,
+`server_id`, listen address, manager, and Proxy lease). Other service commands
+use the unique local install when there is exactly one; if several exist they
+print that table and exit 2. Pass the real workspace ID (`ws_…`) from Add
+machine or from that table. `service start` is ready only when `/api/health`
+reports `proxy_connected`; a live local API is not enough. After lid-close
+sleep, Proxy bounce, or a duplicate fence, the Controller reconnects by itself.
+If the webpage still shows Offline, copy:
+
+```bash
+treer-agent-server service --workspace ws_… restart-controller
 ```
 
 Each installed binary reports the package version and exact source commit:
@@ -339,12 +352,14 @@ stop, full restart, and Controller-only restart actions.
 Stop and full restart require confirmation because they terminate Host-owned
 Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 
-Add `--workspace WORKSPACE_ID` after `service` when managing a workspace other
-than `default`. On Linux, an administrator can run `loginctl enable-linger
+Add `--workspace WORKSPACE_ID` after `service` when this host has more than one
+install. On Linux, an administrator can run `loginctl enable-linger
 USER` when the service must survive the final logout; otherwise keep a
 foreground Host on a fixed machine, for example in tmux. On macOS, a
 LaunchAgent starts at user login; an always-on pre-login LaunchDaemon would
-require a separate privileged installation flow.
+require a separate privileged installation flow. Connecting the same hostname
+into the same workspace reuses the existing machine identity instead of
+creating a second LaunchAgent.
 
 ## Users, administrators, and invitations
 
@@ -591,7 +606,12 @@ transparent namespace wrapper and inject the same loopback listener through
 `ALL_PROXY`/`all_proxy` as SOCKS5h and through `HTTPS_PROXY`/`https_proxy` as
 HTTP CONNECT. Plain HTTP continues through SOCKS5h because the HTTP listener
 implements CONNECT tunnels rather than forward-proxy requests. HTTPS-only
-clients such as Codex's reqwest stack use the HTTPS proxy variable instead. In
+clients such as Codex's reqwest stack use the HTTPS proxy variable instead. The
+listener classifies locally: workspace virtual-host names from the Controller
+snapshot still take the Treer path; every other destination, including
+`api.github.com`, is dialed on this machine and does not wait on the Proxy
+WebSocket. Disconnect tears down only relayed streams, so `gh`, npm, and curl
+to the public internet keep working while the machine is Offline. In
 this mode, `NO_PROXY` and `no_proxy` contain `127.0.0.1,localhost,::1`, so
 Controller and App loopback calls do not enter the proxy path. Treer also
 configures Git to invoke its

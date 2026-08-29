@@ -69,6 +69,25 @@ struct AgentMetadata {
     workload_credential: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProxyLinkStatus {
+    pub connected: bool,
+    pub last_error: Option<String>,
+    pub last_error_code: Option<String>,
+}
+
+impl ProxyLinkStatus {
+    pub fn connection_state(&self) -> &'static str {
+        if self.connected {
+            "online"
+        } else if self.last_error_code.as_deref() == Some("duplicate_machine_connection") {
+            "fenced"
+        } else {
+            "local"
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ControllerRuntime {
     inner: Arc<ControllerInner>,
@@ -98,6 +117,7 @@ struct ControllerInner {
     terminal_events: broadcast::Sender<TerminalOutput>,
     process_events: broadcast::Sender<HostProcessInfo>,
     virtual_hosts: RwLock<Option<VirtualNetworkHostsSnapshot>>,
+    proxy_link: RwLock<ProxyLinkStatus>,
 }
 
 struct ControllerAgent {
@@ -158,6 +178,7 @@ impl ControllerRuntime {
                 terminal_events,
                 process_events,
                 virtual_hosts: RwLock::new(None),
+                proxy_link: RwLock::new(ProxyLinkStatus::default()),
             }),
         };
         let replays: HashMap<_, _> = replay
@@ -277,6 +298,20 @@ impl ControllerRuntime {
             .map_err(|_| ProtocolError::new("state_error", "virtual-host cache lock poisoned"))? =
             None;
         Ok(())
+    }
+
+    pub fn proxy_link_status(&self) -> ProxyLinkStatus {
+        self.inner
+            .proxy_link
+            .read()
+            .map(|status| status.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_proxy_link_status(&self, status: ProxyLinkStatus) {
+        if let Ok(mut current) = self.inner.proxy_link.write() {
+            *current = status;
+        }
     }
 
     pub fn available_agent_kinds(&self) -> Vec<String> {
