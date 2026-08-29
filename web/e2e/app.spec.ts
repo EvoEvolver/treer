@@ -441,7 +441,7 @@ test("create agent dialog can install a missing CLI directly from the launch lis
     server_id: "srv-a",
     kind: "shell",
     cwd: ".",
-    args: ["bash", "-lc", expect.stringContaining("npm install -g @openai/codex")],
+    args: ["bash", "-lc", expect.stringContaining("https://chatgpt.com/codex/install.sh")],
   })
   await expect(page.getByRole("dialog")).toBeHidden()
 })

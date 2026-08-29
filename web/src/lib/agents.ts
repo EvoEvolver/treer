@@ -14,7 +14,7 @@ export const AGENT_CATALOG: AgentCatalogEntry[] = [
   { kind: "grok", command: "grok", label: "Grok", install: null, start: "grok --always-approve" },
   { kind: "opencode", command: "opencode", label: "OpenCode", install: "curl -fsSL https://opencode.ai/install | bash", start: "opencode" },
   { kind: "pi", command: "pi", label: "Pi", install: "curl -fsSL https://pi.dev/install.sh | sh", start: "pi" },
-  { kind: "codex", command: "codex", label: "Codex", install: "npm install -g @openai/codex", start: "codex --dangerously-bypass-approvals-and-sandbox" },
+  { kind: "codex", command: "codex", label: "Codex", install: "curl -fsSL https://chatgpt.com/codex/install.sh | sh", start: "codex --dangerously-bypass-approvals-and-sandbox" },
 ]
 
 export function agentKindFromCommand(command: string): string | null {
