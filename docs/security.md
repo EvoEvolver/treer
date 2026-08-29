@@ -50,6 +50,13 @@ operations to callers already authorized by Proxy Policy. Interface ports stay
 on Agent-private loopback; the Controller is the external routing and policy
 boundary.
 
+The Create Agent dialog's one-click CLI installs execute cataloged third-party
+install scripts or package-manager commands with the machine account's
+authority. Treer does not mirror, pin, attest, or sandbox those upstream
+artifacts beyond the Agent runtime already described here. Treat the action as
+trusting that provider's current installer, and use a dedicated machine, VM, or
+stronger sandbox when that trust is not acceptable.
+
 `proxy-env` is not a full traffic intercept. The injected HTTP CONNECT and
 SOCKS listeners classify destinations locally: workspace virtual-host names
 and the reserved local-API address stay on the Treer path; ordinary internet

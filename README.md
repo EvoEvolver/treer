@@ -552,6 +552,16 @@ The web Create Agent dialog includes a built-in Terminal option. It starts the
 machine user's interactive shell without injecting a command and is not stored
 as a launch profile.
 
+The dialog compares recognized launch-profile commands with the CLIs reported
+by the selected machine. A missing built-in CLI is shown as `Install <name>` in
+the Launch list. Selecting it creates an ordinary terminal Agent on that
+machine, runs the cataloged upstream installer, and then starts the CLI so the
+operator can finish login. The built-in catalog covers Codex, Claude, OpenCode,
+and Pi; a custom Cursor profile uses the same flow. The Controller rechecks its
+PATH on every heartbeat, so a successful install appears as available without a
+Controller restart. Installation does not copy provider credentials from
+another machine.
+
 Profiles store an executable and ordered arguments rather than a shell command
 string. The web editor presents them as one quoted command line and the Create
 Agent dialog can launch any saved workspace profile. The Controller starts the

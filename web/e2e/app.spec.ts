@@ -182,6 +182,14 @@ async function mockApi(page: Page) {
     })
     if (path === "/workspaces/ws-1/snapshot") return ok(route, snapshot)
     if (path === "/workspaces/ws-2/snapshot") return ok(route, { ...snapshot, workspace: secondWorkspace, servers: [], agents: [] })
+    if (path === "/workspaces/ws-1/agents" && route.request().method() === "POST") return ok(route, {
+      agent_id: "ag-installer",
+      server_id: "srv-a",
+      workspace_id: "ws-1",
+      name: "codex-installer",
+      kind: "shell",
+      status: "starting",
+    })
     if (path === "/workspaces/ws-1/virtual-hosts") return ok(route, { hosts: [virtualHost] })
     if (path === "/workspaces/ws-2/virtual-hosts") return ok(route, { hosts: [] })
     if (path === "/workspaces/ws-1/services") return ok(route, { services: [serviceA] })
@@ -413,22 +421,29 @@ test("create agent dialog can install a git recipe", async ({ page }) => {
   await agentsTab(page).click()
   await page.getByRole("button", { name: "New" }).click()
   await expect(page.getByRole("dialog")).toBeVisible()
-  await page.getByRole("dialog").getByRole("combobox").first().click()
+  await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Install recipe" }).click()
   await expect(page.getByPlaceholder("https://github.com/example/recipe.git")).toBeVisible()
   await expect(page.getByText("Only agents already installed on the selected machine can run a recipe.")).toBeVisible()
   await expect(page.getByRole("button", { name: "Install recipe" })).toBeVisible()
 })
 
-test("create agent dialog can install a missing CLI", async ({ page }) => {
+test("create agent dialog can install a missing CLI directly from the launch list", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
   await page.getByRole("button", { name: "New" }).click()
   await expect(page.getByRole("dialog")).toBeVisible()
-  await page.getByRole("dialog").getByRole("combobox").first().click()
-  await page.getByRole("option", { name: "Codex", exact: true }).click()
-  await expect(page.getByText("Codex is not installed on workstation")).toBeVisible()
-  await expect(page.getByRole("button", { name: "Install Codex" })).toBeVisible()
+  const installRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/ws-1/agents")
+  await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
+  await page.getByRole("option", { name: "Install Codex", exact: true }).click()
+  const request = await installRequest
+  expect(request.postDataJSON()).toMatchObject({
+    server_id: "srv-a",
+    kind: "shell",
+    cwd: ".",
+    args: ["bash", "-lc", expect.stringContaining("npm install -g @openai/codex")],
+  })
+  await expect(page.getByRole("dialog")).toBeHidden()
 })
 
 test("create agent dialog lists an installed recipe launch profile", async ({ page }) => {
@@ -436,7 +451,7 @@ test("create agent dialog lists an installed recipe launch profile", async ({ pa
   await agentsTab(page).click()
   await page.getByRole("button", { name: "New" }).click()
   await expect(page.getByRole("dialog")).toBeVisible()
-  await page.getByRole("dialog").getByRole("combobox").first().click()
+  await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Codex Agent UI" }).click()
   await expect(page.getByText("./scripts/treer-agent.sh")).toBeVisible()
   await expect(page.getByRole("dialog").getByRole("textbox")).toHaveValue(/codex-agent-ui-\d{4}-/)

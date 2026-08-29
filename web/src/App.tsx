@@ -47,11 +47,10 @@ import {
   Users,
   X,
   CircleCheck,
-  CircleDashed,
   Download,
 } from "lucide-react"
 import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type PlatformAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
-import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled } from "@/lib/agents"
+import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
 import { cn } from "@/lib/utils"
@@ -864,6 +863,7 @@ function WorkspaceApp() {
   const [renameWorkspaceOpen, setRenameWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [creatingAgent, setCreatingAgent] = useState(false)
+  const [installingAgentKind, setInstallingAgentKind] = useState<string | null>(null)
   const [createAppOpen, setCreateAppOpen] = useState(false)
   const [deletingApp, setDeletingApp] = useState<AppDeployment | null>(null)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
@@ -1255,17 +1255,34 @@ function WorkspaceApp() {
     if (!preview) void loadLaunchProfiles().catch(showError)
   }
 
-  async function installSelectedAgent() {
-    if (!workspaceId || !selectedProfileInstall?.install || !agentServerId) return
-    const script = installThenStartScript(selectedProfileInstall)
+  async function installAgent(entry: AgentCatalogEntry, name: string) {
+    if (!workspaceId || !entry.install || !agentServerId || installingAgentKind) return
+    const script = installThenStartScript(entry)
     if (!script) return
+    setInstallingAgentKind(entry.kind)
     try {
-      const agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "shell", name: agentName || `install-${selectedProfileInstall.kind}`, cwd: ".", args: ["bash", "-lc", script], cols: 120, rows: 36 }) })
+      const agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "shell", name, cwd: ".", args: ["bash", "-lc", script], cols: 120, rows: 36 }) })
       if (!agent.agent_id) throw new Error("Create agent did not return an id")
       setCreateAgentOpen(false)
       showAgentTerminal(agent.agent_id)
       await refreshSnapshot()
     } catch (reason) { showError(reason) }
+    finally { setInstallingAgentKind(null) }
+  }
+
+  async function installSelectedAgent() {
+    if (!selectedProfileInstall) return
+    await installAgent(selectedProfileInstall, agentName || defaultProfileAgentName(selectedProfileInstall.label))
+  }
+
+  function selectAgentProfile(profileId: string) {
+    changeAgentProfile(profileId)
+    const profile = launchProfiles.find((item) => item.profile_id === profileId)
+    const kind = profile ? agentKindFromCommand(profile.command) : null
+    const entry = kind ? catalogEntry(kind) : undefined
+    if (entry?.install && isAgentInstalled(selectedCreateMachine, entry.kind) === false) {
+      void installAgent(entry, defaultProfileAgentName(profile?.name ?? entry.label))
+    }
   }
 
   function changeAgentCommandLine(commandLine: string) {
@@ -1940,7 +1957,71 @@ function WorkspaceApp() {
 
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}><DialogContent data-tour="create-agent-dialog"><form onSubmit={createAgent} className="space-y-4"><DialogHeader><DialogTitle>Create agent</DialogTitle><DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription></DialogHeader><Field label="Launch"><Select value={agentProfileId} onValueChange={changeAgentProfile}><SelectTrigger data-tour="agent-launch"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="terminal">Terminal</SelectItem><SelectItem value="manual">Custom command</SelectItem><SelectItem value="recipe">Install recipe</SelectItem>{launchProfiles.map((profile) => { const kind = agentKindFromCommand(profile.command); const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null; return <SelectItem key={profile.profile_id} value={profile.profile_id} className={installed === false ? "text-muted-foreground" : undefined} trailing={installed === true ? <CircleCheck className="size-3.5 text-emerald-700" /> : installed === false ? <CircleDashed className="size-3.5" /> : null}>{profile.name}</SelectItem> })}</SelectContent></Select></Field><Field label="Machine"><Select value={agentServerId} onValueChange={setAgentServerId} required><SelectTrigger><SelectValue placeholder="Select a machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field>{agentProfileId === "terminal" || agentProfileId === "manual" ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field> : selectedCreateProfile ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div> : null}{agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}{agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Installer"><Select value={agentRecipeKind} onValueChange={setAgentRecipeKind} disabled={!recipeInstallers.length}><SelectTrigger><SelectValue placeholder={recipeInstallers.length ? "Select an installed agent" : "No installed agent on this machine"} /></SelectTrigger><SelectContent>{recipeInstallers.map((entry) => <SelectItem key={entry.kind} value={entry.kind} trailing={<CircleCheck className="size-3.5 text-emerald-700" />}>{entry.label}</SelectItem>)}</SelectContent></Select><span className="mt-1 block text-[10px] text-muted-foreground">{recipeInstallers.length ? "Only agents already installed on the selected machine can run a recipe." : "Install Claude, Cursor, Codex, or another agent on this machine first."}</span></Field><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /></Field></div>}{selectedCreateProfile && selectedProfileInstalled === false && selectedProfileInstall?.install ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">{selectedProfileInstall.label} is not installed on {machineName(selectedCreateMachine)}. Install it in a terminal, then log in there.</div> : selectedCreateProfile ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span> : null}<Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>{selectedProfileInstalled === false && selectedProfileInstall?.install ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId}><Download />Install {selectedProfileInstall.label}</Button> : <Button type="submit" disabled={creatingAgent || !agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind))}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button>}</DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}>
+      <DialogContent data-tour="create-agent-dialog">
+        <form onSubmit={createAgent} className="space-y-4">
+          <DialogHeader>
+            <DialogTitle>Create agent</DialogTitle>
+            <DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription>
+          </DialogHeader>
+          <Field label="Machine">
+            <Select value={agentServerId} onValueChange={setAgentServerId} required>
+              <SelectTrigger aria-label="Machine"><SelectValue placeholder="Select a machine" /></SelectTrigger>
+              <SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          <Field label="Launch">
+            <Select value={agentProfileId} onValueChange={selectAgentProfile}>
+              <SelectTrigger aria-label="Launch" data-tour="agent-launch"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="terminal">Terminal</SelectItem>
+                <SelectItem value="manual">Custom command</SelectItem>
+                <SelectItem value="recipe">Install recipe</SelectItem>
+                {launchProfiles.map((profile) => {
+                  const kind = agentKindFromCommand(profile.command)
+                  const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null
+                  const installable = installed === false && Boolean(kind && catalogEntry(kind)?.install)
+                  const installing = Boolean(kind && installingAgentKind === kind)
+                  return (
+                    <SelectItem
+                      key={profile.profile_id}
+                      value={profile.profile_id}
+                      className={installed === false ? "text-muted-foreground" : undefined}
+                      trailing={installed === true
+                        ? <CircleCheck className="size-3.5 text-emerald-700" />
+                        : installable
+                          ? installing ? <RotateCw className="size-3.5 animate-spin" /> : <Download className="size-3.5" />
+                          : null}
+                    >
+                      {installable ? `Install ${profile.name}` : profile.name}
+                    </SelectItem>
+                  )
+                })}
+              </SelectContent>
+            </Select>
+          </Field>
+          {agentProfileId === "terminal" || agentProfileId === "manual"
+            ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field>
+            : selectedCreateProfile
+              ? <div className="rounded-md border bg-muted/30 px-3 py-2"><code className="block truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div>
+              : null}
+          {agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}
+          {agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Installer"><Select value={agentRecipeKind} onValueChange={setAgentRecipeKind} disabled={!recipeInstallers.length}><SelectTrigger><SelectValue placeholder={recipeInstallers.length ? "Select an installed agent" : "No installed agent on this machine"} /></SelectTrigger><SelectContent>{recipeInstallers.map((entry) => <SelectItem key={entry.kind} value={entry.kind} trailing={<CircleCheck className="size-3.5 text-emerald-700" />}>{entry.label}</SelectItem>)}</SelectContent></Select><span className="mt-1 block text-[10px] text-muted-foreground">{recipeInstallers.length ? "Only agents already installed on the selected machine can run a recipe." : "Install Claude, Cursor, Codex, OpenCode, or Pi on this machine first."}</span></Field><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /></Field></div>}
+          {selectedCreateProfile && selectedProfileInstalled === false && selectedProfileInstall?.install
+            ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">Installation runs on {machineName(selectedCreateMachine)} and opens a terminal for setup and login.</div>
+            : selectedCreateProfile
+              ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>
+              : null}
+          <Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>
+            {selectedProfileInstalled === false && selectedProfileInstall?.install
+              ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId || Boolean(installingAgentKind)}>{installingAgentKind ? <RotateCw className="animate-spin" /> : <Download />}{installingAgentKind ? "Starting installer…" : `Install ${selectedProfileInstall.label}`}</Button>
+              : <Button type="submit" disabled={creatingAgent || Boolean(installingAgentKind) || !agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind))}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button>}
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
     <Dialog open={createAppOpen} onOpenChange={setCreateAppOpen}><DialogContent className="max-w-xl"><form onSubmit={createAppDeployment} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>New App</DialogTitle><DialogDescription>Run a managed HTTP App with a stable workspace hostname.</DialogDescription></DialogHeader><Field label="Name"><Input aria-label="Name" value={appName} onChange={(event) => setAppName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Machine"><Select value={appServerId} onValueChange={setAppServerId} required><SelectTrigger aria-label="Machine"><SelectValue placeholder="Select an online machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><div className="sm:col-span-2"><Field label="Command"><Input aria-label="Command" className="font-mono" value={appCommandLine} onChange={(event) => setAppCommandLine(event.target.value)} placeholder="python3 -m http.server 8080" required /></Field></div><Field label="Working directory"><Input aria-label="Working directory" className="font-mono" value={appCwd} onChange={(event) => setAppCwd(event.target.value)} required /></Field><Field label="UI port"><Input aria-label="UI port" className="font-mono" type="number" min="1" max="65535" value={appPort} onChange={(event) => setAppPort(event.target.value)} placeholder="8080" required /></Field><div className="sm:col-span-2"><Field label="Virtual hostname"><Input aria-label="Virtual hostname" className="font-mono" value={appHostname} onChange={(event) => setAppHostname(event.target.value)} placeholder="my-app.internal" required /></Field></div><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setCreateAppOpen(false)}>Cancel</Button><Button type="submit" disabled={!appServerId}><Play />Create App</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={Boolean(deletingApp)} onOpenChange={(open) => !open && setDeletingApp(null)}><DialogContent><DialogHeader><DialogTitle>Delete App</DialogTitle><DialogDescription>Delete {deletingApp?.name}, stop its process, and remove its service and virtual hostname?</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingApp(null)}>Cancel</Button><Button variant="destructive" onClick={deleteAppDeployment}>Delete App</Button></DialogFooter></DialogContent></Dialog>

@@ -12,8 +12,8 @@ export const AGENT_CATALOG: AgentCatalogEntry[] = [
   { kind: "claude", command: "claude", label: "Claude", install: "curl -fsSL https://claude.ai/install.sh | bash", start: "claude --dangerously-skip-permissions" },
   { kind: "cursor", command: "cursor-agent", label: "Cursor", install: "curl https://cursor.com/install -fsS | bash", start: "cursor-agent" },
   { kind: "grok", command: "grok", label: "Grok", install: null, start: "grok --always-approve" },
-  { kind: "opencode", command: "opencode", label: "OpenCode", install: "npm install -g opencode-ai", start: "opencode" },
-  { kind: "pi", command: "pi", label: "Pi", install: null, start: "pi" },
+  { kind: "opencode", command: "opencode", label: "OpenCode", install: "curl -fsSL https://opencode.ai/install | bash", start: "opencode" },
+  { kind: "pi", command: "pi", label: "Pi", install: "curl -fsSL https://pi.dev/install.sh | sh", start: "pi" },
   { kind: "codex", command: "codex", label: "Codex", install: "npm install -g @openai/codex", start: "codex --dangerously-bypass-approvals-and-sandbox" },
 ]
 
