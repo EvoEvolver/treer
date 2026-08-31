@@ -14,6 +14,9 @@ second manual.
 - Recipe installs use [the bundled installer skill](skills/treer-install/SKILL.md),
   printed by `treer --skill install`. Creating an Agent with `--recipe`
   sends that skill as the first prompt.
+- Apple container Host setup on a Mac uses
+  [the macOS container skill](skills/treer-macos-container/SKILL.md), printed
+  by `treer --skill macos-container`.
 - The root [README](README.md) owns setup and operator examples.
 - [PLAN.md](PLAN.md) and dated [research](docs/research/) preserve design
   history. Use source, tests, and maintained docs for current behavior.
@@ -30,6 +33,7 @@ second manual.
 | Build or operate a workspace App | [apps/README.md](apps/README.md) |
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
 | Install a git recipe with an installer Agent | [skills/treer-install/SKILL.md](skills/treer-install/SKILL.md) |
+| Put a Treer Host in an Apple container machine | [skills/treer-macos-container/SKILL.md](skills/treer-macos-container/SKILL.md) |
 
 ## Source map
 

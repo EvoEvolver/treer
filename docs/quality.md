@@ -51,7 +51,7 @@ node scripts/check-docs.mjs
 | Mail | Python HTTP contract, frontend build, resumable SQLite/PostgreSQL migration | No unattended real-browser audit |
 | Telegram | Fake Bot API, mapping, ack crash ordering, restart, rate-limit and ambiguous-send tests | No live Telegram canary, webhook, or active-active mode |
 | Distribution | NATS event/outbox and multi-Proxy routing tests | No automated partition/failure CI |
-| Host supervision | systemd selection, foreground fallback, partial-unit repair, stale-registration cleanup, and TUI/Web diagnostics | No normal macOS LaunchAgent CI |
+| Host supervision | systemd selection, foreground fallback, partial-unit repair, stale-registration cleanup, and TUI/Web diagnostics | No normal macOS LaunchAgent CI; no Apple container machine setup CI |
 | Machine connection UX | Service workspace listing, `/api/health` `proxy_connected`, duplicate/stale reconnect, Proxy ping idle close, connect reuse, bind conflict, `proxy-env` local Direct classification | No physical lid-close in CI; record a manual macOS sleep/wake check after deploy |
 | Release | Four-platform metadata/checksums, GHCR publish workflow, and signed-manifest Node tests | Installed machine updater does not enforce signatures |
 | Self-host update | Updater unit tests; Proxy admin forward tests; `/admin` e2e | No unattended Compose apply against live Docker |

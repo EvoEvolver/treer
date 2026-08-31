@@ -34,6 +34,7 @@ use url::Url;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 const ATTACH_DETACH_BYTE: u8 = 0x1d;
 const SKILL: &str = include_str!("../../../skills/treer/SKILL.md");
+const MACOS_CONTAINER_SKILL: &str = include_str!("../../../skills/treer-macos-container/SKILL.md");
 
 #[derive(Debug, Parser)]
 #[command(
@@ -49,7 +50,7 @@ struct Args {
         num_args = 0..=1,
         default_missing_value = "treer",
         value_name = "NAME",
-        help = "Print a bundled agent skill and exit (`treer` or `install`)"
+        help = "Print a bundled skill and exit (`treer`, `install`, or `macos-container`)"
     )]
     skill: Option<String>,
     #[arg(long, env = "TREER_AGENT_SERVER_URL")]
@@ -639,7 +640,12 @@ async fn run_cli() -> anyhow::Result<()> {
         match skill.as_str() {
             "treer" => print!("{SKILL}"),
             "install" | "treer-install" => print!("{INSTALL_SKILL}"),
-            other => bail!("unknown skill {other}; available skills: treer, install"),
+            "macos-container" | "macos_container" | "treer-macos-container" => {
+                print!("{MACOS_CONTAINER_SKILL}")
+            }
+            other => {
+                bail!("unknown skill {other}; available skills: treer, install, macos-container")
+            }
         }
         return Ok(());
     }
@@ -1985,10 +1991,15 @@ mod tests {
         let install = Args::try_parse_from(["treer", "--skill", "install"])
             .expect("install skill should parse");
         assert_eq!(install.skill.as_deref(), Some("install"));
+        let macos = Args::try_parse_from(["treer", "--skill", "macos-container"])
+            .expect("macos-container skill should parse");
+        assert_eq!(macos.skill.as_deref(), Some("macos-container"));
         assert!(SKILL.starts_with("---\nname: treer\n"));
         assert!(INSTALL_SKILL.starts_with("---\nname: treer-install\n"));
+        assert!(MACOS_CONTAINER_SKILL.starts_with("---\nname: treer-macos-container\n"));
         assert!(!SKILL.contains("TODO"));
         assert!(!INSTALL_SKILL.contains("TODO"));
+        assert!(!MACOS_CONTAINER_SKILL.contains("TODO"));
     }
 
     #[test]

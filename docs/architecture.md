@@ -133,7 +133,10 @@ streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
 
 The Host is supervised by a per-user systemd service on Linux or a LaunchAgent
-on macOS when that user manager is available. Installation probes supervision
+on macOS when that user manager is available. An Apple container machine is a
+Linux guest: install it with `treer --skill macos-container` and a system
+unit, not a Mac LaunchAgent. Do not reuse a Mac `server_id` inside the guest.
+Installation probes supervision
 before consuming a single-use enrollment key. Automatic mode visibly falls
 back to an attached foreground Host when persistent supervision is unavailable;
 the persisted service-manager choice and fallback reason keep later lifecycle

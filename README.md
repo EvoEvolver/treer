@@ -916,11 +916,14 @@ Print the agent skill bundled with the installed binary:
 treer --skill
 treer --skills  # accepted alias for the CLI contract
 treer --skill install
+treer --skill macos-container
 ```
 
 This does not require a running proxy. The CLI contract is
 `skills/treer/SKILL.md`. Recipe installs use `skills/treer-install/SKILL.md`.
-Both are embedded at build time so the printed instructions match the binary.
+Apple container Host setup on a Mac uses
+`skills/treer-macos-container/SKILL.md`. They are embedded at build time so
+the printed instructions match the binary.
 
 Create an installer that receives the install skill as its first prompt:
 

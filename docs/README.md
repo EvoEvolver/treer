@@ -23,6 +23,7 @@ matching the question; follow its source links for implementation detail.
 | [Self-hosted Compose](../deploy/README.md) | GHCR images, updater sidecar, and `/admin` control-plane updates |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 | [Treer install skill](../skills/treer-install/SKILL.md) | Recipe-install contract prompted when creating an installer with a git URL |
+| [macOS container skill](../skills/treer-macos-container/SKILL.md) | Apple container machine Host setup on a Mac |
 
 ## Active execution plans
 
@@ -65,13 +66,17 @@ to, but does not duplicate, the embedded Treer skill. Keep
 `skills/treer/SKILL.md` at its current path because the CLI embeds it at build
 time and prints it through `treer --skill` and `treer --skills`. Keep
 `skills/treer-install/SKILL.md` next to it; `treer --skill install` and
-Agent create `--recipe` embed that file.
+Agent create `--recipe` embed that file. Keep
+`skills/treer-macos-container/SKILL.md` for Mac container-machine Host
+setup; `treer --skill macos-container` prints it. The image Dockerfile is
+`deploy/apple-container-machine/Dockerfile`.
 
 ## Update map
 
 | Change | Documentation to review |
 | --- | --- |
 | User-visible setup or commands | `README.md`, embedded Treer skill |
+| Apple container machine Host | `skills/treer-macos-container/SKILL.md`, `deploy/apple-container-machine/Dockerfile` |
 | Self-hosted images or `/admin` update | `deploy/README.md`, release process, security model |
 | Product scope or promise | Product direction |
 | Capability classification or sequencing | Capability roadmap |
