@@ -2793,7 +2793,7 @@ impl AuthStore {
         &self,
         token: &str,
     ) -> Result<MachineEnrollmentClaim, AuthFailure> {
-        self.claim_machine_enrollment_for_installation(token, None, None)
+        self.claim_machine_enrollment_for_installation(token, None, None, None)
             .await
     }
 
@@ -2802,11 +2802,21 @@ impl AuthStore {
         token: &str,
         installation_id: Option<&str>,
         machine_name: Option<&str>,
+        existing_server_id: Option<&str>,
     ) -> Result<MachineEnrollmentClaim, AuthFailure> {
         let installation_id = installation_id.map(validate_installation_id).transpose()?;
         let machine_name = machine_name
             .map(|name| validate_resource_name(name, "machine"))
             .transpose()?;
+        let existing_server_id = existing_server_id
+            .map(validate_machine_server_id)
+            .transpose()?;
+        if existing_server_id.is_some() && installation_id.is_none() {
+            return Err(AuthFailure::bad_request(
+                "invalid_machine_identity",
+                "an installed machine ID requires an installation identity",
+            ));
+        }
         let enrollment =
             parse_machine_enrollment_key(token).map_err(|_| invalid_machine_enrollment())?;
         let now = Utc::now();
@@ -2833,7 +2843,7 @@ impl AuthStore {
         let machine_secret = random_secret();
         let machine_secret_hash = hash_password(&machine_secret)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let existing_server_id = if let Some(installation_id) = installation_id.as_deref() {
+        let server_for_installation = if let Some(installation_id) = installation_id.as_deref() {
             sqlx::query_scalar::<_, String>(
                 "SELECT server_id FROM machines WHERE workspace_id = $1 AND installation_id = $2",
             )
@@ -2845,9 +2855,43 @@ impl AuthStore {
         } else {
             None
         };
-        let server_id = existing_server_id
-            .clone()
-            .unwrap_or_else(|| format!("srv_{}", Uuid::new_v4().simple()));
+        let server_id = match (
+            server_for_installation.as_deref(),
+            existing_server_id.as_deref(),
+        ) {
+            (Some(server_id), Some(expected)) if server_id != expected => {
+                return Err(AuthFailure::conflict(
+                    "machine_identity_conflict",
+                    "this installation identity is already bound to another machine",
+                ));
+            }
+            (Some(server_id), _) => server_id.to_string(),
+            (None, Some(server_id)) => {
+                let existing = sqlx::query(
+                    "SELECT workspace_id, installation_id FROM machines WHERE server_id = $1",
+                )
+                .bind(server_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+                if let Some(existing) = existing {
+                    let existing_workspace: String = existing.get("workspace_id");
+                    let existing_installation: Option<String> = existing.get("installation_id");
+                    if existing_workspace != workspace_id
+                        || existing_installation
+                            .as_deref()
+                            .is_some_and(|value| Some(value) != installation_id.as_deref())
+                    {
+                        return Err(AuthFailure::conflict(
+                            "machine_identity_conflict",
+                            "the installed machine is bound to another workspace or installation identity",
+                        ));
+                    }
+                }
+                server_id.to_string()
+            }
+            (None, None) => format!("srv_{}", Uuid::new_v4().simple()),
+        };
         let update = sqlx::query(
             "UPDATE machine_enrollments SET used_at = $1, server_id = $2 \
              WHERE enrollment_id = $3 AND used_at IS NULL AND expires_at > $4",
@@ -2862,11 +2906,19 @@ impl AuthStore {
         if update.rows_affected() != 1 {
             return Err(invalid_machine_enrollment());
         }
-        if existing_server_id.is_some() {
+        let existing_machine =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM machines WHERE server_id = $1")
+                .bind(&server_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?
+                != 0;
+        if existing_machine {
             sqlx::query(
-                "UPDATE machines SET secret_hash = $1, enrolled_by = $2, revoked_at = NULL \
-                 WHERE server_id = $3 AND workspace_id = $4",
+                "UPDATE machines SET installation_id = $1, secret_hash = $2, enrolled_by = $3, revoked_at = NULL \
+                 WHERE server_id = $4 AND workspace_id = $5",
             )
+            .bind(installation_id.as_deref())
             .bind(machine_secret_hash)
             .bind(&created_by)
             .bind(&server_id)
@@ -2917,10 +2969,16 @@ impl AuthStore {
         headers: &HeaderMap,
         installation_id: Option<&str>,
         machine_name: Option<&str>,
+        existing_server_id: Option<&str>,
     ) -> Result<MachineEnrollmentClaim, AuthFailure> {
         let token = bearer_token(headers).ok_or_else(invalid_machine_enrollment)?;
-        self.claim_machine_enrollment_for_installation(token, installation_id, machine_name)
-            .await
+        self.claim_machine_enrollment_for_installation(
+            token,
+            installation_id,
+            machine_name,
+            existing_server_id,
+        )
+        .await
     }
 
     pub async fn bind_machine_identity(
@@ -4990,6 +5048,19 @@ fn validate_installation_id(value: &str) -> Result<String, AuthFailure> {
         return Err(AuthFailure::bad_request(
             "invalid_machine_identity",
             "machine installation identity is invalid",
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn validate_machine_server_id(value: &str) -> Result<String, AuthFailure> {
+    if value.len() != 36
+        || !value.starts_with("srv_")
+        || !value[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_machine_identity",
+            "installed machine ID is invalid",
         ));
     }
     Ok(value.to_ascii_lowercase())
@@ -7093,6 +7164,7 @@ mod tests {
                 &first_enrollment,
                 Some(installation_id),
                 Some("Builder one"),
+                None,
             )
             .await
             .expect("claim first enrollment");
@@ -7105,6 +7177,7 @@ mod tests {
                 &second_enrollment,
                 Some(installation_id),
                 Some("Builder two"),
+                None,
             )
             .await
             .expect("claim second enrollment");
@@ -7140,6 +7213,65 @@ mod tests {
         new_headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", second.machine_token))
+                .expect("new authorization"),
+        );
+        assert!(store.authenticate_machine(&new_headers).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn enrollment_recovers_a_revoked_legacy_machine_without_its_old_credential() {
+        let store = AuthStore::for_test("owner-password").await;
+        let first_enrollment = store
+            .create_machine_enrollment("workspace-a", "admin")
+            .await
+            .expect("create legacy enrollment");
+        let legacy = store
+            .claim_machine_enrollment(&first_enrollment)
+            .await
+            .expect("claim legacy enrollment");
+        sqlx::query("UPDATE machines SET revoked_at = $1 WHERE server_id = $2")
+            .bind(Utc::now().to_rfc3339())
+            .bind(&legacy.server_id)
+            .execute(&store.pool)
+            .await
+            .expect("revoke legacy machine");
+
+        let installation_id = "mid_abcdef0123456789abcdef0123456789";
+        let replacement_enrollment = store
+            .create_machine_enrollment("workspace-a", "admin")
+            .await
+            .expect("create replacement enrollment");
+        let replacement = store
+            .claim_machine_enrollment_for_installation(
+                &replacement_enrollment,
+                Some(installation_id),
+                Some("Recovered builder"),
+                Some(&legacy.server_id),
+            )
+            .await
+            .expect("recover revoked machine");
+
+        assert_eq!(replacement.server_id, legacy.server_id);
+        let stored_installation = sqlx::query_scalar::<_, String>(
+            "SELECT installation_id FROM machines WHERE server_id = $1",
+        )
+        .bind(&legacy.server_id)
+        .fetch_one(&store.pool)
+        .await
+        .expect("load recovered installation identity");
+        assert_eq!(stored_installation, installation_id);
+
+        let mut old_headers = HeaderMap::new();
+        old_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", legacy.machine_token))
+                .expect("old authorization"),
+        );
+        assert!(store.authenticate_machine(&old_headers).await.is_err());
+        let mut new_headers = HeaderMap::new();
+        new_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", replacement.machine_token))
                 .expect("new authorization"),
         );
         assert!(store.authenticate_machine(&new_headers).await.is_ok());
@@ -7186,6 +7318,7 @@ mod tests {
                 &second_enrollment,
                 Some(installation_id),
                 Some("Migrated builder"),
+                None,
             )
             .await
             .expect("reenroll migrated machine");

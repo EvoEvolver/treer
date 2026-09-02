@@ -435,8 +435,13 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
                 proxy
             );
         }
-        bind_machine_identity(&proxy, &config, &identity).await?;
-        let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity).await?;
+        let response = claim_machine_enrollment(
+            &proxy,
+            &args.enrollment_key,
+            &identity,
+            Some(config.server_id.clone()),
+        )
+        .await?;
         if response.server_id != config.server_id {
             anyhow::bail!(
                 "Proxy returned machine {} instead of the installed machine {}",
@@ -469,7 +474,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
     let listen = service::resolve_listen(&enrollment.workspace_id, args.listen).await?;
     let install_hostname = service::current_hostname()?;
-    let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity).await?;
+    let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity, None).await?;
     if response.workspace_id != enrollment.workspace_id {
         anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
     }
@@ -510,6 +515,7 @@ async fn claim_machine_enrollment(
     proxy: &Url,
     enrollment_key: &str,
     identity: &service::MachineIdentity,
+    existing_server_id: Option<String>,
 ) -> Result<MachineEnrollmentResponse> {
     let endpoint = proxy
         .join("api/machines/enroll")
@@ -520,6 +526,7 @@ async fn claim_machine_enrollment(
         .json(&MachineEnrollmentRequest {
             installation_id: identity.installation_id.clone(),
             name: identity.name.clone(),
+            existing_server_id,
         })
         .send()
         .await
@@ -536,37 +543,6 @@ async fn claim_machine_enrollment(
         .json()
         .await
         .context("Proxy returned an invalid enrollment response")
-}
-
-async fn bind_machine_identity(
-    proxy: &Url,
-    config: &service::ServiceConfig,
-    identity: &service::MachineIdentity,
-) -> Result<()> {
-    let endpoint = proxy
-        .join("agent/machine/identity")
-        .context("failed to build machine identity URL")?;
-    let response = reqwest::Client::new()
-        .post(endpoint.clone())
-        .bearer_auth(&config.machine_token)
-        .json(&MachineEnrollmentRequest {
-            installation_id: identity.installation_id.clone(),
-            name: identity.name.clone(),
-        })
-        .send()
-        .await
-        .with_context(|| format!("failed to connect to {endpoint}"))?;
-    if response.status().is_success() {
-        return Ok(());
-    }
-    let status = response.status();
-    let error = response.json::<ApiError>().await.ok();
-    anyhow::bail!(
-        "{}",
-        error
-            .map(|error| error.error.message)
-            .unwrap_or_else(|| format!("Proxy identity binding failed with HTTP {status}"))
-    )
 }
 
 fn prepare_machine_identity(
@@ -974,6 +950,10 @@ mod tests {
                         "mid_0123456789abcdef0123456789abcdef"
                     );
                     assert_eq!(request.name, "builder");
+                    assert_eq!(
+                        request.existing_server_id.as_deref(),
+                        Some("srv_0123456789abcdef0123456789abcdef")
+                    );
                     Json(MachineEnrollmentResponse {
                         workspace_id: "workspace-a".to_string(),
                         server_id: "srv_test".to_string(),
@@ -994,6 +974,7 @@ mod tests {
                 installation_id: "mid_0123456789abcdef0123456789abcdef".to_string(),
                 name: "builder".to_string(),
             },
+            Some("srv_0123456789abcdef0123456789abcdef".to_string()),
         )
         .await
         .expect("claim enrollment");

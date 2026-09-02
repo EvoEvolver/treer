@@ -232,6 +232,12 @@ enrollment link does not create a duplicate machine. Shared home directories
 therefore give each host a separate installation identity. The identity is
 random and does not contain or derive from a MAC address.
 
+Reconnecting an installed workspace uses the new enrollment key to atomically
+bind that installation identity and rotate the machine credential. It does not
+require the locally saved machine credential to remain valid, so a machine that
+was removed or whose credential was revoked can be enrolled again without
+deleting its local service configuration first.
+
 Controller and Host configuration and service-manager entries are named by the
 Proxy-issued server ID, not by workspace. The Linux unit is pinned to the
 installation hostname with `ConditionHost`, and the Host Unix socket lives in

@@ -151,6 +151,11 @@ changes remove the old native registration first and reject transitions that
 would leave a running Host owned by the wrong supervisor. `connect` reuses the
 existing `server_id` for an already-installed hostname and workspace; a second
 Controller for that `server_id` fails if the listen socket is already live.
+Re-enrollment sends the installed `server_id` with the persistent installation
+identity, and the Proxy validates and rotates the credential in the enrollment
+transaction. Recovery therefore does not depend on the previous machine
+credential and does not consume the one-use key before identity conflicts have
+been checked.
 Service commands without `--workspace` list local installs or, when exactly one
 exists, use it. They no longer imply the workspace name `default`.
 

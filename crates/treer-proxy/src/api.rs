@@ -1863,6 +1863,7 @@ async fn enroll_machine(
             &headers,
             request.map(|request| request.installation_id.as_str()),
             request.map(|request| request.name.as_str()),
+            request.and_then(|request| request.existing_server_id.as_deref()),
         )
         .await?;
     state
