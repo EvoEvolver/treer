@@ -61,8 +61,10 @@ use crate::policy::{
     RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT, RESOURCE_MESSAGE_MAILBOX,
     RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
-use crate::state::{AppState, SocketFrame};
+use crate::state::{AppState, SocketFrame, TERMINAL_BROWSER_QUEUE_CAPACITY};
 use crate::updater::UpdaterClient;
+
+const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;
 
 fn control_audit_actor<'a>(
     session: Option<&'a CurrentSession>,
@@ -4967,6 +4969,8 @@ struct TerminalQuery {
     stream_epoch: Option<String>,
     #[serde(default)]
     since_revision: Option<u64>,
+    #[serde(default)]
+    flow_control: bool,
 }
 
 const fn default_terminal_cols() -> u16 {
@@ -5019,17 +5023,7 @@ async fn agent_terminal(
         agent_policy_resource(&agent),
     )
     .await?;
-    Ok(ws.on_upgrade(move |socket| {
-        stream_terminal(
-            socket,
-            state,
-            workspace_id,
-            agent_id,
-            query.cols,
-            query.rows,
-            query.cursor(),
-        )
-    }))
+    Ok(ws.on_upgrade(move |socket| stream_terminal(socket, state, workspace_id, agent_id, query)))
 }
 
 async fn stream_terminal(
@@ -5037,14 +5031,21 @@ async fn stream_terminal(
     state: AppState,
     workspace_id: String,
     agent_id: String,
-    cols: u16,
-    rows: u16,
-    cursor: Option<TerminalCursor>,
+    query: TerminalQuery,
 ) {
     let (mut outgoing, mut incoming) = socket.split();
-    let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<SocketFrame>();
+    let (terminal_tx, mut terminal_rx) =
+        tokio::sync::mpsc::channel::<SocketFrame>(TERMINAL_BROWSER_QUEUE_CAPACITY);
+    let cursor = query.cursor();
     let attached = state
-        .attach_terminal(&workspace_id, &agent_id, cols, rows, cursor, terminal_tx)
+        .attach_terminal(
+            &workspace_id,
+            &agent_id,
+            query.cols,
+            query.rows,
+            cursor,
+            terminal_tx,
+        )
         .await;
     let session_id = match attached {
         Ok(session_id) => session_id,
@@ -5057,21 +5058,10 @@ async fn stream_terminal(
         }
     };
 
+    let flow_window_bytes = query.flow_control.then_some(TERMINAL_FLOW_WINDOW_BYTES);
+    let mut in_flight_bytes = 0usize;
     loop {
         tokio::select! {
-            frame = terminal_rx.recv() => {
-                let Some(frame) = frame else { break };
-                let message = match frame {
-                    SocketFrame::Text(encoded) => Message::Text(encoded.into()),
-                    SocketFrame::Binary(data) => Message::Binary(data.into()),
-                    SocketFrame::Ping(payload) => Message::Ping(payload.into()),
-                    SocketFrame::Pong(payload) => Message::Pong(payload.into()),
-                    SocketFrame::Close => Message::Close(None),
-                };
-                if outgoing.send(message).await.is_err() {
-                    break;
-                }
-            }
             message = incoming.next() => {
                 let Some(Ok(message)) = message else { break };
                 let result = match message {
@@ -5079,6 +5069,21 @@ async fn stream_terminal(
                     Message::Text(text) => match serde_json::from_str::<TerminalClientMessage>(&text) {
                         Ok(TerminalClientMessage::Resize { cols, rows }) => {
                             state.terminal_resize(&session_id, cols, rows).await
+                        }
+                        Ok(TerminalClientMessage::Ack { bytes }) => {
+                            let Some(_) = flow_window_bytes else {
+                                continue;
+                            };
+                            let bytes = bytes as usize;
+                            if bytes > in_flight_bytes {
+                                Err(ProtocolError::new(
+                                    "invalid_terminal_ack",
+                                    "terminal acknowledgement exceeds outstanding output",
+                                ))
+                            } else {
+                                in_flight_bytes -= bytes;
+                                Ok(())
+                            }
                         }
                         Err(error) => Err(ProtocolError::new("invalid_terminal_message", error.to_string())),
                     },
@@ -5092,6 +5097,26 @@ async fn stream_terminal(
                             break;
                         }
                     }
+                }
+            }
+            frame = terminal_rx.recv(), if flow_window_bytes.is_none_or(|window| in_flight_bytes < window) => {
+                let Some(frame) = frame else { break };
+                let binary_bytes = match &frame {
+                    SocketFrame::Binary(data) => data.len(),
+                    _ => 0,
+                };
+                let message = match frame {
+                    SocketFrame::Text(encoded) => Message::Text(encoded.into()),
+                    SocketFrame::Binary(data) => Message::Binary(data.into()),
+                    SocketFrame::Ping(payload) => Message::Ping(payload.into()),
+                    SocketFrame::Pong(payload) => Message::Pong(payload.into()),
+                    SocketFrame::Close => Message::Close(None),
+                };
+                if outgoing.send(message).await.is_err() {
+                    break;
+                }
+                if flow_window_bytes.is_some() {
+                    in_flight_bytes = in_flight_bytes.saturating_add(binary_bytes);
                 }
             }
         }

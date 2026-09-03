@@ -45,6 +45,8 @@ pub(crate) struct ClusterSessionDelivery {
     pub server_id: String,
     pub session_id: String,
     pub revision: Option<u64>,
+    #[serde(default)]
+    pub cursor: bool,
     pub close: bool,
     pub frame: SocketFrame,
 }

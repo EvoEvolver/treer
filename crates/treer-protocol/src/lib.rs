@@ -1630,6 +1630,7 @@ pub struct TerminalCursor {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TerminalClientMessage {
     Resize { cols: u16, rows: u16 },
+    Ack { bytes: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1643,6 +1644,8 @@ pub enum TerminalServerMessage {
         revision: Option<u64>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         gap: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_chunks: Option<u32>,
     },
     Cursor {
         stream_epoch: String,
@@ -2051,6 +2054,12 @@ mod tests {
             serde_json::to_value(message).expect("serialize"),
             serde_json::json!({ "type": "resize", "cols": 140, "rows": 48 })
         );
+
+        assert_eq!(
+            serde_json::to_value(TerminalClientMessage::Ack { bytes: 32_768 })
+                .expect("serialize acknowledgement"),
+            serde_json::json!({ "type": "ack", "bytes": 32768 })
+        );
     }
 
     #[test]
@@ -2076,6 +2085,7 @@ mod tests {
             stream_epoch: Some("stream_a".to_string()),
             revision: Some(9),
             gap: true,
+            replay_chunks: Some(3),
         };
         assert_eq!(
             serde_json::to_value(&message).expect("serialize"),
@@ -2084,7 +2094,8 @@ mod tests {
                 "session_id": "term_1",
                 "stream_epoch": "stream_a",
                 "revision": 9,
-                "gap": true
+                "gap": true,
+                "replay_chunks": 3
             })
         );
         let parsed: TerminalServerMessage = serde_json::from_value(serde_json::json!({
@@ -2099,6 +2110,7 @@ mod tests {
                 stream_epoch: None,
                 revision: None,
                 gap: false,
+                replay_chunks: None,
             }
         );
     }
