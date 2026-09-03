@@ -277,7 +277,16 @@ and delete operations, App lifecycle operations, and machine rename and delete o
 audit events after the Controller result; an audit write failure is logged
 without turning a completed runtime mutation into a retryable API failure.
 
-Workspace deletion is manager-only (`owner`/`admin`) and requires every
+Workspace access is either `organization` or `restricted`. The former admits
+every current organization member; the latter admits only direct user grants,
+group grants, workspace creators, and organization managers. Direct and group
+grants carry `owner` or `member`, with owner taking precedence. Organization
+`owner`/`admin` roles imply workspace ownership, and workspace creation adds an
+explicit owner grant for the creator.
+Removing an organization member also clears that user's direct workspace and
+group grants.
+
+Workspace deletion is workspace-owner-only and requires every
 Machine in the workspace to be deleted first. Deletion is lazy: PostgreSQL
 marks the workspace with a deletion tombstone and revokes remaining Agent
 credentials, while retaining its messages, traffic history, policies, and

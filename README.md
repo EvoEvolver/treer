@@ -392,6 +392,11 @@ their email or preferred name without changing their stable identity or
 organization access. Organization owners and administrators can also rename
 their organization. Organization members can create and rename workspaces;
 renaming keeps the workspace ID, enrolled machines, Agents, and services intact.
+Workspaces are organization-visible by default. A workspace owner can restrict
+one to explicitly added organization members and organization groups. Workspace
+grants use `owner` and `member`; only an owner can change access or delete the
+workspace. Organization owners and administrators are implicit owners of every
+workspace, and the workspace creator starts as an explicit owner.
 
 Users, invitations, sessions, organizations, machine credentials, services,
 App OAuth codes, and workload signing keys are stored in PostgreSQL. The Proxy requires

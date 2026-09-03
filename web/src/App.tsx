@@ -48,7 +48,7 @@ import {
   CircleCheck,
   Download,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type PlatformAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type ServiceIngress, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
 import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
@@ -865,9 +865,51 @@ type WorkspaceSettingsViewProps = {
   onClose: () => void
 }
 
-function WorkspaceSettingsView({ workspace, organization, name, machines, machineCount, profiles, profilesLoading, canDelete, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
+function WorkspaceSettingsView({ workspace, organization, name, machines, machineCount, profiles, profilesLoading, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
+  const [access, setAccess] = useState<WorkspaceAccess>()
+  const [organizationMembers, setOrganizationMembers] = useState<Member[]>([])
+  const [organizationGroups, setOrganizationGroups] = useState<OrganizationGroup[]>([])
+  const [selectedUserId, setSelectedUserId] = useState("")
+  const [selectedGroupId, setSelectedGroupId] = useState("")
+  const [accessError, setAccessError] = useState<string | null>(null)
+  useEffect(() => {
+    if (preview || !workspace || !organization) return
+    Promise.all([
+      api<{ access: WorkspaceAccess }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/access`),
+      api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(organization.organization_id)}/members`),
+      api<{ groups: OrganizationGroup[] }>(`/api/organizations/${encodeURIComponent(organization.organization_id)}/groups`),
+    ]).then(([accessData, memberData, groupData]) => {
+      setAccess(accessData.access)
+      setOrganizationMembers(memberData.members)
+      setOrganizationGroups(groupData.groups)
+    }).catch((reason) => setAccessError(reason instanceof Error ? reason.message : "Unable to load workspace access"))
+  }, [preview, workspace?.workspace_id, organization?.organization_id])
+  async function onAccessMode(mode: WorkspaceAccess["access_mode"]) {
+    if (!workspace) return
+    try {
+      const data = await api<{ access: WorkspaceAccess }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/access`, { method: "PATCH", body: JSON.stringify({ access_mode: mode }) })
+      setAccess(data.access)
+    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : "Unable to update access") }
+  }
+  async function onUserGrant(userId: string, role: WorkspaceAccess["current_role"] | null) {
+    if (!workspace) return
+    try {
+      const data = await api<{ access: WorkspaceAccess }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/access/users/${encodeURIComponent(userId)}`, role ? { method: "PUT", body: JSON.stringify({ role }) } : { method: "DELETE" })
+      setAccess(data.access); setSelectedUserId("")
+    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : "Unable to update member") }
+  }
+  async function onGroupGrant(groupId: string, role: WorkspaceAccess["current_role"] | null) {
+    if (!workspace) return
+    try {
+      const data = await api<{ access: WorkspaceAccess }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/access/groups/${encodeURIComponent(groupId)}`, role ? { method: "PUT", body: JSON.stringify({ role }) } : { method: "DELETE" })
+      setAccess(data.access); setSelectedGroupId("")
+    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : "Unable to update group") }
+  }
   if (!workspace) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">Workspace not found. <Button variant="outline" className="mt-3" onClick={onClose}>Back</Button></div>
   const deleteBlocked = machineCount === undefined || machineCount > 0
+  const isOwner = access?.current_role === "owner"
+  const availableMembers = organizationMembers.filter((member) => !access?.members.some((grant) => grant.user_id === member.user_id))
+  const availableGroups = organizationGroups.filter((group) => !access?.groups.some((grant) => grant.group_id === group.group_id))
 
   return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
     <div className="mb-10 flex items-start justify-between gap-4">
@@ -903,7 +945,22 @@ function WorkspaceSettingsView({ workspace, organization, name, machines, machin
       </div>
     </section>
 
-    {canDelete && <section className="border-b py-6">
+    <section className="border-b py-6">
+      <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
+        <div><h2 className="text-sm font-semibold">Access</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Choose whether everyone in the organization or only selected people and groups can open this workspace.</p></div>
+        <div className="space-y-5">
+          <Field label="Who can access"><Select value={access?.access_mode ?? "organization"} onValueChange={(mode: WorkspaceAccess["access_mode"]) => void onAccessMode(mode)} disabled={!isOwner || preview}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="organization">Everyone in organization</SelectItem><SelectItem value="restricted">Selected people and groups</SelectItem></SelectContent></Select></Field>
+          {accessError && <p className="text-xs text-destructive">{accessError}</p>}
+          {access && <>
+            {access.access_mode === "organization" && <p className="text-xs leading-5 text-muted-foreground">Everyone already has member access. Add owners here to share access management and workspace deletion.</p>}
+            <div><h3 className="mb-2 text-xs font-semibold">People</h3><div className="border-y">{access.members.map((grant) => <div key={grant.user_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.preferred_name}</span><span className="block truncate text-[10px] text-muted-foreground">{grant.email}</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onUserGrant(grant.user_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="owner">Owner</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{grant.role}</span>}{isOwner ? <IconButton label={`Remove ${grant.preferred_name}`} onClick={() => void onUserGrant(grant.user_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.members.length && <div className="py-3 text-xs text-muted-foreground">No direct members.</div>}</div>{isOwner && availableMembers.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedUserId} onValueChange={setSelectedUserId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="Select organization member" /></SelectTrigger><SelectContent>{availableMembers.map((member) => <SelectItem key={member.user_id} value={member.user_id}>{member.preferred_name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedUserId} onClick={() => void onUserGrant(selectedUserId, "member")}><Plus />Add</Button></div>}</div>
+            <div><h3 className="mb-2 text-xs font-semibold">Groups</h3><div className="border-y">{access.groups.map((grant) => <div key={grant.group_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.name}</span><span className="block text-[10px] text-muted-foreground">{grant.member_count} members</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onGroupGrant(grant.group_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="owner">Owner</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{grant.role}</span>}{isOwner ? <IconButton label={`Remove ${grant.name}`} onClick={() => void onGroupGrant(grant.group_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.groups.length && <div className="py-3 text-xs text-muted-foreground">No groups.</div>}</div>{isOwner && availableGroups.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedGroupId} onValueChange={setSelectedGroupId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="Select organization group" /></SelectTrigger><SelectContent>{availableGroups.map((group) => <SelectItem key={group.group_id} value={group.group_id}>{group.name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedGroupId} onClick={() => void onGroupGrant(selectedGroupId, "member")}><Plus />Add</Button></div>}</div>
+          </>}
+        </div>
+      </div>
+    </section>
+
+    {isOwner && <section className="border-b py-6">
       <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
         <div><h2 className="text-sm font-semibold text-destructive">Danger zone</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Deleted workspaces disappear from active views while historical traffic and messages remain.</p></div>
         <div className="grid gap-3 border border-destructive/30 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><p className="text-xs leading-5 text-muted-foreground">{machineCount === undefined ? "Checking machine inventory..." : machineCount > 0 ? `Delete all ${machineCount} ${machineCount === 1 ? "machine" : "machines"} before deleting this workspace.` : "This action cannot be undone."}</p><Button variant="destructive" className="w-full sm:w-auto" disabled={preview || deleteBlocked} onClick={onDelete}><Trash2 />Delete workspace</Button></div>
@@ -960,6 +1017,7 @@ function WorkspaceApp() {
   const [deletingProfile, setDeletingProfile] = useState<AgentLaunchProfile | null>(null)
   const [installOpen, setInstallOpen] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
+  const [groupsOpen, setGroupsOpen] = useState(false)
   const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
   const [publishOpen, setPublishOpen] = useState(false)
   const [createServiceOpen, setCreateServiceOpen] = useState(false)
@@ -1001,6 +1059,8 @@ function WorkspaceApp() {
   const [connectCommand, setConnectCommand] = useState("")
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
+  const [groups, setGroups] = useState<OrganizationGroup[]>([])
+  const [groupName, setGroupName] = useState("")
   const [auditEvents, setAuditEvents] = useState<OrganizationAuditEvent[]>([])
   const [traffic, setTraffic] = useState<MachineTrafficRecord[]>([])
   const [auditLoading, setAuditLoading] = useState(false)
@@ -1351,7 +1411,6 @@ function WorkspaceApp() {
     setSelectedMachineId(null)
     await syncWorkspaces().catch(showError)
   }
-
   async function createAgent(event: FormEvent) {
     event.preventDefault()
     if (preview) {
@@ -1763,6 +1822,45 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
+  async function openGroups() {
+    if (!organizationId) return
+    try {
+      const [groupData, memberData] = await Promise.all([
+        api<{ groups: OrganizationGroup[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/groups`),
+        api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/members`),
+      ])
+      setGroups(groupData.groups)
+      setMembers(memberData.members)
+      setGroupsOpen(true)
+    } catch (reason) { showError(reason) }
+  }
+
+  async function createGroup(event: FormEvent) {
+    event.preventDefault()
+    if (!organizationId) return
+    try {
+      await api(`/api/organizations/${encodeURIComponent(organizationId)}/groups`, { method: "POST", body: JSON.stringify({ name: groupName }) })
+      setGroupName("")
+      await openGroups()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function deleteGroup(groupId: string) {
+    if (!organizationId) return
+    try {
+      await api(`/api/organizations/${encodeURIComponent(organizationId)}/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" })
+      await openGroups()
+    } catch (reason) { showError(reason) }
+  }
+
+  async function setGroupMember(groupId: string, userId: string, present: boolean) {
+    if (!organizationId) return
+    try {
+      const data = await api<{ groups: OrganizationGroup[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`, { method: present ? "PUT" : "DELETE" })
+      setGroups(data.groups)
+    } catch (reason) { showError(reason) }
+  }
+
   async function updateMemberRole(userId: string, role: Member["role"]) {
     if (!organizationId) return
     try {
@@ -2027,7 +2125,7 @@ function WorkspaceApp() {
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
           <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
-          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem><DropdownMenuItem onSelect={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} disabled={!organizationId}><FolderKanban />Create workspace</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem><DropdownMenuItem onSelect={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} disabled={!organizationId}><FolderKanban />Create workspace</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem><DropdownMenuItem onSelect={openGroups} disabled={!organizationId}><ShieldCheck />Groups</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
@@ -2244,6 +2342,8 @@ function WorkspaceApp() {
     <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>Delete workspace</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? "Checking the workspace machine inventory..." : workspaceMachineCount > 0 ? `Delete all ${workspaceMachineCount} ${workspaceMachineCount === 1 ? "machine" : "machines"} from ${workspace?.name ?? "this workspace"} first.` : `Delete ${workspace?.name}? It will disappear from active views while historical traffic and messages are retained. This cannot be undone.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>Cancel</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>Delete workspace</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="min-w-0"><span className="block truncate text-sm font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive" onClick={() => removeMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
+
+    <Dialog open={groupsOpen} onOpenChange={setGroupsOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Organization groups</DialogTitle><DialogDescription>Group organization members for workspace access.</DialogDescription></DialogHeader>{canManageMembers && <form onSubmit={createGroup} className="flex gap-2"><Input aria-label="Group name" value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="Group name" required maxLength={80} /><Button type="submit" disabled={!groupName.trim()}><Plus />Create</Button></form>}<div className="max-h-[55vh] divide-y overflow-auto border-y">{groups.map((group) => <section key={group.group_id} className="py-4"><div className="mb-3 flex items-center justify-between gap-3"><div className="min-w-0"><h3 className="truncate text-sm font-semibold">{group.name}</h3><p className="text-[10px] text-muted-foreground">{group.member_ids.length} members</p></div>{canManageMembers && <IconButton label={`Delete ${group.name}`} className="text-destructive" onClick={() => void deleteGroup(group.group_id)}><Trash2 /></IconButton>}</div><div className="grid gap-2 sm:grid-cols-2">{members.map((member) => <label key={member.user_id} className="flex min-w-0 items-center gap-2 text-xs"><input type="checkbox" checked={group.member_ids.includes(member.user_id)} disabled={!canManageMembers} onChange={(event) => void setGroupMember(group.group_id, member.user_id, event.target.checked)} /><span className="truncate">{member.preferred_name}</span></label>)}</div></section>)}{!groups.length && <div className="py-4 text-xs text-muted-foreground">No groups yet.</div>}</div></DialogContent></Dialog>
 
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}>

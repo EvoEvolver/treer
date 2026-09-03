@@ -258,6 +258,39 @@ pub struct OrganizationMember {
     pub joined_at: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct OrganizationGroup {
+    pub group_id: String,
+    pub organization_id: String,
+    pub name: String,
+    pub member_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAccessMember {
+    pub user_id: String,
+    pub preferred_name: String,
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAccessGroup {
+    pub group_id: String,
+    pub name: String,
+    pub role: String,
+    pub member_count: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAccessInfo {
+    pub workspace_id: String,
+    pub access_mode: String,
+    pub current_role: String,
+    pub members: Vec<WorkspaceAccessMember>,
+    pub groups: Vec<WorkspaceAccessGroup>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineSession {
     pub server_id: Option<String>,
@@ -407,6 +440,21 @@ pub struct RenameOrganizationRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemberRoleRequest {
     role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceAccessRequest {
+    access_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceGrantRequest {
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOrganizationGroupRequest {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -935,17 +983,79 @@ impl AuthStore {
         workspace_id: &str,
         user_id: &str,
     ) -> Result<String, AuthFailure> {
-        let organization_id = sqlx::query_scalar::<_, String>(
-            "SELECT organization_id FROM workspaces \
-             WHERE workspace_id = $1 AND deleted_at IS NULL",
+        if self.disabled {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = $1 AND deleted_at IS NULL)",
+            )
+            .bind(workspace_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            return exists.then(|| "owner".to_string()).ok_or_else(|| {
+                AuthFailure::not_found("workspace_not_found", "workspace does not exist")
+            });
+        }
+        let role = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT CASE \
+                 WHEN om.role IN ('owner', 'admin') THEN 'owner' \
+                 WHEN ug.role = 'owner' OR EXISTS( \
+                   SELECT 1 FROM workspace_group_grants wg \
+                   JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                   WHERE wg.workspace_id = w.workspace_id AND gm.user_id = $2 AND wg.role = 'owner' \
+                 ) THEN 'owner' \
+                 WHEN w.access_mode = 'organization' OR ug.user_id IS NOT NULL OR EXISTS( \
+                   SELECT 1 FROM workspace_group_grants wg \
+                   JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                   WHERE wg.workspace_id = w.workspace_id AND gm.user_id = $2 \
+                 ) THEN 'member' \
+                 ELSE NULL END \
+             FROM workspaces w \
+             JOIN organization_members om ON om.organization_id = w.organization_id AND om.user_id = $2 \
+             LEFT JOIN workspace_user_grants ug ON ug.workspace_id = w.workspace_id AND ug.user_id = $2 \
+             WHERE w.workspace_id = $1 AND w.deleted_at IS NULL",
         )
         .bind(workspace_id)
+        .bind(user_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(AuthFailure::database)?
-        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
-        self.require_organization_member(&organization_id, user_id)
-            .await
+        .flatten();
+        if let Some(role) = role {
+            return Ok(role);
+        }
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = $1 AND deleted_at IS NULL)",
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if exists {
+            Err(AuthFailure::forbidden(
+                "workspace_access_denied",
+                "you do not have access to this workspace",
+            ))
+        } else {
+            Err(AuthFailure::not_found(
+                "workspace_not_found",
+                "workspace does not exist",
+            ))
+        }
+    }
+
+    pub async fn require_workspace_owner(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Result<(), AuthFailure> {
+        if self.workspace_member_role(workspace_id, user_id).await? == "owner" {
+            Ok(())
+        } else {
+            Err(AuthFailure::forbidden(
+                "workspace_owner_required",
+                "workspace owner access required",
+            ))
+        }
     }
 
     pub async fn list_members(
@@ -983,12 +1093,24 @@ impl AuthStore {
         workspace_id: &str,
     ) -> Result<Vec<WorkspaceHuman>, AuthFailure> {
         let rows = sqlx::query(
-            "SELECT u.id AS user_id, u.preferred_name, m.role \
+            "SELECT u.id AS user_id, u.preferred_name, CASE \
+               WHEN m.role IN ('owner', 'admin') OR ug.role = 'owner' OR EXISTS( \
+                 SELECT 1 FROM workspace_group_grants wg \
+                 JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                 WHERE wg.workspace_id = w.workspace_id AND gm.user_id = u.id AND wg.role = 'owner' \
+               ) THEN 'owner' ELSE 'member' END AS role \
              FROM workspaces w \
              JOIN organization_members m ON m.organization_id = w.organization_id \
              JOIN users u ON u.id = m.user_id \
-             WHERE w.workspace_id = $1 AND w.deleted_at IS NULL \
-             ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, \
+             LEFT JOIN workspace_user_grants ug ON ug.workspace_id = w.workspace_id AND ug.user_id = u.id \
+             WHERE w.workspace_id = $1 AND w.deleted_at IS NULL AND ( \
+               w.access_mode = 'organization' OR m.role IN ('owner', 'admin') OR ug.user_id IS NOT NULL OR EXISTS( \
+                 SELECT 1 FROM workspace_group_grants wg \
+                 JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                 WHERE wg.workspace_id = w.workspace_id AND gm.user_id = u.id \
+               ) \
+             ) \
+             ORDER BY CASE WHEN m.role IN ('owner', 'admin') OR ug.role = 'owner' THEN 0 ELSE 1 END, \
                       lower(u.preferred_name), u.id",
         )
         .bind(workspace_id)
@@ -1014,14 +1136,389 @@ impl AuthStore {
             .await?;
         let rows = sqlx::query(
             "SELECT workspace_id, name, created_at FROM workspaces \
-             WHERE organization_id = $1 AND deleted_at IS NULL \
+             WHERE organization_id = $1 AND deleted_at IS NULL AND ( \
+               $3::BOOLEAN OR access_mode = 'organization' OR EXISTS( \
+                 SELECT 1 FROM organization_members om \
+                 WHERE om.organization_id = workspaces.organization_id AND om.user_id = $2 \
+                   AND om.role IN ('owner', 'admin') \
+               ) OR EXISTS( \
+                 SELECT 1 FROM workspace_user_grants ug \
+                 WHERE ug.workspace_id = workspaces.workspace_id AND ug.user_id = $2 \
+               ) OR EXISTS( \
+                 SELECT 1 FROM workspace_group_grants wg \
+                 JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                 WHERE wg.workspace_id = workspaces.workspace_id AND gm.user_id = $2 \
+               ) \
+             ) \
              ORDER BY lower(name), workspace_id",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(self.disabled)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(workspace_from_row).collect()
+    }
+
+    pub async fn workspace_access_info(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        let current_role = self.workspace_member_role(workspace_id, user_id).await?;
+        let access_mode = sqlx::query_scalar::<_, String>(
+            "SELECT access_mode FROM workspaces WHERE workspace_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let members = sqlx::query(
+            "SELECT u.id AS user_id, u.preferred_name, u.email, g.role \
+             FROM workspace_user_grants g \
+             JOIN workspaces w ON w.workspace_id = g.workspace_id \
+             JOIN organization_members om ON om.organization_id = w.organization_id AND om.user_id = g.user_id \
+             JOIN users u ON u.id = g.user_id \
+             WHERE g.workspace_id = $1 \
+             ORDER BY CASE g.role WHEN 'owner' THEN 0 ELSE 1 END, lower(u.preferred_name), u.id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .into_iter()
+        .map(|row| WorkspaceAccessMember {
+            user_id: row.get("user_id"),
+            preferred_name: row.get("preferred_name"),
+            email: row.get("email"),
+            role: row.get("role"),
+        })
+        .collect();
+        let groups = sqlx::query(
+            "SELECT og.group_id, og.name, wg.role, COUNT(gm.user_id) AS member_count \
+             FROM workspace_group_grants wg \
+             JOIN organization_groups og ON og.group_id = wg.group_id \
+             LEFT JOIN organization_group_members gm ON gm.group_id = og.group_id \
+             WHERE wg.workspace_id = $1 \
+             GROUP BY og.group_id, og.name, wg.role \
+             ORDER BY CASE wg.role WHEN 'owner' THEN 0 ELSE 1 END, lower(og.name), og.group_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .into_iter()
+        .map(|row| WorkspaceAccessGroup {
+            group_id: row.get("group_id"),
+            name: row.get("name"),
+            role: row.get("role"),
+            member_count: row.get("member_count"),
+        })
+        .collect();
+        Ok(WorkspaceAccessInfo {
+            workspace_id: workspace_id.to_string(),
+            access_mode,
+            current_role,
+            members,
+            groups,
+        })
+    }
+
+    pub async fn update_workspace_access_mode(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        access_mode: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, user_id).await?;
+        if !matches!(access_mode, "organization" | "restricted") {
+            return Err(AuthFailure::bad_request(
+                "invalid_workspace_access_mode",
+                "workspace access mode must be organization or restricted",
+            ));
+        }
+        sqlx::query(
+            "UPDATE workspaces SET access_mode = $1 WHERE workspace_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(access_mode)
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, user_id).await
+    }
+
+    pub async fn upsert_workspace_user_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        target_user_id: &str,
+        role: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        validate_workspace_role(role)?;
+        if actor == target_user_id && role != "owner" {
+            return Err(AuthFailure::conflict(
+                "workspace_owner_cannot_demote_self",
+                "add another owner before changing your own workspace role",
+            ));
+        }
+        let belongs = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM workspaces w JOIN organization_members om \
+             ON om.organization_id = w.organization_id \
+             WHERE w.workspace_id = $1 AND om.user_id = $2 AND w.deleted_at IS NULL)",
+        )
+        .bind(workspace_id)
+        .bind(target_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if !belongs {
+            return Err(AuthFailure::bad_request(
+                "workspace_member_must_belong_to_organization",
+                "workspace members must belong to the organization",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO workspace_user_grants(workspace_id, user_id, role, created_at, created_by) \
+             VALUES($1, $2, $3, $4, $5) ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role",
+        )
+        .bind(workspace_id)
+        .bind(target_user_id)
+        .bind(role)
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn remove_workspace_user_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        target_user_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        if actor == target_user_id {
+            return Err(AuthFailure::conflict(
+                "workspace_owner_cannot_remove_self",
+                "another workspace owner must remove your access",
+            ));
+        }
+        sqlx::query("DELETE FROM workspace_user_grants WHERE workspace_id = $1 AND user_id = $2")
+            .bind(workspace_id)
+            .bind(target_user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn upsert_workspace_group_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        group_id: &str,
+        role: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        validate_workspace_role(role)?;
+        let same_organization = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM workspaces w JOIN organization_groups g \
+             ON g.organization_id = w.organization_id \
+             WHERE w.workspace_id = $1 AND g.group_id = $2 AND w.deleted_at IS NULL)",
+        )
+        .bind(workspace_id)
+        .bind(group_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if !same_organization {
+            return Err(AuthFailure::bad_request(
+                "workspace_group_must_belong_to_organization",
+                "workspace groups must belong to the organization",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO workspace_group_grants(workspace_id, group_id, role, created_at, created_by) \
+             VALUES($1, $2, $3, $4, $5) ON CONFLICT(workspace_id, group_id) DO UPDATE SET role = excluded.role",
+        )
+        .bind(workspace_id)
+        .bind(group_id)
+        .bind(role)
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn remove_workspace_group_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        group_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        sqlx::query("DELETE FROM workspace_group_grants WHERE workspace_id = $1 AND group_id = $2")
+            .bind(workspace_id)
+            .bind(group_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn list_organization_groups(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
+        self.require_organization_member(organization_id, user_id)
+            .await?;
+        let rows = sqlx::query(
+            "SELECT group_id, organization_id, name FROM organization_groups \
+             WHERE organization_id = $1 ORDER BY lower(name), group_id",
         )
         .bind(organization_id)
         .fetch_all(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        rows.into_iter().map(workspace_from_row).collect()
+        let mut groups = Vec::with_capacity(rows.len());
+        for row in rows {
+            let group_id: String = row.get("group_id");
+            let member_ids = sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM organization_group_members WHERE group_id = $1 ORDER BY user_id",
+            )
+            .bind(&group_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            groups.push(OrganizationGroup {
+                group_id,
+                organization_id: row.get("organization_id"),
+                name: row.get("name"),
+                member_ids,
+            });
+        }
+        Ok(groups)
+    }
+
+    pub async fn create_organization_group(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        name: &str,
+    ) -> Result<OrganizationGroup, AuthFailure> {
+        self.require_manager(organization_id, actor).await?;
+        let name = validate_resource_name(name, "group")?;
+        let group = OrganizationGroup {
+            group_id: format!("grp_{}", Uuid::new_v4().simple()),
+            organization_id: organization_id.to_string(),
+            name,
+            member_ids: Vec::new(),
+        };
+        sqlx::query(
+            "INSERT INTO organization_groups(group_id, organization_id, name, created_at, created_by) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&group.group_id)
+        .bind(organization_id)
+        .bind(&group.name)
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict("group_exists", "group name already exists")
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
+        Ok(group)
+    }
+
+    pub async fn delete_organization_group(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        group_id: &str,
+    ) -> Result<(), AuthFailure> {
+        self.require_manager(organization_id, actor).await?;
+        let result = sqlx::query(
+            "DELETE FROM organization_groups WHERE organization_id = $1 AND group_id = $2",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if result.rows_affected() == 0 {
+            return Err(AuthFailure::not_found(
+                "group_not_found",
+                "group does not exist",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn set_organization_group_member(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        group_id: &str,
+        target_user_id: &str,
+        present: bool,
+    ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
+        self.require_manager(organization_id, actor).await?;
+        let valid = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM organization_groups g JOIN organization_members om \
+             ON om.organization_id = g.organization_id \
+             WHERE g.organization_id = $1 AND g.group_id = $2 AND om.user_id = $3)",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(target_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if !valid {
+            return Err(AuthFailure::bad_request(
+                "invalid_group_member",
+                "the group and member must belong to the organization",
+            ));
+        }
+        if present {
+            sqlx::query(
+                "INSERT INTO organization_group_members(group_id, user_id, added_at, added_by) \
+                 VALUES($1, $2, $3, $4) ON CONFLICT(group_id, user_id) DO NOTHING",
+            )
+            .bind(group_id)
+            .bind(target_user_id)
+            .bind(Utc::now().to_rfc3339())
+            .bind(actor)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        } else {
+            sqlx::query(
+                "DELETE FROM organization_group_members WHERE group_id = $1 AND user_id = $2",
+            )
+            .bind(group_id)
+            .bind(target_user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        }
+        self.list_organization_groups(organization_id, actor).await
     }
 
     pub async fn create_workspace(
@@ -1057,6 +1554,16 @@ impl AuthStore {
                 AuthFailure::database(error)
             }
         })?;
+        sqlx::query(
+            "INSERT INTO workspace_user_grants(workspace_id, user_id, role, created_at, created_by) \
+             SELECT $1, id, 'owner', $2, $3 FROM users WHERE id = $3",
+        )
+        .bind(workspace_id)
+        .bind(now.to_rfc3339())
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         insert_default_agent_launch_profiles(&mut transaction, workspace_id, user_id, &now).await?;
         audit::insert(
             &mut transaction,
@@ -1148,16 +1655,7 @@ impl AuthStore {
         workspace_id: &str,
         user_id: &str,
     ) -> Result<DeletedWorkspace, AuthFailure> {
-        let organization_id = sqlx::query_scalar::<_, String>(
-            "SELECT organization_id FROM workspaces \
-             WHERE workspace_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(workspace_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?
-        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
-        self.require_manager(&organization_id, user_id).await?;
+        self.require_workspace_owner(workspace_id, user_id).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let row = sqlx::query(
             "SELECT organization_id, name FROM workspaces \
@@ -3984,6 +4482,24 @@ impl AuthStore {
             ));
         }
         sqlx::query(
+            "DELETE FROM organization_group_members gm USING organization_groups g \
+             WHERE gm.group_id = g.group_id AND g.organization_id = $1 AND gm.user_id = $2",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "DELETE FROM workspace_user_grants g USING workspaces w \
+             WHERE g.workspace_id = w.workspace_id AND w.organization_id = $1 AND g.user_id = $2",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
             "DELETE FROM organization_members \
              WHERE organization_id = $1 AND user_id = $2",
         )
@@ -4875,6 +5391,120 @@ pub async fn members(
     })))
 }
 
+pub async fn organization_groups(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "groups": auth.list_organization_groups(&organization_id, &session.user_id).await?
+    })))
+}
+
+pub async fn create_organization_group_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+    Json(request): Json<CreateOrganizationGroupRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "group": auth.create_organization_group(&organization_id, &session.user_id, &request.name).await?
+    })))
+}
+
+pub async fn delete_organization_group_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, group_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    auth.delete_organization_group(&organization_id, &session.user_id, &group_id)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn add_organization_group_member_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, group_id, user_id)): AxumPath<(String, String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "groups": auth.set_organization_group_member(&organization_id, &session.user_id, &group_id, &user_id, true).await?
+    })))
+}
+
+pub async fn remove_organization_group_member_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, group_id, user_id)): AxumPath<(String, String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "groups": auth.set_organization_group_member(&organization_id, &session.user_id, &group_id, &user_id, false).await?
+    })))
+}
+
+pub async fn workspace_access(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(workspace_id): AxumPath<String>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.workspace_access_info(&workspace_id, &session.user_id).await?
+    })))
+}
+
+pub async fn update_workspace_access(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(workspace_id): AxumPath<String>,
+    Json(request): Json<UpdateWorkspaceAccessRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.update_workspace_access_mode(&workspace_id, &session.user_id, &request.access_mode).await?
+    })))
+}
+
+pub async fn update_workspace_user_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, user_id)): AxumPath<(String, String)>,
+    Json(request): Json<UpdateWorkspaceGrantRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.upsert_workspace_user_grant(&workspace_id, &session.user_id, &user_id, &request.role).await?
+    })))
+}
+
+pub async fn delete_workspace_user_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, user_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.remove_workspace_user_grant(&workspace_id, &session.user_id, &user_id).await?
+    })))
+}
+
+pub async fn update_workspace_group_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, group_id)): AxumPath<(String, String)>,
+    Json(request): Json<UpdateWorkspaceGrantRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.upsert_workspace_group_grant(&workspace_id, &session.user_id, &group_id, &request.role).await?
+    })))
+}
+
+pub async fn delete_workspace_group_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, group_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.remove_workspace_group_grant(&workspace_id, &session.user_id, &group_id).await?
+    })))
+}
+
 pub async fn audit_events(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
@@ -5311,6 +5941,17 @@ fn validate_resource_name(value: &str, resource: &str) -> Result<String, AuthFai
         ));
     }
     Ok(value.to_string())
+}
+
+fn validate_workspace_role(role: &str) -> Result<(), AuthFailure> {
+    if matches!(role, "owner" | "member") {
+        Ok(())
+    } else {
+        Err(AuthFailure::bad_request(
+            "invalid_workspace_role",
+            "workspace role must be owner or member",
+        ))
+    }
 }
 
 fn validate_installation_id(value: &str) -> Result<String, AuthFailure> {
@@ -7503,6 +8144,120 @@ mod tests {
             .await
             .expect_err("cross-organization access must fail");
         assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn restricted_workspaces_support_user_and_group_grants() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let organization = store
+            .create_organization(&owner.user_id, "Engineering")
+            .await
+            .expect("create organization");
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "ws_restricted",
+                "Restricted",
+                &owner.user_id,
+            )
+            .await
+            .expect("create workspace");
+        let (alice_invite, _) = store
+            .create_invitation(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("invite alice");
+        let alice = store
+            .register(
+                Some(&alice_invite),
+                "alice@example.com",
+                "Alice",
+                "password123",
+            )
+            .await
+            .expect("register alice");
+        let (bob_invite, _) = store
+            .create_invitation(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("invite bob");
+        let bob = store
+            .register(Some(&bob_invite), "bob@example.com", "Bob", "password123")
+            .await
+            .expect("register bob");
+
+        store
+            .update_workspace_access_mode("ws_restricted", &owner.user_id, "restricted")
+            .await
+            .expect("restrict workspace");
+        assert!(store
+            .list_workspaces(&organization.organization_id, &alice.user_id)
+            .await
+            .expect("alice workspace list")
+            .is_empty());
+        assert_eq!(
+            store
+                .require_workspace_member("ws_restricted", &alice.user_id)
+                .await
+                .expect_err("ungranted member must be denied")
+                .status,
+            StatusCode::FORBIDDEN
+        );
+
+        store
+            .upsert_workspace_user_grant("ws_restricted", &owner.user_id, &alice.user_id, "member")
+            .await
+            .expect("grant alice");
+        assert_eq!(
+            store
+                .workspace_member_role("ws_restricted", &alice.user_id)
+                .await
+                .expect("alice role"),
+            "member"
+        );
+        assert!(store
+            .delete_workspace("ws_restricted", &alice.user_id)
+            .await
+            .is_err());
+
+        let group = store
+            .create_organization_group(&organization.organization_id, &owner.user_id, "Reviewers")
+            .await
+            .expect("create group");
+        store
+            .set_organization_group_member(
+                &organization.organization_id,
+                &owner.user_id,
+                &group.group_id,
+                &bob.user_id,
+                true,
+            )
+            .await
+            .expect("add bob to group");
+        store
+            .upsert_workspace_group_grant(
+                "ws_restricted",
+                &owner.user_id,
+                &group.group_id,
+                "member",
+            )
+            .await
+            .expect("grant group");
+        assert_eq!(
+            store
+                .workspace_member_role("ws_restricted", &bob.user_id)
+                .await
+                .expect("bob group role"),
+            "member"
+        );
+
+        store
+            .upsert_workspace_user_grant("ws_restricted", &owner.user_id, &alice.user_id, "owner")
+            .await
+            .expect("promote alice");
+        store
+            .delete_workspace("ws_restricted", &alice.user_id)
+            .await
+            .expect("workspace owner may delete");
     }
 
     #[tokio::test]

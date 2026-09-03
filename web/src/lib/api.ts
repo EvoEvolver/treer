@@ -15,6 +15,35 @@ export interface Workspace {
   name: string
 }
 
+export interface OrganizationGroup {
+  group_id: string
+  organization_id: string
+  name: string
+  member_ids: string[]
+}
+
+export interface WorkspaceAccessMember {
+  user_id: string
+  preferred_name: string
+  email: string
+  role: "owner" | "member"
+}
+
+export interface WorkspaceAccessGroup {
+  group_id: string
+  name: string
+  role: "owner" | "member"
+  member_count: number
+}
+
+export interface WorkspaceAccess {
+  workspace_id: string
+  access_mode: "organization" | "restricted"
+  current_role: "owner" | "member"
+  members: WorkspaceAccessMember[]
+  groups: WorkspaceAccessGroup[]
+}
+
 export interface BuildInfo {
   version: string
   git_commit: string

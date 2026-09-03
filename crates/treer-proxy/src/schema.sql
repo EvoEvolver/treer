@@ -4,6 +4,11 @@ CREATE TABLE IF NOT EXISTS proxy_secrets (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS proxy_schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,
@@ -63,9 +68,79 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deleted_at TEXT;
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'organization';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'workspaces'::regclass
+          AND conname = 'workspaces_access_mode_check'
+    ) THEN
+        ALTER TABLE workspaces ADD CONSTRAINT workspaces_access_mode_check
+            CHECK(access_mode IN ('organization', 'restricted'));
+    END IF;
+END
+$$;
 CREATE INDEX IF NOT EXISTS workspaces_organization_id ON workspaces(organization_id);
 CREATE INDEX IF NOT EXISTS workspaces_active_organization
     ON workspaces(organization_id) WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS organization_groups (
+    group_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS organization_groups_name
+    ON organization_groups(organization_id, lower(name));
+
+CREATE TABLE IF NOT EXISTS organization_group_members (
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    added_at TEXT NOT NULL,
+    added_by TEXT NOT NULL,
+    PRIMARY KEY(group_id, user_id),
+    FOREIGN KEY(group_id) REFERENCES organization_groups(group_id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workspace_user_grants (
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, user_id),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workspace_group_grants (
+    workspace_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, group_id),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(group_id) REFERENCES organization_groups(group_id) ON DELETE CASCADE
+);
+
+WITH migration AS (
+    INSERT INTO proxy_schema_migrations(name, applied_at)
+    VALUES('workspace-access-v1', CURRENT_TIMESTAMP::TEXT)
+    ON CONFLICT(name) DO NOTHING
+    RETURNING 1
+)
+INSERT INTO workspace_user_grants(workspace_id, user_id, role, created_at, created_by)
+SELECT w.workspace_id, w.created_by, 'owner', w.created_at, w.created_by
+FROM workspaces w
+JOIN organization_members om
+  ON om.organization_id = w.organization_id AND om.user_id = w.created_by
+WHERE EXISTS(SELECT 1 FROM migration)
+ON CONFLICT(workspace_id, user_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS agent_launch_profiles (
     profile_id TEXT PRIMARY KEY,

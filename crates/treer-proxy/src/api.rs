@@ -557,6 +557,19 @@ pub fn router(
             get(auth::members),
         )
         .route(
+            "/api/organizations/{organization_id}/groups",
+            get(auth::organization_groups).post(auth::create_organization_group_handler),
+        )
+        .route(
+            "/api/organizations/{organization_id}/groups/{group_id}",
+            axum::routing::delete(auth::delete_organization_group_handler),
+        )
+        .route(
+            "/api/organizations/{organization_id}/groups/{group_id}/members/{user_id}",
+            axum::routing::put(auth::add_organization_group_member_handler)
+                .delete(auth::remove_organization_group_member_handler),
+        )
+        .route(
             "/api/organizations/{organization_id}/audit-events",
             get(auth::audit_events),
         )
@@ -580,6 +593,20 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}",
             axum::routing::patch(rename_workspace).delete(delete_workspace),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/access",
+            get(auth::workspace_access).patch(auth::update_workspace_access),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/access/users/{user_id}",
+            axum::routing::put(auth::update_workspace_user_grant)
+                .delete(auth::delete_workspace_user_grant),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/access/groups/{group_id}",
+            axum::routing::put(auth::update_workspace_group_grant)
+                .delete(auth::delete_workspace_group_grant),
         )
         .route(
             "/api/workspaces/{workspace_id}/snapshot",

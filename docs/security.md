@@ -98,6 +98,10 @@ state and WAL files require normal credential-store protection and backup.
 
 Public service ingress deliberately accepts anonymous internet traffic.
 Workspace ingress requires a current member session or service-audience token.
+For restricted workspaces, current membership means an effective direct or
+group workspace grant, workspace creation ownership, or organization manager
+access. Authorization is recalculated from PostgreSQL, and removing a user from
+the organization invalidates all workspace access.
 The Proxy strips gateway credentials and Treer headers before forwarding, but
 it remains in the browser-to-service data path. The Proxy records directional
 payload byte and frame totals for these tunnels under the synthetic `browser`
