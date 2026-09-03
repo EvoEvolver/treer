@@ -1,5 +1,5 @@
 use std::env;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
@@ -23,12 +23,14 @@ const MAX_UPDATE_BINARY_BYTES: usize = 128 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const UPDATE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROLLER_START_TIMEOUT: Duration = Duration::from_secs(15);
+const NOHUP_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ServiceMode {
     Auto,
     Systemd,
     Launchd,
+    Nohup,
     Foreground,
 }
 
@@ -38,6 +40,7 @@ impl std::fmt::Display for ServiceMode {
             Self::Auto => "auto",
             Self::Systemd => "systemd",
             Self::Launchd => "launchd",
+            Self::Nohup => "nohup",
             Self::Foreground => "foreground",
         })
     }
@@ -48,6 +51,7 @@ impl std::fmt::Display for ServiceMode {
 pub enum ServiceManager {
     SystemdUser,
     Launchd,
+    Nohup,
     Foreground,
 }
 
@@ -56,6 +60,7 @@ impl std::fmt::Display for ServiceManager {
         formatter.write_str(match self {
             Self::SystemdUser => "systemd-user",
             Self::Launchd => "launchd",
+            Self::Nohup => "nohup",
             Self::Foreground => "foreground",
         })
     }
@@ -86,8 +91,18 @@ impl ServiceSelection {
     pub fn announce(&self) {
         if let Some(reason) = &self.fallback_reason {
             eprintln!("treer: warning: persistent user service unavailable: {reason}");
+            match self.manager {
+                ServiceManager::Nohup => eprintln!(
+                    "treer: warning: falling back to nohup mode; the Host will not restart after exit or reboot"
+                ),
+                ServiceManager::Foreground => eprintln!(
+                    "treer: warning: falling back to foreground mode; keep this terminal open"
+                ),
+                ServiceManager::SystemdUser | ServiceManager::Launchd => {}
+            }
+        } else if self.manager == ServiceManager::Nohup {
             eprintln!(
-                "treer: warning: falling back to foreground mode; keep this terminal open or run the command under a process supervisor"
+                "treer: nohup service mode selected; the Host will not restart after exit or reboot"
             );
         } else if self.manager == ServiceManager::Foreground {
             eprintln!(
@@ -233,6 +248,7 @@ impl ServiceConfig {
             mode: match self.service_manager {
                 ServiceManager::SystemdUser => MachineSupervisionMode::SystemdUser,
                 ServiceManager::Launchd => MachineSupervisionMode::Launchd,
+                ServiceManager::Nohup => MachineSupervisionMode::Nohup,
                 ServiceManager::Foreground => MachineSupervisionMode::Foreground,
             },
             fallback_reason: self.service_fallback_reason.clone(),
@@ -409,7 +425,11 @@ pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<Serv
     validate_workspace(workspace)?;
     require_host_binary(&ServicePaths::new("preflight")?)?;
     host_socket_path("preflight")?;
-    select_service_manager(mode)
+    let selection = select_service_manager(mode)?;
+    if selection.manager == ServiceManager::Nohup {
+        require_nohup()?;
+    }
+    Ok(selection)
 }
 
 fn require_host_binary(paths: &ServicePaths) -> Result<()> {
@@ -434,19 +454,13 @@ fn select_linux_service_manager(
     probe: impl FnOnce() -> Result<()>,
 ) -> Result<ServiceSelection> {
     match mode {
-        ServiceMode::Auto => match probe() {
-            Ok(()) => Ok(ServiceSelection {
-                manager: ServiceManager::SystemdUser,
-                fallback_reason: None,
-            }),
-            Err(error) => Ok(ServiceSelection {
-                manager: ServiceManager::Foreground,
-                fallback_reason: Some(format!("{error:#}")),
-            }),
-        },
+        ServiceMode::Auto | ServiceMode::Nohup => Ok(ServiceSelection {
+            manager: ServiceManager::Nohup,
+            fallback_reason: None,
+        }),
         ServiceMode::Systemd => {
             probe().context(
-                "systemd user service mode was requested but the user manager is unavailable; use `--service-mode foreground` or enable a user systemd session",
+                "systemd user service mode was requested but the user manager is unavailable; use `--service-mode nohup` or enable a user systemd session",
             )?;
             Ok(ServiceSelection {
                 manager: ServiceManager::SystemdUser,
@@ -499,7 +513,11 @@ fn systemctl_command() -> Command {
 #[cfg(target_os = "macos")]
 fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
     match mode {
-        ServiceMode::Auto | ServiceMode::Launchd => Ok(ServiceSelection {
+        ServiceMode::Auto | ServiceMode::Nohup => Ok(ServiceSelection {
+            manager: ServiceManager::Nohup,
+            fallback_reason: None,
+        }),
+        ServiceMode::Launchd => Ok(ServiceSelection {
             manager: ServiceManager::Launchd,
             fallback_reason: None,
         }),
@@ -524,7 +542,7 @@ fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
             manager: ServiceManager::Foreground,
             fallback_reason: None,
         }),
-        ServiceMode::Systemd | ServiceMode::Launchd => {
+        ServiceMode::Systemd | ServiceMode::Launchd | ServiceMode::Nohup => {
             bail!("the requested service manager is not available on this platform")
         }
     }
@@ -569,6 +587,8 @@ pub async fn start_and_wait(workspace: &str) -> Result<ServiceActivation> {
         if let ServiceActivation::Foreground(child) = &mut activation {
             let _ = child.kill().await;
             let _ = child.wait().await;
+        } else if config.service_manager == ServiceManager::Nohup {
+            let _ = platform::stop(&paths, &config);
         }
         return Err(error);
     }
@@ -1573,6 +1593,260 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Serialize, Deserialize)]
+struct NohupProcess {
+    pid: u32,
+    started_at: String,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn nohup_executable() -> std::ffi::OsString {
+    env::var_os("TREER_NOHUP").unwrap_or_else(|| "nohup".into())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_nohup() -> Result<()> {
+    let executable = nohup_executable();
+    let path = Path::new(&executable);
+    if path.components().count() > 1 {
+        if path.is_file() {
+            return Ok(());
+        }
+        bail!("nohup executable was not found at {}", path.display());
+    }
+    let found = env::var_os("PATH").is_some_and(|value| {
+        env::split_paths(&value)
+            .map(|directory| directory.join(path))
+            .any(|candidate| candidate.is_file())
+    });
+    if found {
+        Ok(())
+    } else {
+        bail!("nohup was not found on PATH; install coreutils before connecting this machine")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn nohup_pid_path(paths: &ServicePaths, config: &ServiceConfig) -> PathBuf {
+    paths.state_dir.join(format!(
+        "agent-host-{}.pid",
+        component_key(&config.server_id)
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn service_log_path(paths: &ServicePaths, config: &ServiceConfig) -> PathBuf {
+    paths.state_dir.join(format!(
+        "agent-server-{}.log",
+        component_key(&config.server_id)
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_nohup_process(
+    paths: &ServicePaths,
+    config: &ServiceConfig,
+) -> Result<Option<NohupProcess>> {
+    let path = nohup_pid_path(paths, config);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()))
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("invalid nohup PID file {}", path.display()))
+        .map(Some)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn process_started_at(pid: u32) -> Result<Option<String>> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .output()
+        .context("failed to inspect the nohup Host process with ps")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let started_at = String::from_utf8(output.stdout)
+        .context("ps returned non-UTF-8 process metadata")?
+        .trim()
+        .to_string();
+    Ok((!started_at.is_empty()).then_some(started_at))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn nohup_process_is_current(process: &NohupProcess) -> Result<bool> {
+    Ok(process_started_at(process.pid)?.as_deref() == Some(process.started_at.as_str()))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn start_nohup(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    require_nohup()?;
+    start_nohup_with(&nohup_executable(), paths, config)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn start_nohup_with(nohup: &OsStr, paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    let pid_path = nohup_pid_path(paths, config);
+    if let Some(process) = read_nohup_process(paths, config)? {
+        if nohup_process_is_current(&process)? {
+            if host_is_running(&config.host_socket) {
+                println!(
+                    "treer: nohup Host is already running with PID {}",
+                    process.pid
+                );
+                return Ok(());
+            }
+            bail!(
+                "nohup Host PID {} is running but its socket is unavailable; wait for startup or stop it before retrying",
+                process.pid
+            );
+        }
+        remove_if_exists(&pid_path)?;
+    }
+    if host_is_running(&config.host_socket) {
+        bail!(
+            "a Host is already using {} but Treer has no matching nohup PID file",
+            config.host_socket.display()
+        );
+    }
+
+    fs::create_dir_all(&paths.state_dir)
+        .with_context(|| format!("failed to create {}", paths.state_dir.display()))?;
+    let log_path = service_log_path(paths, config);
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let log = options
+        .open(&log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?;
+    drop(log);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(r#""$1" "$2" run --config "$3" </dev/null >>"$4" 2>&1 & printf '%s\n' "$!""#)
+        .arg("treer-nohup")
+        .arg(nohup)
+        .arg(&paths.host_executable)
+        .arg(&paths.host_config)
+        .arg(&log_path)
+        .output()
+        .with_context(|| format!("failed to start {}", PathBuf::from(nohup).display()))?;
+    require_success(output.status, "nohup Host launcher")?;
+    let pid = String::from_utf8(output.stdout)
+        .context("nohup Host launcher returned a non-UTF-8 PID")?
+        .trim()
+        .parse::<u32>()
+        .context("nohup Host launcher returned an invalid PID")?;
+    let started_at = process_started_at(pid)?.with_context(|| {
+        format!("nohup Host PID {pid} exited before its process metadata could be recorded")
+    })?;
+    let process = NohupProcess { pid, started_at };
+    if let Err(error) = save_json(&process, &pid_path) {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+        return Err(error).context("failed to record the nohup Host PID");
+    }
+    println!("treer: started nohup Host with PID {pid}");
+    println!("treer: Host log: {}", log_path.display());
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stop_nohup(paths: &ServicePaths, config: &ServiceConfig, wait: bool) -> Result<()> {
+    let pid_path = nohup_pid_path(paths, config);
+    let Some(process) = read_nohup_process(paths, config)? else {
+        if host_is_running(&config.host_socket) {
+            bail!(
+                "a Host is using {} but its nohup PID file is missing; refusing to signal an unknown process",
+                config.host_socket.display()
+            );
+        }
+        return Ok(());
+    };
+    if !nohup_process_is_current(&process)? {
+        remove_if_exists(&pid_path)?;
+        if host_is_running(&config.host_socket) {
+            bail!("the nohup PID file is stale while the Host socket is still active");
+        }
+        return Ok(());
+    }
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(process.pid.to_string())
+        .status()
+        .with_context(|| format!("failed to signal nohup Host PID {}", process.pid))?;
+    require_success(status, "kill -TERM")?;
+    if !wait {
+        return Ok(());
+    }
+    let deadline = Instant::now() + NOHUP_STOP_TIMEOUT;
+    while nohup_process_is_current(&process)? {
+        if Instant::now() >= deadline {
+            bail!(
+                "nohup Host PID {} did not stop within {} seconds",
+                process.pid,
+                NOHUP_STOP_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    remove_if_exists(&pid_path)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn status_nohup(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    let process = read_nohup_process(paths, config)?;
+    let process_running = process
+        .as_ref()
+        .map(nohup_process_is_current)
+        .transpose()?
+        .unwrap_or(false);
+    let socket_running = host_is_running(&config.host_socket);
+    println!("Manager: nohup");
+    println!(
+        "PID: {}",
+        process
+            .as_ref()
+            .map_or_else(|| "unknown".to_string(), |process| process.pid.to_string())
+    );
+    println!("Log: {}", service_log_path(paths, config).display());
+    match (process_running, socket_running) {
+        (true, true) => {
+            println!("Status: running");
+            Ok(())
+        }
+        (true, false) => bail!("Status: process is running but the Host socket is unavailable"),
+        (false, true) => bail!("Status: Host socket is active but the recorded PID is not running"),
+        (false, false) => bail!("Status: stopped"),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn logs_nohup(
+    paths: &ServicePaths,
+    config: &ServiceConfig,
+    lines: usize,
+    follow: bool,
+) -> Result<()> {
+    let mut command = Command::new("tail");
+    command.args(["-n", &lines.to_string()]);
+    if follow {
+        command.arg("-f");
+    }
+    command.arg(service_log_path(paths, config));
+    run_checked(&mut command, "tail")
+}
+
 fn run_checked(command: &mut Command, description: &str) -> Result<()> {
     let status = command
         .status()
@@ -1699,7 +1973,7 @@ mod platform {
             return Ok(());
         }
         match (previous.service_manager, next.service_manager) {
-            (ServiceManager::SystemdUser, ServiceManager::Foreground) => {
+            (ServiceManager::SystemdUser, ServiceManager::Foreground | ServiceManager::Nohup) => {
                 cleanup_systemd_registration(
                     &unit_path(&previous.server_id)?,
                     &wants_path(&previous.server_id)?,
@@ -1714,6 +1988,22 @@ mod platform {
                     );
                 }
                 Ok(())
+            }
+            (ServiceManager::Nohup, ServiceManager::SystemdUser) => {
+                let paths = ServicePaths::new(&previous.server_id)?;
+                stop_nohup(&paths, previous, true)
+            }
+            (ServiceManager::Foreground, ServiceManager::Nohup) => {
+                if host_is_running(&previous.host_socket) {
+                    bail!(
+                        "cannot switch a running foreground Host to nohup; stop the foreground command with Ctrl-C, then run repair again"
+                    );
+                }
+                Ok(())
+            }
+            (ServiceManager::Nohup, ServiceManager::Foreground) => {
+                let paths = ServicePaths::new(&previous.server_id)?;
+                stop_nohup(&paths, previous, true)
             }
             (_, ServiceManager::Launchd) | (ServiceManager::Launchd, _) => {
                 bail!("launchd service configuration cannot run on Linux")
@@ -1750,7 +2040,7 @@ mod platform {
         );
         if host_running {
             disable.context(
-                "the existing systemd Host is still running, so Treer cannot safely downgrade it to foreground mode",
+                "the existing systemd Host is still running, so Treer cannot safely switch supervision modes",
             )?;
         } else if let Err(error) = disable {
             eprintln!(
@@ -1772,7 +2062,7 @@ mod platform {
 
     pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
         match config.service_manager {
-            ServiceManager::Foreground => return Ok(()),
+            ServiceManager::Nohup | ServiceManager::Foreground => return Ok(()),
             ServiceManager::SystemdUser => {}
             ServiceManager::Launchd => bail!("launchd service configuration cannot run on Linux"),
         }
@@ -1818,7 +2108,10 @@ mod platform {
         Ok(())
     }
 
-    pub fn start(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn start(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return start_nohup(paths, config);
+        }
         require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
@@ -1827,7 +2120,10 @@ mod platform {
         )
     }
 
-    pub fn stop(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn stop(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return stop_nohup(paths, config, true);
+        }
         require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
@@ -1836,7 +2132,10 @@ mod platform {
         )
     }
 
-    pub fn stop_remotely(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn stop_remotely(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return stop_nohup(paths, config, false);
+        }
         require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
@@ -1845,7 +2144,11 @@ mod platform {
         )
     }
 
-    pub fn restart(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn restart(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            stop_nohup(paths, config, true)?;
+            return start_nohup(paths, config);
+        }
         require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
@@ -1854,7 +2157,10 @@ mod platform {
         )
     }
 
-    pub fn status(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn status(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return status_nohup(paths, config);
+        }
         require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         run_checked(
@@ -1864,11 +2170,14 @@ mod platform {
     }
 
     pub fn logs(
-        _paths: &ServicePaths,
+        paths: &ServicePaths,
         config: &ServiceConfig,
         lines: usize,
         follow: bool,
     ) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return logs_nohup(paths, config, lines, follow);
+        }
         require_systemd(config)?;
         let unit = unit_name(&config.server_id);
         let mut command = Command::new("journalctl");
@@ -1886,8 +2195,14 @@ mod platform {
         run_checked(&mut command, "journalctl")
     }
 
-    pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn uninstall(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
         let unit = unit_name(&config.server_id);
+        if config.service_manager == ServiceManager::Nohup {
+            stop_nohup(paths, config, true)?;
+            remove_if_exists(&wants_path(&config.server_id)?)?;
+            remove_if_exists(&unit_path(&config.server_id)?)?;
+            return Ok(());
+        }
         if config.service_manager == ServiceManager::Foreground {
             remove_if_exists(&wants_path(&config.server_id)?)?;
             remove_if_exists(&unit_path(&config.server_id)?)?;
@@ -1907,6 +2222,7 @@ mod platform {
     fn require_systemd(config: &ServiceConfig) -> Result<()> {
         match config.service_manager {
             ServiceManager::SystemdUser => Ok(()),
+            ServiceManager::Nohup => bail!("this service uses nohup mode"),
             ServiceManager::Foreground => bail!(
                 "this service uses foreground mode; run `treer-agent-server service --workspace {} start` in a terminal or process supervisor",
                 config.workspace
@@ -1978,7 +2294,7 @@ mod platform {
             return Ok(());
         }
         match (previous.service_manager, next.service_manager) {
-            (ServiceManager::Launchd, ServiceManager::Foreground) => {
+            (ServiceManager::Launchd, ServiceManager::Foreground | ServiceManager::Nohup) => {
                 let target = service_target(&previous.server_id)?;
                 let bootout = run_checked(
                     Command::new("launchctl").args(["bootout", target.as_str()]),
@@ -1986,7 +2302,7 @@ mod platform {
                 );
                 if host_is_running(&previous.host_socket) {
                     bootout.context(
-                        "the existing LaunchAgent Host is still running, so Treer cannot safely downgrade it to foreground mode",
+                        "the existing LaunchAgent Host is still running, so Treer cannot safely switch supervision modes",
                     )?;
                 }
                 remove_if_exists(&plist_path(&previous.server_id)?)
@@ -1999,6 +2315,22 @@ mod platform {
                 }
                 Ok(())
             }
+            (ServiceManager::Nohup, ServiceManager::Launchd) => {
+                let paths = ServicePaths::new(&previous.server_id)?;
+                stop_nohup(&paths, previous, true)
+            }
+            (ServiceManager::Foreground, ServiceManager::Nohup) => {
+                if host_is_running(&previous.host_socket) {
+                    bail!(
+                        "cannot switch a running foreground Host to nohup; stop the foreground command with Ctrl-C, then run repair again"
+                    );
+                }
+                Ok(())
+            }
+            (ServiceManager::Nohup, ServiceManager::Foreground) => {
+                let paths = ServicePaths::new(&previous.server_id)?;
+                stop_nohup(&paths, previous, true)
+            }
             (_, ServiceManager::SystemdUser) | (ServiceManager::SystemdUser, _) => {
                 bail!("systemd user service configuration cannot run on macOS")
             }
@@ -2008,7 +2340,7 @@ mod platform {
 
     pub fn register(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
         match config.service_manager {
-            ServiceManager::Foreground => return Ok(()),
+            ServiceManager::Nohup | ServiceManager::Foreground => return Ok(()),
             ServiceManager::Launchd => {}
             ServiceManager::SystemdUser => {
                 bail!("systemd user service configuration cannot run on macOS")
@@ -2020,10 +2352,7 @@ mod platform {
             .context("LaunchAgent path has no parent")?;
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
-        let log_path = paths.state_dir.join(format!(
-            "agent-server-{}.log",
-            component_key(&config.server_id)
-        ));
+        let log_path = service_log_path(paths, config);
         write_atomic(
             &plist_path,
             launchd_plist(
@@ -2038,7 +2367,10 @@ mod platform {
         Ok(())
     }
 
-    pub fn start(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn start(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return start_nohup(paths, config);
+        }
         require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         let loaded = Command::new("launchctl")
@@ -2065,7 +2397,10 @@ mod platform {
         }
     }
 
-    pub fn stop(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn stop(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return stop_nohup(paths, config, true);
+        }
         require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         run_checked(
@@ -2075,11 +2410,18 @@ mod platform {
     }
 
     pub fn stop_remotely(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return stop_nohup(paths, config, false);
+        }
         require_launchd(config)?;
         stop(paths, config)
     }
 
     pub fn restart(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            stop_nohup(paths, config, true)?;
+            return start_nohup(paths, config);
+        }
         require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         let _ = Command::new("launchctl")
@@ -2088,7 +2430,10 @@ mod platform {
         start(paths, config)
     }
 
-    pub fn status(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn status(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return status_nohup(paths, config);
+        }
         require_launchd(config)?;
         let target = service_target(&config.server_id)?;
         run_checked(
@@ -2103,11 +2448,11 @@ mod platform {
         lines: usize,
         follow: bool,
     ) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            return logs_nohup(paths, config, lines, follow);
+        }
         require_launchd(config)?;
-        let log_path = paths.state_dir.join(format!(
-            "agent-server-{}.log",
-            component_key(&config.server_id)
-        ));
+        let log_path = service_log_path(paths, config);
         let mut command = Command::new("tail");
         command.args(["-n", &lines.to_string()]);
         if follow {
@@ -2117,7 +2462,12 @@ mod platform {
         run_checked(&mut command, "tail")
     }
 
-    pub fn uninstall(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    pub fn uninstall(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+        if config.service_manager == ServiceManager::Nohup {
+            stop_nohup(paths, config, true)?;
+            remove_if_exists(&plist_path(&config.server_id)?)?;
+            return Ok(());
+        }
         if config.service_manager == ServiceManager::Foreground {
             remove_if_exists(&plist_path(&config.server_id)?)?;
             return Ok(());
@@ -2133,6 +2483,7 @@ mod platform {
     fn require_launchd(config: &ServiceConfig) -> Result<()> {
         match config.service_manager {
             ServiceManager::Launchd => Ok(()),
+            ServiceManager::Nohup => bail!("this service uses nohup mode"),
             ServiceManager::Foreground => bail!(
                 "this service uses foreground mode; run `treer-agent-server service --workspace {} start` in a terminal or process supervisor",
                 config.workspace
@@ -2350,16 +2701,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn automatic_service_mode_falls_back_but_explicit_systemd_fails() {
+    fn automatic_service_mode_uses_nohup_without_probing_systemd() {
         let automatic = select_linux_service_manager(ServiceMode::Auto, || {
-            bail!("Failed to connect to bus: No such file or directory")
+            panic!("automatic nohup mode must not probe systemd")
         })
-        .expect("automatic fallback");
-        assert_eq!(automatic.manager, ServiceManager::Foreground);
-        assert!(automatic
-            .fallback_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("Failed to connect to bus")));
+        .expect("automatic nohup selection");
+        assert_eq!(automatic.manager, ServiceManager::Nohup);
+        assert_eq!(automatic.fallback_reason, None);
 
         let explicit = select_linux_service_manager(ServiceMode::Systemd, || {
             bail!("Failed to connect to bus: No such file or directory")
@@ -2372,6 +2720,12 @@ mod tests {
         })
         .expect("foreground selection");
         assert_eq!(foreground.manager, ServiceManager::Foreground);
+
+        let nohup = select_linux_service_manager(ServiceMode::Nohup, || {
+            panic!("explicit nohup mode must not probe systemd")
+        })
+        .expect("nohup selection");
+        assert_eq!(nohup.manager, ServiceManager::Nohup);
     }
 
     #[cfg(target_os = "linux")]
@@ -2379,8 +2733,8 @@ mod tests {
     fn service_canary_healthy_systemd_user_manager_is_selected() {
         use std::os::unix::fs::PermissionsExt;
 
-        let selection = select_linux_service_manager(ServiceMode::Auto, || Ok(()))
-            .expect("healthy systemd selection");
+        let selection = select_linux_service_manager(ServiceMode::Systemd, || Ok(()))
+            .expect("explicit systemd selection");
         assert_eq!(selection.manager, ServiceManager::SystemdUser);
         assert_eq!(selection.fallback_reason, None);
 
@@ -2426,16 +2780,95 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn service_canary_missing_user_bus_visibly_falls_back() {
+    fn service_canary_auto_ignores_a_missing_user_bus() {
         let selection = select_linux_service_manager(ServiceMode::Auto, || {
-            bail!("Failed to connect to bus: No medium found")
+            panic!("auto mode must not inspect the user bus")
         })
-        .expect("automatic foreground fallback");
-        assert_eq!(selection.manager, ServiceManager::Foreground);
-        assert!(selection
-            .fallback_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("Failed to connect to bus")));
+        .expect("automatic nohup selection");
+        assert_eq!(selection.manager, ServiceManager::Nohup);
+        assert_eq!(selection.fallback_reason, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nohup_stop_discards_a_reused_pid_without_signaling_it() {
+        let (directory, paths, config) = nohup_test_service("stale-pid");
+        let pid_path = nohup_pid_path(&paths, &config);
+        save_json(
+            &NohupProcess {
+                pid: std::process::id(),
+                started_at: "not the current process start time".to_string(),
+            },
+            &pid_path,
+        )
+        .expect("write stale PID record");
+
+        stop_nohup(&paths, &config, true).expect("discard stale PID record");
+        assert!(!pid_path.exists());
+
+        fs::remove_dir_all(directory).expect("remove nohup state directory");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nohup_launcher_detaches_and_stops_the_recorded_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (directory, mut paths, config) = nohup_test_service("lifecycle");
+        let fake_nohup = directory.join("fake nohup");
+        let fake_host = directory.join("fake host");
+        fs::write(&fake_nohup, "#!/bin/sh\nexec \"$@\"\n").expect("write fake nohup");
+        fs::write(
+            &fake_host,
+            "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+        )
+        .expect("write fake Host");
+        fs::set_permissions(&fake_nohup, fs::Permissions::from_mode(0o755))
+            .expect("make fake nohup executable");
+        fs::set_permissions(&fake_host, fs::Permissions::from_mode(0o755))
+            .expect("make fake Host executable");
+        paths.host_executable = fake_host;
+
+        start_nohup_with(fake_nohup.as_os_str(), &paths, &config)
+            .expect("start detached fake Host");
+        let process = read_nohup_process(&paths, &config)
+            .expect("read PID record")
+            .expect("PID record");
+        assert!(nohup_process_is_current(&process).expect("inspect fake Host"));
+        stop_nohup(&paths, &config, true).expect("stop detached fake Host");
+        assert!(!nohup_pid_path(&paths, &config).exists());
+
+        fs::remove_dir_all(directory).expect("remove nohup lifecycle directory");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn nohup_test_service(label: &str) -> (PathBuf, ServicePaths, ServiceConfig) {
+        let directory = std::env::temp_dir().join(format!(
+            "treer-nohup-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&directory).expect("create nohup test directory");
+        let paths = ServicePaths {
+            executable: directory.join("treer-agent-server"),
+            host_executable: directory.join("treer-agent-host"),
+            config: directory.join("controller.json"),
+            host_config: directory.join("host config.json"),
+            state_dir: directory.clone(),
+        };
+        let config = ServiceConfig {
+            proxy: "https://treer.example/".to_string(),
+            workspace: "default".to_string(),
+            server_id: format!("srv_nohup_{label}"),
+            machine_token: "srv_nohup.secret".to_string(),
+            operator_credential: "op_nohup".to_string(),
+            root: directory.clone(),
+            listen: "127.0.0.1:8790".to_string(),
+            host_socket: directory.join("host socket.sock"),
+            install_hostname: current_hostname().expect("hostname"),
+            service_manager: ServiceManager::Nohup,
+            service_fallback_reason: None,
+        };
+        (directory, paths, config)
     }
 
     #[cfg(target_os = "linux")]
@@ -2486,7 +2919,9 @@ mod tests {
             true,
         )
         .expect_err("an active Host must not be orphaned when systemctl is unavailable");
-        assert!(error.to_string().contains("cannot safely downgrade"));
+        assert!(error
+            .to_string()
+            .contains("cannot safely switch supervision modes"));
         assert!(unit.exists());
 
         fs::remove_dir_all(directory).expect("remove canary directory");

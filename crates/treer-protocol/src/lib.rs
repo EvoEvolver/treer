@@ -71,6 +71,7 @@ pub struct BuildInfo {
 pub enum MachineSupervisionMode {
     SystemdUser,
     Launchd,
+    Nohup,
     Foreground,
 }
 
@@ -1870,6 +1871,21 @@ mod tests {
         let decoded: ServerInfo =
             serde_json::from_value(legacy).expect("deserialize older server info");
         assert_eq!(decoded.supervision, None);
+    }
+
+    #[test]
+    fn nohup_supervision_round_trips() {
+        let supervision = MachineSupervision {
+            mode: MachineSupervisionMode::Nohup,
+            fallback_reason: None,
+        };
+        let encoded = serde_json::to_value(&supervision).expect("serialize nohup supervision");
+        assert_eq!(encoded["mode"], "nohup");
+        assert_eq!(
+            serde_json::from_value::<MachineSupervision>(encoded)
+                .expect("deserialize nohup supervision"),
+            supervision
+        );
     }
 
     #[test]

@@ -205,19 +205,18 @@ TREER_ENROLLMENT_KEY='enr_v1_...' \
 
 `connect` decodes the workspace ID from the key, uses the current directory as
 the workspace root, registers the Host service, and starts it. Before exchanging
-the single-use key, it validates local paths and binaries and probes the selected
-service manager. Linux `auto` mode prefers a host-pinned systemd user service;
-macOS prefers a per-user LaunchAgent with `KeepAlive`. If the persistent user
-service is unavailable, `auto` prints the reason and an explicit downgrade
-warning, starts the Host in the foreground, and keeps the command attached to
-it. Keep that terminal open or run it under a process supervisor. Force an
-early error instead with `--service-mode systemd`, or choose the fallback
-directly with `--service-mode foreground`.
+the single-use key, it validates local paths and binaries. On Linux and macOS,
+`auto` starts the Host detached with `nohup`, records its PID and process start
+identity, and writes output under the Treer state directory. This mode
+deliberately provides no start-at-boot or Host crash restart. Select a native
+user service explicitly with `--service-mode systemd` on Linux or
+`--service-mode launchd` on macOS; attached diagnostics remain available with
+`--service-mode foreground`.
 
-Linux setup checks systemd linger and prints an actionable warning when the
-service will stop after the last login session exits. It does not attempt a
-privileged linger change. `connect` reports success only after the local
-Controller health endpoint reports `proxy_connected`. Override
+Explicit Linux systemd setup checks linger and prints an actionable warning
+when the service will stop after the last login session exits. It does not
+attempt a privileged linger change. `connect` reports success only after the
+local Controller health endpoint reports `proxy_connected`. Override
 `TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`, `TREER_RUNTIME_DIR`, or
 `TREER_AGENT_SERVER_LISTEN` when needed. The first available loopback port
 starting at `8790` is saved per installed machine.
@@ -339,33 +338,29 @@ treer-agent-server service --workspace WORKSPACE_ID repair
 treer-agent-server service --workspace WORKSPACE_ID repair --service-mode systemd
 ```
 
-The default `auto` repair may visibly downgrade to foreground mode under the
-same rules as `connect`; in that case the repair command remains attached to
-the Host. When switching supervision modes, Treer removes the old systemd unit
-or LaunchAgent before activating the replacement. An inactive partial systemd
-registration can be cleaned even while the user bus is unavailable. A running
-Host is never orphaned: if its current manager cannot stop it, repair exits and
-asks the operator to stop the existing foreground command or restore the user
-manager before retrying.
+The default `auto` repair switches the Host to detached `nohup` mode under the
+same rules as `connect`. When switching supervision modes, Treer removes the old
+systemd unit or LaunchAgent, or stops the old `nohup` process, before activating
+the replacement. An inactive partial systemd registration can be cleaned even
+while the user bus is unavailable. A running Host is never orphaned: if its
+current manager cannot stop it, repair exits and asks the operator to stop the
+existing foreground command or restore the user manager before retrying.
 
 `--tui` opens an interactive dashboard for the installed workspace. It shows
 the local Controller health, Proxy reachability, current supervision mode, and
-Host-owned Agents on this machine. A foreground downgrade is highlighted with
-its persisted reason. The same mode and reason appear in the web machine
-overview after the Controller connects. The Agent list remains available from
-local state while the Proxy is unreachable, and the dashboard provides start,
-stop, full restart, and Controller-only restart actions.
+Host-owned Agents on this machine. The same mode and any persisted fallback
+reason appear in the web machine overview after the Controller connects. The
+Agent list remains available from local state while the Proxy is unreachable,
+and the dashboard provides start, stop, full restart, and Controller-only
+restart actions.
 Stop and full restart require confirmation because they terminate Host-owned
 Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 
 Add `--workspace WORKSPACE_ID` after `service` when this host has more than one
-install. On Linux, an administrator can run `loginctl enable-linger
-USER` when the service must survive the final logout; otherwise keep a
-foreground Host on a fixed machine, for example in tmux. On macOS, a
-LaunchAgent starts at user login; an always-on pre-login LaunchDaemon would
-require a separate privileged installation flow. Connecting the same hostname
-into the same workspace reuses the existing machine identity instead of
-creating a second LaunchAgent.
+install. The default `nohup` Host survives terminal logout but not reboot or
+process failure; run `service start` after either event. Connecting the same
+hostname into the same workspace reuses the existing machine identity instead
+of creating a second Host registration.
 
 ## Users, administrators, and invitations
 
@@ -720,10 +715,11 @@ egress are intentionally excluded. Hourly rows are retained for 90 days.
 
 Deleting an online machine sends a confirmed shutdown command over its existing
 Controller WebSocket before revoking the machine credential. A capable
-Controller then stops the local systemd user service or macOS LaunchAgent, which
-also terminates its Host and managed agents. The service remains installed and
-can still be started manually. Offline machines and older Controllers are
-deleted without waiting; their revoked credential prevents a later reconnect.
+Controller then stops the local `nohup` process, systemd user service, or macOS
+LaunchAgent, which also terminates its Host and managed agents. The service
+remains installed and can still be started manually. Offline machines and older
+Controllers are deleted without waiting; their revoked credential prevents a
+later reconnect.
 
 Authorization is a separate Proxy subsystem. The current policy engine defaults
 to allow and evaluates ordered asynchronous policy evaluators using

@@ -21,7 +21,7 @@ export interface BuildInfo {
 }
 
 export interface MachineSupervision {
-  mode: "systemd_user" | "launchd" | "foreground"
+  mode: "systemd_user" | "launchd" | "nohup" | "foreground"
   fallback_reason?: string
 }
 

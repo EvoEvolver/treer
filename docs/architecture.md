@@ -132,14 +132,15 @@ runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
 
-The Host is supervised by a per-user systemd service on Linux or a LaunchAgent
-on macOS when that user manager is available. An Apple container machine is a
-Linux guest: install it with `treer --skill macos-container` and a system
-unit, not a Mac LaunchAgent. Do not reuse a Mac `server_id` inside the guest.
-Installation probes supervision
-before consuming a single-use enrollment key. Automatic mode visibly falls
-back to an attached foreground Host when persistent supervision is unavailable;
-the persisted service-manager choice and fallback reason keep later lifecycle
+Automatic mode starts the Host as a detached `nohup` process on Linux and
+macOS. Treer records the PID and process start identity and redirects output to
+its state directory so lifecycle commands can reject reused PIDs and manage the
+correct Host. This intentionally does not provide start-at-boot or Host crash
+restart. A per-user systemd service or LaunchAgent remains an explicit operator
+choice, and attached foreground mode remains available for diagnostics. An
+Apple container machine is a Linux guest: install it with `treer --skill
+macos-container` and do not reuse a Mac `server_id` inside the guest. The
+persisted service-manager choice and fallback reason keep later lifecycle
 commands and machine diagnostics consistent. The Controller publishes that
 state as an optional machine snapshot field so older Controllers remain valid
 during rolling upgrades. TUI reads the same persisted state locally.
@@ -147,8 +148,9 @@ Startup is complete only when the Controller identity endpoint reports
 `proxy_connected`. Local `/api/agents` success is not a Proxy lease. Because
 service configuration is saved before native registration, `service repair` can
 reconstruct a partial installation without another enrollment key. Manager
-changes remove the old native registration first and reject transitions that
-would leave a running Host owned by the wrong supervisor. `connect` reuses the
+changes remove the old native registration or stop the old `nohup` process
+first, and reject transitions that would leave a running Host owned by the
+wrong supervisor. `connect` reuses the
 existing `server_id` for an already-installed hostname and workspace; a second
 Controller for that `server_id` fails if the listen socket is already live.
 Re-enrollment sends the installed `server_id` with the persistent installation

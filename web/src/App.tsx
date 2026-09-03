@@ -131,6 +131,7 @@ function buildLabel(build: Machine["controller_build"]) {
 function supervisionLabel(mode: NonNullable<Machine["supervision"]>["mode"]) {
   if (mode === "systemd_user") return "systemd user"
   if (mode === "launchd") return "LaunchAgent"
+  if (mode === "nohup") return "nohup"
   return "foreground"
 }
 
@@ -2155,7 +2156,7 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Controller commit</dt><dd className="truncate font-mono">{machine.controller_build.git_commit.slice(0, 10)}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Host commit</dt><dd className="truncate font-mono">{machine.host_build.git_commit.slice(0, 10)}</dd></div>
         </dl>
-        {machine.supervision?.fallback_reason && <div className="flex gap-2 border-t pt-3 text-[11px] leading-5 text-amber-700"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" /><p><span className="font-medium">Foreground fallback.</span> {machine.supervision.fallback_reason}</p></div>}
+        {machine.supervision?.fallback_reason && <div className="flex gap-2 border-t pt-3 text-[11px] leading-5 text-amber-700"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" /><p><span className="font-medium">{supervisionLabel(machine.supervision.mode)} fallback.</span> {machine.supervision.fallback_reason}</p></div>}
       </section>
 
       <section className="space-y-3 rounded-md border p-4">

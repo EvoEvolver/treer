@@ -122,7 +122,7 @@ struct ConnectArgs {
     root: PathBuf,
     #[arg(long, env = "TREER_AGENT_SERVER_LISTEN")]
     listen: Option<SocketAddr>,
-    /// Select persistent systemd/launchd supervision or a foreground fallback.
+    /// Select nohup (default), an operating-system service, or foreground mode.
     #[arg(long, value_enum, default_value_t = service::ServiceMode::Auto)]
     service_mode: service::ServiceMode,
     /// Set or replace the persistent machine name.
@@ -770,6 +770,22 @@ mod tests {
 
         let args = Args::try_parse_from([
             "treer-agent-server",
+            "connect",
+            "--proxy",
+            "https://treer.example",
+            "--key",
+            &key,
+            "--service-mode",
+            "nohup",
+        ])
+        .expect("parse nohup connect");
+        let Some(Command::Connect(connect)) = args.command else {
+            panic!("expected connect command");
+        };
+        assert_eq!(connect.service_mode, service::ServiceMode::Nohup);
+
+        let args = Args::try_parse_from([
+            "treer-agent-server",
             "service",
             "--workspace",
             "workspace-a",
@@ -800,7 +816,7 @@ mod tests {
         else {
             panic!("expected service status command");
         };
-        assert_eq!(workspace, None);
+        assert_eq!(workspace, std::env::var("TREER_WORKSPACE_ID").ok());
     }
 
     fn setup_args(name: Option<&str>, non_interactive: bool, accept_risk: bool) -> ConnectArgs {
