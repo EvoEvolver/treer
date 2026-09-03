@@ -721,17 +721,6 @@ function queueReviewRender() {
   reviewRenderTimer = setTimeout(renderReviews, 120);
 }
 
-function balancedForArgument(value) {
-  let depth = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    if (value[index] === "\\") { index += 1; continue; }
-    if (value[index] === "{") depth += 1;
-    if (value[index] === "}") depth -= 1;
-    if (depth < 0) return false;
-  }
-  return depth === 0 && !/(^|[^\\])%/.test(value);
-}
-
 function cleanMetadata(value) {
   return value.replaceAll("\\", "/").replace(/[{}%#]/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -744,7 +733,6 @@ function openReviewDialog() {
   if (parseReviews(state.view.state.doc.toString()).some(item => selection.from < item.to && selection.to > item.from)) {
     return showToast("Resolve the existing review before adding another one.");
   }
-  if (!balancedForArgument(selected)) return showToast("Select balanced LaTeX without comment lines.");
   state.reviewSelection = { from: selection.from, to: selection.to, selected };
   document.getElementById("dialog-title").textContent = "Inline comment";
   document.getElementById("dialog-label").textContent = "Comment";

@@ -125,6 +125,30 @@ test("selection remains visible inside an inline review mark", async () => {
   });
 });
 
+test("comment accepts arbitrary selected LaTeX fragments", async () => {
+  await withEditor(async ({ page }) => {
+    const content = "Before {fragment % note\nafter";
+    await createEditor(page, content);
+    const from = content.indexOf("{fragment");
+    const to = content.indexOf("\nafter");
+    await page.evaluate(([anchor, head]) => {
+      const { view } = globalThis.__paperTest.state;
+      view.dispatch({ selection: { anchor, head } });
+      view.focus();
+    }, [from, to]);
+    await page.locator("#add-comment").click();
+    await page.locator("#review-text").fill("Comment on this fragment");
+    await page.locator("#dialog-submit").click();
+
+    const { doc } = await editorState(page);
+    assert.match(doc, /\\cmtbg\{[^}]+\}\{[^}]+\}\{fragment % note\\cmted\{Comment on this fragment\}/);
+    await page.locator(".cm-review-comment", { hasText: "{fragment % note" }).waitFor();
+    await page.locator('[data-output="review"]').click();
+    await page.locator(".review-item button", { hasText: "Resolve" }).click();
+    assert.equal((await editorState(page)).doc, content);
+  });
+});
+
 test("selection overlay preserves the addition highlight", async () => {
   await withEditor(async ({ page }) => {
     const content = "Hello \\addbg{r1}{Ada}brave\\added world.";

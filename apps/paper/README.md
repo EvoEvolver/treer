@@ -77,6 +77,9 @@ keeps its selected text. Accepting a revision keeps additions and removes
 deletions; rejecting it does the inverse. The browser hides and protects these
 storage macros: comments appear as highlighted text with hover cards, while
 revisions show inserted and struck-through text inline.
+Comments may target any non-empty source range, including fragments with
+unbalanced LaTeX braces or comment characters; review storage is removed from
+the temporary source before compilation.
 Selecting a range that intersects one or more revisions shows a floating action
 that accepts all of those revisions in one collaborative edit.
 
