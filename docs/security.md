@@ -112,8 +112,11 @@ is not an internet listener. Any process on that machine that can reach
 `127.0.0.1` can reach the published service. Agent-scoped services use a
 separate Unix bridge into the same namespace and do not open a host TCP port.
 Managed Apps use `publish_ports` for their declared HTTP UI port, then route the
-stable service and virtual hostname to that loopback listener. Their command,
-arguments, working directory, and hostname are plaintext Proxy metadata; the
+stable service and virtual hostname to that loopback listener. When wildcard
+ingress is configured, Core creates a dedicated `workspace` ingress for each
+Managed App; browser access requires a current workspace session and Agent
+access requires a service-audience credential. Their command, arguments,
+working directory, hostname, and `public_url` are plaintext Proxy metadata; the
 Managed App API deliberately has no secret field.
 
 Only a logged-in workspace user or operator API may directly mutate service,

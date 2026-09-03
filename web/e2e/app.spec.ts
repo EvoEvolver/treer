@@ -112,6 +112,7 @@ const managedApp = {
   port: 9420,
   hostname: "soul.demo.internal",
   service_id: "svc-app-1",
+  public_url: "https://soul-app1.canary.apps.treer.ai/",
   desired_state: "running" as const,
   runtime_agent_id: "appw-1",
   restart_count: 1,
@@ -260,6 +261,35 @@ test("restores organization and workspace from the URL after reload", async ({ p
   await expect(page).toHaveTitle("Research / Experiments")
 })
 
+test("late snapshots from the previous workspace cannot replace the current inventory", async ({ page }) => {
+  let releaseFirstSnapshot = () => {}
+  let firstSnapshotStarted = false
+  const firstSnapshotBlocked = new Promise<void>((resolve) => { releaseFirstSnapshot = resolve })
+  let firstSnapshotResponded = () => {}
+  const firstSnapshotResponse = new Promise<void>((resolve) => { firstSnapshotResponded = resolve })
+  await page.route("**/api/workspaces/ws-1/snapshot", async (route) => {
+    firstSnapshotStarted = true
+    await firstSnapshotBlocked
+    await ok(route, snapshot)
+    firstSnapshotResponded()
+  })
+
+  await page.goto("/")
+  await expect.poll(() => firstSnapshotStarted).toBe(true)
+  await page.getByRole("combobox", { name: "Organization" }).click()
+  await page.getByRole("option", { name: "Research" }).click()
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
+  await expect(page).toHaveTitle("Research / Experiments")
+
+  releaseFirstSnapshot()
+  await firstSnapshotResponse
+  await page.waitForTimeout(100)
+  await expect(page.getByRole("tab", { name: /Machines 0/ })).toBeVisible()
+  await expect(page.getByRole("tab", { name: /Agents 0/ })).toBeVisible()
+  await expect(workstationRow(page)).toHaveCount(0)
+  await expect(page.getByRole("button", { name: /^api-server / })).toHaveCount(0)
+})
+
 test("agent list row menu can rename and delete", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
@@ -306,8 +336,8 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
   await page.getByRole("menuitem", { name: "Apps" }).click()
 
   await expect(page.getByText("Soul Archive")).toBeVisible()
-  await expect(page.getByText("soul.demo.internal/", { exact: true })).toBeVisible()
-  await expect(page.getByText("soul.demo.internal/_human/", { exact: true })).toBeVisible()
+  await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/", { exact: true })).toBeVisible()
+  await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/_human/", { exact: true })).toBeVisible()
   await page.evaluate(() => {
     window.open = ((url?: string | URL) => {
       document.documentElement.dataset.lastOpenedUrl = String(url)
@@ -315,11 +345,11 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
     }) as typeof window.open
   })
   await page.getByRole("button", { name: "Open Soul Archive Agent interface" }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/")
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
   await page.getByRole("button", { name: "Open Soul Archive Human interface" }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/_human/")
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/_human/")
   await page.getByRole("button", { name: "Open Soul Archive", exact: true }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/_human/")
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/_human/")
   const restarting = page.waitForRequest((request) => request.url().includes("/apps/app-1/restart") && request.method() === "POST")
   await page.getByRole("button", { name: "Restart Soul Archive" }).click()
   await restarting

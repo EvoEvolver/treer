@@ -1592,6 +1592,7 @@ impl AuthStore {
             port: request.port,
             hostname: hostname.clone(),
             service_id: service.service_id.clone(),
+            public_url: None,
             desired_state: AppDesiredState::Running,
             runtime_agent_id: None,
             restart_count: 0,
@@ -1751,6 +1752,7 @@ impl AuthStore {
         target: &str,
     ) -> Result<AppDeployment, AuthFailure> {
         let update_guard = self.virtual_hosts_update.lock().await;
+        let _ingress_update = self.service_ingresses_update.lock().await;
         let deployment = self.resolve_app_deployment(workspace_id, target).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM app_deployments WHERE workspace_id = $1 AND app_id = $2")
@@ -1766,6 +1768,10 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
+        self.service_ingresses
+            .write()
+            .await
+            .retain(|_, resolved| resolved.ingress.service_id != deployment.service_id);
         drop(update_guard);
         self.refresh_virtual_network_hosts()
             .await
@@ -2323,6 +2329,114 @@ impl AuthStore {
             },
         );
         Ok(ingress)
+    }
+
+    pub async fn ensure_app_ingress(
+        &self,
+        app: &AppDeployment,
+        actor: &str,
+        base_domain: &str,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let service = self
+            .resolve_machine_service(&app.workspace_id, &app.service_id)
+            .await?;
+        let _update = self.service_ingresses_update.lock().await;
+        let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+        if let Some(existing) = self.service_ingresses.read().await.get(&hostname) {
+            return if existing.ingress.service_id == app.service_id
+                && existing.ingress.access == ServiceIngressAccess::Workspace
+            {
+                Ok(existing.ingress.clone())
+            } else {
+                Err(AuthFailure::conflict(
+                    "ingress_exists",
+                    "generated App ingress hostname already exists",
+                ))
+            };
+        }
+        let now = Utc::now();
+        let ingress = ServiceIngress {
+            ingress_id: format!("ing_{}", Uuid::new_v4().simple()),
+            workspace_id: app.workspace_id.clone(),
+            service_id: app.service_id.clone(),
+            hostname: hostname.clone(),
+            access: ServiceIngressAccess::Workspace,
+            enabled: true,
+            created_at: now,
+            created_by: actor.to_string(),
+            updated_at: now,
+            updated_by: actor.to_string(),
+        };
+        let inserted = sqlx::query(
+            "INSERT INTO service_ingresses(\
+             ingress_id, workspace_id, service_id, hostname, access, enabled, created_at, \
+             created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, 'workspace', TRUE, $5, $6, $7, $8) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&ingress.ingress_id)
+        .bind(&ingress.workspace_id)
+        .bind(&ingress.service_id)
+        .bind(&ingress.hostname)
+        .bind(ingress.created_at.to_rfc3339())
+        .bind(&ingress.created_by)
+        .bind(ingress.updated_at.to_rfc3339())
+        .bind(&ingress.updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if inserted.rows_affected() == 0 {
+            return self
+                .resolve_service_ingress_hostname(&hostname)
+                .await?
+                .filter(|resolved| {
+                    resolved.ingress.service_id == app.service_id
+                        && resolved.ingress.access == ServiceIngressAccess::Workspace
+                })
+                .map(|resolved| resolved.ingress)
+                .ok_or_else(|| {
+                    AuthFailure::conflict(
+                        "ingress_exists",
+                        "generated App ingress hostname already exists",
+                    )
+                });
+        }
+        self.service_ingresses.write().await.insert(
+            hostname,
+            ResolvedServiceIngress {
+                ingress: ingress.clone(),
+                service,
+            },
+        );
+        Ok(ingress)
+    }
+
+    pub async fn ensure_managed_app_ingresses(
+        &self,
+        actor: &str,
+        base_domain: &str,
+    ) -> Result<usize, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT a.app_id, a.workspace_id, a.name, a.server_id, a.command, a.args, a.cwd, \
+             a.port, a.hostname, a.service_id, a.desired_state, a.runtime_agent_id, \
+             a.restart_count, a.last_error, a.created_at, a.created_by, a.updated_at, a.updated_by \
+             FROM app_deployments a JOIN workspaces w ON w.workspace_id = a.workspace_id \
+             WHERE w.deleted_at IS NULL ORDER BY a.app_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let apps = rows
+            .into_iter()
+            .map(app_deployment_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut created = 0;
+        for app in apps {
+            let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+            let existed = self.service_ingresses.read().await.contains_key(&hostname);
+            self.ensure_app_ingress(&app, actor, base_domain).await?;
+            created += usize::from(!existed);
+        }
+        Ok(created)
     }
 
     pub async fn update_service_ingress(
@@ -5307,6 +5421,7 @@ fn app_deployment_from_row(row: sqlx::postgres::PgRow) -> Result<AppDeployment, 
         port,
         hostname: row.get("hostname"),
         service_id: row.get("service_id"),
+        public_url: None,
         desired_state,
         runtime_agent_id: row.get("runtime_agent_id"),
         restart_count,
@@ -5608,6 +5723,30 @@ fn normalize_ingress_slug(value: &str) -> Result<String, AuthFailure> {
     Ok(slug)
 }
 
+pub(crate) fn managed_app_ingress_hostname(
+    app_name: &str,
+    app_id: &str,
+    base_domain: &str,
+) -> Result<String, AuthFailure> {
+    let slug = normalize_ingress_slug(app_name).unwrap_or_else(|_| "app".to_string());
+    let suffix = app_id
+        .strip_prefix("app_")
+        .unwrap_or(app_id)
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(12)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let hostname = format!("{slug}-{suffix}.{base_domain}");
+    if suffix.is_empty() || hostname.len() > 253 {
+        return Err(AuthFailure::bad_request(
+            "invalid_ingress_slug",
+            "generated App ingress hostname is invalid",
+        ));
+    }
+    Ok(hostname)
+}
+
 fn validate_ingress_return_path(value: &str) -> Result<String, AuthFailure> {
     if !value.starts_with('/')
         || value.starts_with("//")
@@ -5835,6 +5974,21 @@ mod tests {
     use treer_protocol::{AgentInfo, AgentStatus, CreateVirtualNetworkHostRequest, ServerStatus};
 
     type EmailCapture = Arc<Mutex<Option<oneshot::Sender<(HeaderMap, Value)>>>>;
+
+    #[test]
+    fn managed_app_ingress_hostnames_are_stable_and_dns_safe() {
+        assert_eq!(
+            managed_app_ingress_hostname("Soul Archive", "app_abcdef1234567890", "apps.treer.test")
+                .expect("managed App hostname"),
+            "soul-archive-abcdef123456.apps.treer.test"
+        );
+        assert_eq!(
+            managed_app_ingress_hostname("灵魂", "app_1234567890abcdef", "apps.treer.test")
+                .expect("fallback App hostname"),
+            "app-1234567890ab.apps.treer.test"
+        );
+        assert!(managed_app_ingress_hostname("Soul", "app_---", "apps.treer.test").is_err());
+    }
 
     async fn capture_email(
         State(capture): State<EmailCapture>,
@@ -6174,6 +6328,22 @@ mod tests {
             .expect("resolve App virtual host")
             .expect("App virtual host");
         assert_eq!(host.service_id, app.service_id);
+        let ingress = store
+            .ensure_app_ingress(&app, "owner", "apps.treer.test")
+            .await
+            .expect("create App ingress");
+        assert_eq!(ingress.service_id, app.service_id);
+        assert_eq!(ingress.access, ServiceIngressAccess::Workspace);
+        assert!(ingress.hostname.starts_with("soul-"));
+        assert!(ingress.hostname.ends_with(".apps.treer.test"));
+        assert_eq!(
+            store
+                .ensure_app_ingress(&app, "owner", "apps.treer.test")
+                .await
+                .expect("reuse App ingress")
+                .ingress_id,
+            ingress.ingress_id
+        );
 
         let first = store
             .claim_app_runtime("apps", &app.app_id, None, "appw_first", "reconciler")
@@ -6213,6 +6383,11 @@ mod tests {
             .resolve_virtual_network_host("apps", "soul.internal")
             .await
             .expect("resolve deleted host")
+            .is_none());
+        assert!(store
+            .resolve_service_ingress_hostname(&ingress.hostname)
+            .await
+            .expect("resolve deleted ingress")
             .is_none());
     }
 

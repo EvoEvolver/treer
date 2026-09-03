@@ -41,7 +41,10 @@ use uuid::Uuid;
 use crate::admin;
 use crate::agent_socket;
 use crate::audit::NewWorkspaceAuditEvent;
-use crate::auth::{self, AuthStore, CurrentSession, MachineSession, ProfileMutationActor};
+use crate::auth::{
+    self, managed_app_ingress_hostname, AuthStore, CurrentSession, MachineSession,
+    ProfileMutationActor,
+};
 use crate::identity::IdentityIssuer;
 use crate::message_store::{MessageStore, MessageStoreError};
 use crate::policy::{
@@ -182,6 +185,10 @@ impl IngressConfig {
 
     pub fn public_url(&self) -> Option<&Url> {
         self.public_url.as_ref()
+    }
+
+    pub fn base_domain_if_configured(&self) -> Option<&str> {
+        self.base_domain.as_deref()
     }
 
     fn base_domain(&self) -> Result<&str, ApiFailure> {
@@ -2251,14 +2258,47 @@ async fn hydrate_app_deployment(state: &AppState, app: &mut AppDeployment) {
     };
 }
 
+fn attach_app_public_url(
+    config: &IngressConfig,
+    ingresses: &[ServiceIngress],
+    app: &mut AppDeployment,
+) {
+    let managed_hostname = config.base_domain_if_configured().and_then(|base_domain| {
+        managed_app_ingress_hostname(&app.name, &app.app_id, base_domain).ok()
+    });
+    app.public_url = ingresses
+        .iter()
+        .find(|ingress| {
+            managed_hostname.as_deref() == Some(ingress.hostname.as_str())
+                && ingress.service_id == app.service_id
+                && ingress.access == ServiceIngressAccess::Workspace
+                && ingress.enabled
+        })
+        .and_then(|ingress| config.url_for_hostname(&ingress.hostname).ok())
+        .map(|url| url.to_string());
+}
+
+async fn hydrate_app_public_url(
+    auth: &AuthStore,
+    config: &IngressConfig,
+    app: &mut AppDeployment,
+) -> Result<(), ApiFailure> {
+    let ingresses = auth.list_service_ingresses(&app.workspace_id).await?;
+    attach_app_public_url(config, &ingresses, app);
+    Ok(())
+}
+
 async fn list_app_deployments(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
     let mut apps = auth.list_app_deployments(&workspace_id).await?;
+    let ingresses = auth.list_service_ingresses(&workspace_id).await?;
     for app in &mut apps {
         hydrate_app_deployment(&state, app).await;
+        attach_app_public_url(&config, &ingresses, app);
     }
     Ok(Json(json!({ "apps": apps })))
 }
@@ -2266,10 +2306,12 @@ async fn list_app_deployments(
 async fn get_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let mut app = auth.resolve_app_deployment(&workspace_id, &target).await?;
     hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2417,6 +2459,7 @@ async fn stop_app_runtime(
 async fn create_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2448,6 +2491,13 @@ async fn create_app_deployment(
     let mut app = auth
         .create_app_deployment(&workspace_id, actor, server_id, request)
         .await?;
+    if let Some(base_domain) = config.base_domain_if_configured() {
+        if let Err(error) = auth.ensure_app_ingress(&app, actor, base_domain).await {
+            let _ = auth.delete_app_deployment(&workspace_id, &app.app_id).await;
+            publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
+            return Err(error.into());
+        }
+    }
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     match launch_app_runtime(&state, &auth, &app, actor).await {
         Ok(started) => app = started,
@@ -2467,6 +2517,7 @@ async fn create_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2474,6 +2525,7 @@ async fn create_app_deployment(
 async fn start_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2528,6 +2580,7 @@ async fn start_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2535,6 +2588,7 @@ async fn start_app_deployment(
 async fn stop_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2577,6 +2631,7 @@ async fn stop_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2584,6 +2639,7 @@ async fn stop_app_deployment(
 async fn restart_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2627,6 +2683,7 @@ async fn restart_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2634,6 +2691,7 @@ async fn restart_app_deployment(
 async fn delete_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2641,6 +2699,8 @@ async fn delete_app_deployment(
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let current = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let mut response_app = current.clone();
+    hydrate_app_public_url(&auth, &config, &mut response_app).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -2670,7 +2730,8 @@ async fn delete_app_deployment(
         &app,
     )
     .await;
-    Ok(Json(json!({ "app": app })))
+    response_app.status = app.status;
+    Ok(Json(json!({ "app": response_app })))
 }
 
 pub(crate) async fn reconcile_app_deployments_for_server(

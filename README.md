@@ -91,6 +91,12 @@ treer app list
 treer app restart docs
 ```
 
+When wildcard ingress is configured, every Managed App receives a stable,
+workspace-authenticated `public_url` on its own origin. Browser assets,
+root-relative paths, redirects, and App routes therefore resolve without the
+control plane's `/virtual-hosts/.../proxy/` tunnel prefix. Installations without
+wildcard ingress continue to use that authenticated tunnel as a fallback.
+
 Managed Apps do not add a new security boundary or secret store. More complex
 Apps may still use an external supervisor and register ordinary Treer services.
 

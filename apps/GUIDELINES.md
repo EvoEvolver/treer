@@ -91,10 +91,11 @@ SPA routes, scripts, stylesheets, fonts, images, and other browser-only assets.
 Serve `/_human` and `/_human/` consistently, either with the same response or a
 redirect into `/_human/`.
 
-Human pages must work both on the App origin and below Treer's authenticated
-browser-tunnel prefix. Use document-relative asset URLs such as `./app.js` and
-configure frontend build tools with a relative base such as `./`; root-relative
-URLs like `/_human/app.js` escape the tunnel and reach the Proxy instead.
+Managed Apps receive a dedicated wildcard-ingress origin when the deployment
+configures `TREER_INGRESS_PUBLIC_URL`. Human pages should still work below
+Treer's authenticated browser-tunnel fallback used by installations without a
+wildcard domain. Use document-relative asset URLs such as `./app.js` and
+configure frontend build tools with a relative base such as `./`.
 
 Resolve API URLs against the App root before `/_human`, while preserving any
 tunnel prefix. For example, a page at either `/_human/` or

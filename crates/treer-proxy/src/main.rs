@@ -217,6 +217,16 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("failed to connect to PostgreSQL")?;
+    if let Some(base_domain) = ingress.base_domain_if_configured() {
+        let created = auth
+            .ensure_managed_app_ingresses("system", base_domain)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.into_parts().1.message))
+            .context("failed to reconcile managed App ingresses")?;
+        if created > 0 {
+            info!(created, %base_domain, "created missing managed App ingresses");
+        }
+    }
     let instance_id = args
         .proxy_instance_id
         .or(args.railway_replica_id)

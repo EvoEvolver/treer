@@ -107,9 +107,15 @@ treer app restart docs
 treer app delete docs
 ```
 
+Read `public_url` from `treer app create`, `list`, or `show` and use it as the
+App's external root when present. It has no control-plane `/proxy/` suffix and
+preserves root-relative assets and redirects. The default managed ingress
+requires Workspace authentication. `public_url` is absent when the Proxy has no
+wildcard ingress configured.
+
 Use this only for a single-process HTTP App. It does not install dependencies,
 store secrets, migrate state, or isolate hostile code. Service, virtual-host,
-and ingress records are operator-owned. An Agent cannot create or mutate them,
+and ingress records are owned by the Managed App. An Agent cannot create or mutate them,
 including through an older CLI. Use the browser control plane for externally
 supervised or non-HTTP processes.
 

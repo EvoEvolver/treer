@@ -733,6 +733,8 @@ pub struct AppDeployment {
     pub port: u16,
     pub hostname: String,
     pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
     pub desired_state: AppDesiredState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_agent_id: Option<String>,

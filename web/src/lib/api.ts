@@ -81,6 +81,7 @@ export interface AppDeployment {
   port: number
   hostname: string
   service_id: string
+  public_url?: string
   desired_state: "running" | "stopped"
   runtime_agent_id?: string
   restart_count: number
