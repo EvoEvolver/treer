@@ -395,7 +395,16 @@ pub enum ServiceActivation {
     Foreground(tokio::process::Child),
 }
 
-pub async fn refresh_registration_and_wait(config: ServiceConfig) -> Result<ServiceActivation> {
+pub async fn refresh_registration_and_wait(mut config: ServiceConfig) -> Result<ServiceActivation> {
+    let preferred_host_socket = host_socket_path(&config.server_id)?;
+    if should_migrate_host_socket(&config.host_socket, &preferred_host_socket) {
+        eprintln!(
+            "treer: migrating unavailable Host socket from {} to {}",
+            config.host_socket.display(),
+            preferred_host_socket.display()
+        );
+        config.host_socket = preferred_host_socket;
+    }
     let workspace = config.workspace.clone();
     register(config)?;
     let (_, installed) = installed_service(&workspace)?;
@@ -602,6 +611,16 @@ pub async fn start_and_wait(workspace: &str) -> Result<ServiceActivation> {
     }
     println!("treer: Controller and Proxy connection are ready");
     Ok(activation)
+}
+
+fn should_migrate_host_socket(current: &Path, preferred: &Path) -> bool {
+    if current == preferred {
+        return false;
+    }
+    #[cfg(unix)]
+    return !host_is_running(current);
+    #[cfg(not(unix))]
+    true
 }
 
 pub async fn wait_for_foreground(activation: ServiceActivation) -> Result<()> {
@@ -1431,16 +1450,77 @@ fn runtime_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("TREER_RUNTIME_DIR") {
         return Ok(PathBuf::from(path));
     }
-    if let Some(path) = env::var_os("XDG_RUNTIME_DIR") {
-        return Ok(PathBuf::from(path).join("treer"));
-    }
     let uid = current_uid()?;
+    #[cfg(unix)]
+    let uid_number = uid
+        .parse::<u32>()
+        .context("id -u returned an invalid user id")?;
+    if let Some(path) = env::var_os("XDG_RUNTIME_DIR") {
+        let path = PathBuf::from(path);
+        #[cfg(unix)]
+        if runtime_base_is_private_and_writable(&path, uid_number) {
+            return Ok(path.join("treer"));
+        }
+        #[cfg(not(unix))]
+        return Ok(path.join("treer"));
+    }
     #[cfg(target_os = "linux")]
     {
-        Ok(PathBuf::from("/run/user").join(uid).join("treer"))
+        if let Some(path) = linux_user_runtime_dir(Path::new("/run/user"), &uid, uid_number) {
+            return Ok(path);
+        }
+        private_state_runtime_dir()
     }
     #[cfg(not(target_os = "linux"))]
     Ok(env::temp_dir().join(format!("treer-{uid}")))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_runtime_dir(run_user_root: &Path, uid: &str, uid_number: u32) -> Option<PathBuf> {
+    let path = run_user_root.join(uid);
+    if runtime_base_is_private_and_writable(&path, uid_number) {
+        Some(path.join("treer"))
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn runtime_base_is_private_and_writable(path: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    metadata.is_dir()
+        && metadata.uid() == uid
+        && metadata.permissions().mode() & 0o300 == 0o300
+        && metadata.permissions().mode() & 0o077 == 0
+}
+
+fn private_state_runtime_dir() -> Result<PathBuf> {
+    prepare_private_runtime_dir(state_dir()?.join("run"))
+}
+
+fn prepare_private_runtime_dir(path: PathBuf) -> Result<PathBuf> {
+    fs::create_dir_all(&path).with_context(|| {
+        format!(
+            "failed to create fallback runtime directory {}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to secure fallback runtime directory {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(path)
 }
 
 fn current_uid() -> Result<String> {
@@ -2604,7 +2684,6 @@ mod tests {
                 .file_name()
         );
         assert!(unix_path_byte_len(&socket) <= MAX_UNIX_SOCKET_PATH_BYTES);
-        assert!(!socket.starts_with(state_dir().expect("state directory")));
     }
 
     #[test]
@@ -2631,6 +2710,114 @@ mod tests {
             Some(filename.as_str())
         );
         assert!(fitted.starts_with("/tmp"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_base_requires_a_private_writable_directory_owned_by_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = env::temp_dir().join(format!(
+            "treer-runtime-permissions-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&directory).expect("temporary runtime directory");
+        let uid = current_uid()
+            .expect("current uid")
+            .parse::<u32>()
+            .expect("numeric uid");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("private permissions");
+        assert!(runtime_base_is_private_and_writable(&directory, uid));
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+            .expect("public permissions");
+        assert!(!runtime_base_is_private_and_writable(&directory, uid));
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777))
+            .expect("writable public permissions");
+        assert!(!runtime_base_is_private_and_writable(&directory, uid));
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
+            .expect("read-only permissions");
+        assert!(!runtime_base_is_private_and_writable(&directory, uid));
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o600))
+            .expect("non-searchable permissions");
+        assert!(!runtime_base_is_private_and_writable(&directory, uid));
+        assert!(!runtime_base_is_private_and_writable(
+            &directory.join("missing"),
+            uid
+        ));
+        fs::remove_dir(&directory).expect("remove temporary runtime directory");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_runtime_dir_falls_back_when_the_user_runtime_directory_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = env::temp_dir().join(format!(
+            "treer-runtime-selection-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&directory).expect("temporary directory");
+        let uid = current_uid().expect("current uid");
+        let uid_number = uid.parse::<u32>().expect("numeric uid");
+        assert_eq!(linux_user_runtime_dir(&directory, &uid, uid_number), None);
+
+        let user_runtime = directory.join(&uid);
+        fs::create_dir(&user_runtime).expect("user runtime directory");
+        fs::set_permissions(&user_runtime, fs::Permissions::from_mode(0o700))
+            .expect("private permissions");
+        assert_eq!(
+            linux_user_runtime_dir(&directory, &uid, uid_number),
+            Some(user_runtime.join("treer"))
+        );
+        fs::remove_dir_all(&directory).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_runtime_directory_is_created_with_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = env::temp_dir().join(format!(
+            "treer-runtime-fallback-{}",
+            Uuid::new_v4().simple()
+        ));
+        let runtime = directory.join("run");
+        assert_eq!(
+            prepare_private_runtime_dir(runtime.clone()).expect("prepare runtime directory"),
+            runtime
+        );
+        assert_eq!(
+            fs::metadata(&runtime)
+                .expect("runtime metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_legacy_socket_is_migrated_but_a_live_socket_is_not() {
+        let directory = env::temp_dir().join(format!(
+            "treer-runtime-migration-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&directory).expect("temporary directory");
+        let current = directory.join("current.sock");
+        let preferred = directory.join("preferred.sock");
+        assert!(should_migrate_host_socket(&current, &preferred));
+        assert!(!should_migrate_host_socket(&preferred, &preferred));
+
+        let listener = std::os::unix::net::UnixListener::bind(&current).expect("live Host socket");
+        assert!(!should_migrate_host_socket(&current, &preferred));
+        drop(listener);
+        fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 
     #[test]
