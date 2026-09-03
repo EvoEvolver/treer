@@ -16,11 +16,11 @@ with the Agent's existing Policy subject. Core rechecks Policy for every
 operation; process isolation, secrets, configuration, state, upgrades, and
 network access remain deployment concerns.
 
-Every standalone App follows the [App guidelines](GUIDELINES.md): `/` is an
-Agent-readable GitHub Flavored Markdown manual, data pages are JSON, and human
-HTML and browser assets live below `/_human/`. Agent Interfaces such as Codex UI
-and Pi UI are embedded AIS surfaces rather than standalone App indexes and
-continue to expose their registered `ui_path`.
+Every standalone App follows the [App guidelines](GUIDELINES.md): `/` negotiates
+between an Agent-readable GitHub Flavored Markdown manual and the human HTML
+interface, while data pages remain JSON. Agent Interfaces such as Codex UI and
+Pi UI are embedded AIS surfaces rather than standalone App indexes and continue
+to expose their registered `ui_path`.
 
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.

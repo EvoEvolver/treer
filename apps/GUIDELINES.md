@@ -1,8 +1,8 @@
 # Treer App guidelines
 
 This document defines the HTTP presentation contract for standalone Treer Apps.
-It keeps the default surface useful to Agents while preserving a separate,
-predictable interface for humans.
+It keeps one predictable App root useful to both Agents and humans through
+HTTP representation negotiation.
 
 Agent Interface Servers (AIS), including Codex UI and Pi UI, are not standalone
 App indexes. They continue to expose the `ui_path` registered in their AIS
@@ -15,15 +15,25 @@ Use these route families consistently:
 
 | Path | Audience | Recommended representation |
 | --- | --- | --- |
-| `/` | Agents | GitHub Flavored Markdown in UTF-8 text |
+| `/` | Humans and Agents | HTML or GitHub Flavored Markdown, negotiated below |
 | Additional documentation pages | Agents | GitHub Flavored Markdown in UTF-8 text |
 | `/v1/...` or `/api/...` | Programs and Agents | Versioned JSON |
-| `/_human/` | Humans | HTML, CSS, JavaScript, and browser assets |
+| Browser assets | Humans | App-relative JavaScript, CSS, fonts, images, and workers |
 | `/health` or `/api/health` | Supervisors | Small JSON health document |
 
-The root must not redirect to the human UI. `curl APP_URL/` must produce a
-useful manual without JavaScript, browser automation, authentication cookies,
-or content negotiation.
+Choose the root representation in this order:
+
+1. An explicit `Accept: text/html` requests the human interface.
+2. An explicit `Accept: text/markdown` requests the Agent manual.
+3. When neither media type is explicit, a browser `User-Agent` containing
+   `Mozilla/` receives HTML and every other caller receives Markdown.
+
+If both supported media types are explicit, honor their quality values and
+header order. Set `Vary: Accept, User-Agent`. This is presentation selection,
+not authentication or authorization; callers may choose either representation.
+Do not redirect between representations or use a separate human-only prefix.
+`curl APP_URL/` must continue to produce a useful Markdown manual without
+JavaScript, browser automation, or authentication cookies.
 
 ## Agent pages
 
@@ -35,10 +45,10 @@ Prefer `Content-Type: text/markdown; charset=utf-8`. `text/plain; charset=utf-8`
 is acceptable for compatibility when the body still follows GitHub Markdown
 conventions. Do not return HTML from an Agent documentation route.
 
-The root manual should contain, in this order:
+The Markdown root representation should contain, in this order:
 
 1. App name and one-paragraph purpose.
-2. A link to the human interface at `/_human/`, when one exists.
+2. A note that browsers and `Accept: text/html` receive the human interface.
 3. The shortest safe read-only discovery or inspection commands.
 4. Mutation commands, clearly separated from inspection commands.
 5. Authentication, authorization, data sensitivity, and trust warnings.
@@ -86,10 +96,9 @@ behavior for mutations that callers may retry.
 
 ## Human pages
 
-Place every human HTML surface below `/_human/`. This includes entry points,
-SPA routes, scripts, stylesheets, fonts, images, and other browser-only assets.
-Serve `/_human` and `/_human/` consistently, either with the same response or a
-redirect into `/_human/`.
+Serve the human entry point as the HTML representation of `/`. Keep its
+scripts, stylesheets, fonts, images, and other browser assets at stable paths
+relative to the App root. Do not introduce a `/_human/` route family.
 
 Managed Apps receive a dedicated wildcard-ingress origin when the deployment
 configures `TREER_INGRESS_PUBLIC_URL`. Human pages should still work below
@@ -97,16 +106,15 @@ Treer's authenticated browser-tunnel fallback used by installations without a
 wildcard domain. Use document-relative asset URLs such as `./app.js` and
 configure frontend build tools with a relative base such as `./`.
 
-Resolve API URLs against the App root before `/_human`, while preserving any
-tunnel prefix. For example, a page at either `/_human/` or
-`/api/workspaces/WORKSPACE/virtual-hosts/HOST/proxy/_human/` should resolve
-`/v1/items` to the corresponding App root, not the browser origin root. Keep
-the human entry URL directory-like with a trailing slash, and restrict SPA
-fallback to the `/_human/` subtree so unknown Agent and API routes cannot return
-the human `index.html`.
+Resolve API URLs relative to the negotiated App root while preserving any
+tunnel prefix. For example, a page at
+`/api/workspaces/WORKSPACE/virtual-hosts/HOST/proxy/` should resolve `v1/items`
+below that same prefix, not the browser origin root. Keep the entry URL
+directory-like with a trailing slash, and do not let SPA fallback turn unknown
+Agent or API routes into the human `index.html`.
 
 Browser authentication callbacks may remain under `/api/`, but their default
-and validated `return_to` location should be under `/_human/`. Human session
+and validated `return_to` location should be the negotiated App root. Human session
 cookies do not authenticate an Agent. State the authentication requirement of
 every non-public API independently from the UI.
 
@@ -120,15 +128,16 @@ Every standalone App with a human interface should test the boundary directly:
 
 ```sh
 curl -i "$APP_URL/"
-curl -i "$APP_URL/_human/"
+curl -i -H 'Accept: text/html' "$APP_URL/"
+curl -i -H 'Accept: text/markdown' "$APP_URL/"
 curl -i -H 'Accept: application/json' "$APP_URL/v1/items"
 ```
 
 Tests should prove that:
 
-- `/` is Markdown-compatible text and contains useful Agent instructions;
-- `/` does not contain or redirect to HTML;
-- `/_human/` returns the human page and its assets resolve below `/_human/`;
+- `/` defaults to Markdown for non-browser callers and contains useful Agent instructions;
+- explicit HTML and Markdown `Accept` headers override the `User-Agent` heuristic;
+- browser navigation receives the human page and its relative assets resolve below the App root;
 - data routes return JSON even when they fail;
 - browser assets and API calls preserve a browser-tunnel path prefix; and
 - unknown paths do not fall through to an unrelated representation.
