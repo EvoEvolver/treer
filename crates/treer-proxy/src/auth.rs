@@ -723,7 +723,8 @@ impl AuthStore {
 
     pub async fn all_workspaces(&self) -> Result<Vec<WorkspaceInfo>, AuthFailure> {
         let rows = sqlx::query(
-            "SELECT workspace_id, name, created_at FROM workspaces ORDER BY workspace_id",
+            "SELECT workspace_id, name, created_at FROM workspaces \
+             WHERE deleted_at IS NULL ORDER BY workspace_id",
         )
         .fetch_all(&self.pool)
         .await
@@ -935,7 +936,8 @@ impl AuthStore {
         user_id: &str,
     ) -> Result<String, AuthFailure> {
         let organization_id = sqlx::query_scalar::<_, String>(
-            "SELECT organization_id FROM workspaces WHERE workspace_id = $1",
+            "SELECT organization_id FROM workspaces \
+             WHERE workspace_id = $1 AND deleted_at IS NULL",
         )
         .bind(workspace_id)
         .fetch_optional(&self.pool)
@@ -985,7 +987,7 @@ impl AuthStore {
              FROM workspaces w \
              JOIN organization_members m ON m.organization_id = w.organization_id \
              JOIN users u ON u.id = m.user_id \
-             WHERE w.workspace_id = $1 \
+             WHERE w.workspace_id = $1 AND w.deleted_at IS NULL \
              ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, \
                       lower(u.preferred_name), u.id",
         )
@@ -1012,7 +1014,8 @@ impl AuthStore {
             .await?;
         let rows = sqlx::query(
             "SELECT workspace_id, name, created_at FROM workspaces \
-             WHERE organization_id = $1 ORDER BY lower(name), workspace_id",
+             WHERE organization_id = $1 AND deleted_at IS NULL \
+             ORDER BY lower(name), workspace_id",
         )
         .bind(organization_id)
         .fetch_all(&self.pool)
@@ -1090,7 +1093,8 @@ impl AuthStore {
         let name = validate_resource_name(name, "workspace")?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let row = sqlx::query(
-            "SELECT organization_id, name FROM workspaces WHERE workspace_id = $1 FOR UPDATE",
+            "SELECT organization_id, name FROM workspaces \
+             WHERE workspace_id = $1 AND deleted_at IS NULL FOR UPDATE",
         )
         .bind(workspace_id)
         .fetch_optional(&mut *transaction)
@@ -1099,12 +1103,15 @@ impl AuthStore {
         .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
         let organization_id: String = row.get("organization_id");
         let old_name: String = row.get("name");
-        sqlx::query("UPDATE workspaces SET name = $1 WHERE workspace_id = $2")
-            .bind(&name)
-            .bind(workspace_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE workspaces SET name = $1 \
+             WHERE workspace_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(&name)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         audit::insert(
             &mut transaction,
             NewAuditEvent {
@@ -1124,7 +1131,8 @@ impl AuthStore {
         .map_err(AuthFailure::database)?;
         let info = workspace_from_row(
             sqlx::query(
-                "SELECT workspace_id, name, created_at FROM workspaces WHERE workspace_id = $1",
+                "SELECT workspace_id, name, created_at FROM workspaces \
+                 WHERE workspace_id = $1 AND deleted_at IS NULL",
             )
             .bind(workspace_id)
             .fetch_one(&mut *transaction)
@@ -1141,7 +1149,8 @@ impl AuthStore {
         user_id: &str,
     ) -> Result<DeletedWorkspace, AuthFailure> {
         let organization_id = sqlx::query_scalar::<_, String>(
-            "SELECT organization_id FROM workspaces WHERE workspace_id = $1",
+            "SELECT organization_id FROM workspaces \
+             WHERE workspace_id = $1 AND deleted_at IS NULL",
         )
         .bind(workspace_id)
         .fetch_optional(&self.pool)
@@ -1151,7 +1160,8 @@ impl AuthStore {
         self.require_manager(&organization_id, user_id).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let row = sqlx::query(
-            "SELECT organization_id, name FROM workspaces WHERE workspace_id = $1 FOR UPDATE",
+            "SELECT organization_id, name FROM workspaces \
+             WHERE workspace_id = $1 AND deleted_at IS NULL FOR UPDATE",
         )
         .bind(workspace_id)
         .fetch_optional(&mut *transaction)
@@ -1160,12 +1170,19 @@ impl AuthStore {
         .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
         let organization_id: String = row.get("organization_id");
         let name: String = row.get("name");
-        let machine_count =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM machines WHERE workspace_id = $1")
-                .bind(workspace_id)
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(AuthFailure::database)?;
+        let machine_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM machines WHERE workspace_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if machine_count != 0 {
+            return Err(AuthFailure::conflict(
+                "workspace_has_machines",
+                "delete all machines in this workspace first",
+            ));
+        }
         let agent_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1",
         )
@@ -1180,17 +1197,7 @@ impl AuthStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
-        // Tables without foreign keys to workspaces are cleaned up explicitly so
-        // no credential, name, or enrollment survives the deletion.
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE machines SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL",
-        )
-        .bind(&now)
-        .bind(workspace_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
         sqlx::query(
             "UPDATE agent_credentials SET revoked_at = $1 \
              WHERE workspace_id = $2 AND revoked_at IS NULL",
@@ -1200,26 +1207,6 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM machine_enrollments WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM machine_names WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM agent_names WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM deleted_agents WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
         audit::insert(
             &mut transaction,
             NewAuditEvent {
@@ -1241,11 +1228,16 @@ impl AuthStore {
         )
         .await
         .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE workspaces SET deleted_at = $1, deleted_by = $2 \
+             WHERE workspace_id = $3 AND deleted_at IS NULL",
+        )
+        .bind(&now)
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         self.agent_credentials
             .write()
@@ -2143,7 +2135,10 @@ impl AuthStore {
             "SELECT v.workspace_id, v.hostname, v.service_id, s.protocol AS service_protocol, \
              s.server_id AS destination_server_id, s.target_agent_id AS destination_agent_id, \
              s.target_host, s.target_port, v.created_at, v.created_by \
-             FROM virtual_network_hosts v JOIN machine_services s ON s.service_id = v.service_id",
+             FROM virtual_network_hosts v \
+             JOIN machine_services s ON s.service_id = v.service_id \
+             JOIN workspaces w ON w.workspace_id = v.workspace_id \
+             WHERE w.deleted_at IS NULL",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -2238,7 +2233,8 @@ impl AuthStore {
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \
              FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id \
-             WHERE lower(i.hostname) = lower($1)",
+             JOIN workspaces w ON w.workspace_id = i.workspace_id \
+             WHERE lower(i.hostname) = lower($1) AND w.deleted_at IS NULL",
         )
         .bind(hostname)
         .fetch_optional(&self.pool)
@@ -2395,7 +2391,9 @@ impl AuthStore {
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \
-             FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id",
+             FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id \
+             JOIN workspaces w ON w.workspace_id = i.workspace_id \
+             WHERE w.deleted_at IS NULL",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -2993,6 +2991,15 @@ impl AuthStore {
         let machine_secret = random_secret();
         let machine_secret_hash = hash_password(&machine_secret)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let workspace =
+            sqlx::query("SELECT deleted_at FROM workspaces WHERE workspace_id = $1 FOR KEY SHARE")
+                .bind(&workspace_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        if workspace.is_some_and(|row| row.get::<Option<String>, _>("deleted_at").is_some()) {
+            return Err(invalid_machine_enrollment());
+        }
         let server_for_installation = if let Some(installation_id) = installation_id.as_deref() {
             sqlx::query_scalar::<_, String>(
                 "SELECT server_id FROM machines WHERE workspace_id = $1 AND installation_id = $2",
@@ -3201,8 +3208,9 @@ impl AuthStore {
         let token = bearer_token(headers).ok_or_else(machine_auth_required)?;
         let (server_id, secret) = parse_credential(token, "srv_")?;
         let row = sqlx::query(
-            "SELECT workspace_id, secret_hash FROM machines \
-             WHERE server_id = $1 AND revoked_at IS NULL",
+            "SELECT m.workspace_id, m.secret_hash FROM machines m \
+             LEFT JOIN workspaces w ON w.workspace_id = m.workspace_id \
+             WHERE m.server_id = $1 AND m.revoked_at IS NULL AND w.deleted_at IS NULL",
         )
         .bind(server_id)
         .fetch_optional(&self.pool)
@@ -3285,8 +3293,9 @@ impl AuthStore {
             record
         } else {
             let row = sqlx::query(
-                "SELECT workspace_id, server_id, secret_hash FROM agent_credentials \
-                 WHERE agent_id = $1 AND revoked_at IS NULL",
+                "SELECT c.workspace_id, c.server_id, c.secret_hash FROM agent_credentials c \
+                 LEFT JOIN workspaces w ON w.workspace_id = c.workspace_id \
+                 WHERE c.agent_id = $1 AND c.revoked_at IS NULL AND w.deleted_at IS NULL",
             )
             .bind(agent_id)
             .fetch_optional(&self.pool)
@@ -6997,6 +7006,56 @@ mod tests {
             .await
             .expect("create launch profile");
 
+        sqlx::query(
+            "INSERT INTO machine_traffic_hourly(\
+             workspace_id, window_start, source_server_id, destination_server_id, \
+             payload_bytes, payload_frames, updated_at) VALUES($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind("ws_deletable")
+        .bind(Utc::now().timestamp())
+        .bind(&machine.server_id)
+        .bind("peer-machine")
+        .bind(128_i64)
+        .bind(1_i64)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert traffic history");
+        crate::message_store::MessageStore::open(store.pool())
+            .await
+            .expect("initialize message store");
+        sqlx::query(
+            "INSERT INTO core_messages(\
+             message_id, workspace_id, sender_kind, sender_id, sender_name, body, created_at) \
+             VALUES($1, $2, 'agent', $3, $4, $5, $6)",
+        )
+        .bind("msg-history")
+        .bind("ws_deletable")
+        .bind("agent-1")
+        .bind("Agent One")
+        .bind("retained history")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert message history");
+        let unused_enrollment = store
+            .create_machine_enrollment("ws_deletable", &owner.user_id)
+            .await
+            .expect("create unused enrollment");
+
+        let blocked = store
+            .delete_workspace("ws_deletable", &owner.user_id)
+            .await
+            .expect_err("an active machine must block workspace deletion");
+        let (status, error) = blocked.into_parts();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "workspace_has_machines");
+
+        store
+            .delete_machine("ws_deletable", &machine.server_id, &["agent-1".to_string()])
+            .await
+            .expect("delete machine first");
+
         let deleted = store
             .delete_workspace("ws_deletable", &owner.user_id)
             .await
@@ -7004,7 +7063,7 @@ mod tests {
         assert_eq!(deleted.workspace_id, "ws_deletable");
         assert_eq!(deleted.organization_id, organization.organization_id);
         assert_eq!(deleted.name, "Deletable");
-        assert_eq!(deleted.machine_count, 1);
+        assert_eq!(deleted.machine_count, 0);
         assert_eq!(deleted.agent_count, 1);
         assert_eq!(deleted.app_count, 0);
 
@@ -7013,25 +7072,33 @@ mod tests {
             .await
             .expect("list workspaces")
             .is_empty());
-        let orphan_check = sqlx::query_scalar::<_, i64>(
-            "SELECT (SELECT COUNT(*) FROM machines WHERE workspace_id = $1 AND revoked_at IS NULL) \
-             + (SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1 AND revoked_at IS NULL) \
-             + (SELECT COUNT(*) FROM machine_enrollments WHERE workspace_id = $1) \
-             + (SELECT COUNT(*) FROM machine_names WHERE workspace_id = $1) \
-             + (SELECT COUNT(*) FROM agent_names WHERE workspace_id = $1) \
-             + (SELECT COUNT(*) FROM deleted_agents WHERE workspace_id = $1) \
-             + (SELECT COUNT(*) FROM agent_launch_profiles WHERE workspace_id = $1) \
-             + (SELECT COUNT(*) FROM machine_services WHERE workspace_id = $1) \
-             + (SELECT COUNT(*) FROM app_deployments WHERE workspace_id = $1)",
+        let retained = sqlx::query(
+            "SELECT deleted_at, deleted_by, \
+             (SELECT COUNT(*) FROM machines WHERE workspace_id = $1) AS machines, \
+             (SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1) AS agents, \
+             (SELECT COUNT(*) FROM agent_launch_profiles WHERE workspace_id = $1) AS profiles, \
+             (SELECT COUNT(*) FROM machine_traffic_hourly WHERE workspace_id = $1) AS traffic, \
+             (SELECT COUNT(*) FROM core_messages WHERE workspace_id = $1) AS messages \
+             FROM workspaces WHERE workspace_id = $1",
         )
         .bind("ws_deletable")
         .fetch_one(&store.pool)
         .await
-        .expect("orphan check");
+        .expect("load retained workspace history");
+        assert!(retained.get::<Option<String>, _>("deleted_at").is_some());
         assert_eq!(
-            orphan_check, 0,
-            "deletion must revoke and cascade all workspace resources"
+            retained.get::<Option<String>, _>("deleted_by"),
+            Some(owner.user_id.clone())
         );
+        assert_eq!(retained.get::<i64, _>("machines"), 1);
+        assert_eq!(retained.get::<i64, _>("agents"), 1);
+        assert_eq!(retained.get::<i64, _>("profiles"), 5);
+        assert_eq!(retained.get::<i64, _>("traffic"), 1);
+        assert_eq!(retained.get::<i64, _>("messages"), 1);
+        assert!(store
+            .claim_machine_enrollment(&unused_enrollment)
+            .await
+            .is_err());
         assert!(
             store
                 .delete_workspace("ws_deletable", &owner.user_id)
@@ -7054,7 +7121,7 @@ mod tests {
             .find(|event| event.action == "workspace.deleted")
             .expect("workspace.deleted audit event");
         assert_eq!(deletion.resource_id, "ws_deletable");
-        assert_eq!(deletion.payload["machine_count"], 1);
+        assert_eq!(deletion.payload["machine_count"], 0);
         assert_eq!(deletion.payload["agent_count"], 1);
     }
 
