@@ -13,7 +13,7 @@ npm --prefix apps/paper test
 PAPER_STATE_DIR="$PWD/.treer/apps/paper" npm --prefix apps/paper start
 ```
 
-Open `http://127.0.0.1:8090/_human/`. Set `PAPER_PORT` or `PAPER_HOST` to change
+Open `http://127.0.0.1:8090/`. Set `PAPER_PORT` or `PAPER_HOST` to change
 the listener. `PAPER_LATEX_BIN` may point to Tectonic or `latexmk`; otherwise
 Paper checks `.treer/apps/paper/bin/tectonic`, then `PATH`.
 

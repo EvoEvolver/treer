@@ -22,7 +22,7 @@ async function withEditor(run) {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    await page.goto(`${base}/_human/?test=1`);
+    await page.goto(`${base}/?test=1`);
     await page.waitForFunction(() => globalThis.__paperTest);
     await run({ page, base });
     await page.close();
@@ -192,7 +192,7 @@ test("selection action accepts every suggestion in the selected range", async ()
 
 test("real collaborative page creates and accepts an insertion suggestion", async () => {
   await withEditor(async ({ page, base }) => {
-    await page.goto(`${base}/_human/`);
+    await page.goto(`${base}/`);
     await page.waitForFunction(() => document.querySelector("#sync-state")?.textContent === "Saved live");
     await page.locator("#suggest-edit").click();
     await page.locator(".cm-content").click();
@@ -215,7 +215,7 @@ test("real collaborative page creates and accepts an insertion suggestion", asyn
 
 test("real collaborative page replaces a selection and exposes review actions", async () => {
   await withEditor(async ({ page, base }) => {
-    await page.goto(`${base}/_human/`);
+    await page.goto(`${base}/`);
     await page.waitForFunction(() => document.querySelector("#sync-state")?.textContent === "Saved live");
     await page.locator("#suggest-edit").click();
     await page.locator(".cm-content").click();

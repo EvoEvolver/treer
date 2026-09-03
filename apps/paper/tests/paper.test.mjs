@@ -78,16 +78,30 @@ test("compile projection removes storage macros beside ordinary letters", () => 
   assert.doesNotMatch(clean, /\\(?:cmtbg|cmted|revbg|reved|addbg|added|delbg|deled)\\b/);
 });
 
-test("agent, human, JSON, and unknown routes stay distinct", async () => {
+test("root negotiates Agent and human representations", async () => {
   await withServer(async ({ base }) => {
     const root = await fetch(`${base}/`);
     assert.match(root.headers.get("content-type"), /^text\/markdown/);
     assert.match(await root.text(), /^# Treer Paper/);
 
-    const human = await fetch(`${base}/_human/`);
+    const human = await fetch(`${base}/`, { headers: { Accept: "text/html" } });
     assert.match(human.headers.get("content-type"), /^text\/html/);
+    assert.match(human.headers.get("vary"), /Accept/);
+    assert.match(human.headers.get("vary"), /User-Agent/);
     assert.match(human.headers.get("content-security-policy"), /object-src 'none'/);
     assert.match(await human.text(), /<title>Paper<\/title>/);
+
+    const browser = await fetch(`${base}/`, { headers: { "User-Agent": "Mozilla/5.0", Accept: "*/*" } });
+    assert.match(browser.headers.get("content-type"), /^text\/html/);
+    const agentOverride = await fetch(`${base}/`, {
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "text/markdown" },
+    });
+    assert.match(agentOverride.headers.get("content-type"), /^text\/markdown/);
+    const removedHumanPrefix = await fetch(`${base}/_human/`);
+    assert.equal(removedHumanPrefix.status, 404);
+
+    const asset = await fetch(`${base}/app.js`);
+    assert.match(asset.headers.get("content-type"), /javascript/);
 
     const project = await fetch(`${base}/v1/project`);
     assert.match(project.headers.get("content-type"), /^application\/json/);

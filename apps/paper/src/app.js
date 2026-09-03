@@ -91,11 +91,8 @@ const elements = Object.fromEntries([
   "toast", "toggle-files", "upload-file", "upload-input", "selection-actions", "selection-accept",
 ].map(id => [id.replaceAll("-", "_"), document.getElementById(id)]));
 
-const humanMarker = "/_human/";
-const markerIndex = window.location.pathname.lastIndexOf(humanMarker);
-const appPath = markerIndex >= 0 ? window.location.pathname.slice(0, markerIndex + 1) : "/";
-const apiUrl = relative => new URL(`${appPath}${relative}`, window.location.origin);
-GlobalWorkerOptions.workerSrc = apiUrl("_human/pdf.worker.min.mjs").toString();
+const apiUrl = relative => new URL(relative, window.location.href);
+GlobalWorkerOptions.workerSrc = apiUrl("pdf.worker.min.mjs").toString();
 const socketUrl = relative => {
   const url = apiUrl(relative);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";

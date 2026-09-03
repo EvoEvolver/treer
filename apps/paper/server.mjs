@@ -414,7 +414,7 @@ async function findCompiler(configured, stateDir) {
 function manual() {
   return `# Treer Paper
 
-Treer Paper is a filesystem-backed collaborative LaTeX editor for a small trusted workspace. Humans edit at [/_human/](/_human/); agents use the JSON and file APIs below.
+Treer Paper is a filesystem-backed collaborative LaTeX editor for a small trusted workspace. Browsers receive the editor at this same URL; Agents receive this Markdown manual and use the JSON and file APIs below.
 
 ## Inspect
 
@@ -477,7 +477,28 @@ export async function createPaperServer(options = {}) {
     );
     next();
   });
-  app.get("/", (_request, response) => response.type("text/markdown; charset=utf-8").send(manual()));
+  app.get("/", (request, response) => {
+    response.setHeader("Vary", "Accept, User-Agent");
+    const accepted = String(request.get("accept") || "")
+      .split(",")
+      .map((entry, order) => {
+        const [mediaType, ...parameters] = entry.trim().toLowerCase().split(";");
+        const quality = parameters.reduce((value, parameter) => {
+          const match = parameter.trim().match(/^q=(0(?:\.\d+)?|1(?:\.0+)?)$/);
+          return match ? Number(match[1]) : value;
+        }, 1);
+        return { mediaType, quality, order };
+      })
+      .filter(entry => entry.mediaType === "text/html" || entry.mediaType === "text/markdown")
+      .sort((left, right) => right.quality - left.quality || left.order - right.order);
+    const representation = accepted[0]?.mediaType
+      || (/Mozilla\//i.test(request.get("user-agent") || "") ? "text/html" : "text/markdown");
+    if (representation === "text/html") {
+      response.setHeader("Cache-Control", "no-store");
+      return response.sendFile(path.join(APP_DIR, "public", "index.html"));
+    }
+    return response.type("text/markdown; charset=utf-8").send(manual());
+  });
   app.get("/health", (_request, response) => response.json({ ok: true, name: "paper" }));
   app.get("/v1/project", async (_request, response, next) => {
     try {
@@ -621,11 +642,7 @@ export async function createPaperServer(options = {}) {
     }
   });
 
-  app.get(/^\/_human\/?$/, (_request, response) => {
-    response.setHeader("Cache-Control", "no-store");
-    response.sendFile(path.join(APP_DIR, "public", "index.html"));
-  });
-  app.get(/^\/_human\/(app\.js|styles\.css|pdf\.worker\.min\.mjs)$/, (request, response) => {
+  app.get(/^\/(app\.js|styles\.css|pdf\.worker\.min\.mjs)$/, (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     response.sendFile(path.join(APP_DIR, "public", request.params[0]));
   });
