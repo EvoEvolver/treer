@@ -190,6 +190,10 @@ async function mockApi(page: Page) {
     })
     if (path === "/workspaces/ws-1/snapshot") return ok(route, snapshot)
     if (path === "/workspaces/ws-2/snapshot") return ok(route, { ...snapshot, workspace: secondWorkspace, servers: [], agents: [] })
+    if (path === "/workspaces/ws-1" && route.request().method() === "PATCH") {
+      const body = route.request().postDataJSON() as { name: string }
+      return ok(route, { workspace: { ...workspace, name: body.name } })
+    }
     if (path === "/workspaces/ws-1/agents" && route.request().method() === "POST") return ok(route, {
       agent_id: "ag-installer",
       server_id: "srv-a",
@@ -328,6 +332,28 @@ test("workspace dropdown opens Profiles and Apps without exposing Network", asyn
 
   await page.getByRole("button", { name: "Workspace views" }).click()
   await expect(page.getByRole("menuitem", { name: "Network" })).toHaveCount(0)
+})
+
+test("workspace controls open a settings page with inline rename", async ({ page }) => {
+  await page.goto("/")
+  await expect(page.getByRole("button", { name: "Workspace settings" })).toHaveCount(1)
+  await expect(page.getByRole("button", { name: "Rename workspace" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Delete workspace" })).toHaveCount(0)
+
+  await page.getByRole("button", { name: "Workspace settings" }).click()
+  await expect(page.getByRole("heading", { name: "Demo", exact: true })).toBeVisible()
+  await expect(page.getByText("ws-1", { exact: true })).toBeVisible()
+  await expect(page.getByText("Machines").last()).toBeVisible()
+  await expect(page.getByText("Agents").last()).toBeVisible()
+
+  const name = page.getByLabel("Workspace name")
+  await name.fill("Platform")
+  const renaming = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/ws-1") && request.method() === "PATCH")
+  await page.getByRole("button", { name: "Save" }).click()
+  const request = await renaming
+  expect(request.postDataJSON()).toEqual({ name: "Platform" })
+  await expect(page).toHaveTitle("Acme / Platform")
+  await expect(page.getByRole("heading", { name: "Platform", exact: true })).toBeVisible()
 })
 
 test("managed App view exposes lifecycle actions and creation", async ({ page }) => {
@@ -611,6 +637,7 @@ test("manager can delete a workspace and the app recovers to no workspace", asyn
   await page.goto("/")
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
 
+  await page.getByRole("button", { name: "Workspace settings" }).click()
   await page.getByRole("button", { name: "Delete workspace" }).click()
   const dialog = page.getByRole("dialog")
   await expect(dialog.getByRole("heading", { name: "Delete workspace" })).toBeVisible()
@@ -626,8 +653,8 @@ test("manager can delete a workspace and the app recovers to no workspace", asyn
 
 test("workspace deletion is blocked until every machine is deleted", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: "Delete workspace" }).click()
-  const dialog = page.getByRole("dialog")
-  await expect(dialog.getByText("Delete all 2 machines from Demo first.")).toBeVisible()
-  await expect(dialog.getByRole("button", { name: "Delete workspace" })).toBeDisabled()
+  await page.getByRole("button", { name: "Workspace settings" }).click()
+  await expect(page.getByText("Delete all 2 machines before deleting this workspace.")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Delete workspace" })).toBeDisabled()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
 })

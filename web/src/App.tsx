@@ -68,7 +68,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
-type MainView = "terminal" | "profiles" | "apps" | "network" | "audit" | "machine"
+type MainView = "terminal" | "profiles" | "apps" | "network" | "audit" | "machine" | "workspace"
 type AuthMode = "login" | "register" | "forgot" | "reset"
 type AuthConfig = { github: boolean; google: boolean; invitation_required: boolean }
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
@@ -832,6 +832,43 @@ function AppsView({ apps, machines, loading, onOpen, onAction, onDelete }: { app
   </div></div>
 }
 
+function WorkspaceSettingsView({ workspace, organization, name, machineCount, agentCount, canDelete, preview, onNameChange, onRename, onDelete, onClose }: { workspace?: Workspace; organization?: Organization; name: string; machineCount?: number; agentCount?: number; canDelete: boolean; preview: boolean; onNameChange: (value: string) => void; onRename: (event: FormEvent) => void; onDelete: () => void; onClose: () => void }) {
+  if (!workspace) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">Workspace not found. <Button variant="outline" className="mt-3" onClick={onClose}>Back</Button></div>
+  const deleteBlocked = machineCount === undefined || machineCount > 0
+
+  return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[960px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
+    <div className="mb-10 flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <div className="mb-3 flex items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><SettingsIcon className="size-4" /></span><h1 className="truncate text-2xl font-semibold">{workspace.name}</h1></div>
+        <p className="font-mono text-xs text-muted-foreground">{workspace.workspace_id}</p>
+        {organization && <p className="mt-1 text-xs text-muted-foreground">{organization.name}</p>}
+      </div>
+      <Button variant="outline" className="shrink-0" onClick={onClose}>Close</Button>
+    </div>
+
+    <section className="border-y py-6">
+      <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div><h2 className="text-sm font-semibold">General</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">The display name shown to organization members.</p></div>
+        <form onSubmit={onRename} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><div className="min-w-0"><Field label="Workspace name"><Input aria-label="Workspace name" value={name} onChange={(event) => onNameChange(event.target.value)} required maxLength={80} /></Field></div><Button type="submit" className="w-full sm:w-auto" disabled={!name.trim() || name.trim() === workspace.name}>Save</Button></form>
+      </div>
+    </section>
+
+    <section className="border-b py-6">
+      <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div><h2 className="text-sm font-semibold">Inventory</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Resources currently attached to this workspace.</p></div>
+        <dl className="grid grid-cols-2 border-y text-xs"><div className="py-4 pr-4"><dt className="text-muted-foreground">Machines</dt><dd className="mt-1 text-2xl font-semibold tabular-nums">{machineCount ?? "-"}</dd></div><div className="border-l py-4 pl-4"><dt className="text-muted-foreground">Agents</dt><dd className="mt-1 text-2xl font-semibold tabular-nums">{agentCount ?? "-"}</dd></div></dl>
+      </div>
+    </section>
+
+    {canDelete && <section className="border-b py-6">
+      <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div><h2 className="text-sm font-semibold text-destructive">Danger zone</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Deleted workspaces disappear from active views while historical traffic and messages remain.</p></div>
+        <div className="grid gap-3 border border-destructive/30 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><p className="text-xs leading-5 text-muted-foreground">{machineCount === undefined ? "Checking machine inventory..." : machineCount > 0 ? `Delete all ${machineCount} ${machineCount === 1 ? "machine" : "machines"} before deleting this workspace.` : "This action cannot be undone."}</p><Button variant="destructive" className="w-full sm:w-auto" disabled={preview || deleteBlocked} onClick={onDelete}><Trash2 />Delete workspace</Button></div>
+      </div>
+    </section>}
+  </div></div>
+}
+
 function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
   const navigate = useNavigate()
@@ -868,7 +905,6 @@ function WorkspaceApp() {
   const [error, setError] = useState<string | null>(null)
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
-  const [renameWorkspaceOpen, setRenameWorkspaceOpen] = useState(false)
   const [deleteWorkspaceOpen, setDeleteWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [creatingAgent, setCreatingAgent] = useState(false)
@@ -890,6 +926,7 @@ function WorkspaceApp() {
   const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
   const [organizationName, setOrganizationName] = useState("")
+  const [createWorkspaceName, setCreateWorkspaceName] = useState("")
   const [workspaceName, setWorkspaceName] = useState("")
   const [agentName, setAgentName] = useState(defaultAgentName("terminal"))
   const [agentNameCustomized, setAgentNameCustomized] = useState(false)
@@ -1105,6 +1142,10 @@ function WorkspaceApp() {
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
   const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)
+
+  useEffect(() => {
+    if (mainView === "workspace") setWorkspaceName(workspace?.name ?? "")
+  }, [mainView, workspace?.workspace_id, workspace?.name])
   const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen
   const mobileSidebarHidden = isMobile && mainView !== "terminal"
   const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
@@ -1216,7 +1257,7 @@ function WorkspaceApp() {
     event.preventDefault()
     if (preview) {
       setCreateWorkspaceOpen(false)
-      setWorkspaceName("")
+      setCreateWorkspaceName("")
       setWorkspaces([PREVIEW_WORKSPACE])
       setWorkspaceId(PREVIEW_WORKSPACE.workspace_id)
       setSnapshot({ revision: 0, workspace: PREVIEW_WORKSPACE, servers: [], agents: [] })
@@ -1224,8 +1265,8 @@ function WorkspaceApp() {
     }
     if (!organizationId) return
     try {
-      const data = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", body: JSON.stringify({ organization_id: organizationId, name: workspaceName }) })
-      setCreateWorkspaceOpen(false); setWorkspaceName("")
+      const data = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", body: JSON.stringify({ organization_id: organizationId, name: createWorkspaceName }) })
+      setCreateWorkspaceOpen(false); setCreateWorkspaceName("")
       const list = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
       setWorkspaces(list.workspaces); selectWorkspace(data.workspace.workspace_id)
     } catch (reason) { showError(reason) }
@@ -1247,7 +1288,7 @@ function WorkspaceApp() {
       const data = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: "PATCH", body: JSON.stringify({ name: workspaceName }) })
       setWorkspaces((items) => replaceWorkspace(items, data.workspace))
       setSnapshot((current) => current?.workspace.workspace_id === data.workspace.workspace_id ? { ...current, workspace: data.workspace } : current)
-      setRenameWorkspaceOpen(false); setWorkspaceName("")
+      setWorkspaceName(data.workspace.name)
     } catch (reason) { showError(reason) }
   }
 
@@ -1471,6 +1512,17 @@ function WorkspaceApp() {
     setMainView("profiles")
   }
 
+  function openWorkspaceSettings() {
+    if (!workspace) {
+      setCreateWorkspaceName("")
+      setCreateWorkspaceOpen(true)
+      return
+    }
+    setWorkspaceName(workspace.name)
+    setMainView("workspace")
+    setMobileTerminalOpen(false)
+  }
+
   function closeMainView() {
     setMainView("terminal")
   }
@@ -1571,7 +1623,7 @@ function WorkspaceApp() {
   const tourHostRef = useRef<FirstRunTourHost | null>(null)
   tourHostRef.current = {
     setSidebarTab,
-    openCreateWorkspace: () => { setWorkspaceName(""); setCreateWorkspaceOpen(true) },
+    openCreateWorkspace: () => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) },
     closeCreateWorkspace: () => setCreateWorkspaceOpen(false),
     prepareWorkspaceForMachineSteps: () => {
       if (!preview) return
@@ -1901,18 +1953,14 @@ function WorkspaceApp() {
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
           <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
-          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem><DropdownMenuItem onSelect={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} disabled={!organizationId}><FolderKanban />Create workspace</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
         </div>
-        <div className="grid grid-cols-[20px_minmax(0,1fr)_64px] items-center gap-2 px-3 pb-3 pl-5">
+        <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
           <div data-tour="workspace-select">
             <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
           </div>
-          <div className="flex">
-            {canManageMembers && <IconButton label="Delete workspace" disabled={!workspace || preview} className="text-destructive hover:text-destructive" onClick={() => setDeleteWorkspaceOpen(true)}><Trash2 /></IconButton>}
-            <IconButton label="Rename workspace" disabled={!workspace} onClick={() => { if (workspace) { setWorkspaceName(workspace.name); setRenameWorkspaceOpen(true) } }}><Pencil /></IconButton>
-            <span data-tour="create-workspace"><IconButton label="Create workspace" disabled={!organizationId} onClick={() => { setWorkspaceName(""); setCreateWorkspaceOpen(true) }}><Plus /></IconButton></span>
-          </div>
+          <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <SettingsIcon /> : <Plus />}</IconButton></span>
         </div>
         <div className="px-2 pb-2">
           <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className={cn("h-8 w-full justify-start gap-2 px-2 text-xs font-normal", (mainView === "profiles" || mainView === "apps") && "bg-accent")} aria-label="Workspace views"><ListChecks className="size-3.5" />{mainView === "profiles" ? "Profiles" : mainView === "apps" ? "Apps" : "Workspace"}<ChevronDown className="ml-auto size-3.5 text-muted-foreground" /></Button></DropdownMenuTrigger>
@@ -1959,7 +2007,7 @@ function WorkspaceApp() {
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
             {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={closeMainView}><ChevronLeft /></IconButton>}
-            <span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "profiles" ? "Profiles" : mainView === "apps" ? "Apps" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
+            <span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "workspace" ? "Settings" : mainView === "profiles" ? "Profiles" : mainView === "apps" ? "Apps" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
@@ -2002,7 +2050,7 @@ function WorkspaceApp() {
               </div>
             </div>}
           </div>
-        </div> : mainView === "profiles" ? <LaunchProfilesView profiles={launchProfiles} loading={launchProfilesLoading} onEdit={openEditLaunchProfile} onLaunch={openLaunchProfile} onDelete={setDeletingProfile} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onAction={appLifecycle} onDelete={setDeletingApp} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMainView} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} machines={snapshot?.servers ?? []} loading={auditLoading} /> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
+        </div> : mainView === "workspace" ? <WorkspaceSettingsView workspace={workspace} organization={organization} name={workspaceName} machineCount={workspaceMachineCount} agentCount={snapshot?.agents.length} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "profiles" ? <LaunchProfilesView profiles={launchProfiles} loading={launchProfilesLoading} onEdit={openEditLaunchProfile} onLaunch={openLaunchProfile} onDelete={setDeletingProfile} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onAction={appLifecycle} onDelete={setDeletingApp} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMainView} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} machines={snapshot?.servers ?? []} loading={auditLoading} /> : <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14"><div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Network className="size-4" /></div><h1 className="text-2xl font-semibold">Network</h1></div><span className="text-xs text-muted-foreground">{services.length} services · {virtualHosts.length} hosts</span></div><section className="mb-10"><h2 className="mb-3 text-sm font-semibold">Machine services</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Service</span><span>Target</span><span>Machine</span><span className="w-24" /></div>{services.map((service) => { const machine = snapshot?.servers.find((item) => item.server_id === service.server_id); const health = serviceHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><span className="col-start-1 row-start-1 min-w-0 truncate text-xs font-medium sm:col-start-auto sm:row-start-auto">{service.name}<span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</span><span className="col-start-1 row-start-2 min-w-0 truncate font-mono text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service.target_host}:{service.target_port}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, service.server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Probe ${service.name}`} onClick={() => probeService(service.service_id)} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Edit ${service.name}`} onClick={() => openEditService(service)}><Pencil /></IconButton><IconButton label={`Delete ${service.name}`} className="text-destructive hover:text-destructive" onClick={() => deleteService(service.service_id)}><Trash2 /></IconButton></span></div>})}{!services.length && <EmptyState icon={<Server />} label="No machine services" />}</div></section><section><h2 className="mb-3 text-sm font-semibold">Virtual hosts</h2><div className="border-y"><div className="hidden h-9 grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>Hostname</span><span>Service</span><span>Machine</span><span className="w-24" /></div>{virtualHosts.map((host) => { const machine = snapshot?.servers.find((item) => item.server_id === host.destination_server_id); const service = services.find((item) => item.service_id === host.service_id); return <div key={host.hostname} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1.2fr)_minmax(180px,1fr)_minmax(140px,1fr)_auto] sm:gap-4"><button className="col-start-1 row-start-1 min-w-0 truncate text-left font-mono text-xs font-medium hover:underline sm:col-start-auto sm:row-start-auto" onClick={() => openVirtualHost(host.hostname)}>{host.hostname}</button><span className="col-start-1 row-start-2 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{service?.name ?? host.service_id}</span><span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, host.destination_server_id)}</span><span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${host.hostname}`} onClick={() => openVirtualHost(host.hostname)} disabled={machine?.status !== "online" || service?.protocol !== "http"}><ExternalLink /></IconButton><IconButton label={`Delete ${host.hostname}`} className="text-destructive hover:text-destructive" onClick={() => deleteVirtualHost(host.hostname)}><Trash2 /></IconButton></span></div>})}{!virtualHosts.length && <EmptyState icon={<Network />} label="No virtual hosts" />}</div></section></div></div>}
       </section>
     </main>
 
@@ -2011,8 +2059,7 @@ function WorkspaceApp() {
     <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
 
     <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={organizationName} onValueChange={setOrganizationName} onSubmit={createOrganization} />
-    <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={createWorkspace} dataTour="create-workspace-dialog" />
-    <SimpleNameDialog open={renameWorkspaceOpen} onOpenChange={setRenameWorkspaceOpen} title="Rename workspace" description="Update the workspace name shown to organization members." label="Workspace name" value={workspaceName} onValueChange={setWorkspaceName} onSubmit={renameWorkspace} />
+    <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={createWorkspaceName} onValueChange={setCreateWorkspaceName} onSubmit={createWorkspace} dataTour="create-workspace-dialog" />
 
     <Dialog open={renameOrganizationOpen} onOpenChange={setRenameOrganizationOpen}><DialogContent><form onSubmit={renameOrganization}><DialogHeader><DialogTitle>Rename organization</DialogTitle><DialogDescription>Update the organization name shown to its members.</DialogDescription></DialogHeader><div className="my-5"><Field label="Organization name"><Input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameOrganizationOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
 
