@@ -61,7 +61,11 @@ CREATE TABLE IF NOT EXISTS workspaces (
     created_by TEXT NOT NULL,
     FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE
 );
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deleted_by TEXT;
 CREATE INDEX IF NOT EXISTS workspaces_organization_id ON workspaces(organization_id);
+CREATE INDEX IF NOT EXISTS workspaces_active_organization
+    ON workspaces(organization_id) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS agent_launch_profiles (
     profile_id TEXT PRIMARY KEY,

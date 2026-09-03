@@ -866,6 +866,7 @@ function WorkspaceApp() {
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
   const [renameWorkspaceOpen, setRenameWorkspaceOpen] = useState(false)
+  const [deleteWorkspaceOpen, setDeleteWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [creatingAgent, setCreatingAgent] = useState(false)
   const [installingAgentKind, setInstallingAgentKind] = useState<string | null>(null)
@@ -970,34 +971,36 @@ function WorkspaceApp() {
 
   useEffect(() => { if (user && !preview) loadOrganizations().catch(showError) }, [user, preview, loadOrganizations, showError])
 
-  useEffect(() => {
-    if (preview) {
-      setConnection("no workspace")
-      return
-    }
-    let cancelled = false
-    setWorkspaceId(null)
-    setSnapshot(null)
+  const syncWorkspaces = useCallback(async () => {
+    if (preview) return
     if (!organizationId) {
       setWorkspaces([])
       setConnection("no workspace")
       return
     }
-    api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`).then((data) => {
-      if (cancelled) return
-      setWorkspaces(data.workspaces)
-      const routeSelection = routeSelectionRef.current
-      const selected = routeSelection.organizationId === organizationId
-        && routeSelection.workspaceId
-        && data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)
-        ? routeSelection.workspaceId
-        : data.workspaces[0]?.workspace_id ?? null
-      setWorkspaceId(selected)
-      replaceWorkspaceRoute(organizationId, selected)
-      if (!data.workspaces.length) setConnection("no workspace")
-    }).catch(showError)
-    return () => { cancelled = true }
-  }, [organizationId, preview, replaceWorkspaceRoute, showError])
+    const data = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
+    if (organizationIdRef.current !== organizationId) return
+    setWorkspaces(data.workspaces)
+    const routeSelection = routeSelectionRef.current
+    const selected = routeSelection.organizationId === organizationId
+      && routeSelection.workspaceId
+      && data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)
+      ? routeSelection.workspaceId
+      : data.workspaces[0]?.workspace_id ?? null
+    setWorkspaceId(selected)
+    replaceWorkspaceRoute(organizationId, selected)
+    if (!data.workspaces.length) setConnection("no workspace")
+  }, [organizationId, preview, replaceWorkspaceRoute])
+
+  useEffect(() => {
+    if (preview) {
+      setConnection("no workspace")
+      return
+    }
+    setWorkspaceId(null)
+    setSnapshot(null)
+    void syncWorkspaces().catch(showError)
+  }, [organizationId, preview, syncWorkspaces, showError])
 
   const refreshSnapshot = useCallback(async () => {
     if (preview || !workspaceId) return
@@ -1034,6 +1037,15 @@ function WorkspaceApp() {
           const updated = message.data as Workspace
           setWorkspaces((items) => replaceWorkspace(items, updated))
           setSnapshot((current) => current?.workspace.workspace_id === updated.workspace_id ? { ...current, workspace: updated } : current)
+        } else if (message.event === "workspace.deleted" && message.data) {
+          const removed = message.data as Workspace
+          setWorkspaces((items) => items.filter((item) => item.workspace_id !== removed.workspace_id))
+          if (removed.workspace_id === workspaceId) {
+            setSnapshot(null)
+            setSelectedAgentId(null)
+            setSelectedMachineId(null)
+            void syncWorkspaces().catch(showError)
+          }
         }
         else refreshSnapshot().catch(showError)
       }
@@ -1045,7 +1057,7 @@ function WorkspaceApp() {
     }
     connect(true)
     return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
-  }, [preview, workspaceId, refreshSnapshot, showError])
+  }, [preview, workspaceId, refreshSnapshot, syncWorkspaces, showError])
 
   useEffect(() => {
     const agents = snapshot?.agents ?? []
@@ -1065,6 +1077,9 @@ function WorkspaceApp() {
   const recipeInstallers = availableCatalog(selectedCreateMachine)
   const organization = organizations.find((item) => item.organization_id === organizationId)
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
+  const workspaceMachineCount = snapshot?.workspace.workspace_id === workspaceId
+    ? snapshot.servers.length
+    : undefined
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
   const interfaceUiUrl = workspaceId && selectedAgent && selectedAgentInterface
     ? proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`)
@@ -1213,6 +1228,20 @@ function WorkspaceApp() {
       setSnapshot((current) => current?.workspace.workspace_id === data.workspace.workspace_id ? { ...current, workspace: data.workspace } : current)
       setRenameWorkspaceOpen(false); setWorkspaceName("")
     } catch (reason) { showError(reason) }
+  }
+
+  async function confirmDeleteWorkspace() {
+    const targetId = workspaceId
+    if (!targetId) return
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(targetId)}`, { method: "DELETE" })
+    } catch (reason) { showError(reason); return }
+    setDeleteWorkspaceOpen(false)
+    setWorkspaces((items) => items.filter((item) => item.workspace_id !== targetId))
+    setSnapshot(null)
+    setSelectedAgentId(null)
+    setSelectedMachineId(null)
+    await syncWorkspaces().catch(showError)
   }
 
   async function createAgent(event: FormEvent) {
@@ -1850,6 +1879,7 @@ function WorkspaceApp() {
             <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
           </div>
           <div className="flex">
+            {canManageMembers && <IconButton label="Delete workspace" disabled={!workspace || preview} className="text-destructive hover:text-destructive" onClick={() => setDeleteWorkspaceOpen(true)}><Trash2 /></IconButton>}
             <IconButton label="Rename workspace" disabled={!workspace} onClick={() => { if (workspace) { setWorkspaceName(workspace.name); setRenameWorkspaceOpen(true) } }}><Pencil /></IconButton>
             <span data-tour="create-workspace"><IconButton label="Create workspace" disabled={!organizationId} onClick={() => { setWorkspaceName(""); setCreateWorkspaceOpen(true) }}><Plus /></IconButton></span>
           </div>
@@ -2068,6 +2098,7 @@ function WorkspaceApp() {
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget?.name} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>Delete workspace</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? "Checking the workspace machine inventory..." : workspaceMachineCount > 0 ? `Delete all ${workspaceMachineCount} ${workspaceMachineCount === 1 ? "machine" : "machines"} from ${workspace?.name ?? "this workspace"} first.` : `Delete ${workspace?.name}? It will disappear from active views while historical traffic and messages are retained. This cannot be undone.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>Cancel</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>Delete workspace</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="min-w-0"><span className="block truncate text-sm font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive" onClick={() => removeMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
 

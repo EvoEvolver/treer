@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_aggregates_directional_counters_in_postgres() {
+    async fn flush_aggregates_counters_after_workspace_is_tombstoned() {
         let store = AuthStore::for_test("admin-password").await;
         store.seed_test_workspace("traffic").await;
         let recorder = TrafficRecorder::new(store.pool());
@@ -341,6 +341,12 @@ mod tests {
         first.source_to_destination.record(9);
         first.source_to_destination.record(3);
         recorder.flush_pending().await.expect("flush first batch");
+        sqlx::query("UPDATE workspaces SET deleted_at = $1 WHERE workspace_id = $2")
+            .bind(Utc::now().to_rfc3339())
+            .bind("traffic")
+            .execute(&store.pool())
+            .await
+            .expect("tombstone workspace");
         let second = recorder.register_stream("traffic", "source", "destination");
         second.source_to_destination.record(5);
         second.destination_to_source.record(7);

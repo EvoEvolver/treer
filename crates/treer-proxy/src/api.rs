@@ -569,7 +569,7 @@ pub fn router(
         )
         .route(
             "/api/workspaces/{workspace_id}",
-            axum::routing::patch(rename_workspace),
+            axum::routing::patch(rename_workspace).delete(delete_workspace),
         )
         .route(
             "/api/workspaces/{workspace_id}/snapshot",
@@ -2109,6 +2109,20 @@ async fn rename_workspace(
         .await?;
     state.rename_workspace_info(info.clone()).await?;
     Ok(Json(json!({ "workspace": info })))
+}
+
+async fn delete_workspace(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let deleted = auth
+        .delete_workspace(&workspace_id, &session.user_id)
+        .await?;
+    state.delete_workspace(&workspace_id).await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
+    Ok(Json(serde_json::to_value(&deleted)?))
 }
 
 async fn workspace_snapshot(
@@ -5623,6 +5637,194 @@ mod tests {
             .await
             .expect("route response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn workspace_deletion_route_requires_auth_and_deletes_the_workspace() {
+        let auth = AuthStore::for_test("admin-password").await;
+        let (invite, _) = auth
+            .create_personal_invitation()
+            .await
+            .expect("personal invitation");
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://treer.example/").expect("public URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth.clone(),
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/register")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "invite": invite,
+                            "email": "owner@example.com",
+                            "preferred_name": "Owner",
+                            "password": "password123",
+                        }))
+                        .expect("register body"),
+                    ))
+                    .expect("register request"),
+            )
+            .await
+            .expect("register response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/organizations")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("organization list request"),
+            )
+            .await
+            .expect("organization list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("organization list body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("organization list JSON");
+        let organization_id = payload["organizations"]
+            .as_array()
+            .expect("organization array")
+            .first()
+            .expect("personal organization")
+            .get("organization_id")
+            .expect("organization id")
+            .as_str()
+            .expect("organization id text")
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workspaces")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "organization_id": organization_id,
+                            "name": "Deletable",
+                        }))
+                        .expect("create workspace body"),
+                    ))
+                    .expect("create workspace request"),
+            )
+            .await
+            .expect("create workspace response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("create workspace body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("create workspace JSON");
+        let workspace_id = payload["workspace"]["workspace_id"]
+            .as_str()
+            .expect("workspace id")
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/workspaces/{workspace_id}"))
+                    .body(Body::empty())
+                    .expect("unauthenticated delete"),
+            )
+            .await
+            .expect("unauthenticated response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/workspaces/{workspace_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("authenticated delete"),
+            )
+            .await
+            .expect("delete response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("delete body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("delete JSON");
+        assert_eq!(payload["workspace_id"], workspace_id);
+        assert_eq!(payload["name"], "Deletable");
+        assert_eq!(payload["organization_id"], organization_id);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/workspaces?organization_id={organization_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("workspace list request"),
+            )
+            .await
+            .expect("list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("list JSON");
+        assert!(payload["workspaces"]
+            .as_array()
+            .expect("workspace array")
+            .is_empty());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/workspaces/{workspace_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("repeat delete"),
+            )
+            .await
+            .expect("repeat delete response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn session_cookie(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.starts_with("treer_session="))
+            .map(|value| value.split(';').next().expect("cookie pair").to_string())
+            .expect("session cookie")
     }
 
     #[tokio::test]

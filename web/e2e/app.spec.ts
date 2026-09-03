@@ -541,3 +541,60 @@ test("General settings show theme and English language, and toggle dark class", 
   await page.getByRole("button", { name: "Light" }).click()
   await expect(page.locator("html")).not.toHaveClass(/dark/)
 })
+
+test("manager can delete a workspace and the app recovers to no workspace", async ({ page }) => {
+  let workspaces = [workspace]
+  const deletedPaths: string[] = []
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
+    ...snapshot,
+    servers: [],
+    agents: [],
+  }))
+  await page.route(/\/api\/workspaces/, (route) => {
+    const url = new URL(route.request().url())
+    const path = url.pathname.replace(/^\/api/, "")
+    if (path === "/workspaces/ws-1" && route.request().method() === "DELETE") {
+      deletedPaths.push(url.pathname)
+      workspaces = []
+      return ok(route, {
+        workspace_id: "ws-1",
+        organization_id: "org-1",
+        name: "Demo",
+        machine_count: 0,
+        agent_count: 2,
+        app_count: 1,
+      })
+    }
+    if (path === "/workspaces" && route.request().method() === "GET") {
+      return ok(route, {
+        workspaces: workspaces.filter(
+          (item) => item.organization_id === url.searchParams.get("organization_id"),
+        ),
+      })
+    }
+    return route.fallback()
+  })
+
+  await page.goto("/")
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
+
+  await page.getByRole("button", { name: "Delete workspace" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByRole("heading", { name: "Delete workspace" })).toBeVisible()
+  await expect(dialog.getByText("Delete Demo?")).toBeVisible()
+  await expect(dialog.getByText("historical traffic and messages are retained")).toBeVisible()
+  await expect(dialog.getByText("This cannot be undone.")).toBeVisible()
+
+  await dialog.getByRole("button", { name: "Delete workspace" }).click()
+  await expect(deletedPaths).toEqual(["/api/workspaces/ws-1"])
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("No workspace")
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1")
+})
+
+test("workspace deletion is blocked until every machine is deleted", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Delete workspace" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByText("Delete all 2 machines from Demo first.")).toBeVisible()
+  await expect(dialog.getByRole("button", { name: "Delete workspace" })).toBeDisabled()
+})

@@ -273,6 +273,16 @@ and delete operations, App lifecycle operations, and machine rename and delete o
 audit events after the Controller result; an audit write failure is logged
 without turning a completed runtime mutation into a retryable API failure.
 
+Workspace deletion is manager-only (`owner`/`admin`) and requires every
+Machine in the workspace to be deleted first. Deletion is lazy: PostgreSQL
+marks the workspace with a deletion tombstone and revokes remaining Agent
+credentials, while retaining its messages, traffic history, policies, and
+other records. Active workspace queries and authentication exclude tombstoned
+rows. The Proxy then evicts the affected credential, service-ingress, and
+virtual-host caches, removes the workspace from in-memory active state, and
+broadcasts a `WorkspaceDeleted` cluster projection so other Proxies stop
+serving it.
+
 PostgreSQL is the durable source for accounts, organizations, workspaces,
 machine credentials, services, ingresses, App OAuth codes, policy, audit,
 traffic counters, and Core Message. NATS supplies events and cross-Proxy live

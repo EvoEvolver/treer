@@ -153,7 +153,7 @@ async fn get_user(
         "SELECT w.workspace_id, w.name, w.organization_id \
          FROM workspaces w \
          JOIN organization_members m ON m.organization_id = w.organization_id \
-         WHERE m.user_id = $1 \
+         WHERE m.user_id = $1 AND w.deleted_at IS NULL \
          ORDER BY lower(w.name)",
     )
     .bind(&user_id)
@@ -272,7 +272,7 @@ async fn list_machines(
          FROM machines m \
          JOIN workspaces w ON w.workspace_id = m.workspace_id \
          LEFT JOIN machine_names n ON n.server_id = m.server_id \
-         WHERE m.revoked_at IS NULL \
+         WHERE m.revoked_at IS NULL AND w.deleted_at IS NULL \
          ORDER BY coalesce(n.name, m.server_id), m.server_id",
     )
     .fetch_all(&auth.pool())
@@ -313,7 +313,7 @@ async fn get_machine(
          FROM machines m \
          JOIN workspaces w ON w.workspace_id = m.workspace_id \
          LEFT JOIN machine_names n ON n.server_id = m.server_id \
-         WHERE m.server_id = $1 AND m.revoked_at IS NULL",
+         WHERE m.server_id = $1 AND m.revoked_at IS NULL AND w.deleted_at IS NULL",
     )
     .bind(&server_id)
     .fetch_optional(&auth.pool())
@@ -351,10 +351,12 @@ async fn list_organizations(
     let rows = sqlx::query(
         "SELECT o.organization_id, o.name, o.created_at, \
                 u.id AS owner_id, u.preferred_name AS owner_name, u.email AS owner_email, \
-                (SELECT COUNT(*) FROM workspaces w WHERE w.organization_id = o.organization_id) AS workspace_count, \
+                (SELECT COUNT(*) FROM workspaces w \
+                    WHERE w.organization_id = o.organization_id AND w.deleted_at IS NULL) AS workspace_count, \
                 (SELECT COUNT(*) FROM machines m \
                     JOIN workspaces w ON w.workspace_id = m.workspace_id \
-                    WHERE w.organization_id = o.organization_id AND m.revoked_at IS NULL) AS machine_count \
+                    WHERE w.organization_id = o.organization_id AND w.deleted_at IS NULL \
+                    AND m.revoked_at IS NULL) AS machine_count \
          FROM organizations o \
          LEFT JOIN organization_members om ON om.organization_id = o.organization_id AND om.role = 'owner' \
          LEFT JOIN users u ON u.id = om.user_id \

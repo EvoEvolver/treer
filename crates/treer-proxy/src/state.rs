@@ -824,7 +824,53 @@ impl AppState {
             (server, agents, event)
         };
         self.publish_workspace_event(event);
+        self.release_server_runtime(workspace_id, server_id, "machine deleted", "server_deleted")
+            .await;
+        self.broadcast_projection(ClusterProjectionUpdate::ServerDeleted {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        })
+        .await?;
 
+        Ok((server, agents))
+    }
+
+    pub async fn delete_workspace(&self, workspace_id: &str) -> Result<(), ProtocolError> {
+        let removed = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            workspaces.remove(workspace_id)
+        };
+        if let Some(workspace) = removed {
+            self.publish_workspace_event(WorkspaceEvent {
+                revision: workspace.revision.saturating_add(1),
+                workspace_id: workspace_id.to_string(),
+                event: "workspace.deleted".to_string(),
+                data: serde_json::to_value(&workspace.info).unwrap_or(Value::Null),
+            });
+            for server_id in workspace.servers.keys() {
+                self.release_server_runtime(
+                    workspace_id,
+                    server_id,
+                    "workspace deleted",
+                    "workspace_deleted",
+                )
+                .await;
+            }
+        }
+        self.broadcast_projection(ClusterProjectionUpdate::WorkspaceDeleted {
+            workspace_id: workspace_id.to_string(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn release_server_runtime(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        terminal_reason: &str,
+        pending_error: &str,
+    ) {
         let key = ServerKey {
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
@@ -857,7 +903,7 @@ impl AppState {
         for (command_id, command) in cancelled {
             let _ = command.result.send(CommandResult::failure(
                 command_id,
-                ProtocolError::new("server_deleted", server_id),
+                ProtocolError::new(pending_error, server_id),
             ));
         }
 
@@ -879,20 +925,13 @@ impl AppState {
             send_terminal_to_browser(
                 &terminal.outgoing,
                 &TerminalServerMessage::Closed {
-                    reason: Some("machine deleted".to_string()),
+                    reason: Some(terminal_reason.to_string()),
                     exit_code: None,
                 },
             );
         }
         self.close_server_network_streams(workspace_id, server_id)
             .await;
-        self.broadcast_projection(ClusterProjectionUpdate::ServerDeleted {
-            workspace_id: workspace_id.to_string(),
-            server_id: server_id.to_string(),
-        })
-        .await?;
-
-        Ok((server, agents))
     }
 
     pub async fn rename_agent(
@@ -2264,6 +2303,34 @@ impl AppState {
         match update {
             ClusterProjectionUpdate::WorkspaceUpsert { workspace } => {
                 self.upsert_workspace_info(workspace, true).await;
+            }
+            ClusterProjectionUpdate::WorkspaceDeleted { workspace_id } => {
+                let (event, server_ids) = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.remove(&workspace_id) else {
+                        return;
+                    };
+                    let event = Some(WorkspaceEvent {
+                        revision: workspace.revision.saturating_add(1),
+                        workspace_id: workspace_id.clone(),
+                        event: "workspace.deleted".to_string(),
+                        data: serde_json::to_value(&workspace.info).unwrap_or(Value::Null),
+                    });
+                    let server_ids = workspace.servers.keys().cloned().collect::<Vec<_>>();
+                    (event, server_ids)
+                };
+                if let Some(event) = event {
+                    self.publish_workspace_event(event);
+                }
+                for server_id in server_ids {
+                    self.release_server_runtime(
+                        &workspace_id,
+                        &server_id,
+                        "workspace deleted",
+                        "workspace_deleted",
+                    )
+                    .await;
+                }
             }
             ClusterProjectionUpdate::ServerRenamed {
                 workspace_id,

@@ -54,6 +54,9 @@ pub(crate) enum ClusterProjectionUpdate {
     WorkspaceUpsert {
         workspace: WorkspaceInfo,
     },
+    WorkspaceDeleted {
+        workspace_id: String,
+    },
     ServerRenamed {
         workspace_id: String,
         server_id: String,
@@ -841,6 +844,10 @@ fn projection_key(update: &ClusterProjectionUpdate) -> String {
         ClusterProjectionUpdate::WorkspaceUpsert { workspace } => format!(
             "workspace.{}",
             URL_SAFE_NO_PAD.encode(workspace.workspace_id.as_bytes())
+        ),
+        ClusterProjectionUpdate::WorkspaceDeleted { workspace_id } => format!(
+            "workspace.{}",
+            URL_SAFE_NO_PAD.encode(workspace_id.as_bytes())
         ),
         ClusterProjectionUpdate::ServerRenamed {
             workspace_id,
