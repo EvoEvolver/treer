@@ -232,10 +232,15 @@ export interface ServiceIngress {
 
 export interface MachineTrafficRecord {
   window_start: string
+  traffic_class?: "virtual_network" | "service_ingress" | "virtual_host" | "agent_interface"
+  source_type?: "client" | "machine"
   source_server_id: string
+  destination_type?: "client" | "machine"
   destination_server_id: string
   payload_bytes: number
   payload_frames: number
+  billable_bytes?: number
+  meter_version?: number
 }
 
 export interface OrganizationAuditEvent {

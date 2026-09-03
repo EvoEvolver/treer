@@ -7196,6 +7196,22 @@ mod tests {
         .execute(&store.pool)
         .await
         .expect("insert traffic history");
+        sqlx::query(
+            "INSERT INTO traffic_usage_hourly(\
+             workspace_id, window_start, traffic_class, source_type, source_id, \
+             destination_type, destination_id, payload_bytes, payload_frames, \
+             billable_bytes, meter_version, updated_at) \
+             VALUES($1, $2, 'service_ingress', 'client', 'browser', 'machine', $3, $4, $5, $4, 1, $6)",
+        )
+        .bind("ws_deletable")
+        .bind(Utc::now().timestamp())
+        .bind(&machine.server_id)
+        .bind(256_i64)
+        .bind(2_i64)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert usage history");
         crate::message_store::MessageStore::open(store.pool())
             .await
             .expect("initialize message store");
@@ -7252,7 +7268,8 @@ mod tests {
              (SELECT COUNT(*) FROM machines WHERE workspace_id = $1) AS machines, \
              (SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1) AS agents, \
              (SELECT COUNT(*) FROM agent_launch_profiles WHERE workspace_id = $1) AS profiles, \
-             (SELECT COUNT(*) FROM machine_traffic_hourly WHERE workspace_id = $1) AS traffic, \
+             (SELECT COUNT(*) FROM machine_traffic_hourly WHERE workspace_id = $1) AS legacy_traffic, \
+             (SELECT COUNT(*) FROM traffic_usage_hourly WHERE workspace_id = $1) AS traffic, \
              (SELECT COUNT(*) FROM core_messages WHERE workspace_id = $1) AS messages \
              FROM workspaces WHERE workspace_id = $1",
         )
@@ -7268,6 +7285,7 @@ mod tests {
         assert_eq!(retained.get::<i64, _>("machines"), 1);
         assert_eq!(retained.get::<i64, _>("agents"), 1);
         assert_eq!(retained.get::<i64, _>("profiles"), 5);
+        assert_eq!(retained.get::<i64, _>("legacy_traffic"), 1);
         assert_eq!(retained.get::<i64, _>("traffic"), 1);
         assert_eq!(retained.get::<i64, _>("messages"), 1);
         assert!(store

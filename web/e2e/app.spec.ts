@@ -154,8 +154,8 @@ const snapshot = {
 }
 
 const traffic = [
-  { window_start: NOW, source_server_id: "srv-a", destination_server_id: "srv-b", payload_bytes: 1500, payload_frames: 12 },
-  { window_start: NOW, source_server_id: "srv-b", destination_server_id: "srv-a", payload_bytes: 750, payload_frames: 9 },
+  { window_start: NOW, traffic_class: "virtual_network", source_type: "machine", source_server_id: "srv-a", destination_type: "machine", destination_server_id: "srv-b", payload_bytes: 1500, payload_frames: 12, billable_bytes: 1500, meter_version: 1 },
+  { window_start: NOW, traffic_class: "virtual_network", source_type: "machine", source_server_id: "srv-b", destination_type: "machine", destination_server_id: "srv-a", payload_bytes: 750, payload_frames: 9, billable_bytes: 750, meter_version: 1 },
 ]
 
 function ok(route: Route, body: unknown) {
@@ -320,6 +320,16 @@ test("org dropdown contains Members and Audit entries", async ({ page }) => {
   await expect(page.getByRole("menuitem", { name: "Audit" })).toBeVisible()
 })
 
+test("audit view presents versioned traffic as billable usage", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Organization actions" }).click()
+  await page.getByRole("menuitem", { name: "Audit" }).click()
+
+  await expect(page.getByText("Billable usage")).toBeVisible()
+  await expect(page.getByText("Data frames")).toBeVisible()
+  await expect(page.getByText("Machine", { exact: true })).toHaveCount(2)
+})
+
 test("workspace dropdown opens Profiles and Apps without exposing Network", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: /Workspace/ }).click()
@@ -425,11 +435,33 @@ test("clicking a machine opens an overview with identity, agents, services, virt
 
   // Network summary (traffic totals + peers)
   await expect(page.getByText("Network (last 24h)")).toBeVisible()
-  await expect(page.getByText("Data sent")).toBeVisible()
-  await expect(page.getByText("Data received")).toBeVisible()
+  await expect(page.getByText("Routed out")).toBeVisible()
+  await expect(page.getByText("Routed in")).toBeVisible()
 
   await page.getByRole("button", { name: "Close" }).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeHidden()
+})
+
+test("workspace members can see machine traffic without audit permission", async ({ page }) => {
+  await page.route(/\/api\/organizations$/, (route) => ok(route, {
+    organizations: [{ ...organization, role: "member" }],
+  }))
+  await page.route("**/api/workspaces/ws-1/traffic?hours=24", (route) => ok(route, {
+    traffic: traffic.map((item) => ({
+      window_start: item.window_start,
+      source_server_id: item.source_server_id,
+      destination_server_id: item.destination_server_id,
+      payload_bytes: item.payload_bytes,
+      payload_frames: item.payload_frames,
+    })),
+  }))
+  await page.goto("/")
+  await machinesTab(page).click()
+  await workstationRow(page).click()
+
+  await expect(page.getByText("Routed out")).toBeVisible()
+  await expect(page.getByText("1.46 KB")).toBeVisible()
+  await expect(page.getByText("750 B")).toBeVisible()
 })
 
 test("offline machines show copyable recovery commands with the workspace id", async ({ page }) => {

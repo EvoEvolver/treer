@@ -22,7 +22,9 @@ use crate::cluster::{
     ClusterSessionKind,
 };
 use crate::event_bus::EventBus;
-use crate::traffic::{TrafficCounter, TrafficRecorder};
+#[cfg(test)]
+use crate::traffic::BROWSER_TRAFFIC_ENDPOINT;
+use crate::traffic::{StreamTrafficCounters, TrafficClass, TrafficCounter, TrafficRecorder};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
 const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1469,6 +1471,7 @@ impl AppState {
         destination_agent_id: Option<&str>,
         host: &str,
         port: u16,
+        traffic_class: TrafficClass,
     ) -> Result<DuplexStream, ProtocolError> {
         let key = NetworkStreamKey {
             workspace_id: workspace_id.to_string(),
@@ -1547,10 +1550,15 @@ impl AppState {
         }
 
         let (client, bridge) = tokio::io::duplex(NETWORK_INITIAL_WINDOW);
+        let traffic = self.inner.traffic.register_client_stream(
+            workspace_id,
+            traffic_class,
+            destination_server_id,
+        );
         let state = self.clone();
         tokio::spawn(async move {
             if let Err(error) = state
-                .bridge_browser_network_stream(&key, bridge, incoming_rx)
+                .bridge_browser_network_stream(&key, bridge, incoming_rx, traffic)
                 .await
             {
                 state.reset_browser_network_stream(&key, error).await;
@@ -1571,6 +1579,7 @@ impl AppState {
         key: &NetworkStreamKey,
         stream: DuplexStream,
         mut incoming: mpsc::Receiver<NetworkBinaryFrame>,
+        traffic: StreamTrafficCounters,
     ) -> Result<(), ProtocolError> {
         let (mut reader, mut writer) = tokio::io::split(stream);
         let mut buffer = vec![0_u8; NETWORK_MAX_CHUNK];
@@ -1587,6 +1596,7 @@ impl AppState {
                     } else {
                         send_window -= read;
                         self.send_browser_network_frame(key, NetworkBinaryKind::Data, buffer[..read].to_vec()).await?;
+                        traffic.source_to_destination.record(read);
                     }
                 }
                 frame = incoming.recv() => {
@@ -1594,6 +1604,7 @@ impl AppState {
                     match frame.kind {
                         NetworkBinaryKind::Data => {
                             writer.write_all(&frame.payload).await.map_err(|error| ProtocolError::new("network_io_error", error.to_string()))?;
+                            traffic.destination_to_source.record(frame.payload.len());
                             let amount = u32::try_from(frame.payload.len()).unwrap_or(u32::MAX).to_be_bytes().to_vec();
                             self.send_browser_network_frame(key, NetworkBinaryKind::WindowUpdate, amount).await?;
                         }
@@ -1673,7 +1684,7 @@ impl AppState {
             server_id: destination_server_id.to_string(),
             stream_id: self.inner.cluster.routed_id("net"),
         };
-        let traffic = self.inner.traffic.register_stream(
+        let traffic = self.inner.traffic.register_machine_stream(
             workspace_id,
             source_server_id,
             destination_server_id,
@@ -3632,11 +3643,21 @@ mod tests {
         let _ = source_rx.recv().await.expect("source data");
 
         assert_eq!(
-            traffic.pending_for("alpha", "source", "destination"),
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::VirtualNetwork,
+                "source",
+                "destination"
+            ),
             (7, 1)
         );
         assert_eq!(
-            traffic.pending_for("alpha", "destination", "source"),
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::VirtualNetwork,
+                "destination",
+                "source"
+            ),
             (8, 1)
         );
     }
@@ -3679,7 +3700,12 @@ mod tests {
 
     #[tokio::test]
     async fn browser_network_streams_bridge_data_and_close_cleanly() {
-        let state = AppState::new();
+        let traffic = TrafficRecorder::default();
+        let state = AppState::with_backplanes_and_traffic(
+            EventBus::in_process(),
+            ClusterBus::standalone("browser-traffic-test".to_string()),
+            traffic.clone(),
+        );
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
@@ -3690,7 +3716,14 @@ mod tests {
         let opening_state = state.clone();
         let opening = tokio::spawn(async move {
             opening_state
-                .open_browser_network_stream("alpha", "server", Some("agent-a"), "127.0.0.1", 8080)
+                .open_browser_network_stream(
+                    "alpha",
+                    "server",
+                    Some("agent-a"),
+                    "127.0.0.1",
+                    8080,
+                    TrafficClass::AgentInterface,
+                )
                 .await
         });
         let open = expect_network(server_rx.recv().await.expect("browser open frame"));
@@ -3766,6 +3799,24 @@ mod tests {
         assert_eq!(close.kind, NetworkBinaryKind::HalfClose);
         tokio::task::yield_now().await;
         assert!(state.inner.browser_network_streams.lock().await.is_empty());
+        assert_eq!(
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::AgentInterface,
+                BROWSER_TRAFFIC_ENDPOINT,
+                "server"
+            ),
+            (7, 1)
+        );
+        assert_eq!(
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::AgentInterface,
+                "server",
+                BROWSER_TRAFFIC_ENDPOINT
+            ),
+            (8, 1)
+        );
     }
 
     #[tokio::test]

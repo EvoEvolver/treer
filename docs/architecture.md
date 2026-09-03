@@ -289,9 +289,14 @@ serving it.
 
 PostgreSQL is the durable source for accounts, organizations, workspaces,
 machine credentials, services, ingresses, App OAuth codes, policy, audit,
-traffic counters, and Core Message. NATS supplies events and cross-Proxy live
-routing but is not Message truth. App SQLite databases contain only App-owned
-sessions or external delivery mappings.
+the logical traffic-usage ledger, and Core Message. Usage is metered once after
+payload delivery and classified by route and meter version; NATS framing,
+control messages, fan-out, and retries are operational transport costs rather
+than customer usage. The legacy machine-traffic table remains read-compatible
+during retention while new counters write to `traffic_usage_hourly`. NATS
+supplies events and cross-Proxy live routing but is not Message or billing
+truth. App SQLite databases contain only App-owned sessions or external
+delivery mappings.
 
 ## Self-hosted control plane updates
 

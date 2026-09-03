@@ -62,6 +62,7 @@ use crate::policy::{
     RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame, TERMINAL_BROWSER_QUEUE_CAPACITY};
+use crate::traffic::TrafficClass;
 use crate::updater::UpdaterClient;
 
 const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;
@@ -3148,6 +3149,7 @@ async fn proxy_service_ingress(
         request,
         false,
         "service ingress",
+        TrafficClass::ServiceIngress,
     )
     .await
 }
@@ -3319,6 +3321,7 @@ async fn proxy_virtual_network_host(
         request,
         true,
         "virtual host",
+        TrafficClass::VirtualHost,
     )
     .await
 }
@@ -3387,6 +3390,7 @@ async fn proxy_agent_interface_ui(
         request,
         true,
         "Agent Interface UI",
+        TrafficClass::AgentInterface,
     )
     .await
 }
@@ -3402,6 +3406,7 @@ async fn tunnel_http_request(
     mut request: Request<Body>,
     strip_response_cookies: bool,
     route_kind: &'static str,
+    traffic_class: TrafficClass,
 ) -> Result<Response, ApiFailure> {
     let stream = state
         .open_browser_network_stream(
@@ -3410,6 +3415,7 @@ async fn tunnel_http_request(
             target_agent_id,
             target_host,
             target_port,
+            traffic_class,
         )
         .await?;
     let upgraded = request.headers().contains_key(header::UPGRADE);

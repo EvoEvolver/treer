@@ -1487,10 +1487,15 @@ pub struct UpdateServiceIngressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineTrafficRecord {
     pub window_start: DateTime<Utc>,
+    pub traffic_class: String,
+    pub source_type: String,
     pub source_server_id: String,
+    pub destination_type: String,
     pub destination_server_id: String,
     pub payload_bytes: u64,
     pub payload_frames: u64,
+    pub billable_bytes: u64,
+    pub meter_version: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

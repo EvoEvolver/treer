@@ -774,25 +774,31 @@ const auditActionLabels: Record<string, string> = {
 }
 
 function AuditView({ events, traffic, machines, loading }: { events: OrganizationAuditEvent[]; traffic: MachineTrafficRecord[]; machines: Machine[]; loading: boolean }) {
-  const totalBytes = traffic.reduce((sum, item) => sum + item.payload_bytes, 0)
+  const totalBytes = traffic.reduce((sum, item) => sum + (item.billable_bytes ?? item.payload_bytes), 0)
   const totalFrames = traffic.reduce((sum, item) => sum + item.payload_frames, 0)
   const routes = Array.from(traffic.reduce((items, item) => {
-    const key = `${item.source_server_id}\u0000${item.destination_server_id}`
-    const current = items.get(key) ?? { source: item.source_server_id, destination: item.destination_server_id, bytes: 0, frames: 0 }
-    current.bytes += item.payload_bytes
+    const trafficClass = item.traffic_class ?? "virtual_network"
+    const sourceType = item.source_type ?? "machine"
+    const destinationType = item.destination_type ?? "machine"
+    const key = `${trafficClass}\u0000${sourceType}\u0000${item.source_server_id}\u0000${destinationType}\u0000${item.destination_server_id}`
+    const current = items.get(key) ?? { trafficClass, sourceType, source: item.source_server_id, destinationType, destination: item.destination_server_id, bytes: 0, frames: 0 }
+    current.bytes += item.billable_bytes ?? item.payload_bytes
     current.frames += item.payload_frames
     items.set(key, current)
     return items
-  }, new Map<string, { source: string; destination: string; bytes: number; frames: number }>()).values()).sort((left, right) => right.bytes - left.bytes)
-  const resolveMachine = (serverId: string) => machineName(machines.find((machine) => machine.server_id === serverId), serverId)
+  }, new Map<string, { trafficClass: NonNullable<MachineTrafficRecord["traffic_class"]>; sourceType: NonNullable<MachineTrafficRecord["source_type"]>; source: string; destinationType: NonNullable<MachineTrafficRecord["destination_type"]>; destination: string; bytes: number; frames: number }>()).values()).sort((left, right) => right.bytes - left.bytes)
+  const resolveEndpoint = (type: NonNullable<MachineTrafficRecord["source_type"]>, serverId: string) => type === "client" || serverId === "browser"
+    ? "Browser / ingress"
+    : machineName(machines.find((machine) => machine.server_id === serverId), serverId)
+  const trafficClassLabel: Record<NonNullable<MachineTrafficRecord["traffic_class"]>, string> = { virtual_network: "Machine", service_ingress: "Ingress", virtual_host: "Virtual host", agent_interface: "Agent UI" }
 
   return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
     <div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-[#f8d9df] text-[#8b4452]"><ScrollText className="size-4" /></div><h1 className="text-2xl font-semibold">Audit</h1></div><span className="text-xs text-muted-foreground">Organization activity</span></div>
     <section className="mb-11"><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">Traffic</h2><span className="text-[10px] uppercase text-muted-foreground">Last 24 hours</span></div><div className="grid grid-cols-3 border-y">
-      <div className="py-5 pr-3"><div className="text-[10px] text-muted-foreground">Relayed data</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{formatBytes(totalBytes)}</div></div>
+      <div className="py-5 pr-3"><div className="text-[10px] text-muted-foreground">Billable usage</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{formatBytes(totalBytes)}</div></div>
       <div className="border-x px-3 py-5 sm:px-6"><div className="text-[10px] text-muted-foreground">Data frames</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{totalFrames.toLocaleString()}</div></div>
-      <div className="py-5 pl-3 sm:pl-6"><div className="text-[10px] text-muted-foreground">Machine routes</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{routes.length}</div></div>
-    </div>{routes.length > 0 && <div className="mt-3 divide-y border-b">{routes.slice(0, 5).map((route) => <div key={`${route.source}:${route.destination}`} className="grid min-h-10 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 text-xs"><span className="flex min-w-0 items-center gap-2"><span className="truncate">{resolveMachine(route.source)}</span><ArrowRight className="size-3 shrink-0 text-muted-foreground" /><span className="truncate">{resolveMachine(route.destination)}</span></span><span className="font-mono text-[10px] text-muted-foreground">{formatBytes(route.bytes)}</span></div>)}</div>}</section>
+      <div className="py-5 pl-3 sm:pl-6"><div className="text-[10px] text-muted-foreground">Routes</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{routes.length}</div></div>
+    </div>{routes.length > 0 && <div className="mt-3 divide-y border-b">{routes.slice(0, 5).map((route) => <div key={`${route.trafficClass}:${route.source}:${route.destination}`} className="grid min-h-10 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 text-xs"><span className="flex min-w-0 items-center gap-2"><span className="w-16 shrink-0 text-[9px] uppercase text-muted-foreground">{trafficClassLabel[route.trafficClass]}</span><span className="truncate">{resolveEndpoint(route.sourceType, route.source)}</span><ArrowRight className="size-3 shrink-0 text-muted-foreground" /><span className="truncate">{resolveEndpoint(route.destinationType, route.destination)}</span></span><span className="font-mono text-[10px] text-muted-foreground">{formatBytes(route.bytes)}</span></div>)}</div>}</section>
     <section><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">Activity</h2><span className="text-[10px] text-muted-foreground">{events.length} events</span></div><div className="border-y divide-y">{events.map((event) => { const actor = event.actor_name ?? event.actor_id ?? event.actor_kind; const resource = event.resource_name ?? event.resource_id; return <div key={event.event_id} className="grid min-h-16 grid-cols-[32px_minmax(0,1fr)] gap-3 py-3 sm:grid-cols-[32px_minmax(0,1fr)_auto] sm:items-center"><span className="grid size-8 place-items-center rounded bg-[#dcebea] text-[10px] font-bold text-[#35645f]">{initials(actor)}</span><div className="min-w-0"><div className="truncate text-xs"><span className="font-medium">{actor}</span> <span className="text-muted-foreground">{auditActionLabels[event.action] ?? event.action}</span></div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{resource}</div></div><time className="col-start-2 text-[10px] text-muted-foreground sm:col-start-auto" dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString()}</time></div>})}{!events.length && <EmptyState icon={loading ? <RotateCw className="animate-spin" /> : <Activity />} label={loading ? "Loading activity" : "No audit activity yet"} />}</div></section>
   </div></div>
 }
@@ -1754,26 +1760,39 @@ function WorkspaceApp() {
   const loadAudit = useCallback(async () => {
     if (!organizationId || !workspaceId || !canManageMembers) {
       setAuditEvents([])
-      setTraffic([])
       return
     }
     setAuditLoading(true)
     try {
-      const [auditData, trafficData] = await Promise.all([
-        api<{ events: OrganizationAuditEvent[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/audit-events?workspace_id=${encodeURIComponent(workspaceId)}&limit=100`),
-        api<{ traffic: MachineTrafficRecord[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/traffic?hours=24`),
-      ])
+      const auditData = await api<{ events: OrganizationAuditEvent[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/audit-events?workspace_id=${encodeURIComponent(workspaceId)}&limit=100`)
       setAuditEvents(auditData.events)
-      setTraffic(trafficData.traffic)
     } finally {
       setAuditLoading(false)
     }
   }, [organizationId, workspaceId, canManageMembers])
 
+  const loadTraffic = useCallback(async () => {
+    const requestedWorkspaceId = workspaceId
+    if (!requestedWorkspaceId) {
+      setTraffic([])
+      return
+    }
+    const data = await api<{ traffic: MachineTrafficRecord[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/traffic?hours=24`)
+    if (workspaceIdRef.current === requestedWorkspaceId) setTraffic(data.traffic)
+  }, [workspaceId])
+
+  const refreshAudit = useCallback(() => {
+    void Promise.all([loadAudit(), loadTraffic()]).catch(showError)
+  }, [loadAudit, loadTraffic, showError])
+
   useEffect(() => {
     if (mainView === "audit") loadAudit().catch(showError)
-    if (mainView === "machine") { loadNetwork().catch(showError); loadAudit().catch(showError) }
-  }, [mainView, loadAudit, loadNetwork, showError])
+    if (mainView === "machine") loadNetwork().catch(showError)
+    if (mainView !== "audit" && mainView !== "machine") return
+    loadTraffic().catch(showError)
+    const timer = window.setInterval(() => loadTraffic().catch(showError), 10_000)
+    return () => window.clearInterval(timer)
+  }, [mainView, loadAudit, loadNetwork, loadTraffic, showError])
 
   function openAudit() {
     setMainView("audit")
@@ -2009,7 +2028,7 @@ function WorkspaceApp() {
             <IconButton label={selectedAgentInterface ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={() => void stopAgent()}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
-          </div> : mainView === "profiles" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh profiles" onClick={loadLaunchProfiles} disabled={launchProfilesLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openNewLaunchProfile}><Plus />New profile</Button></div> : mainView === "apps" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh Apps" onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openCreateApp} disabled={!onlineMachines.length}><Plus />New App</Button></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={loadAudit} disabled={auditLoading}><RotateCw /></IconButton> : mainView === "network" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div> : null}
+          </div> : mainView === "profiles" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh profiles" onClick={loadLaunchProfiles} disabled={launchProfilesLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openNewLaunchProfile}><Plus />New profile</Button></div> : mainView === "apps" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh Apps" onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openCreateApp} disabled={!onlineMachines.length}><Plus />New App</Button></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : mainView === "network" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div> : null}
         </header>
         {mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
           <div className="max-w-sm">
@@ -2215,8 +2234,8 @@ function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {
 
 function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
-  const outBytes = traffic.filter((t) => t.source_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
-  const inBytes = traffic.filter((t) => t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
+  const outBytes = traffic.filter((t) => (t.source_type ?? "machine") === "machine" && t.source_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
+  const inBytes = traffic.filter((t) => (t.destination_type ?? "machine") === "machine" && t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
   const peers = Array.from(new Set(
     traffic
       .filter((t) => t.source_server_id === machine?.server_id || t.destination_server_id === machine?.server_id)
@@ -2269,8 +2288,8 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
       <section className="space-y-3 rounded-md border p-4">
         <h2 className="text-sm font-semibold">Network (last 24h)</h2>
         <dl className="grid gap-2 text-xs">
-          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Data sent</dt><dd className="font-mono">{formatBytes(outBytes)}</dd></div>
-          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Data received</dt><dd className="font-mono">{formatBytes(inBytes)}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Routed out</dt><dd className="font-mono">{formatBytes(outBytes)}</dd></div>
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Routed in</dt><dd className="font-mono">{formatBytes(inBytes)}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Peers</dt><dd className="font-mono">{peers.length}</dd></div>
         </dl>
         {peers.length > 0 && <div className="flex flex-wrap gap-1.5 pt-2">{peers.map((peer) => <span key={peer.server_id} className="rounded-full bg-accent px-2 py-1 text-[10px] font-medium">{machineName(peer)}</span>)}</div>}

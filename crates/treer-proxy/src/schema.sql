@@ -416,5 +416,26 @@ CREATE TABLE IF NOT EXISTS machine_traffic_hourly (
 );
 CREATE INDEX IF NOT EXISTS machine_traffic_hourly_workspace_window
     ON machine_traffic_hourly(workspace_id, window_start DESC);
+CREATE TABLE IF NOT EXISTS traffic_usage_hourly (
+    workspace_id TEXT NOT NULL,
+    window_start BIGINT NOT NULL,
+    traffic_class TEXT NOT NULL CHECK(traffic_class IN ('virtual_network', 'service_ingress', 'virtual_host', 'agent_interface')),
+    source_type TEXT NOT NULL CHECK(source_type IN ('client', 'machine')),
+    source_id TEXT NOT NULL,
+    destination_type TEXT NOT NULL CHECK(destination_type IN ('client', 'machine')),
+    destination_id TEXT NOT NULL,
+    payload_bytes BIGINT NOT NULL DEFAULT 0 CHECK(payload_bytes >= 0),
+    payload_frames BIGINT NOT NULL DEFAULT 0 CHECK(payload_frames >= 0),
+    billable_bytes BIGINT NOT NULL DEFAULT 0 CHECK(billable_bytes >= 0),
+    meter_version INTEGER NOT NULL CHECK(meter_version > 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(
+        workspace_id, window_start, traffic_class, source_type, source_id,
+        destination_type, destination_id, meter_version
+    ),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+);
+CREATE INDEX IF NOT EXISTS traffic_usage_hourly_workspace_window
+    ON traffic_usage_hourly(workspace_id, window_start DESC);
 CREATE INDEX IF NOT EXISTS virtual_network_hosts_service
     ON virtual_network_hosts(workspace_id, service_id);

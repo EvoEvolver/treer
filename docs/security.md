@@ -99,7 +99,12 @@ state and WAL files require normal credential-store protection and backup.
 Public service ingress deliberately accepts anonymous internet traffic.
 Workspace ingress requires a current member session or service-audience token.
 The Proxy strips gateway credentials and Treer headers before forwarding, but
-it remains in the browser-to-service data path.
+it remains in the browser-to-service data path. The Proxy records directional
+payload byte and frame totals for these tunnels under the synthetic `browser`
+client endpoint. Each aggregate carries a traffic class and meter version so
+future billing rules remain explainable; workspace members can read those
+aggregates. It does not store payload content, request paths, headers, or NATS
+control-plane traffic in the usage ledger.
 
 Self-hosted Compose gives the updater sidecar the host Docker socket and a
 read-only bind of `compose.yaml`. Compromise of that sidecar is host Docker

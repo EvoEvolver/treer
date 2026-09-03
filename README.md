@@ -706,18 +706,29 @@ Treer consumes its own ingress cookie/header and strips client-supplied
 `X-Treer-*` identity headers before forwarding. Only HTTP services can be
 published. Disabling or deleting an ingress does not stop the service.
 
-The Proxy also records hourly payload totals for each relayed machine direction.
-Workspace members can query the last 1 to 720 hours without scanning individual
-connections:
+The Proxy also records an hourly logical-usage ledger for payload successfully
+delivered through Treer. Meter version 1 treats payload bytes in both directions
+as billable and classifies them as `virtual_network`, `service_ingress`,
+`virtual_host`, or `agent_interface`. Browser-side traffic uses the stable
+`browser` client endpoint, so requests appear as `browser` to the destination
+machine and responses use the reverse direction. Workspace members can query
+the last 1 to 720 hourly buckets without scanning individual connections:
 
 ```text
 GET /api/workspaces/<workspace_id>/traffic?hours=24
 ```
 
-The response reports `source_server_id`, `destination_server_id`,
-`payload_bytes`, and `payload_frames`. Counters flush to PostgreSQL every ten
-seconds; protocol overhead, PTY bytes, public ingress, and direct internet
-egress are intentionally excluded. Hourly rows are retained for 90 days.
+The response reports the traffic class, endpoint types and IDs, raw
+`payload_bytes`, `payload_frames`, `billable_bytes`, and `meter_version`.
+Queries include the serving Proxy's not-yet-flushed counters; counters flush to
+PostgreSQL every ten seconds and on graceful shutdown. Another Proxy replica's
+newest counters may remain invisible until its next flush. Legacy machine
+traffic rows remain readable during the 90-day retention window. NATS protocol
+overhead, control-plane messages, retries, PTY bytes, and direct internet egress
+are intentionally excluded: broker topology must not change customer usage.
+This aggregate ledger is a billing foundation, not yet an invoice-grade source;
+hard process failure can lose the pending interval until a durable usage journal
+is added.
 
 Deleting an online machine sends a confirmed shutdown command over its existing
 Controller WebSocket before revoking the machine credential. A capable

@@ -260,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
     messages.spawn_outbox_dispatcher(event_bus.clone());
     let traffic = TrafficRecorder::new(auth.pool());
     traffic.spawn_flush_task();
-    let state = AppState::with_backplanes_and_traffic(event_bus, cluster.clone(), traffic);
+    let state = AppState::with_backplanes_and_traffic(event_bus, cluster.clone(), traffic.clone());
     for workspace in auth
         .all_workspaces()
         .await
@@ -304,9 +304,49 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
     info!(address = %listen, %proxy_public_url, %app_public_url, ingress = ?ingress.public_url(), %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, core_messages_enabled = args.enable_core_messages, "treer proxy listening");
-    axum::serve(listener, app)
+    let shutdown_traffic = traffic.clone();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            if let Err(error) = shutdown_traffic.flush_pending().await {
+                warn!(%error, "failed to persist traffic usage counters during shutdown");
+            }
+        })
         .await
-        .context("proxy server failed")
+        .context("proxy server failed");
+    traffic
+        .flush_pending()
+        .await
+        .context("failed to persist final traffic usage counters")?;
+    server
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    signal = tokio::signal::ctrl_c() => {
+                        if let Err(error) = signal {
+                            warn!(%error, "failed to listen for Ctrl-C");
+                        }
+                    }
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                warn!(%error, "failed to listen for SIGTERM");
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    warn!(%error, "failed to listen for Ctrl-C");
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        warn!(%error, "failed to listen for Ctrl-C");
+    }
 }
 
 fn resolve_admin_password(configured: Option<String>, auth_disabled: bool) -> Result<String> {
