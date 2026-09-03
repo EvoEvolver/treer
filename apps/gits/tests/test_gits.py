@@ -53,14 +53,15 @@ class GitsServerTest(unittest.TestCase):
         method: str,
         path: str,
         body: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], object | None]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        headers = {}
+        request_headers = dict(headers or {})
         encoded = None
         if body is not None:
             encoded = json.dumps(body)
-            headers["Content-Type"] = "application/json"
-        connection.request(method, path, body=encoded, headers=headers)
+            request_headers["Content-Type"] = "application/json"
+        connection.request(method, path, body=encoded, headers=request_headers)
         response = connection.getresponse()
         raw = response.read()
         response_headers = {name.lower(): value for name, value in response.getheaders()}
@@ -90,7 +91,7 @@ class GitsServerTest(unittest.TestCase):
             check=False,
         )
 
-    def test_agent_index_json_api_and_human_ui_are_separate(self) -> None:
+    def test_root_negotiates_agent_and_human_representations(self) -> None:
         status, headers, manual = self.request("GET", "/")
         self.assertEqual(status, 200)
         self.assertEqual(headers["content-type"], "text/markdown; charset=utf-8")
@@ -98,16 +99,31 @@ class GitsServerTest(unittest.TestCase):
         self.assertIn("git clone http://gits.internal", manual)
         self.assertNotIn("<!doctype html>", manual.lower())
 
-        status, headers, page = self.request("GET", "/_human/")
+        status, headers, page = self.request("GET", "/", headers={"Accept": "text/html"})
         self.assertEqual(status, 200)
         self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
+        self.assertEqual(headers["vary"], "Accept, User-Agent")
         self.assertIn("<title>Gits</title>", page)
         self.assertIn('src="./app.js"', page)
 
-        status, _, script = self.request("GET", "/_human/app.js")
+        status, _, page = self.request("GET", "/", headers={"User-Agent": "Mozilla/5.0"})
+        self.assertEqual(status, 200)
+        self.assertIn("<title>Gits</title>", page)
+
+        status, headers, manual = self.request(
+            "GET", "/", headers={"User-Agent": "Mozilla/5.0", "Accept": "text/markdown"}
+        )
+        self.assertEqual(headers["content-type"], "text/markdown; charset=utf-8")
+        self.assertIn("# Gits", manual)
+
+        status, _, script = self.request("GET", "/app.js")
         self.assertEqual(status, 200)
         self.assertIn("function applicationUrl(path)", script)
         self.assertIn("fetch(applicationUrl(path)", script)
+
+        status, _, value = self.request("GET", "/_human/")
+        self.assertEqual(status, 404)
+        self.assertEqual(value["error"]["code"], "not_found")
 
         status, headers, value = self.request("GET", "/v1/repos")
         self.assertEqual(status, 200)

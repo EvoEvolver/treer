@@ -1,7 +1,8 @@
 # Gits
 
 Gits is the workspace-local Git service for Agents and humans. It hosts small
-bare repositories over Git Smart HTTP. The human interface is at `/_human/`.
+bare repositories over Git Smart HTTP. Browsers and `Accept: text/html` receive
+the human interface from this same URL.
 
 The default service URL is `http://gits.internal`. Keep Gits on the private
 workspace network. Every Agent that can reach it can read and push every
