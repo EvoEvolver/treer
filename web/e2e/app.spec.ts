@@ -26,6 +26,14 @@ const workspace = {
   organization_id: "org-1",
 }
 
+const workspaceAccess = {
+  workspace_id: "ws-1",
+  access_mode: "organization" as const,
+  current_role: "owner" as const,
+  members: [],
+  groups: [],
+}
+
 const secondWorkspace = {
   workspace_id: "ws-2",
   name: "Experiments",
@@ -192,6 +200,7 @@ async function mockApi(page: Page) {
     }
     if (path === "/organizations") return ok(route, { organizations: [organization, secondOrganization] })
     if (path === "/organizations/org-1/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "owner" }] })
+    if (path === "/organizations/org-1/groups") return ok(route, { groups: [] })
     if (path === "/organizations/org-1/audit-events") return ok(route, { events: [] })
     if (path === "/workspaces") return ok(route, {
       workspaces: url.searchParams.get("organization_id") === "org-1"
@@ -200,6 +209,7 @@ async function mockApi(page: Page) {
     })
     if (path === "/workspaces/ws-1/snapshot") return ok(route, snapshot)
     if (path === "/workspaces/ws-2/snapshot") return ok(route, { ...snapshot, workspace: secondWorkspace, servers: [], agents: [] })
+    if (path === "/workspaces/ws-1/access") return ok(route, { access: workspaceAccess })
     if (path === "/workspaces/ws-1" && route.request().method() === "PATCH") {
       const body = route.request().postDataJSON() as { name: string }
       return ok(route, { workspace: { ...workspace, name: body.name } })
@@ -469,7 +479,7 @@ test("workspace members can see machine traffic without audit permission", async
     })),
   }))
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
 
   await expect(page.getByText("Routed out")).toBeVisible()
