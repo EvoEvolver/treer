@@ -363,19 +363,17 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
 
   await expect(page.getByText("Soul Archive")).toBeVisible()
   await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/", { exact: true })).toBeVisible()
-  await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/_human/", { exact: true })).toBeVisible()
+  await expect(page.getByText(/_human/)).toHaveCount(0)
   await page.evaluate(() => {
     window.open = ((url?: string | URL) => {
       document.documentElement.dataset.lastOpenedUrl = String(url)
       return null
     }) as typeof window.open
   })
-  await page.getByRole("button", { name: "Open Soul Archive Agent interface" }).click()
+  await page.getByRole("button", { name: "Open Soul Archive interface" }).click()
   await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
-  await page.getByRole("button", { name: "Open Soul Archive Human interface" }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/_human/")
   await page.getByRole("button", { name: "Open Soul Archive", exact: true }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/_human/")
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
   const restarting = page.waitForRequest((request) => request.url().includes("/apps/app-1/restart") && request.method() === "POST")
   await page.getByRole("button", { name: "Restart Soul Archive" }).click()
   await restarting

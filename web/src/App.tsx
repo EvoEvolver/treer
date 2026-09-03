@@ -813,19 +813,16 @@ function LaunchProfilesView({ profiles, loading, onEdit, onLaunch, onDelete }: {
   </div></div>
 }
 
-function AppsView({ apps, machines, loading, onOpen, onAction, onDelete }: { apps: AppDeployment[]; machines: Machine[]; loading: boolean; onOpen: (app: AppDeployment, path: "/" | "/_human/") => void; onAction: (app: AppDeployment, action: "start" | "stop" | "restart") => void; onDelete: (app: AppDeployment) => void }) {
+function AppsView({ apps, machines, loading, onOpen, onAction, onDelete }: { apps: AppDeployment[]; machines: Machine[]; loading: boolean; onOpen: (app: AppDeployment) => void; onAction: (app: AppDeployment, action: "start" | "stop" | "restart") => void; onDelete: (app: AppDeployment) => void }) {
   return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
     <div className="mb-8 flex items-end justify-between gap-4"><div><div className="mb-2 grid size-9 place-items-center rounded-md bg-emerald-100 text-emerald-800"><PanelsTopLeft className="size-4" /></div><h1 className="text-2xl font-semibold">Apps</h1></div><span className="text-xs text-muted-foreground">{apps.length} deployments</span></div>
     <div className="border-y">
-      <div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(220px,1.3fr)_minmax(150px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>App</span><span>Interfaces</span><span>Machine</span><span className="w-36" /></div>
+      <div className="hidden h-9 grid-cols-[minmax(150px,1fr)_minmax(220px,1.3fr)_minmax(150px,1fr)_auto] items-center gap-4 border-b text-[10px] font-medium uppercase text-muted-foreground sm:grid"><span>App</span><span>URL</span><span>Machine</span><span className="w-36" /></div>
       {apps.map((app) => { const machine = machines.find((item) => item.server_id === app.server_id); const interfaceBase = app.public_url?.replace(/\/$/, "") ?? app.hostname; return <div key={app.app_id} className="grid min-h-[72px] grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b py-3 last:border-b-0 sm:grid-cols-[minmax(150px,1fr)_minmax(220px,1.3fr)_minmax(150px,1fr)_auto] sm:gap-4">
         <div className="col-start-1 row-start-1 min-w-0 sm:col-start-auto sm:row-start-auto"><div className="flex items-center gap-2"><span className="truncate text-xs font-medium">{app.name}</span><Status value={app.status} /></div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={formatCommandLine(app.command, app.args)}>{formatCommandLine(app.command, app.args)}</div>{app.last_error && <div className="mt-1 truncate text-[9px] text-red-600" title={app.last_error}>{app.last_error}</div>}</div>
-        <div className="col-start-1 row-start-2 min-w-0 space-y-1 sm:col-start-auto sm:row-start-auto">
-          <button type="button" className="flex w-full min-w-0 items-center gap-2 text-left hover:underline" aria-label={`Open ${app.name} Agent interface`} onClick={() => onOpen(app, "/")}><span className="w-11 shrink-0 text-[9px] font-medium uppercase text-muted-foreground">Agent</span><span className="min-w-0 truncate font-mono text-[10px]">{interfaceBase}/</span></button>
-          <button type="button" className="flex w-full min-w-0 items-center gap-2 text-left hover:underline" aria-label={`Open ${app.name} Human interface`} onClick={() => onOpen(app, "/_human/")}><span className="w-11 shrink-0 text-[9px] font-medium uppercase text-muted-foreground">Human</span><span className="min-w-0 truncate font-mono text-[10px]">{interfaceBase}/_human/</span></button>
-        </div>
+        <button type="button" className="col-start-1 row-start-2 min-w-0 truncate text-left font-mono text-[10px] hover:underline sm:col-start-auto sm:row-start-auto" aria-label={`Open ${app.name} interface`} onClick={() => onOpen(app)}>{interfaceBase}/</button>
         <span className="col-start-1 row-start-3 min-w-0 truncate text-[10px] text-muted-foreground sm:col-start-auto sm:row-start-auto">{machineName(machine, app.server_id)} · restarts {app.restart_count}</span>
-        <span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${app.name}`} onClick={() => onOpen(app, "/_human/")} disabled={app.status !== "running"}><ExternalLink /></IconButton>{app.desired_state === "stopped" ? <IconButton label={`Start ${app.name}`} onClick={() => onAction(app, "start")} disabled={machine?.status !== "online"}><Play /></IconButton> : <IconButton label={`Stop ${app.name}`} onClick={() => onAction(app, "stop")} disabled={machine?.status !== "online"}><Square /></IconButton>}<IconButton label={`Restart ${app.name}`} onClick={() => onAction(app, "restart")} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Delete ${app.name}`} className="text-destructive hover:text-destructive" onClick={() => onDelete(app)}><Trash2 /></IconButton></span>
+        <span className="col-start-2 row-span-3 row-start-1 flex items-center justify-end gap-1 sm:col-start-auto sm:row-span-1 sm:row-start-auto"><IconButton label={`Open ${app.name}`} onClick={() => onOpen(app)} disabled={app.status !== "running"}><ExternalLink /></IconButton>{app.desired_state === "stopped" ? <IconButton label={`Start ${app.name}`} onClick={() => onAction(app, "start")} disabled={machine?.status !== "online"}><Play /></IconButton> : <IconButton label={`Stop ${app.name}`} onClick={() => onAction(app, "stop")} disabled={machine?.status !== "online"}><Square /></IconButton>}<IconButton label={`Restart ${app.name}`} onClick={() => onAction(app, "restart")} disabled={machine?.status !== "online"}><RotateCw /></IconButton><IconButton label={`Delete ${app.name}`} className="text-destructive hover:text-destructive" onClick={() => onDelete(app)}><Trash2 /></IconButton></span>
       </div>})}
       {!apps.length && <EmptyState icon={<PanelsTopLeft />} label={loading ? "Loading Apps" : "No Apps yet"} />}
     </div>
@@ -1814,20 +1811,18 @@ function WorkspaceApp() {
     setCreateServiceOpen(true)
   }
 
-  function openVirtualHost(hostname: string, path: "/" | "/_human/" = "/") {
+  function openVirtualHost(hostname: string) {
     if (!workspaceId) return
-    const suffix = path === "/_human/" ? "_human/" : ""
-    const url = proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(hostname)}/proxy/${suffix}`)
+    const url = proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(hostname)}/proxy/`)
     window.open(url, "_blank", "noopener,noreferrer")
   }
 
-  function openApp(app: AppDeployment, path: "/" | "/_human/") {
+  function openApp(app: AppDeployment) {
     if (!app.public_url) {
-      openVirtualHost(app.hostname, path)
+      openVirtualHost(app.hostname)
       return
     }
-    const url = new URL(path, app.public_url)
-    window.open(url, "_blank", "noopener,noreferrer")
+    window.open(app.public_url, "_blank", "noopener,noreferrer")
   }
 
   async function refreshNetwork() {
