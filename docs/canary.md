@@ -72,9 +72,10 @@ URLs explicitly so this environment cannot accidentally emit Production
 installation or App links. The Proxy deployment explicitly enables
 `TREER_ENABLE_CORE_MESSAGES=true`; self-hosted launches default this gate off.
 
-The local gate inside `release-canary` includes Mail and Telegram App tests,
-frontend builds, and Core Message tests against local PostgreSQL. The Railway
-workflow remains network-focused and does not start channel Apps.
+The local gate inside `release-canary` includes the control-plane frontend and
+Core Message tests against local PostgreSQL. Workspace App and AIS adapter
+tests are opt-in focused checks rather than release gates. The Railway workflow
+remains network-focused and does not start channel Apps.
 The Railway black-box workflow below does not currently install a Mail bridge,
 contact Telegram, or automate a Mail browser. Do not cite it as external-channel
 canary evidence; those are separate future fixtures.

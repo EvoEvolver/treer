@@ -975,10 +975,10 @@ just test-db-up
 just check
 ```
 
-The complete gate checks documentation links, release tooling, both React
-builds, Mail and Telegram App tests, and the full Rust workspace. While
-iterating on messaging, use `just app-test` and `just messaging-e2e`; run the
-complete gate before handoff.
+The complete gate checks documentation links, release tooling, the control-plane
+React build, updater tests, and the full Rust workspace. Workspace App and AIS
+adapter tests are focused, opt-in checks; while iterating on messaging, use
+`just app-test` and `just messaging-e2e`.
 
 ## License
 

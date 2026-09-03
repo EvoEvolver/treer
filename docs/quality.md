@@ -23,8 +23,9 @@ available on the allocated node, skip the PostgreSQL-backed tests and report
 that limitation instead of treating the partial run as the complete gate.
 
 `just check` verifies documentation links, release tooling, the control-plane
-and Mail frontends, Mail/Telegram/Soul/updater tests, AIS adapter tests, Rust
-build/format/tests, and Clippy with warnings denied. Focused commands are:
+frontend, updater tests, Rust build/format/tests, and Clippy with warnings
+denied. Workspace Apps and AIS adapters are intentionally outside the release
+gate; run their focused checks when changing them. Focused commands are:
 
 ```sh
 just app-test
