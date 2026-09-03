@@ -32,6 +32,8 @@ continue to expose their registered `ui_path`.
   uploads environment-bound state bundles and launches command Agents from them.
 - [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for
   repositories shared by Agents and humans.
+- [`paper`](paper/README.md) is a small filesystem-backed collaborative LaTeX
+  editor with Yjs, inline review macros, and server-side PDF compilation.
 - [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
   [`dsh-ais`](dsh-ais/README.md), [`claude-ais`](claude-ais/README.md),
