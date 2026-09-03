@@ -197,7 +197,10 @@ Browser terminal attach is revisioned. The Host keeps a bounded PTY output ring
 keyed by stream epoch. Reconnects send the client's last cursor; the Host
 returns only later chunks and a gap flag when the ring has slid past that
 cursor. Live Controller lag resyncs from the same Host read instead of dropping
-bytes. This is opaque byte replay, not Agent-protocol item storage.
+bytes. When a process exits, the Host releases its child and PTY resources
+immediately and retains only the latest 256 completed process records for
+Controller restart recovery. This is opaque byte replay, not Agent-protocol
+item storage.
 
 ## Agent Interface Server
 
