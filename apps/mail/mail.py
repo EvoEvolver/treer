@@ -40,6 +40,27 @@ RFC3339_NANOSECONDS = re.compile(
 )
 
 
+def root_representation(accept: str, user_agent: str) -> str:
+    choices: list[tuple[float, int, str]] = []
+    for order, raw_entry in enumerate(accept.split(",")):
+        parts = [part.strip().lower() for part in raw_entry.split(";")]
+        media_type = parts[0]
+        if media_type not in {"text/html", "text/markdown"}:
+            continue
+        quality = 1.0
+        for parameter in parts[1:]:
+            if parameter.startswith("q="):
+                try:
+                    quality = float(parameter[2:])
+                except ValueError:
+                    quality = 0.0
+        if 0 < quality <= 1:
+            choices.append((-quality, order, media_type))
+    if choices:
+        return min(choices)[2]
+    return "text/html" if "mozilla/" in user_agent.lower() else "text/markdown"
+
+
 class MailError(Exception):
     def __init__(self, status: int, message: str, code: str = "mail_request_failed") -> None:
         super().__init__(message)
@@ -512,12 +533,19 @@ class MailHandler(BaseHTTPRequestHandler):
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if path == "/" and method in {"GET", "HEAD"}:
-                self._bytes(
-                    200,
-                    "text/plain; charset=utf-8",
-                    (APP_ROOT / "AGENT.md").read_bytes(),
-                    head=method == "HEAD",
+                representation = root_representation(
+                    self.headers.get("Accept", ""), self.headers.get("User-Agent", "")
                 )
+                if representation == "text/html":
+                    self._static(path, head=method == "HEAD", vary=True)
+                else:
+                    self._bytes(
+                        200,
+                        "text/markdown; charset=utf-8",
+                        (APP_ROOT / "AGENT.md").read_bytes(),
+                        head=method == "HEAD",
+                        vary=True,
+                    )
             elif path == "/api/health" and method in {"GET", "HEAD"}:
                 self._json(200, {"status": "ok", "service": "treer-mail"}, head=method == "HEAD")
             elif path == "/api/config" and method == "GET":
@@ -527,9 +555,7 @@ class MailHandler(BaseHTTPRequestHandler):
                     {"service_id": config.service_id, "proxy_public_url": config.proxy_public_url},
                 )
             elif path == "/api/auth/start" and method == "GET":
-                location = self.server.application.start_oauth(
-                    query.get("return_to", ["/_human/"])[0]
-                )
+                location = self.server.application.start_oauth(query.get("return_to", ["/"])[0])
                 self._redirect(location)
             elif path == "/api/auth/callback" and method == "GET":
                 raw, location, max_age = self.server.application.finish_oauth(
@@ -565,9 +591,7 @@ class MailHandler(BaseHTTPRequestHandler):
                 )
             elif path.startswith("/api/"):
                 raise MailError(404, "Mail API route not found", "route_not_found")
-            elif method in {"GET", "HEAD"} and (
-                path == "/_human" or path.startswith("/_human/")
-            ):
+            elif method in {"GET", "HEAD"}:
                 self._static(path, head=method == "HEAD")
             else:
                 raise MailError(405, "method not allowed", "method_not_allowed")
@@ -612,23 +636,21 @@ class MailHandler(BaseHTTPRequestHandler):
             raise MailError(400, "request body must be a JSON object", "request_body_invalid") from error
         return _object(value, "request body")
 
-    def _static(self, request_path: str, *, head: bool) -> None:
+    def _static(self, request_path: str, *, head: bool, vary: bool = False) -> None:
         web_root = self.server.application.config.web_dir.resolve()
-        relative = urllib.parse.unquote(request_path).removeprefix("/_human/")
-        if request_path.rstrip("/") == "/_human":
-            relative = "index.html"
+        relative = urllib.parse.unquote(request_path).lstrip("/") or "index.html"
         candidate = (web_root / relative).resolve()
         try:
             candidate.relative_to(web_root)
         except ValueError:
             raise MailError(404, "not found", "static_not_found")
         if not candidate.is_file():
-            candidate = web_root / "index.html"
-        if not candidate.is_file():
-            raise MailError(503, "Mail frontend is not built", "frontend_unavailable")
+            if relative == "index.html":
+                raise MailError(503, "Mail frontend is not built", "frontend_unavailable")
+            raise MailError(404, "not found", "static_not_found")
         content = candidate.read_bytes()
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        self._bytes(200, content_type, content, head=head)
+        self._bytes(200, content_type, content, head=head, vary=vary)
 
     def _security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -646,10 +668,20 @@ class MailHandler(BaseHTTPRequestHandler):
     def _error(self, error: MailError) -> None:
         self._json(error.status, {"error": {"code": error.code, "message": error.message}})
 
-    def _bytes(self, status: int, content_type: str, content: bytes, *, head: bool = False) -> None:
+    def _bytes(
+        self,
+        status: int,
+        content_type: str,
+        content: bytes,
+        *,
+        head: bool = False,
+        vary: bool = False,
+    ) -> None:
         self.send_response(status)
         self._security_headers()
         self.send_header("Content-Type", content_type)
+        if vary:
+            self.send_header("Vary", "Accept, User-Agent")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         if not head:
@@ -773,10 +805,8 @@ def _query_int(query: dict[str, list[str]], name: str, default: int) -> int:
 
 
 def _local_return_path(value: str) -> str:
-    if not value.startswith("/") or value.startswith("//") or len(value) > 4096 or any(
-        ord(character) < 32 for character in value
-    ):
-        raise MailError(400, "return_to must be a local absolute path", "return_path_invalid")
+    if value != "/":
+        raise MailError(400, "return_to must be the App root", "return_path_invalid")
     return value
 
 

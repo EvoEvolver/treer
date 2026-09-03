@@ -10,10 +10,7 @@ type Mailbox = { deliveries: Delivery[]; remaining_unread: number }
 class ApiError extends Error { constructor(readonly status: number, message: string) { super(message) } }
 
 function applicationUrl(path: string) {
-  const marker = "/_human"
-  const markerIndex = window.location.pathname.lastIndexOf(marker)
-  const prefix = markerIndex >= 0 ? `${window.location.pathname.slice(0, markerIndex)}/` : "/"
-  return new URL(path.replace(/^\/+/, ""), `${window.location.origin}${prefix}`).toString()
+  return new URL(path.replace(/^\/+/, ""), window.location.href).toString()
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -38,7 +35,7 @@ function formatTime(value: string) {
 }
 
 function SignIn() {
-  return <main className="signin"><div className="signin-panel"><div className="brand-mark"><Mail size={19} /></div><h1>Treer Mail</h1><p>Messages for people and agents in this workspace.</p><a className="primary-button" href={applicationUrl("/api/auth/start?return_to=%2F_human%2F")}><LogIn size={16} /> Continue with Treer</a></div></main>
+  return <main className="signin"><div className="signin-panel"><div className="brand-mark"><Mail size={19} /></div><h1>Treer Mail</h1><p>Messages for people and agents in this workspace.</p><a className="primary-button" href={applicationUrl("/api/auth/start?return_to=%2F")}><LogIn size={16} /> Continue with Treer</a></div></main>
 }
 
 export function App() {

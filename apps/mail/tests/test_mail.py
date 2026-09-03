@@ -211,10 +211,15 @@ class MailServerTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def request(
-        self, method: str, path: str, body: dict[str, object] | None = None
+        self,
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        request_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], object | None]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         headers = {"Cookie": self.cookie} if self.cookie else {}
+        headers.update(request_headers or {})
         encoded = None
         if body is not None:
             encoded = json.dumps(body)
@@ -229,9 +234,7 @@ class MailServerTest(unittest.TestCase):
         return response.status, response_headers, value
 
     def login(self) -> None:
-        status, headers, _ = self.request(
-            "GET", "/api/auth/start?return_to=%2F_human%2Finbox"
-        )
+        status, headers, _ = self.request("GET", "/api/auth/start?return_to=%2F")
         self.assertEqual(status, 302)
         authorize = urllib.parse.urlsplit(headers["location"])
         state = urllib.parse.parse_qs(authorize.query)["state"][0]
@@ -239,7 +242,7 @@ class MailServerTest(unittest.TestCase):
             "GET", f"/api/auth/callback?code=fake-code&state={urllib.parse.quote(state)}"
         )
         self.assertEqual(status, 302)
-        self.assertEqual(headers["location"], "/_human/inbox")
+        self.assertEqual(headers["location"], "/")
         self.assertIn("HttpOnly", headers["set-cookie"])
         self.cookie = headers["set-cookie"].split(";", 1)[0]
 
@@ -295,17 +298,38 @@ class MailServerTest(unittest.TestCase):
         status, _, _ = self.request("GET", "/api/auth/session")
         self.assertEqual(status, 401)
 
-    def test_root_is_agent_manual_and_human_ui_has_separate_path(self) -> None:
+    def test_root_negotiates_agent_manual_and_human_ui(self) -> None:
         status, headers, manual = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertEqual(headers["content-type"], "text/plain; charset=utf-8")
+        self.assertEqual(headers["content-type"], "text/markdown; charset=utf-8")
+        self.assertEqual(headers["vary"], "Accept, User-Agent")
         self.assertIn("This index is for Agents", manual)
         self.assertIn("treer message list", manual)
 
-        status, headers, page = self.request("GET", "/_human/")
+        status, headers, page = self.request(
+            "GET", "/", request_headers={"Accept": "text/html"}
+        )
         self.assertEqual(status, 200)
         self.assertEqual(headers["content-type"], "text/html")
+        self.assertEqual(headers["vary"], "Accept, User-Agent")
         self.assertIn("Treer Mail", page)
+
+        status, _, page = self.request(
+            "GET", "/", request_headers={"User-Agent": "Mozilla/5.0"}
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("Treer Mail", page)
+
+        status, headers, _ = self.request(
+            "GET",
+            "/",
+            request_headers={"Accept": "text/markdown", "User-Agent": "Mozilla/5.0"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "text/markdown; charset=utf-8")
+
+        status, _, _ = self.request("GET", "/_human/")
+        self.assertEqual(status, 404)
 
         source = (APP_ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
         self.assertIn("function applicationUrl(path: string)", source)
