@@ -233,6 +233,7 @@ test("opens app, shows org, workspace, machines and agents", async ({ page }) =>
   await expect(page.locator("aside").getByText("Acme")).toBeVisible()
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1/workspaces/ws-1")
+  await expect(page).toHaveTitle("Acme / Demo")
 
   await machinesTab(page).click()
   await expect(workstationRow(page)).toBeVisible()
@@ -249,12 +250,14 @@ test("restores organization and workspace from the URL after reload", async ({ p
   await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
   await expect.poll(() => new URL(page.url()).searchParams.get("source")).toBe("bookmark")
+  await expect(page).toHaveTitle("Research / Experiments")
 
   await page.reload()
 
   await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-2/workspaces/ws-2")
+  await expect(page).toHaveTitle("Research / Experiments")
 })
 
 test("agent list row menu can rename and delete", async ({ page }) => {

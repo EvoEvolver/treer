@@ -1080,6 +1080,14 @@ function WorkspaceApp() {
   const workspaceMachineCount = snapshot?.workspace.workspace_id === workspaceId
     ? snapshot.servers.length
     : undefined
+
+  useEffect(() => {
+    document.title = organization && workspace
+      ? `${organization.name} / ${workspace.name}`
+      : "Treer"
+    return () => { document.title = "Treer" }
+  }, [organization, workspace])
+
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
   const interfaceUiUrl = workspaceId && selectedAgent && selectedAgentInterface
     ? proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`)
