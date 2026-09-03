@@ -67,10 +67,13 @@ print(json.dumps({'agent_id': 'ag_reborn', 'name': 'reborn', 'status': 'running'
         path: str,
         body: bytes | None = None,
         content_type: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        headers = {"Content-Type": content_type} if content_type else {}
-        connection.request(method, path, body=body, headers=headers)
+        request_headers = dict(headers or {})
+        if content_type:
+            request_headers["Content-Type"] = content_type
+        connection.request(method, path, body=body, headers=request_headers)
         response = connection.getresponse()
         payload = response.read()
         status = response.status
@@ -135,16 +138,15 @@ print(json.dumps({'agent_id': 'ag_reborn', 'name': 'reborn', 'status': 'running'
         self.assertIn("checksum mismatch", script)
         self.assertIn("installed treer-soul", script)
 
-    def test_root_is_agent_manual_and_human_ui_is_read_only(self) -> None:
+    def test_root_negotiates_agent_and_read_only_human_ui(self) -> None:
         status, body = self.request("GET", "/")
         self.assertEqual(status, 200)
         manual = body.decode()
         self.assertIn("This index is for Agents", manual)
         self.assertIn("treer-soul capture-codex", manual)
-        self.assertIn("/_human/", manual)
         self.assertNotIn("<!doctype html>", manual.lower())
 
-        status, body = self.request("GET", "/_human/")
+        status, body = self.request("GET", "/", headers={"Accept": "text/html"})
         self.assertEqual(status, 200)
         page = body.decode()
         self.assertIn("Treer Soul", page)
@@ -152,15 +154,29 @@ print(json.dumps({'agent_id': 'ag_reborn', 'name': 'reborn', 'status': 'running'
         self.assertNotIn("Upload", page)
         self.assertNotIn("Incarnate", page)
 
-        status, script = self.request("GET", "/_human/app.js")
+        status, body = self.request("GET", "/", headers={"User-Agent": "Mozilla/5.0"})
+        self.assertEqual(status, 200)
+        self.assertIn("Treer Soul", body.decode())
+
+        status, body = self.request(
+            "GET", "/", headers={"User-Agent": "Mozilla/5.0", "Accept": "text/markdown"}
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("This index is for Agents", body.decode())
+
+        status, script = self.request("GET", "/app.js")
         self.assertEqual(status, 200)
         source = script.decode()
         self.assertIn('fetch(applicationUrl("/v1/souls")', source)
         self.assertNotIn('method: "POST"', source)
 
-        status, stylesheet = self.request("GET", "/_human/app.css")
+        status, stylesheet = self.request("GET", "/app.css")
         self.assertEqual(status, 200)
         self.assertIn(b".workspace", stylesheet)
+
+        status, body = self.request("GET", "/_human/")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"]["code"], "not_found")
 
     def test_codex_capture_restores_rollout_and_uses_supported_resume_command(self) -> None:
         session_id = "01234567-89ab-cdef-0123-456789abcdef"

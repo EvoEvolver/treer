@@ -13,10 +13,7 @@ const state = {
 };
 
 function applicationUrl(path) {
-  const marker = "/_human";
-  const markerIndex = window.location.pathname.lastIndexOf(marker);
-  const prefix = markerIndex >= 0 ? `${window.location.pathname.slice(0, markerIndex)}/` : "/";
-  return new URL(path.replace(/^\/+/, ""), `${window.location.origin}${prefix}`).toString();
+  return new URL(path.replace(/^\/+/, ""), window.location.href).toString();
 }
 
 function formatBytes(value) {
