@@ -33,7 +33,7 @@ use treer_protocol::{
     ServiceIngressAccess, TerminalClientMessage, TerminalCursor, TerminalServerMessage,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
     VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    WorkspaceEvent, WorkspaceSnapshot, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -2118,8 +2118,7 @@ async fn workspace_snapshot(
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let mut snapshot = state.snapshot(&workspace_id).await?;
-    snapshot.agents.retain(|agent| agent.kind != "app");
+    let mut snapshot = visible_workspace_snapshot(state.snapshot(&workspace_id).await?);
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -2154,6 +2153,16 @@ async fn workspace_snapshot(
         snapshot.agents = visible;
     }
     Ok(Json(serde_json::to_value(snapshot)?))
+}
+
+fn visible_workspace_snapshot(mut snapshot: WorkspaceSnapshot) -> WorkspaceSnapshot {
+    snapshot.agents.retain(|agent| agent.kind != "app");
+    snapshot
+}
+
+fn is_internal_app_agent_event(event: &WorkspaceEvent) -> bool {
+    event.event.starts_with("agent.")
+        && event.data.get("kind").and_then(Value::as_str) == Some("app")
 }
 
 async fn list_servers(
@@ -5031,6 +5040,7 @@ async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_i
     let (mut outgoing, mut incoming) = socket.split();
     let mut events = state.subscribe();
     if let Ok(snapshot) = state.snapshot(&workspace_id).await {
+        let snapshot = visible_workspace_snapshot(snapshot);
         let initial = WorkspaceEvent {
             revision: snapshot.revision,
             workspace_id: workspace_id.clone(),
@@ -5046,6 +5056,9 @@ async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_i
         tokio::select! {
             event = events.recv() => match event {
                 Ok(event) if event.workspace_id == workspace_id => {
+                    if is_internal_app_agent_event(&event) {
+                        continue;
+                    }
                     if send_event(&mut outgoing, &event).await.is_err() {
                         break;
                     }
@@ -5053,6 +5066,7 @@ async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_i
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let Ok(snapshot) = state.snapshot(&workspace_id).await else { break };
+                    let snapshot = visible_workspace_snapshot(snapshot);
                     let event = WorkspaceEvent {
                         revision: snapshot.revision,
                         workspace_id: workspace_id.clone(),
@@ -5296,6 +5310,34 @@ mod tests {
             .await
             .expect("apply agent snapshot");
         state
+    }
+
+    #[tokio::test]
+    async fn public_workspace_updates_hide_app_runtime_agents() {
+        let state = state_with_managed_agent().await;
+        let mut app_agent = state
+            .resolve_agent("default", "agent-a")
+            .await
+            .expect("resolve fixture agent");
+        app_agent.agent_id = "appw-test".to_string();
+        app_agent.name = "app:Docs".to_string();
+        app_agent.kind = "app".to_string();
+        state.test_insert_agent(app_agent.clone()).await;
+
+        let snapshot = state.snapshot("default").await.expect("workspace snapshot");
+        assert!(snapshot.agents.iter().any(|agent| agent.kind == "app"));
+
+        let visible = visible_workspace_snapshot(snapshot);
+        assert!(visible.agents.iter().all(|agent| agent.kind != "app"));
+        assert_eq!(visible.agents.len(), 2);
+
+        let event = WorkspaceEvent {
+            revision: 1,
+            workspace_id: "default".to_string(),
+            event: "agent.updated".to_string(),
+            data: serde_json::to_value(app_agent).expect("encode app agent"),
+        };
+        assert!(is_internal_app_agent_event(&event));
     }
 
     #[tokio::test]

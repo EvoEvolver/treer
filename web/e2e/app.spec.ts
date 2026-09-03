@@ -74,6 +74,13 @@ const agentB = {
   status: "running",
 }
 
+const appRuntimeAgent = {
+  ...agentA,
+  agent_id: "appw-1",
+  name: "app:Soul Archive",
+  kind: "app",
+}
+
 const serviceA = {
   service_id: "svc-1",
   name: "api",
@@ -142,7 +149,7 @@ const snapshot = {
   revision: 1,
   workspace,
   servers: [machineA, machineB],
-  agents: [agentA, agentB],
+  agents: [agentA, agentB, appRuntimeAgent],
 }
 
 const traffic = [
@@ -234,6 +241,7 @@ test("opens app, shows org, workspace, machines and agents", async ({ page }) =>
   await agentsTab(page).click()
   await expect(page.getByRole("button", { name: /^api-server / })).toBeVisible()
   await expect(page.getByRole("button", { name: /^worker / })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^app:Soul Archive / })).toHaveCount(0)
 })
 
 test("restores organization and workspace from the URL after reload", async ({ page }) => {

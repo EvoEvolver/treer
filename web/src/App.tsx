@@ -99,6 +99,10 @@ function replaceWorkspace(items: Workspace[], updated: Workspace) {
     .sort((left, right) => left.name.localeCompare(right.name) || left.workspace_id.localeCompare(right.workspace_id))
 }
 
+function visibleWorkspaceSnapshot(snapshot: Snapshot): Snapshot {
+  return { ...snapshot, agents: snapshot.agents.filter((agent) => agent.kind !== "app") }
+}
+
 function workspacePath(organizationId: string | null, workspaceId: string | null) {
   if (!organizationId) return "/"
   const organizationPath = `/orgs/${encodeURIComponent(organizationId)}`
@@ -997,7 +1001,7 @@ function WorkspaceApp() {
 
   const refreshSnapshot = useCallback(async () => {
     if (preview || !workspaceId) return
-    const data = await api<Snapshot>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`)
+    const data = visibleWorkspaceSnapshot(await api<Snapshot>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`))
     setSnapshot(data)
     setWorkspaces((items) => replaceWorkspace(items, data.workspace))
   }, [preview, workspaceId])
@@ -1023,7 +1027,7 @@ function WorkspaceApp() {
         if (disposed) return
         const message = JSON.parse(event.data) as { event: string; data?: Snapshot | Workspace }
         if (message.event === "workspace.snapshot" && message.data) {
-          const next = message.data as Snapshot
+          const next = visibleWorkspaceSnapshot(message.data as Snapshot)
           setSnapshot(next)
           setWorkspaces((items) => replaceWorkspace(items, next.workspace))
         } else if (message.event === "workspace.renamed" && message.data) {
