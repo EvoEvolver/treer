@@ -3,13 +3,15 @@ import "driver.js/dist/driver.css"
 
 export const FIRST_RUN_TOUR_VERSION = "v1"
 
-export type SidebarTab = "machines" | "agents"
+export type SidebarTab = "apps" | "agents"
 
 export type FirstRunTourHost = {
   setSidebarTab: (tab: SidebarTab) => void
   openCreateWorkspace: () => void
   closeCreateWorkspace: () => void
   prepareWorkspaceForMachineSteps: () => void
+  openWorkspaceSettings: () => void
+  closeWorkspaceSettings: () => void
   openInstall: () => void | Promise<void>
   closeInstall: () => void
   openCreateAgent: (reset: boolean) => void
@@ -158,6 +160,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
       host.closeCreateWorkspace()
       host.closeInstall()
       host.closeCreateAgent()
+      host.closeWorkspaceSettings()
       host.setSidebarTab("agents")
       if (activeTour === tour) activeTour = null
     },
@@ -209,16 +212,16 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
           tour.movePrevious()
         },
         onNextClick: () => {
-          void goTo(tour, "[data-tour='machines-tab']", () => {
+          void goTo(tour, "[data-tour='workspace-machines']", () => {
             host.closeCreateWorkspace()
             host.prepareWorkspaceForMachineSteps()
-            host.setSidebarTab("machines")
+            host.openWorkspaceSettings()
           })
         },
       },
     },
     {
-      element: "[data-tour='machines-tab']",
+      element: "[data-tour='workspace-machines']",
       popover: {
         title: "Machines hold the processes",
         description:
@@ -226,6 +229,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
         side: "right",
         align: "start",
         onPrevClick: () => {
+          host.closeWorkspaceSettings()
           host.setSidebarTab("agents")
           host.openCreateWorkspace()
           void waitForSelector("[data-tour='create-workspace-dialog']").then(() => tour.movePrevious())
@@ -274,7 +278,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
         side: "bottom",
         align: "end",
         onPrevClick: () => {
-          host.setSidebarTab("machines")
+          host.openWorkspaceSettings()
           void host.openInstall()
           void waitForSelector("[data-tour='add-machine-dialog']").then(() => tour.movePrevious())
         },

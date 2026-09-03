@@ -236,23 +236,30 @@ test.beforeEach(async ({ page }) => {
   await mockApi(page)
 })
 
-// Helpers — machine entries in the machines list are <button>s whose accessible
+// Helpers — machine entries in workspace settings are <button>s whose accessible
 // name includes the machine name, root path and build label.
 const workstationRow = (page: Page) => page.getByRole("button", { name: /^workstation / })
 const cloudboxRow = (page: Page) => page.getByRole("button", { name: /^cloudbox / })
 const agentsTab = (page: Page) => page.getByRole("tab", { name: /Agents/ })
-const machinesTab = (page: Page) => page.getByRole("tab", { name: /Machines/ })
+const appsTab = (page: Page) => page.getByRole("tab", { name: /Apps/ })
 
-test("opens app, shows org, workspace, machines and agents", async ({ page }) => {
+async function openWorkspaceSettings(page: Page) {
+  await page.getByRole("button", { name: "Workspace settings" }).click()
+  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
+}
+
+test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await page.goto("/")
   await expect(page.locator("aside").getByText("Acme")).toBeVisible()
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1/workspaces/ws-1")
   await expect(page).toHaveTitle("Acme / Demo")
+  await expect(page.locator("aside [role=tab]").nth(0)).toContainText("Agents")
+  await expect(page.locator("aside [role=tab]").nth(1)).toContainText("Apps")
 
-  await machinesTab(page).click()
-  await expect(workstationRow(page)).toBeVisible()
-  await expect(cloudboxRow(page)).toBeVisible()
+  await appsTab(page).click()
+  await expect(page.locator("aside").getByRole("button", { name: "Open Soul Archive app" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
 
   await agentsTab(page).click()
   await expect(page.getByRole("button", { name: /^api-server / })).toBeVisible()
@@ -298,7 +305,7 @@ test("late snapshots from the previous workspace cannot replace the current inve
   releaseFirstSnapshot()
   await firstSnapshotResponse
   await page.waitForTimeout(100)
-  await expect(page.getByRole("tab", { name: /Machines 0/ })).toBeVisible()
+  await expect(page.getByRole("tab", { name: /Apps 0/ })).toBeVisible()
   await expect(page.getByRole("tab", { name: /Agents 0/ })).toBeVisible()
   await expect(workstationRow(page)).toHaveCount(0)
   await expect(page.getByRole("button", { name: /^api-server / })).toHaveCount(0)
@@ -340,18 +347,15 @@ test("audit view presents versioned traffic as billable usage", async ({ page })
   await expect(page.getByText("Machine", { exact: true })).toHaveCount(2)
 })
 
-test("workspace dropdown opens Profiles and Apps without exposing Network", async ({ page }) => {
+test("workspace settings contain Machines and launch profiles without a separate views menu", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: /Workspace/ }).click()
-  await page.getByRole("menuitem", { name: "Profiles" }).click()
-  await expect(page.getByRole("heading", { name: "Profiles" })).toBeVisible()
-
-  await page.getByRole("button", { name: "Workspace views" }).click()
-  await page.getByRole("menuitem", { name: "Apps" }).click()
-  await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
-
-  await page.getByRole("button", { name: "Workspace views" }).click()
-  await expect(page.getByRole("menuitem", { name: "Network" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Workspace views" })).toHaveCount(0)
+  await openWorkspaceSettings(page)
+  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
+  await expect(workstationRow(page)).toBeVisible()
+  await expect(page.getByText("Codex Agent UI", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "New profile" })).toBeVisible()
+  await expect(appsTab(page)).toBeVisible()
 })
 
 test("workspace controls open a settings page with inline rename", async ({ page }) => {
@@ -360,11 +364,11 @@ test("workspace controls open a settings page with inline rename", async ({ page
   await expect(page.getByRole("button", { name: "Rename workspace" })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Delete workspace" })).toHaveCount(0)
 
-  await page.getByRole("button", { name: "Workspace settings" }).click()
+  await openWorkspaceSettings(page)
   await expect(page.getByRole("heading", { name: "Demo", exact: true })).toBeVisible()
   await expect(page.getByText("ws-1", { exact: true })).toBeVisible()
-  await expect(page.getByText("Machines").last()).toBeVisible()
-  await expect(page.getByText("Agents").last()).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
 
   const name = page.getByLabel("Workspace name")
   await name.fill("Platform")
@@ -378,10 +382,9 @@ test("workspace controls open a settings page with inline rename", async ({ page
 
 test("managed App view exposes lifecycle actions and creation", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: /Workspace/ }).click()
-  await page.getByRole("menuitem", { name: "Apps" }).click()
+  await appsTab(page).click()
 
-  await expect(page.getByText("Soul Archive")).toBeVisible()
+  await expect(page.locator("main > section").getByText("Soul Archive")).toBeVisible()
   await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/", { exact: true })).toBeVisible()
   await expect(page.getByText(/_human/)).toHaveCount(0)
   await page.evaluate(() => {
@@ -398,7 +401,7 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
   await page.getByRole("button", { name: "Restart Soul Archive" }).click()
   await restarting
 
-  await page.getByRole("button", { name: "New App" }).click()
+  await page.locator("header").getByRole("button", { name: "New App" }).click()
   const dialog = page.getByRole("dialog", { name: "New App" })
   await dialog.getByLabel("Name", { exact: true }).fill("Docs")
   await dialog.getByLabel("Command", { exact: true }).fill("python3 -m http.server 8080")
@@ -419,7 +422,7 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
 
 test("clicking a machine opens an overview with identity, agents, services, virtual hosts, and traffic", async ({ page }) => {
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
 
   // Identity
@@ -485,7 +488,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
     agents: [agentA, agentB],
   }))
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await expect(page.getByText("workstation · srv-b :8794")).toBeVisible()
   await page.getByRole("button", { name: /^workstation / }).first().click()
   await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
@@ -495,7 +498,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
 
 test("machine overview only shows agents for the selected machine", async ({ page }) => {
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeVisible()
 
@@ -515,9 +518,9 @@ test("machine overview only shows agents for the selected machine", async ({ pag
 
 test("from a machine overview, clicking Terminal opens the agent terminal", async ({ page }) => {
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
-  await page.getByRole("button", { name: "Terminal" }).click()
+  await page.getByRole("button", { name: "Terminal", exact: true }).click()
 
   // Returns to the terminal main view; header shows agent name
   await expect(page.locator("header").getByText("api-server")).toBeVisible()
@@ -587,9 +590,12 @@ test("create agent dialog contains a long profile command on narrow screens", as
 test("mobile: machine overview hides sidebar and shows back button", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeVisible()
+  await expect(page.locator("aside")).toBeHidden()
+  await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
+  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
   await expect(page.locator("aside")).toBeHidden()
   await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
   await expect(page.locator("aside")).toBeVisible()
