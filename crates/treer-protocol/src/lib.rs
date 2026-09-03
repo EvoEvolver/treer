@@ -988,6 +988,8 @@ pub struct LaunchAgentProfileRequest {
     pub server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default = "default_cols")]
     pub cols: u16,
     #[serde(default = "default_rows")]
@@ -1837,6 +1839,32 @@ fn invalid_enrollment_key() -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_profile_request_round_trips_optional_cwd_override() {
+        let request = LaunchAgentProfileRequest {
+            server_id: Some("srv_1".to_string()),
+            agent_name: Some("reviewer".to_string()),
+            cwd: Some("packages/api".to_string()),
+            cols: 100,
+            rows: 30,
+        };
+        let encoded = serde_json::to_value(&request).expect("serialize launch request");
+        assert_eq!(encoded["cwd"], "packages/api");
+        assert_eq!(
+            serde_json::from_value::<LaunchAgentProfileRequest>(encoded)
+                .expect("deserialize launch request"),
+            request
+        );
+
+        let legacy = serde_json::from_value::<LaunchAgentProfileRequest>(serde_json::json!({
+            "server_id": "srv_1",
+            "cols": 120,
+            "rows": 36
+        }))
+        .expect("deserialize request without cwd");
+        assert_eq!(legacy.cwd, None);
+    }
 
     #[test]
     fn machine_supervision_is_optional_for_older_controllers() {

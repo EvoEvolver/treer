@@ -146,6 +146,16 @@ const codexProfile = {
   command: "codex",
 }
 
+const longScriptProfile = {
+  ...recipeProfile,
+  profile_id: "alp-long-script",
+  name: "Codex + UI",
+  description: "Portable Codex UI bootstrap",
+  cwd: ".",
+  command: "sh",
+  args: ["-lc", `set -eu\n${"echo bootstrap-step-with-a-long-value\n".repeat(80)}`],
+}
+
 const snapshot = {
   revision: 1,
   workspace,
@@ -210,7 +220,7 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-2/ingresses") return ok(route, { ingresses: [] })
     if (path === "/workspaces/ws-1/traffic") return ok(route, { traffic })
     if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
-    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile] })
+    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile, longScriptProfile] })
     if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
     if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [managedApp] })
     if (path === "/workspaces/ws-1/apps" && route.request().method() === "POST") return ok(route, { app: managedApp })
@@ -553,6 +563,25 @@ test("create agent dialog lists an installed recipe launch profile", async ({ pa
   await expect(page.getByText("./scripts/treer-agent.sh")).toBeVisible()
   await expect(page.getByRole("dialog").getByRole("textbox")).toHaveValue(/codex-agent-ui-\d{4}-/)
   await expect(page.getByRole("button", { name: "Create agent" })).toBeVisible()
+})
+
+test("create agent dialog contains a long profile command on narrow screens", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await agentsTab(page).click()
+  await page.getByRole("button", { name: "New" }).click()
+  const dialog = page.getByRole("dialog")
+  await dialog.getByRole("combobox", { name: "Launch" }).click()
+  await page.getByRole("option", { name: "Codex + UI" }).click()
+
+  const dialogBox = await dialog.boundingBox()
+  const commandBox = await dialog.locator("code").boundingBox()
+  expect(dialogBox).not.toBeNull()
+  expect(commandBox).not.toBeNull()
+  expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
+  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(390)
+  expect(commandBox!.x).toBeGreaterThanOrEqual(dialogBox!.x)
+  expect(commandBox!.x + commandBox!.width).toBeLessThanOrEqual(dialogBox!.x + dialogBox!.width)
 })
 
 test("mobile: machine overview hides sidebar and shows back button", async ({ page }) => {

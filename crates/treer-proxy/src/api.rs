@@ -4254,7 +4254,7 @@ fn agent_request_from_launch_profile(
         server_id: request.server_id,
         kind: "shell".to_string(),
         name: agent_name,
-        cwd: profile.cwd.clone(),
+        cwd: request.cwd.unwrap_or_else(|| profile.cwd.clone()),
         args,
         cols: request.cols,
         rows: request.rows,
@@ -6497,6 +6497,7 @@ mod tests {
             LaunchAgentProfileRequest {
                 server_id: Some("machine-a".to_string()),
                 agent_name: None,
+                cwd: Some("reviews/42".to_string()),
                 cols: 100,
                 rows: 30,
             },
@@ -6505,9 +6506,22 @@ mod tests {
         assert_eq!(request.server_id.as_deref(), Some("machine-a"));
         assert_eq!(request.kind, "shell");
         assert_eq!(request.name, "Reviewer");
-        assert_eq!(request.cwd, "packages/api");
+        assert_eq!(request.cwd, "reviews/42");
         assert_eq!(request.args, ["codex", "review", "--base", "main"]);
         assert_eq!((request.cols, request.rows), (100, 30));
+
+        let request = agent_request_from_launch_profile(
+            &profile,
+            LaunchAgentProfileRequest {
+                server_id: None,
+                agent_name: None,
+                cwd: None,
+                cols: 120,
+                rows: 36,
+            },
+        )
+        .expect("build request with profile cwd");
+        assert_eq!(request.cwd, "packages/api");
     }
 
     #[test]

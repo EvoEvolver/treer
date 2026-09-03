@@ -552,7 +552,8 @@ Workspace members and managed Agents can also save reusable launch profiles:
 ```bash
 treer agent admin profile create reviewer --cwd . codex -- review --base main
 treer agent admin profile list
-treer agent admin profile launch reviewer --machine build-machine --name review-42
+treer agent admin profile launch reviewer --machine build-machine \
+  --name review-42 --cwd packages/api
 ```
 
 The web Create Agent dialog includes a built-in Terminal option. It starts the
@@ -579,6 +580,11 @@ explicit shell executable such as `sh` with `-lc` when shell expansion is
 required. Profiles are plaintext workspace configuration and must not contain
 secrets. New workspaces include editable and deletable Codex, Claude, Pi, and
 OpenCode profiles; existing workspaces are left unchanged.
+
+`profile launch --cwd` overrides the saved working directory for that launch
+without changing the profile. The directory is relative to the selected
+machine's Host root and must resolve inside that root. Omitting it uses the
+profile's saved `cwd`.
 
 ## Host and Controller
 
