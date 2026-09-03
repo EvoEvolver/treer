@@ -65,6 +65,16 @@ pub(crate) struct ProfileMutationActor<'a> {
     pub label: &'a str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeletedWorkspace {
+    pub workspace_id: String,
+    pub organization_id: String,
+    pub name: String,
+    pub machine_count: i64,
+    pub agent_count: i64,
+    pub app_count: i64,
+}
+
 #[derive(Clone)]
 pub struct AuthStore {
     pool: PgPool,
@@ -1123,6 +1133,146 @@ impl AuthStore {
         )?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(info)
+    }
+
+    pub async fn delete_workspace(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Result<DeletedWorkspace, AuthFailure> {
+        let organization_id = sqlx::query_scalar::<_, String>(
+            "SELECT organization_id FROM workspaces WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
+        self.require_manager(&organization_id, user_id).await?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let row = sqlx::query(
+            "SELECT organization_id, name FROM workspaces WHERE workspace_id = $1 FOR UPDATE",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
+        let organization_id: String = row.get("organization_id");
+        let name: String = row.get("name");
+        let machine_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM machines WHERE workspace_id = $1")
+                .bind(workspace_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        let agent_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        let app_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM app_deployments WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        // Tables without foreign keys to workspaces are cleaned up explicitly so
+        // no credential, name, or enrollment survives the deletion.
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE machines SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(&now)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE agent_credentials SET revoked_at = $1 \
+             WHERE workspace_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(&now)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM machine_enrollments WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM machine_names WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM agent_names WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM deleted_agents WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id: &organization_id,
+                workspace_id: Some(workspace_id),
+                actor_kind: "user",
+                actor_id: Some(user_id),
+                source: "api",
+                action: "workspace.deleted",
+                resource_kind: "workspace",
+                resource_id: workspace_id,
+                resource_name: Some(&name),
+                payload: json!({
+                    "machine_count": machine_count,
+                    "agent_count": agent_count,
+                    "app_count": app_count,
+                }),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        self.agent_credentials
+            .write()
+            .await
+            .retain(|_, record| record.workspace_id != workspace_id);
+        let _update = self.service_ingresses_update.lock().await;
+        self.service_ingresses
+            .write()
+            .await
+            .retain(|_, resolved| resolved.ingress.workspace_id != workspace_id);
+        if self
+            .virtual_hosts
+            .write()
+            .await
+            .remove(workspace_id)
+            .is_some()
+        {
+            self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(DeletedWorkspace {
+            workspace_id: workspace_id.to_string(),
+            organization_id,
+            name,
+            machine_count,
+            agent_count,
+            app_count,
+        })
     }
 
     pub async fn list_agent_launch_profiles(
@@ -6751,6 +6901,161 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_deletion_requires_a_manager_and_revokes_credentials() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let organization = store
+            .create_organization(&owner.user_id, "Engineering")
+            .await
+            .expect("create organization");
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "ws_deletable",
+                "Deletable",
+                &owner.user_id,
+            )
+            .await
+            .expect("create workspace");
+        let (invite, _) = store
+            .create_invitation(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("invite member");
+        let member = store
+            .register(Some(&invite), "member@example.com", "Member", "password123")
+            .await
+            .expect("register member");
+        assert!(
+            store
+                .delete_workspace("ws_deletable", &member.user_id)
+                .await
+                .is_err(),
+            "a plain member cannot delete a workspace"
+        );
+
+        let enrollment = store
+            .create_machine_enrollment("ws_deletable", &owner.user_id)
+            .await
+            .expect("create enrollment");
+        let machine = store
+            .claim_machine_enrollment(&enrollment)
+            .await
+            .expect("claim machine");
+        sqlx::query(
+            "INSERT INTO agent_credentials(agent_id, workspace_id, server_id, secret_hash, created_at) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind("agent-1")
+        .bind("ws_deletable")
+        .bind(&machine.server_id)
+        .bind("agent-secret-hash")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert agent credential");
+        sqlx::query(
+            "INSERT INTO machine_names(server_id, workspace_id, name, updated_at) \
+             VALUES($1, $2, $3, $4)",
+        )
+        .bind(&machine.server_id)
+        .bind("ws_deletable")
+        .bind("machine name")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert machine name");
+        sqlx::query(
+            "INSERT INTO agent_names(agent_id, workspace_id, name, updated_at) \
+             VALUES($1, $2, $3, $4)",
+        )
+        .bind("agent-1")
+        .bind("ws_deletable")
+        .bind("agent name")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert agent name");
+        store
+            .create_agent_launch_profile(
+                "ws_deletable",
+                ProfileMutationActor {
+                    kind: "user",
+                    id: Some(&owner.user_id),
+                    label: &owner.preferred_name,
+                },
+                CreateAgentLaunchProfileRequest {
+                    name: "Custom".to_string(),
+                    description: "".to_string(),
+                    cwd: ".".to_string(),
+                    command: "bash".to_string(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("create launch profile");
+
+        let deleted = store
+            .delete_workspace("ws_deletable", &owner.user_id)
+            .await
+            .expect("delete workspace");
+        assert_eq!(deleted.workspace_id, "ws_deletable");
+        assert_eq!(deleted.organization_id, organization.organization_id);
+        assert_eq!(deleted.name, "Deletable");
+        assert_eq!(deleted.machine_count, 1);
+        assert_eq!(deleted.agent_count, 1);
+        assert_eq!(deleted.app_count, 0);
+
+        assert!(store
+            .list_workspaces(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("list workspaces")
+            .is_empty());
+        let orphan_check = sqlx::query_scalar::<_, i64>(
+            "SELECT (SELECT COUNT(*) FROM machines WHERE workspace_id = $1 AND revoked_at IS NULL) \
+             + (SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1 AND revoked_at IS NULL) \
+             + (SELECT COUNT(*) FROM machine_enrollments WHERE workspace_id = $1) \
+             + (SELECT COUNT(*) FROM machine_names WHERE workspace_id = $1) \
+             + (SELECT COUNT(*) FROM agent_names WHERE workspace_id = $1) \
+             + (SELECT COUNT(*) FROM deleted_agents WHERE workspace_id = $1) \
+             + (SELECT COUNT(*) FROM agent_launch_profiles WHERE workspace_id = $1) \
+             + (SELECT COUNT(*) FROM machine_services WHERE workspace_id = $1) \
+             + (SELECT COUNT(*) FROM app_deployments WHERE workspace_id = $1)",
+        )
+        .bind("ws_deletable")
+        .fetch_one(&store.pool)
+        .await
+        .expect("orphan check");
+        assert_eq!(
+            orphan_check, 0,
+            "deletion must revoke and cascade all workspace resources"
+        );
+        assert!(
+            store
+                .delete_workspace("ws_deletable", &owner.user_id)
+                .await
+                .is_err(),
+            "a deleted workspace cannot be deleted again"
+        );
+        let audit_events = store
+            .list_audit_events(
+                &organization.organization_id,
+                &owner.user_id,
+                None,
+                None,
+                100,
+            )
+            .await
+            .expect("owner audit events");
+        let deletion = audit_events
+            .iter()
+            .find(|event| event.action == "workspace.deleted")
+            .expect("workspace.deleted audit event");
+        assert_eq!(deletion.resource_id, "ws_deletable");
+        assert_eq!(deletion.payload["machine_count"], 1);
+        assert_eq!(deletion.payload["agent_count"], 1);
     }
 
     #[tokio::test]
