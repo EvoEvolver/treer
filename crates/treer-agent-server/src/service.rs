@@ -1498,10 +1498,12 @@ fn runtime_base_is_private_and_writable(path: &Path, uid: u32) -> bool {
         && metadata.permissions().mode() & 0o077 == 0
 }
 
+#[cfg(target_os = "linux")]
 fn private_state_runtime_dir() -> Result<PathBuf> {
     prepare_private_runtime_dir(state_dir()?.join("run"))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn prepare_private_runtime_dir(path: PathBuf) -> Result<PathBuf> {
     fs::create_dir_all(&path).with_context(|| {
         format!(
@@ -2804,7 +2806,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unavailable_legacy_socket_is_migrated_but_a_live_socket_is_not() {
-        let directory = env::temp_dir().join(format!(
+        let directory = PathBuf::from("/tmp").join(format!(
             "treer-runtime-migration-{}",
             Uuid::new_v4().simple()
         ));
