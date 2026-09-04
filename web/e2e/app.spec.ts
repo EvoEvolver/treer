@@ -199,8 +199,11 @@ async function mockApi(page: Page) {
       return ok(route, currentUser)
     }
     if (path === "/organizations") return ok(route, { organizations: [organization, secondOrganization] })
+    if (path === "/organizations/org-1" && route.request().method() === "PATCH") return ok(route, {})
     if (path === "/organizations/org-1/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "owner" }] })
-    if (path === "/organizations/org-1/groups") return ok(route, { groups: [] })
+    if (path === "/organizations/org-1/groups") return ok(route, { groups: [{ group_id: "grp-1", organization_id: "org-1", name: "Platform", member_ids: [user.user_id] }] })
+    if (path === "/organizations/org-2/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "member" }] })
+    if (path === "/organizations/org-2/groups") return ok(route, { groups: [] })
     if (path === "/organizations/org-1/audit-events") return ok(route, { events: [] })
     if (path === "/workspaces") return ok(route, {
       workspaces: url.searchParams.get("organization_id") === "org-1"
@@ -210,6 +213,7 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-1/snapshot") return ok(route, snapshot)
     if (path === "/workspaces/ws-2/snapshot") return ok(route, { ...snapshot, workspace: secondWorkspace, servers: [], agents: [] })
     if (path === "/workspaces/ws-1/access") return ok(route, { access: workspaceAccess })
+    if (path === "/workspaces/ws-2/access") return ok(route, { access: { workspace_id: "ws-2", access_mode: "organization", current_role: "member", members: [], groups: [] } })
     if (path === "/workspaces/ws-1" && route.request().method() === "PATCH") {
       const body = route.request().postDataJSON() as { name: string }
       return ok(route, { workspace: { ...workspace, name: body.name } })
@@ -339,18 +343,41 @@ test("agent list row menu can rename and delete", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Delete agent" })).toBeVisible()
 })
 
-test("org dropdown contains Members and Audit entries", async ({ page }) => {
+test("organization actions open a settings page with inline management", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: "Organization actions" }).click()
-  await expect(page.getByRole("menuitem", { name: "Create organization" })).toBeVisible()
-  await expect(page.getByRole("menuitem", { name: "Members" })).toBeVisible()
-  await expect(page.getByRole("menuitem", { name: "Audit" })).toBeVisible()
+  const organizationSettings = page.getByRole("button", { name: "Organization settings" })
+  await expect(organizationSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
+  await organizationSettings.click()
+
+  await expect(page.getByRole("heading", { name: "Acme", exact: true })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "General" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Workspaces" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Groups" })).toBeVisible()
+  await expect(page.getByText("Platform", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "New organization" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Open audit" })).toBeVisible()
+
+  await expect(page.getByLabel("Organization name")).toBeEnabled()
+  await page.getByRole("button", { name: "Select Demo workspace" }).click()
+  await expect(page.getByRole("heading", { name: "General" })).toBeHidden()
+})
+
+test("mobile organization settings hide the sidebar and fit the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Organization settings" }).click()
+
+  await expect(page.locator("aside")).toBeHidden()
+  await expect(page.getByRole("heading", { name: "Acme", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
 test("audit view presents versioned traffic as billable usage", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: "Organization actions" }).click()
-  await page.getByRole("menuitem", { name: "Audit" }).click()
+  await page.getByRole("button", { name: "Organization settings" }).click()
+  await page.getByRole("button", { name: "Open audit" }).click()
 
   await expect(page.getByText("Billable usage")).toBeVisible()
   await expect(page.getByText("Data frames")).toBeVisible()
@@ -370,7 +397,9 @@ test("workspace settings contain Machines and launch profiles without a separate
 
 test("workspace controls open a settings page with inline rename", async ({ page }) => {
   await page.goto("/")
-  await expect(page.getByRole("button", { name: "Workspace settings" })).toHaveCount(1)
+  const workspaceSettings = page.getByRole("button", { name: "Workspace settings" })
+  await expect(workspaceSettings).toHaveCount(1)
+  await expect(workspaceSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
   await expect(page.getByRole("button", { name: "Rename workspace" })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Delete workspace" })).toHaveCount(0)
 

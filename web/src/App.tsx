@@ -67,7 +67,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
 type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
-type MainView = "terminal" | "apps" | "network" | "audit" | "machine" | "workspace"
+type MainView = "terminal" | "apps" | "network" | "audit" | "machine" | "organization" | "workspace"
 type AuthMode = "login" | "register" | "forgot" | "reset"
 type AuthConfig = { github: boolean; google: boolean; invitation_required: boolean }
 type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
@@ -839,6 +839,89 @@ function AppItem({ app, machine, onOpen }: { app: AppDeployment; machine?: Machi
   </button>
 }
 
+type OrganizationSettingsViewProps = {
+  organization?: Organization
+  name: string
+  workspaces: Workspace[]
+  selectedWorkspaceId: string | null
+  members: Member[]
+  groups: OrganizationGroup[]
+  groupName: string
+  canManage: boolean
+  currentRole: Organization["role"]
+  onNameChange: (value: string) => void
+  onRename: (event: FormEvent) => void
+  onCreateOrganization: () => void
+  onCreateWorkspace: () => void
+  onSelectWorkspace: (workspaceId: string) => void
+  onInvite: () => void
+  onMemberRoleChange: (userId: string, role: Member["role"]) => void
+  onRemoveMember: (userId: string) => void
+  onGroupNameChange: (value: string) => void
+  onCreateGroup: (event: FormEvent) => void
+  onDeleteGroup: (groupId: string) => void
+  onSetGroupMember: (groupId: string, userId: string, present: boolean) => void
+  onOpenAudit: () => void
+  onClose: () => void
+}
+
+function OrganizationSettingsView({ organization, name, workspaces, selectedWorkspaceId, members, groups, groupName, canManage, currentRole, onNameChange, onRename, onCreateOrganization, onCreateWorkspace, onSelectWorkspace, onInvite, onMemberRoleChange, onRemoveMember, onGroupNameChange, onCreateGroup, onDeleteGroup, onSetGroupMember, onOpenAudit, onClose }: OrganizationSettingsViewProps) {
+  if (!organization) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">Organization not found. <Button variant="outline" className="mt-3" onClick={onClose}>Back</Button></div>
+
+  return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
+    <div className="mb-10 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0">
+        <div className="mb-3 flex items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Building2 className="size-4" /></span><h1 className="truncate text-2xl font-semibold">{organization.name}</h1></div>
+        <p className="font-mono text-xs text-muted-foreground">{organization.organization_id}</p>
+        <p className="mt-1 text-xs capitalize text-muted-foreground">{currentRole}</p>
+      </div>
+      <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto"><Button variant="outline" className="min-w-0 flex-1 sm:flex-none" onClick={onCreateOrganization}><Plus />New organization</Button><Button variant="outline" className="shrink-0" onClick={onClose}>Close</Button></div>
+    </div>
+
+    <section className="border-y py-6">
+      <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div><h2 className="text-sm font-semibold">General</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">The organization name shown to its members.</p></div>
+        <form onSubmit={onRename} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><div className="min-w-0"><Field label="Organization name"><Input aria-label="Organization name" value={name} onChange={(event) => onNameChange(event.target.value)} required maxLength={80} disabled={!canManage} /></Field></div>{canManage && <Button type="submit" className="w-full sm:w-auto" disabled={!name.trim() || name.trim() === organization.name}>Save</Button>}</form>
+      </div>
+    </section>
+
+    <section className="border-b py-6">
+      <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
+        <div><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">Workspaces</h2><IconButton label="Create workspace" onClick={onCreateWorkspace}><Plus /></IconButton></div><p className="mt-1 text-xs leading-5 text-muted-foreground">Workspaces owned by this organization.</p></div>
+        <div className="border-y">
+          {workspaces.map((item) => <button key={item.workspace_id} type="button" className="grid min-h-14 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b py-3 text-left last:border-b-0 hover:bg-accent/50" aria-label={`Select ${item.name} workspace`} onClick={() => onSelectWorkspace(item.workspace_id)}><span className="min-w-0"><span className="block truncate text-xs font-medium">{item.name}</span><span className="mt-1 block truncate font-mono text-[9px] text-muted-foreground">{item.workspace_id}</span></span>{item.workspace_id === selectedWorkspaceId && <span className="text-[10px] font-medium text-emerald-700">Current</span>}</button>)}
+          {!workspaces.length && <EmptyState icon={<FolderKanban />} label="No workspaces yet" />}
+        </div>
+      </div>
+    </section>
+
+    <section className="border-b py-6">
+      <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
+        <div><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">Members</h2>{canManage && <IconButton label="Invite member" onClick={onInvite}><UserRound /></IconButton>}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">People with organization access.</p></div>
+        <div className="border-y">
+          {members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-3 border-b py-2 last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => onMemberRoleChange(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManage && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive hover:text-destructive" onClick={() => onRemoveMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}
+          {!members.length && <EmptyState icon={<Users />} label="No members" />}
+        </div>
+      </div>
+    </section>
+
+    <section className="border-b py-6">
+      <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
+        <div><h2 className="text-sm font-semibold">Groups</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Member groups used for workspace access.</p></div>
+        <div className="space-y-4">
+          {canManage && <form onSubmit={onCreateGroup} className="flex gap-2"><Input aria-label="Group name" value={groupName} onChange={(event) => onGroupNameChange(event.target.value)} placeholder="Group name" required maxLength={80} /><Button type="submit" variant="outline" disabled={!groupName.trim()}><Plus />Create</Button></form>}
+          <div className="border-y divide-y">
+            {groups.map((group) => <div key={group.group_id} className="py-4"><div className="mb-3 flex items-center justify-between gap-3"><div className="min-w-0"><h3 className="truncate text-xs font-semibold">{group.name}</h3><p className="mt-1 text-[10px] text-muted-foreground">{group.member_ids.length} members</p></div>{canManage && <IconButton label={`Delete ${group.name}`} className="text-destructive hover:text-destructive" onClick={() => onDeleteGroup(group.group_id)}><Trash2 /></IconButton>}</div><div className="grid gap-2 sm:grid-cols-2">{members.map((member) => <label key={member.user_id} className="flex min-w-0 items-center gap-2 text-xs"><input type="checkbox" className="size-4 accent-foreground" checked={group.member_ids.includes(member.user_id)} disabled={!canManage} onChange={(event) => onSetGroupMember(group.group_id, member.user_id, event.target.checked)} /><span className="truncate">{member.preferred_name}</span></label>)}</div></div>)}
+            {!groups.length && <EmptyState icon={<ShieldCheck />} label="No groups yet" />}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    {canManage && <section className="border-b py-6"><div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]"><div><h2 className="text-sm font-semibold">Activity</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Management events and workspace traffic usage.</p></div><div><Button variant="outline" onClick={onOpenAudit}><ScrollText />Open audit</Button></div></div></section>}
+  </div></div>
+}
+
 type WorkspaceSettingsViewProps = {
   workspace?: Workspace
   organization?: Organization
@@ -1016,16 +1099,14 @@ function WorkspaceApp() {
   const [launchingProfile, setLaunchingProfile] = useState<AgentLaunchProfile | null>(null)
   const [deletingProfile, setDeletingProfile] = useState<AgentLaunchProfile | null>(null)
   const [installOpen, setInstallOpen] = useState(false)
-  const [membersOpen, setMembersOpen] = useState(false)
-  const [groupsOpen, setGroupsOpen] = useState(false)
   const [createVirtualHostOpen, setCreateVirtualHostOpen] = useState(false)
   const [publishOpen, setPublishOpen] = useState(false)
   const [createServiceOpen, setCreateServiceOpen] = useState(false)
   const [editingService, setEditingService] = useState<MachineService | null>(null)
   const [inviteOpen, setInviteOpen] = useState(false)
-  const [renameOrganizationOpen, setRenameOrganizationOpen] = useState(false)
   const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
+  const [createOrganizationName, setCreateOrganizationName] = useState("")
   const [organizationName, setOrganizationName] = useState("")
   const [createWorkspaceName, setCreateWorkspaceName] = useState("")
   const [workspaceName, setWorkspaceName] = useState("")
@@ -1247,8 +1328,9 @@ function WorkspaceApp() {
   const canManageMembers = ["owner", "admin"].includes(currentRole)
 
   useEffect(() => {
+    if (mainView === "organization") setOrganizationName(organization?.name ?? "")
     if (mainView === "workspace") setWorkspaceName(workspace?.name ?? "")
-  }, [mainView, workspace?.workspace_id, workspace?.name])
+  }, [mainView, organization?.organization_id, organization?.name, workspace?.workspace_id, workspace?.name])
   const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen
   const mobileSidebarHidden = isMobile && mainView !== "terminal"
   const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
@@ -1354,8 +1436,8 @@ function WorkspaceApp() {
   async function createOrganization(event: FormEvent) {
     event.preventDefault()
     try {
-      const data = await api<{ organization: Organization }>("/api/organizations", { method: "POST", body: JSON.stringify({ name: organizationName }) })
-      setCreateOrganizationOpen(false); setOrganizationName(""); await loadOrganizations(data.organization.organization_id)
+      const data = await api<{ organization: Organization }>("/api/organizations", { method: "POST", body: JSON.stringify({ name: createOrganizationName }) })
+      setCreateOrganizationOpen(false); setCreateOrganizationName(""); await loadOrganizations(data.organization.organization_id)
     } catch (reason) { showError(reason) }
   }
 
@@ -1383,7 +1465,7 @@ function WorkspaceApp() {
     if (!organizationId) return
     try {
       await api(`/api/organizations/${encodeURIComponent(organizationId)}`, { method: "PATCH", body: JSON.stringify({ name: organizationName }) })
-      setRenameOrganizationOpen(false); await loadOrganizations(organizationId)
+      await loadOrganizations(organizationId)
     } catch (reason) { showError(reason) }
   }
 
@@ -1624,6 +1706,17 @@ function WorkspaceApp() {
     } catch (reason) { showError(reason) }
   }
 
+  function openOrganizationSettings() {
+    if (!organization) {
+      setCreateOrganizationName("")
+      setCreateOrganizationOpen(true)
+      return
+    }
+    setOrganizationName(organization.name)
+    setMainView("organization")
+    setMobileTerminalOpen(false)
+  }
+
   function openWorkspaceSettings() {
     if (!workspace) {
       setCreateWorkspaceName("")
@@ -1814,26 +1907,30 @@ function WorkspaceApp() {
     catch (reason) { showError(reason) }
   }
 
-  async function openMembers() {
-    if (!organizationId) return
-    try {
-      const data = await api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/members`)
-      setMembers(data.members); setMembersOpen(true)
-    } catch (reason) { showError(reason) }
-  }
+  const loadOrganizationSettings = useCallback(async () => {
+    if (preview) {
+      setMembers([{ ...PREVIEW_USER, role: "owner" }])
+      setGroups([])
+      return
+    }
+    const requestedOrganizationId = organizationId
+    if (!requestedOrganizationId) {
+      setMembers([])
+      setGroups([])
+      return
+    }
+    const [memberData, groupData] = await Promise.all([
+      api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(requestedOrganizationId)}/members`),
+      api<{ groups: OrganizationGroup[] }>(`/api/organizations/${encodeURIComponent(requestedOrganizationId)}/groups`),
+    ])
+    if (organizationIdRef.current !== requestedOrganizationId) return
+    setMembers(memberData.members)
+    setGroups(groupData.groups)
+  }, [preview, organizationId])
 
-  async function openGroups() {
-    if (!organizationId) return
-    try {
-      const [groupData, memberData] = await Promise.all([
-        api<{ groups: OrganizationGroup[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/groups`),
-        api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/members`),
-      ])
-      setGroups(groupData.groups)
-      setMembers(memberData.members)
-      setGroupsOpen(true)
-    } catch (reason) { showError(reason) }
-  }
+  useEffect(() => {
+    if (mainView === "organization") loadOrganizationSettings().catch(showError)
+  }, [mainView, loadOrganizationSettings, showError])
 
   async function createGroup(event: FormEvent) {
     event.preventDefault()
@@ -1841,7 +1938,7 @@ function WorkspaceApp() {
     try {
       await api(`/api/organizations/${encodeURIComponent(organizationId)}/groups`, { method: "POST", body: JSON.stringify({ name: groupName }) })
       setGroupName("")
-      await openGroups()
+      await loadOrganizationSettings()
     } catch (reason) { showError(reason) }
   }
 
@@ -1849,7 +1946,7 @@ function WorkspaceApp() {
     if (!organizationId) return
     try {
       await api(`/api/organizations/${encodeURIComponent(organizationId)}/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" })
-      await openGroups()
+      await loadOrganizationSettings()
     } catch (reason) { showError(reason) }
   }
 
@@ -1865,7 +1962,7 @@ function WorkspaceApp() {
     if (!organizationId) return
     try {
       await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ role }) })
-      await openMembers()
+      await loadOrganizationSettings()
     } catch (reason) { showError(reason) }
   }
 
@@ -1873,7 +1970,7 @@ function WorkspaceApp() {
     if (!organizationId) return
     try {
       await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE" })
-      await openMembers()
+      await loadOrganizationSettings()
     } catch (reason) { showError(reason) }
   }
 
@@ -1881,7 +1978,7 @@ function WorkspaceApp() {
     if (!organizationId) return
     try {
       const invitation = await api<{ url: string }>(`/api/organizations/${encodeURIComponent(organizationId)}/invitations`, { method: "POST", body: "{}" })
-      setInviteUrl(invitation.url); setMembersOpen(false); setInviteOpen(true)
+      setInviteUrl(invitation.url); setInviteOpen(true)
     } catch (reason) { showError(reason) }
   }
 
@@ -2125,14 +2222,14 @@ function WorkspaceApp() {
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
           <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
-          <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label="Organization actions"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setCreateOrganizationOpen(true)}><Plus />Create organization</DropdownMenuItem><DropdownMenuItem onSelect={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} disabled={!organizationId}><FolderKanban />Create workspace</DropdownMenuItem>{canManageMembers && organization && <DropdownMenuItem onSelect={() => { setOrganizationName(organization.name); setRenameOrganizationOpen(true) }}><Pencil />Rename organization</DropdownMenuItem>}<DropdownMenuSeparator /><DropdownMenuItem onSelect={openMembers} disabled={!organizationId}><Users />Members</DropdownMenuItem><DropdownMenuItem onSelect={openGroups} disabled={!organizationId}><ShieldCheck />Groups</DropdownMenuItem>{canManageMembers && <DropdownMenuItem onSelect={openAudit} disabled={!organizationId}><ScrollText />Audit</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
+          <IconButton label={organization ? "Organization settings" : "Create organization"} className={cn("size-8", mainView === "organization" && "bg-accent")} onClick={openOrganizationSettings}>{organization ? <MoreHorizontal /> : <Plus />}</IconButton>
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
           <div data-tour="workspace-select">
             <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
           </div>
-          <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <SettingsIcon /> : <Plus />}</IconButton></span>
+          <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
         <Tabs value={sidebarTab} onValueChange={(value) => value === "apps" ? openApps() : openAgents()} className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <TabsList className="mx-2 grid h-auto grid-cols-2 bg-accent p-0.5">
@@ -2170,8 +2267,8 @@ function WorkspaceApp() {
       <section className={cn("min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]", mobileTerminalIdle ? "hidden md:grid" : "grid")}>
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-            {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : closeMainView}><ChevronLeft /></IconButton>}
-            <span className="hidden truncate sm:block">{workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
+            {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
+            <span className="hidden truncate sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "network" ? "Network" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
@@ -2180,7 +2277,7 @@ function WorkspaceApp() {
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : mainView === "apps" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh Apps" onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton><Button size="sm" className="h-8" onClick={openCreateApp} disabled={!onlineMachines.length}><Plus />New App</Button></div> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : mainView === "network" ? <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh network" onClick={refreshNetwork}><RotateCw /></IconButton><Button size="sm" variant="outline" className="h-8" onClick={openCreateService} disabled={!snapshot?.servers.length}><Server />Add service</Button><Button size="sm" variant="outline" className="h-8" onClick={openCreateVirtualHost} disabled={!services.length}><Plus />Add host</Button><Button size="sm" className="h-8" onClick={openPublish} disabled={!services.some((service) => service.protocol === "http")}><ExternalLink />Publish</Button></div> : null}
         </header>
-        {mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
+        {mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
           <div className="max-w-sm">
             <p className="text-sm font-medium text-zinc-800">Machine is offline</p>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">{machineName(selectedAgentMachine, selectedAgent.server_id)} is not connected to the control plane. It may be stopped, waking from sleep, or fenced as a duplicate.</p>
@@ -2222,10 +2319,8 @@ function WorkspaceApp() {
 
     <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
 
-    <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={organizationName} onValueChange={setOrganizationName} onSubmit={createOrganization} />
+    <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={createOrganizationName} onValueChange={setCreateOrganizationName} onSubmit={createOrganization} />
     <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={createWorkspaceName} onValueChange={setCreateWorkspaceName} onSubmit={createWorkspace} dataTour="create-workspace-dialog" />
-
-    <Dialog open={renameOrganizationOpen} onOpenChange={setRenameOrganizationOpen}><DialogContent><form onSubmit={renameOrganization}><DialogHeader><DialogTitle>Rename organization</DialogTitle><DialogDescription>Update the organization name shown to its members.</DialogDescription></DialogHeader><div className="my-5"><Field label="Organization name"><Input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameOrganizationOpen(false)}>Cancel</Button><Button type="submit">Save</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={profileEditorOpen} onOpenChange={(open) => { setProfileEditorOpen(open); if (!open) setEditingLaunchProfile(null) }}><DialogContent className="max-w-xl"><form onSubmit={saveLaunchProfile} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>{editingLaunchProfile ? "Edit launch profile" : "New launch profile"}</DialogTitle><DialogDescription>Reusable Agent process settings for this workspace.</DialogDescription></DialogHeader><Field label="Profile name"><Input value={launchProfileName} onChange={(event) => setLaunchProfileName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Working directory"><Input className="font-mono" value={launchProfileCwd} onChange={(event) => setLaunchProfileCwd(event.target.value)} required /></Field><div className="sm:col-span-2"><Field label="Description"><Input value={launchProfileDescription} onChange={(event) => setLaunchProfileDescription(event.target.value)} maxLength={1000} /></Field></div><div className="sm:col-span-2"><Field label="Command"><Input className="font-mono" value={launchProfileCommandLine} onChange={(event) => setLaunchProfileCommandLine(event.target.value)} placeholder="codex review --base main" required /></Field></div><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setProfileEditorOpen(false)}>Cancel</Button><Button type="submit"><Rocket />{editingLaunchProfile ? "Save profile" : "Create profile"}</Button></DialogFooter></form></DialogContent></Dialog>
 
@@ -2340,10 +2435,6 @@ function WorkspaceApp() {
 
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget?.name} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>Delete workspace</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? "Checking the workspace machine inventory..." : workspaceMachineCount > 0 ? `Delete all ${workspaceMachineCount} ${workspaceMachineCount === 1 ? "machine" : "machines"} from ${workspace?.name ?? "this workspace"} first.` : `Delete ${workspace?.name}? It will disappear from active views while historical traffic and messages are retained. This cannot be undone.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>Cancel</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>Delete workspace</Button></DialogFooter></DialogContent></Dialog>
-
-    <Dialog open={membersOpen} onOpenChange={setMembersOpen}><DialogContent className="max-w-xl"><DialogHeader><div className="flex items-center justify-between gap-4 pr-7"><DialogTitle>Organization members</DialogTitle>{canManageMembers && <Button size="sm" onClick={createInvite}><UserRound />Invite member</Button>}</div><DialogDescription>Manage access to {organization?.name ?? "this organization"}.</DialogDescription></DialogHeader><div className="max-h-[55vh] divide-y overflow-auto border-y">{members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_120px_auto] items-center gap-3"><span className="min-w-0"><span className="block truncate text-sm font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => updateMemberRole(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManageMembers && member.role !== "owner" ? <IconButton label={`Remove ${member.preferred_name}`} className="text-destructive" onClick={() => removeMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}</div></DialogContent></Dialog>
-
-    <Dialog open={groupsOpen} onOpenChange={setGroupsOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Organization groups</DialogTitle><DialogDescription>Group organization members for workspace access.</DialogDescription></DialogHeader>{canManageMembers && <form onSubmit={createGroup} className="flex gap-2"><Input aria-label="Group name" value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="Group name" required maxLength={80} /><Button type="submit" disabled={!groupName.trim()}><Plus />Create</Button></form>}<div className="max-h-[55vh] divide-y overflow-auto border-y">{groups.map((group) => <section key={group.group_id} className="py-4"><div className="mb-3 flex items-center justify-between gap-3"><div className="min-w-0"><h3 className="truncate text-sm font-semibold">{group.name}</h3><p className="text-[10px] text-muted-foreground">{group.member_ids.length} members</p></div>{canManageMembers && <IconButton label={`Delete ${group.name}`} className="text-destructive" onClick={() => void deleteGroup(group.group_id)}><Trash2 /></IconButton>}</div><div className="grid gap-2 sm:grid-cols-2">{members.map((member) => <label key={member.user_id} className="flex min-w-0 items-center gap-2 text-xs"><input type="checkbox" checked={group.member_ids.includes(member.user_id)} disabled={!canManageMembers} onChange={(event) => void setGroupMember(group.group_id, member.user_id, event.target.checked)} /><span className="truncate">{member.preferred_name}</span></label>)}</div></section>)}{!groups.length && <div className="py-4 text-xs text-muted-foreground">No groups yet.</div>}</div></DialogContent></Dialog>
 
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}>
