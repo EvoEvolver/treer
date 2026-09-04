@@ -6016,6 +6016,7 @@ mod tests {
             messages,
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
         );
 
         let response = app
