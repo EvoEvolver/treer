@@ -2960,6 +2960,39 @@ impl AuthStore {
         Ok(created)
     }
 
+    pub async fn set_app_ingress_access(
+        &self,
+        app: &AppDeployment,
+        actor: &str,
+        base_domain: &str,
+        access: ServiceIngressAccess,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+        let Some(existing) = self.resolve_service_ingress_hostname(&hostname).await? else {
+            return self
+                .ensure_app_ingress(app, actor, base_domain, Some(access))
+                .await;
+        };
+        if existing.ingress.workspace_id != app.workspace_id
+            || existing.ingress.service_id != app.service_id
+        {
+            return Err(AuthFailure::conflict(
+                "ingress_exists",
+                "generated App ingress hostname already exists",
+            ));
+        }
+        self.update_service_ingress(
+            &app.workspace_id,
+            &existing.ingress.ingress_id,
+            actor,
+            UpdateServiceIngressRequest {
+                access: Some(access),
+                enabled: Some(true),
+            },
+        )
+        .await
+    }
+
     pub async fn update_service_ingress(
         &self,
         workspace_id: &str,
@@ -7175,6 +7208,32 @@ mod tests {
             .await
             .expect("create public App ingress");
         assert_eq!(public_ingress.access, ServiceIngressAccess::Public);
+        assert_eq!(
+            store
+                .set_app_ingress_access(
+                    &public_app,
+                    "owner",
+                    "apps.treer.test",
+                    ServiceIngressAccess::Workspace,
+                )
+                .await
+                .expect("protect public App ingress")
+                .access,
+            ServiceIngressAccess::Workspace
+        );
+        assert_eq!(
+            store
+                .set_app_ingress_access(
+                    &public_app,
+                    "owner",
+                    "apps.treer.test",
+                    ServiceIngressAccess::Public,
+                )
+                .await
+                .expect("publish App ingress")
+                .access,
+            ServiceIngressAccess::Public
+        );
         store
             .ensure_managed_app_ingresses("reconciler", "apps.treer.test")
             .await

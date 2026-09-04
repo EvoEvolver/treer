@@ -139,6 +139,11 @@ records for compatibility but cannot publish arbitrary sandbox listeners. Their
 only publication authority is the declared HTTP port of a Managed App created
 through the atomic App lifecycle.
 
+Workspace members may change an existing Managed App's owned ingress between
+`workspace` and `public` access from the App settings UI. This endpoint resolves
+the ingress from the App record and does not accept a service, hostname, or
+arbitrary ingress identifier from the caller.
+
 ## Policy And Rollout
 
 Policy is authoritative only after authentication establishes an immutable

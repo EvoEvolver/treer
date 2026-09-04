@@ -629,6 +629,10 @@ pub fn router(
             get(get_app_deployment).delete(delete_app_deployment),
         )
         .route(
+            "/api/workspaces/{workspace_id}/apps/{app_id}/access",
+            axum::routing::patch(update_app_access),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/start",
             post(start_app_deployment),
         )
@@ -2366,6 +2370,34 @@ async fn get_app_deployment(
     let mut app = auth.resolve_app_deployment(&workspace_id, &target).await?;
     hydrate_app_deployment(&state, &mut app).await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
+    Ok(Json(json!({ "app": app })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAppAccessRequest {
+    access: ServiceIngressAccess,
+}
+
+async fn update_app_access(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(session): Extension<CurrentSession>,
+    Path((workspace_id, target)): Path<(String, String)>,
+    Json(request): Json<UpdateAppAccessRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let mut app = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let ingress = auth
+        .set_app_ingress_access(
+            &app,
+            &session.user_id,
+            config.base_domain()?,
+            request.access,
+        )
+        .await?;
+    hydrate_app_deployment(&state, &mut app).await;
+    attach_app_public_url(&config, &[ingress], &mut app);
+    record_app_audit(&auth, Some(&session), None, "app.access.updated", &app).await;
     Ok(Json(json!({ "app": app })))
 }
 

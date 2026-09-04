@@ -121,6 +121,7 @@ const managedApp = {
   hostname: "soul.demo.internal",
   service_id: "svc-app-1",
   public_url: "https://soul-app1.canary.apps.treer.ai/",
+  access: "workspace" as "public" | "workspace",
   desired_state: "running" as const,
   runtime_agent_id: "appw-1",
   restart_count: 1,
@@ -182,6 +183,7 @@ function ok(route: Route, body: unknown) {
 
 async function mockApi(page: Page) {
   let currentUser = { ...user }
+  let currentApp: typeof managedApp = { ...managedApp }
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, () => {})
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, () => {})
   await page.route("**/api/**", async (route: Route) => {
@@ -230,15 +232,17 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-2/virtual-hosts") return ok(route, { hosts: [] })
     if (path === "/workspaces/ws-1/services") return ok(route, { services: [serviceA] })
     if (path === "/workspaces/ws-2/services") return ok(route, { services: [] })
-    if (path === "/workspaces/ws-1/ingresses") return ok(route, { ingresses: [] })
-    if (path === "/workspaces/ws-2/ingresses") return ok(route, { ingresses: [] })
     if (path === "/workspaces/ws-1/traffic") return ok(route, { traffic })
     if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
     if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile, longScriptProfile] })
     if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
-    if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [managedApp] })
-    if (path === "/workspaces/ws-1/apps" && route.request().method() === "POST") return ok(route, { app: managedApp })
-    if (/^\/workspaces\/ws-1\/apps\/[^/]+\/(start|stop|restart)$/.test(path) && route.request().method() === "POST") return ok(route, { app: managedApp })
+    if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [currentApp] })
+    if (path === "/workspaces/ws-1/apps/app-1/access" && route.request().method() === "PATCH") {
+      const body = route.request().postDataJSON() as { access: "public" | "workspace" }
+      currentApp = { ...currentApp, access: body.access }
+      return ok(route, { app: currentApp })
+    }
+    if (/^\/workspaces\/ws-1\/apps\/[^/]+\/(start|stop|restart)$/.test(path) && route.request().method() === "POST") return ok(route, { app: currentApp })
     if (/^\/workspaces\/ws-1\/apps\/[^/]+$/.test(path) && route.request().method() === "DELETE") return ok(route, {})
     if (path === "/workspaces/ws-2/apps" && route.request().method() === "GET") return ok(route, { apps: [] })
 
@@ -272,7 +276,7 @@ test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await expect(page.locator("aside [role=tab]").nth(1)).toContainText("Apps")
 
   await appsTab(page).click()
-  await expect(page.locator("aside").getByRole("button", { name: "Open Soul Archive app" })).toBeVisible()
+  await expect(page.locator("aside").getByRole("button", { name: "Open Soul Archive settings" })).toBeVisible()
   await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
 
   await agentsTab(page).click()
@@ -419,44 +423,49 @@ test("workspace controls open a settings page with inline rename", async ({ page
   await expect(page.getByRole("heading", { name: "Platform", exact: true })).toBeVisible()
 })
 
-test("managed App view exposes lifecycle actions and creation", async ({ page }) => {
+test("managed App settings control access and lifecycle without creation or Network UI", async ({ page }) => {
   await page.goto("/")
   await appsTab(page).click()
 
   await expect(page.locator("main > section").getByText("Soul Archive")).toBeVisible()
   await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: /New App|New$/ })).toHaveCount(0)
+  await expect(page.getByRole("heading", { name: "Network" })).toHaveCount(0)
   await expect(page.getByText(/_human/)).toHaveCount(0)
+  await page.getByRole("button", { name: "Open Soul Archive settings" }).first().click()
+  await expect(page.getByRole("heading", { name: "Soul Archive" })).toBeVisible()
+  await expect(page.getByRole("combobox", { name: "App access" })).toHaveText("Workspace session required")
+
+  const publishing = page.waitForRequest((request) => request.url().includes("/apps/app-1/access") && request.method() === "PATCH")
+  await page.getByRole("combobox", { name: "App access" }).click()
+  await page.getByRole("option", { name: "Public · no authentication" }).click()
+  const publishRequest = await publishing
+  expect(publishRequest.postDataJSON()).toEqual({ access: "public" })
+  await expect(page.getByText("Anyone with this URL can access the App without a Treer session.")).toBeVisible()
+
   await page.evaluate(() => {
     window.open = ((url?: string | URL) => {
       document.documentElement.dataset.lastOpenedUrl = String(url)
       return null
     }) as typeof window.open
   })
-  await page.getByRole("button", { name: "Open Soul Archive interface" }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
   await page.getByRole("button", { name: "Open Soul Archive", exact: true }).click()
   await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
   const restarting = page.waitForRequest((request) => request.url().includes("/apps/app-1/restart") && request.method() === "POST")
-  await page.getByRole("button", { name: "Restart Soul Archive" }).click()
+  await page.getByRole("button", { name: "Restart" }).click()
   await restarting
+})
 
-  await page.locator("header").getByRole("button", { name: "New App" }).click()
-  const dialog = page.getByRole("dialog", { name: "New App" })
-  await dialog.getByLabel("Name", { exact: true }).fill("Docs")
-  await dialog.getByLabel("Command", { exact: true }).fill("python3 -m http.server 8080")
-  await dialog.getByLabel("UI port", { exact: true }).fill("8080")
-  await dialog.getByLabel("Virtual hostname", { exact: true }).fill("docs.demo.internal")
-  const creating = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/ws-1/apps") && request.method() === "POST")
-  await dialog.getByRole("button", { name: "Create App" }).click()
-  const request = await creating
-  expect(request.postDataJSON()).toMatchObject({
-    server_id: "srv-a",
-    name: "Docs",
-    command: "python3",
-    args: ["-m", "http.server", "8080"],
-    port: 8080,
-    hostname: "docs.demo.internal",
-  })
+test("mobile App settings hide the sidebar and fit the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await appsTab(page).click()
+  await page.getByRole("button", { name: "Open Soul Archive settings" }).first().click()
+
+  await expect(page.getByRole("heading", { name: "Soul Archive" })).toBeVisible()
+  await expect(page.locator("aside")).toBeHidden()
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
 test("clicking a machine opens an overview with identity, agents, services, virtual hosts, and traffic", async ({ page }) => {

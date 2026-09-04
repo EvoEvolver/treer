@@ -92,6 +92,12 @@ Start, stop, restart, delete, list, and show are available through the browser,
 public API, Controller-local API, and `treer app` CLI. User-triggered lifecycle
 changes append workspace audit events.
 
+The human UI treats Managed Apps as Agent-owned deployments: it lists and
+operates existing Apps but does not offer App creation. Each App has a settings
+view that changes only its owned ingress between `workspace` and `public`
+access. General service, virtual-host, and ingress editing is not exposed in
+the workspace UI.
+
 Managed App lifecycle is the only Agent-authorized path that allocates a
 service, virtual host, or its owned ingress. The public option applies only to
 that App-owned ingress. Direct Agent routes for arbitrary service, virtual-host,

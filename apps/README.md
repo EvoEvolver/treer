@@ -8,6 +8,9 @@ workspace-authenticated `public_url` for the App by default. An Agent may pass
 `treer app create --public` to make only that Managed App's declared HTTP port
 an anonymously accessible public origin; the App is then responsible for any
 application-level authentication.
+The human UI manages existing Apps but does not create them. Open an App's
+settings to switch its dedicated origin between Workspace authentication and
+anonymous public access. Agents create Apps with `treer app create`.
 An externally managed App is started by an operator or another supervisor; a
 logged-in workspace user then registers its ordinary service through the
 control plane. Managed Agents cannot register service, virtual-host, or ingress
