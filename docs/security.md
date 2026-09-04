@@ -101,8 +101,17 @@ state and WAL files require normal credential-store protection and backup.
 
 Public service ingress deliberately accepts anonymous internet traffic.
 Workspace ingress requires a current member session or service-audience token.
+For restricted workspaces, current membership means an effective direct or
+group workspace grant, workspace creation ownership, or organization manager
+access. Authorization is recalculated from PostgreSQL, and removing a user from
+the organization invalidates all workspace access.
 The Proxy strips gateway credentials and Treer headers before forwarding, but
-it remains in the browser-to-service data path.
+it remains in the browser-to-service data path. The Proxy records directional
+payload byte and frame totals for these tunnels under the synthetic `browser`
+client endpoint. Each aggregate carries a traffic class and meter version so
+future billing rules remain explainable; workspace members can read those
+aggregates. It does not store payload content, request paths, headers, or NATS
+control-plane traffic in the usage ledger.
 
 Self-hosted Compose gives the updater sidecar the host Docker socket and a
 read-only bind of `compose.yaml`. Compromise of that sidecar is host Docker
@@ -115,8 +124,11 @@ is not an internet listener. Any process on that machine that can reach
 `127.0.0.1` can reach the published service. Agent-scoped services use a
 separate Unix bridge into the same namespace and do not open a host TCP port.
 Managed Apps use `publish_ports` for their declared HTTP UI port, then route the
-stable service and virtual hostname to that loopback listener. Their command,
-arguments, working directory, and hostname are plaintext Proxy metadata; the
+stable service and virtual hostname to that loopback listener. When wildcard
+ingress is configured, Core creates a dedicated `workspace` ingress for each
+Managed App; browser access requires a current workspace session and Agent
+access requires a service-audience credential. Their command, arguments,
+working directory, hostname, and `public_url` are plaintext Proxy metadata; the
 Managed App API deliberately has no secret field.
 
 Only a logged-in workspace user or operator API may directly mutate service,

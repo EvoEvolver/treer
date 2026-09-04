@@ -22,12 +22,16 @@ use crate::cluster::{
     ClusterSessionKind,
 };
 use crate::event_bus::EventBus;
-use crate::traffic::{TrafficCounter, TrafficRecorder};
+#[cfg(test)]
+use crate::traffic::BROWSER_TRAFFIC_ENDPOINT;
+use crate::traffic::{StreamTrafficCounters, TrafficClass, TrafficCounter, TrafficRecorder};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
 const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const NETWORK_INITIAL_WINDOW: usize = 256 * 1024;
 const NETWORK_MAX_CHUNK: usize = 16 * 1024;
+pub(crate) const TERMINAL_BROWSER_QUEUE_CAPACITY: usize = 32;
+const TERMINAL_REPLAY_CHUNK_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SocketFrame {
@@ -81,7 +85,7 @@ struct TerminalSession {
     workspace_id: String,
     server_id: String,
     process_id: String,
-    outgoing: mpsc::UnboundedSender<SocketFrame>,
+    outgoing: mpsc::Sender<SocketFrame>,
     last_revision: Option<u64>,
     stream_epoch: Option<String>,
 }
@@ -824,7 +828,53 @@ impl AppState {
             (server, agents, event)
         };
         self.publish_workspace_event(event);
+        self.release_server_runtime(workspace_id, server_id, "machine deleted", "server_deleted")
+            .await;
+        self.broadcast_projection(ClusterProjectionUpdate::ServerDeleted {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        })
+        .await?;
 
+        Ok((server, agents))
+    }
+
+    pub async fn delete_workspace(&self, workspace_id: &str) -> Result<(), ProtocolError> {
+        let removed = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            workspaces.remove(workspace_id)
+        };
+        if let Some(workspace) = removed {
+            self.publish_workspace_event(WorkspaceEvent {
+                revision: workspace.revision.saturating_add(1),
+                workspace_id: workspace_id.to_string(),
+                event: "workspace.deleted".to_string(),
+                data: serde_json::to_value(&workspace.info).unwrap_or(Value::Null),
+            });
+            for server_id in workspace.servers.keys() {
+                self.release_server_runtime(
+                    workspace_id,
+                    server_id,
+                    "workspace deleted",
+                    "workspace_deleted",
+                )
+                .await;
+            }
+        }
+        self.broadcast_projection(ClusterProjectionUpdate::WorkspaceDeleted {
+            workspace_id: workspace_id.to_string(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn release_server_runtime(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        terminal_reason: &str,
+        pending_error: &str,
+    ) {
         let key = ServerKey {
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
@@ -857,7 +907,7 @@ impl AppState {
         for (command_id, command) in cancelled {
             let _ = command.result.send(CommandResult::failure(
                 command_id,
-                ProtocolError::new("server_deleted", server_id),
+                ProtocolError::new(pending_error, server_id),
             ));
         }
 
@@ -879,20 +929,13 @@ impl AppState {
             send_terminal_to_browser(
                 &terminal.outgoing,
                 &TerminalServerMessage::Closed {
-                    reason: Some("machine deleted".to_string()),
+                    reason: Some(terminal_reason.to_string()),
                     exit_code: None,
                 },
             );
         }
         self.close_server_network_streams(workspace_id, server_id)
             .await;
-        self.broadcast_projection(ClusterProjectionUpdate::ServerDeleted {
-            workspace_id: workspace_id.to_string(),
-            server_id: server_id.to_string(),
-        })
-        .await?;
-
-        Ok((server, agents))
     }
 
     pub async fn rename_agent(
@@ -1165,7 +1208,7 @@ impl AppState {
         cols: u16,
         rows: u16,
         cursor: Option<TerminalCursor>,
-        outgoing: mpsc::UnboundedSender<SocketFrame>,
+        outgoing: mpsc::Sender<SocketFrame>,
     ) -> Result<String, ProtocolError> {
         let agent = self.resolve_agent(workspace_id, agent_id).await?;
         let server_id = agent.server_id;
@@ -1290,18 +1333,27 @@ impl AppState {
                 session.stream_epoch = ready.stream_epoch.clone();
             }
         }
+        let replay_chunks = ready.replay.len().div_ceil(TERMINAL_REPLAY_CHUNK_BYTES);
+        let replay_chunks = u32::try_from(replay_chunks).map_err(|_| {
+            ProtocolError::new(
+                "terminal_replay_too_large",
+                "terminal replay has too many chunks",
+            )
+        })?;
         let message = TerminalServerMessage::Ready {
             session_id: session_id.to_string(),
             stream_epoch: ready.stream_epoch.clone(),
             revision: Some(ready.revision),
             gap: ready.gap,
+            replay_chunks: Some(replay_chunks),
         };
         self.deliver_session_frame(ClusterSessionDelivery {
             kind: ClusterSessionKind::Terminal,
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
             session_id: session_id.to_string(),
-            revision: None,
+            revision: (replay_chunks == 0).then_some(ready.revision),
+            cursor: false,
             close: false,
             frame: SocketFrame::Text(
                 serde_json::to_string(&message)
@@ -1309,16 +1361,21 @@ impl AppState {
             ),
         })
         .await?;
-        self.deliver_session_frame(ClusterSessionDelivery {
-            kind: ClusterSessionKind::Terminal,
-            workspace_id: workspace_id.to_string(),
-            server_id: server_id.to_string(),
-            session_id: session_id.to_string(),
-            revision: Some(ready.revision),
-            close: false,
-            frame: SocketFrame::Binary(ready.replay),
-        })
-        .await
+        for (index, chunk) in ready.replay.chunks(TERMINAL_REPLAY_CHUNK_BYTES).enumerate() {
+            let final_chunk = index + 1 == replay_chunks as usize;
+            self.deliver_session_frame(ClusterSessionDelivery {
+                kind: ClusterSessionKind::Terminal,
+                workspace_id: workspace_id.to_string(),
+                server_id: server_id.to_string(),
+                session_id: session_id.to_string(),
+                revision: final_chunk.then_some(ready.revision),
+                cursor: false,
+                close: false,
+                frame: SocketFrame::Binary(chunk.to_vec()),
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn terminal_output(
@@ -1332,49 +1389,15 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        let (stream_epoch, duplicate) = {
-            let sessions = self.inner.terminal_sessions.lock().await;
-            let session = sessions.get(session_id);
-            (
-                session.and_then(|session| session.stream_epoch.clone()),
-                session.is_some_and(|session| {
-                    session
-                        .last_revision
-                        .is_some_and(|last_revision| revision <= last_revision)
-                }),
-            )
-        };
-        if duplicate {
-            return Ok(());
-        }
         self.deliver_session_frame(ClusterSessionDelivery {
             kind: ClusterSessionKind::Terminal,
             workspace_id: workspace_id.to_string(),
             server_id: server_id.to_string(),
             session_id: session_id.to_string(),
             revision: Some(revision),
+            cursor: true,
             close: false,
             frame: SocketFrame::Binary(data),
-        })
-        .await?;
-        let Some(stream_epoch) = stream_epoch else {
-            return Ok(());
-        };
-        let cursor = TerminalServerMessage::Cursor {
-            stream_epoch,
-            revision,
-        };
-        self.deliver_session_frame(ClusterSessionDelivery {
-            kind: ClusterSessionKind::Terminal,
-            workspace_id: workspace_id.to_string(),
-            server_id: server_id.to_string(),
-            session_id: session_id.to_string(),
-            revision: None,
-            close: false,
-            frame: SocketFrame::Text(
-                serde_json::to_string(&cursor)
-                    .map_err(|error| ProtocolError::new("encode_error", error.to_string()))?,
-            ),
         })
         .await
     }
@@ -1448,6 +1471,7 @@ impl AppState {
         destination_agent_id: Option<&str>,
         host: &str,
         port: u16,
+        traffic_class: TrafficClass,
     ) -> Result<DuplexStream, ProtocolError> {
         let key = NetworkStreamKey {
             workspace_id: workspace_id.to_string(),
@@ -1526,10 +1550,15 @@ impl AppState {
         }
 
         let (client, bridge) = tokio::io::duplex(NETWORK_INITIAL_WINDOW);
+        let traffic = self.inner.traffic.register_client_stream(
+            workspace_id,
+            traffic_class,
+            destination_server_id,
+        );
         let state = self.clone();
         tokio::spawn(async move {
             if let Err(error) = state
-                .bridge_browser_network_stream(&key, bridge, incoming_rx)
+                .bridge_browser_network_stream(&key, bridge, incoming_rx, traffic)
                 .await
             {
                 state.reset_browser_network_stream(&key, error).await;
@@ -1550,6 +1579,7 @@ impl AppState {
         key: &NetworkStreamKey,
         stream: DuplexStream,
         mut incoming: mpsc::Receiver<NetworkBinaryFrame>,
+        traffic: StreamTrafficCounters,
     ) -> Result<(), ProtocolError> {
         let (mut reader, mut writer) = tokio::io::split(stream);
         let mut buffer = vec![0_u8; NETWORK_MAX_CHUNK];
@@ -1566,6 +1596,7 @@ impl AppState {
                     } else {
                         send_window -= read;
                         self.send_browser_network_frame(key, NetworkBinaryKind::Data, buffer[..read].to_vec()).await?;
+                        traffic.source_to_destination.record(read);
                     }
                 }
                 frame = incoming.recv() => {
@@ -1573,6 +1604,7 @@ impl AppState {
                     match frame.kind {
                         NetworkBinaryKind::Data => {
                             writer.write_all(&frame.payload).await.map_err(|error| ProtocolError::new("network_io_error", error.to_string()))?;
+                            traffic.destination_to_source.record(frame.payload.len());
                             let amount = u32::try_from(frame.payload.len()).unwrap_or(u32::MAX).to_be_bytes().to_vec();
                             self.send_browser_network_frame(key, NetworkBinaryKind::WindowUpdate, amount).await?;
                         }
@@ -1652,7 +1684,7 @@ impl AppState {
             server_id: destination_server_id.to_string(),
             stream_id: self.inner.cluster.routed_id("net"),
         };
-        let traffic = self.inner.traffic.register_stream(
+        let traffic = self.inner.traffic.register_machine_stream(
             workspace_id,
             source_server_id,
             destination_server_id,
@@ -2265,6 +2297,34 @@ impl AppState {
             ClusterProjectionUpdate::WorkspaceUpsert { workspace } => {
                 self.upsert_workspace_info(workspace, true).await;
             }
+            ClusterProjectionUpdate::WorkspaceDeleted { workspace_id } => {
+                let (event, server_ids) = {
+                    let mut workspaces = self.inner.workspaces.write().await;
+                    let Some(workspace) = workspaces.remove(&workspace_id) else {
+                        return;
+                    };
+                    let event = Some(WorkspaceEvent {
+                        revision: workspace.revision.saturating_add(1),
+                        workspace_id: workspace_id.clone(),
+                        event: "workspace.deleted".to_string(),
+                        data: serde_json::to_value(&workspace.info).unwrap_or(Value::Null),
+                    });
+                    let server_ids = workspace.servers.keys().cloned().collect::<Vec<_>>();
+                    (event, server_ids)
+                };
+                if let Some(event) = event {
+                    self.publish_workspace_event(event);
+                }
+                for server_id in server_ids {
+                    self.release_server_runtime(
+                        &workspace_id,
+                        &server_id,
+                        "workspace deleted",
+                        "workspace_deleted",
+                    )
+                    .await;
+                }
+            }
             ClusterProjectionUpdate::ServerRenamed {
                 workspace_id,
                 server_id,
@@ -2424,7 +2484,7 @@ impl AppState {
         &self,
         delivery: ClusterSessionDelivery,
     ) -> Result<(), ProtocolError> {
-        let outgoing = {
+        let overloaded_route = {
             let mut sessions = self.inner.terminal_sessions.lock().await;
             let session = sessions
                 .get_mut(&delivery.session_id)
@@ -2444,18 +2504,62 @@ impl AppState {
             }) {
                 return Ok(());
             }
-            if let Some(revision) = delivery.revision {
-                session.last_revision = Some(revision);
+            let cursor_frame = if delivery.cursor {
+                session
+                    .stream_epoch
+                    .as_ref()
+                    .zip(delivery.revision)
+                    .map(|(stream_epoch, revision)| {
+                        serde_json::to_string(&TerminalServerMessage::Cursor {
+                            stream_epoch: stream_epoch.clone(),
+                            revision,
+                        })
+                        .map(SocketFrame::Text)
+                        .map_err(|error| ProtocolError::new("encode_error", error.to_string()))
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+            let route = (session.workspace_id.clone(), session.server_id.clone());
+            let send_result = session.outgoing.try_send(delivery.frame).and_then(|_| {
+                if let Some(cursor_frame) = cursor_frame {
+                    session.outgoing.try_send(cursor_frame)
+                } else {
+                    Ok(())
+                }
+            });
+            match send_result {
+                Ok(()) => {
+                    if let Some(revision) = delivery.revision {
+                        session.last_revision = Some(revision);
+                    }
+                    if delivery.close {
+                        sessions.remove(&delivery.session_id);
+                    }
+                    None
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    sessions.remove(&delivery.session_id);
+                    Some(route)
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    sessions.remove(&delivery.session_id);
+                    return Err(ProtocolError::new("terminal_closed", delivery.session_id));
+                }
             }
-            let outgoing = session.outgoing.clone();
-            if delivery.close {
-                sessions.remove(&delivery.session_id);
-            }
-            outgoing
         };
-        outgoing
-            .send(delivery.frame)
-            .map_err(|_| ProtocolError::new("terminal_closed", delivery.session_id))
+        if let Some((workspace_id, server_id)) = overloaded_route {
+            let message = ProxyMessage::TerminalDetach {
+                session_id: delivery.session_id,
+            };
+            if let Ok(frame) = proxy_message_frame(&message) {
+                let _ = self
+                    .send_server_frame(&workspace_id, &server_id, frame)
+                    .await;
+            }
+        }
+        Ok(())
     }
 
     async fn terminal_session_route(
@@ -2487,6 +2591,7 @@ impl AppState {
             server_id: server_id.to_string(),
             session_id: session_id.to_string(),
             revision: None,
+            cursor: false,
             close,
             frame: SocketFrame::Text(encoded),
         })
@@ -2621,12 +2726,9 @@ fn proxy_message_frame(message: &ProxyMessage) -> Result<SocketFrame, ProtocolEr
     Ok(SocketFrame::Text(encoded))
 }
 
-fn send_terminal_to_browser(
-    outgoing: &mpsc::UnboundedSender<SocketFrame>,
-    message: &TerminalServerMessage,
-) {
+fn send_terminal_to_browser(outgoing: &mpsc::Sender<SocketFrame>, message: &TerminalServerMessage) {
     if let Ok(encoded) = serde_json::to_string(message) {
-        let _ = outgoing.send(SocketFrame::Text(encoded));
+        let _ = outgoing.try_send(SocketFrame::Text(encoded));
     }
 }
 
@@ -3033,7 +3135,7 @@ mod tests {
             .await
             .expect("apply snapshot");
 
-        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let (terminal_tx, mut terminal_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
         state
             .attach_terminal("alpha", "agent-1", 120, 40, None, terminal_tx)
             .await
@@ -3541,11 +3643,21 @@ mod tests {
         let _ = source_rx.recv().await.expect("source data");
 
         assert_eq!(
-            traffic.pending_for("alpha", "source", "destination"),
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::VirtualNetwork,
+                "source",
+                "destination"
+            ),
             (7, 1)
         );
         assert_eq!(
-            traffic.pending_for("alpha", "destination", "source"),
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::VirtualNetwork,
+                "destination",
+                "source"
+            ),
             (8, 1)
         );
     }
@@ -3588,7 +3700,12 @@ mod tests {
 
     #[tokio::test]
     async fn browser_network_streams_bridge_data_and_close_cleanly() {
-        let state = AppState::new();
+        let traffic = TrafficRecorder::default();
+        let state = AppState::with_backplanes_and_traffic(
+            EventBus::in_process(),
+            ClusterBus::standalone("browser-traffic-test".to_string()),
+            traffic.clone(),
+        );
         let connection_id = Uuid::new_v4();
         let (server_tx, mut server_rx) = mpsc::unbounded_channel();
         state
@@ -3599,7 +3716,14 @@ mod tests {
         let opening_state = state.clone();
         let opening = tokio::spawn(async move {
             opening_state
-                .open_browser_network_stream("alpha", "server", Some("agent-a"), "127.0.0.1", 8080)
+                .open_browser_network_stream(
+                    "alpha",
+                    "server",
+                    Some("agent-a"),
+                    "127.0.0.1",
+                    8080,
+                    TrafficClass::AgentInterface,
+                )
                 .await
         });
         let open = expect_network(server_rx.recv().await.expect("browser open frame"));
@@ -3675,6 +3799,24 @@ mod tests {
         assert_eq!(close.kind, NetworkBinaryKind::HalfClose);
         tokio::task::yield_now().await;
         assert!(state.inner.browser_network_streams.lock().await.is_empty());
+        assert_eq!(
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::AgentInterface,
+                BROWSER_TRAFFIC_ENDPOINT,
+                "server"
+            ),
+            (7, 1)
+        );
+        assert_eq!(
+            traffic.pending_for(
+                "alpha",
+                TrafficClass::AgentInterface,
+                "server",
+                BROWSER_TRAFFIC_ENDPOINT
+            ),
+            (8, 1)
+        );
     }
 
     #[tokio::test]
@@ -3695,7 +3837,7 @@ mod tests {
                 .agents
                 .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
         }
-        let (browser_tx, mut browser_rx) = mpsc::unbounded_channel();
+        let (browser_tx, mut browser_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
         let session_id = state
             .attach_terminal("alpha", "agent-1", 120, 40, None, browser_tx)
             .await
@@ -3713,6 +3855,7 @@ mod tests {
             } if attached == &session_id
         ));
 
+        let replay = vec![b'x'; TERMINAL_REPLAY_CHUNK_BYTES + 1];
         state
             .terminal_ready(
                 "alpha",
@@ -3721,7 +3864,7 @@ mod tests {
                 &session_id,
                 TerminalReadyPayload {
                     revision: 7,
-                    replay: b"replay".to_vec(),
+                    replay: replay.clone(),
                     stream_epoch: Some("stream_a".to_string()),
                     gap: false,
                 },
@@ -3738,11 +3881,20 @@ mod tests {
                 stream_epoch: Some("stream_a".to_string()),
                 revision: Some(7),
                 gap: false,
+                replay_chunks: Some(2),
             }
         );
         assert_eq!(
             browser_rx.recv().await,
-            Some(SocketFrame::Binary(b"replay".to_vec()))
+            Some(SocketFrame::Binary(
+                replay[..TERMINAL_REPLAY_CHUNK_BYTES].to_vec()
+            ))
+        );
+        assert_eq!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Binary(
+                replay[TERMINAL_REPLAY_CHUNK_BYTES..].to_vec()
+            ))
         );
 
         state
@@ -3802,6 +3954,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_terminal_consumer_is_detached_when_its_queue_fills() {
+        let state = AppState::new();
+        let server = test_server();
+        let connection_id = Uuid::new_v4();
+        let (server_tx, mut server_rx) = mpsc::unbounded_channel();
+        state
+            .register_server(server, connection_id, server_tx)
+            .await
+            .expect("register controller");
+        {
+            let mut workspaces = state.inner.workspaces.write().await;
+            workspaces
+                .get_mut("alpha")
+                .expect("workspace")
+                .agents
+                .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
+        }
+        let (browser_tx, mut browser_rx) = mpsc::channel(1);
+        let session_id = state
+            .attach_terminal("alpha", "agent-1", 120, 40, None, browser_tx)
+            .await
+            .expect("attach terminal");
+        let _attach = server_rx.recv().await.expect("terminal attach");
+        state
+            .inner
+            .terminal_sessions
+            .lock()
+            .await
+            .get_mut(&session_id)
+            .expect("terminal session")
+            .stream_epoch = Some("stream_a".to_string());
+
+        state
+            .terminal_output(
+                "alpha",
+                "server",
+                connection_id,
+                &session_id,
+                1,
+                b"output".to_vec(),
+            )
+            .await
+            .expect("detach overloaded terminal without blocking controller");
+
+        assert_eq!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Binary(b"output".to_vec()))
+        );
+        assert!(!state
+            .inner
+            .terminal_sessions
+            .lock()
+            .await
+            .contains_key(&session_id));
+        let detach: ProxyMessage = serde_json::from_str(&expect_text(
+            server_rx.recv().await.expect("terminal detach"),
+        ))
+        .expect("decode terminal detach");
+        assert_eq!(
+            detach,
+            ProxyMessage::TerminalDetach {
+                session_id: session_id.clone(),
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn terminal_attach_forwards_a_stream_cursor() {
         let state = AppState::new();
         let server = test_server();
@@ -3819,7 +4038,7 @@ mod tests {
                 .agents
                 .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
         }
-        let (browser_tx, _browser_rx) = mpsc::unbounded_channel();
+        let (browser_tx, _browser_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
         let cursor = TerminalCursor {
             stream_epoch: "stream_a".to_string(),
             revision: 12,
@@ -4130,7 +4349,7 @@ mod tests {
             serde_json::json!({"accepted": true})
         );
 
-        let (browser_tx, mut browser_rx) = mpsc::unbounded_channel();
+        let (browser_tx, mut browser_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
         let session_id = state_a
             .attach_terminal(&workspace_id, &agent_id, 100, 30, None, browser_tx)
             .await
@@ -4164,6 +4383,32 @@ mod tests {
         assert_eq!(
             browser_rx.recv().await,
             Some(SocketFrame::Binary(b"replay".to_vec()))
+        );
+        state_b
+            .terminal_output(
+                &workspace_id,
+                &destination_id,
+                destination_connection,
+                &session_id,
+                5,
+                b"live".to_vec(),
+            )
+            .await
+            .expect("return live terminal output across proxies");
+        assert_eq!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Binary(b"live".to_vec()))
+        );
+        let cursor: TerminalServerMessage = serde_json::from_str(&expect_text(
+            browser_rx.recv().await.expect("cross-proxy cursor"),
+        ))
+        .expect("decode cross-proxy cursor");
+        assert_eq!(
+            cursor,
+            TerminalServerMessage::Cursor {
+                stream_epoch: "stream_b".to_string(),
+                revision: 5,
+            }
         );
         state_a
             .terminal_input(&session_id, b"hello".to_vec())

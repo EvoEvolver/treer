@@ -91,6 +91,12 @@ treer app list
 treer app restart docs
 ```
 
+When wildcard ingress is configured, every Managed App receives a stable,
+workspace-authenticated `public_url` on its own origin. Browser assets,
+root-relative paths, redirects, and App routes therefore resolve without the
+control plane's `/virtual-hosts/.../proxy/` tunnel prefix. Installations without
+wildcard ingress continue to use that authenticated tunnel as a fallback.
+
 Managed Apps do not add a new security boundary or secret store. More complex
 Apps may still use an external supervisor and register ordinary Treer services.
 
@@ -198,26 +204,25 @@ needed.
 The separate connection command contains a 10-minute, single-use enrollment key:
 
 ```bash
-TREER_ENROLLMENT_KEY='enr_v1_...' \
-  treer-agent-server connect \
+treer-agent-server connect \
+  --key 'enr_v1_...' \
   --proxy 'https://PROXY_HOST/'
 ```
 
 `connect` decodes the workspace ID from the key, uses the current directory as
 the workspace root, registers the Host service, and starts it. Before exchanging
-the single-use key, it validates local paths and binaries and probes the selected
-service manager. Linux `auto` mode prefers a host-pinned systemd user service;
-macOS prefers a per-user LaunchAgent with `KeepAlive`. If the persistent user
-service is unavailable, `auto` prints the reason and an explicit downgrade
-warning, starts the Host in the foreground, and keeps the command attached to
-it. Keep that terminal open or run it under a process supervisor. Force an
-early error instead with `--service-mode systemd`, or choose the fallback
-directly with `--service-mode foreground`.
+the single-use key, it validates local paths and binaries. On Linux and macOS,
+`auto` starts the Host detached with `nohup`, records its PID and process start
+identity, and writes output under the Treer state directory. This mode
+deliberately provides no start-at-boot or Host crash restart. Select a native
+user service explicitly with `--service-mode systemd` on Linux or
+`--service-mode launchd` on macOS; attached diagnostics remain available with
+`--service-mode foreground`.
 
-Linux setup checks systemd linger and prints an actionable warning when the
-service will stop after the last login session exits. It does not attempt a
-privileged linger change. `connect` reports success only after the local
-Controller health endpoint reports `proxy_connected`. Override
+Explicit Linux systemd setup checks linger and prints an actionable warning
+when the service will stop after the last login session exits. It does not
+attempt a privileged linger change. `connect` reports success only after the
+local Controller health endpoint reports `proxy_connected`. Override
 `TREER_WORKSPACE_ROOT`, `TREER_STATE_DIR`, `TREER_RUNTIME_DIR`, or
 `TREER_AGENT_SERVER_LISTEN` when needed. The first available loopback port
 starting at `8790` is saved per installed machine.
@@ -232,6 +237,12 @@ enrollment link does not create a duplicate machine. Shared home directories
 therefore give each host a separate installation identity. The identity is
 random and does not contain or derive from a MAC address.
 
+Reconnecting an installed workspace uses the new enrollment key to atomically
+bind that installation identity and rotate the machine credential. It does not
+require the locally saved machine credential to remain valid, so a machine that
+was removed or whose credential was revoked can be enrolled again without
+deleting its local service configuration first.
+
 Controller and Host configuration and service-manager entries are named by the
 Proxy-issued server ID, not by workspace. The Linux unit is pinned to the
 installation hostname with `ConditionHost`, and the Host Unix socket lives in
@@ -241,8 +252,8 @@ the node-local runtime directory (`$XDG_RUNTIME_DIR/treer`, normally
 Automation must opt in explicitly and provide a name on first setup:
 
 ```bash
-TREER_ENROLLMENT_KEY='enr_v1_...' \
-  treer-agent-server connect \
+treer-agent-server connect \
+  --key 'enr_v1_...' \
   --proxy 'https://PROXY_HOST/' \
   --non-interactive --accept-risk --name 'build-machine'
 ```
@@ -333,33 +344,29 @@ treer-agent-server service --workspace WORKSPACE_ID repair
 treer-agent-server service --workspace WORKSPACE_ID repair --service-mode systemd
 ```
 
-The default `auto` repair may visibly downgrade to foreground mode under the
-same rules as `connect`; in that case the repair command remains attached to
-the Host. When switching supervision modes, Treer removes the old systemd unit
-or LaunchAgent before activating the replacement. An inactive partial systemd
-registration can be cleaned even while the user bus is unavailable. A running
-Host is never orphaned: if its current manager cannot stop it, repair exits and
-asks the operator to stop the existing foreground command or restore the user
-manager before retrying.
+The default `auto` repair switches the Host to detached `nohup` mode under the
+same rules as `connect`. When switching supervision modes, Treer removes the old
+systemd unit or LaunchAgent, or stops the old `nohup` process, before activating
+the replacement. An inactive partial systemd registration can be cleaned even
+while the user bus is unavailable. A running Host is never orphaned: if its
+current manager cannot stop it, repair exits and asks the operator to stop the
+existing foreground command or restore the user manager before retrying.
 
 `--tui` opens an interactive dashboard for the installed workspace. It shows
 the local Controller health, Proxy reachability, current supervision mode, and
-Host-owned Agents on this machine. A foreground downgrade is highlighted with
-its persisted reason. The same mode and reason appear in the web machine
-overview after the Controller connects. The Agent list remains available from
-local state while the Proxy is unreachable, and the dashboard provides start,
-stop, full restart, and Controller-only restart actions.
+Host-owned Agents on this machine. The same mode and any persisted fallback
+reason appear in the web machine overview after the Controller connects. The
+Agent list remains available from local state while the Proxy is unreachable,
+and the dashboard provides start, stop, full restart, and Controller-only
+restart actions.
 Stop and full restart require confirmation because they terminate Host-owned
 Agents and PTYs. Press `?` in the dashboard to show all key bindings.
 
 Add `--workspace WORKSPACE_ID` after `service` when this host has more than one
-install. On Linux, an administrator can run `loginctl enable-linger
-USER` when the service must survive the final logout; otherwise keep a
-foreground Host on a fixed machine, for example in tmux. On macOS, a
-LaunchAgent starts at user login; an always-on pre-login LaunchDaemon would
-require a separate privileged installation flow. Connecting the same hostname
-into the same workspace reuses the existing machine identity instead of
-creating a second LaunchAgent.
+install. The default `nohup` Host survives terminal logout but not reboot or
+process failure; run `service start` after either event. Connecting the same
+hostname into the same workspace reuses the existing machine identity instead
+of creating a second Host registration.
 
 ## Users, administrators, and invitations
 
@@ -385,6 +392,11 @@ their email or preferred name without changing their stable identity or
 organization access. Organization owners and administrators can also rename
 their organization. Organization members can create and rename workspaces;
 renaming keeps the workspace ID, enrolled machines, Agents, and services intact.
+Workspaces are organization-visible by default. A workspace owner can restrict
+one to explicitly added organization members and organization groups. Workspace
+grants use `owner` and `member`; only an owner can change access or delete the
+workspace. Organization owners and administrators are implicit owners of every
+workspace, and the workspace creator starts as an explicit owner.
 
 Users, invitations, sessions, organizations, machine credentials, services,
 App OAuth codes, and workload signing keys are stored in PostgreSQL. The Proxy requires
@@ -545,7 +557,8 @@ Workspace members and managed Agents can also save reusable launch profiles:
 ```bash
 treer agent admin profile create reviewer --cwd . codex -- review --base main
 treer agent admin profile list
-treer agent admin profile launch reviewer --machine build-machine --name review-42
+treer agent admin profile launch reviewer --machine build-machine \
+  --name review-42 --cwd packages/api
 ```
 
 The web Create Agent dialog includes a built-in Terminal option. It starts the
@@ -572,6 +585,11 @@ explicit shell executable such as `sh` with `-lc` when shell expansion is
 required. Profiles are plaintext workspace configuration and must not contain
 secrets. New workspaces include editable and deletable Codex, Claude, Pi, and
 OpenCode profiles; existing workspaces are left unchanged.
+
+`profile launch --cwd` overrides the saved working directory for that launch
+without changing the profile. The directory is relative to the selected
+machine's Host root and must resolve inside that root. Omitting it uses the
+profile's saved `cwd`.
 
 ## Host and Controller
 
@@ -699,25 +717,37 @@ Treer consumes its own ingress cookie/header and strips client-supplied
 `X-Treer-*` identity headers before forwarding. Only HTTP services can be
 published. Disabling or deleting an ingress does not stop the service.
 
-The Proxy also records hourly payload totals for each relayed machine direction.
-Workspace members can query the last 1 to 720 hours without scanning individual
-connections:
+The Proxy also records an hourly logical-usage ledger for payload successfully
+delivered through Treer. Meter version 1 treats payload bytes in both directions
+as billable and classifies them as `virtual_network`, `service_ingress`,
+`virtual_host`, or `agent_interface`. Browser-side traffic uses the stable
+`browser` client endpoint, so requests appear as `browser` to the destination
+machine and responses use the reverse direction. Workspace members can query
+the last 1 to 720 hourly buckets without scanning individual connections:
 
 ```text
 GET /api/workspaces/<workspace_id>/traffic?hours=24
 ```
 
-The response reports `source_server_id`, `destination_server_id`,
-`payload_bytes`, and `payload_frames`. Counters flush to PostgreSQL every ten
-seconds; protocol overhead, PTY bytes, public ingress, and direct internet
-egress are intentionally excluded. Hourly rows are retained for 90 days.
+The response reports the traffic class, endpoint types and IDs, raw
+`payload_bytes`, `payload_frames`, `billable_bytes`, and `meter_version`.
+Queries include the serving Proxy's not-yet-flushed counters; counters flush to
+PostgreSQL every ten seconds and on graceful shutdown. Another Proxy replica's
+newest counters may remain invisible until its next flush. Legacy machine
+traffic rows remain readable during the 90-day retention window. NATS protocol
+overhead, control-plane messages, retries, PTY bytes, and direct internet egress
+are intentionally excluded: broker topology must not change customer usage.
+This aggregate ledger is a billing foundation, not yet an invoice-grade source;
+hard process failure can lose the pending interval until a durable usage journal
+is added.
 
 Deleting an online machine sends a confirmed shutdown command over its existing
 Controller WebSocket before revoking the machine credential. A capable
-Controller then stops the local systemd user service or macOS LaunchAgent, which
-also terminates its Host and managed agents. The service remains installed and
-can still be started manually. Offline machines and older Controllers are
-deleted without waiting; their revoked credential prevents a later reconnect.
+Controller then stops the local `nohup` process, systemd user service, or macOS
+LaunchAgent, which also terminates its Host and managed agents. The service
+remains installed and can still be started manually. Offline machines and older
+Controllers are deleted without waiting; their revoked credential prevents a
+later reconnect.
 
 Authorization is a separate Proxy subsystem. The current policy engine defaults
 to allow and evaluates ordered asynchronous policy evaluators using
@@ -945,10 +975,10 @@ just test-db-up
 just check
 ```
 
-The complete gate checks documentation links, release tooling, both React
-builds, Mail and Telegram App tests, and the full Rust workspace. While
-iterating on messaging, use `just app-test` and `just messaging-e2e`; run the
-complete gate before handoff.
+The complete gate checks documentation links, release tooling, the control-plane
+React build, updater tests, and the full Rust workspace. Workspace App and AIS
+adapter tests are focused, opt-in checks; while iterating on messaging, use
+`just app-test` and `just messaging-e2e`.
 
 ## License
 

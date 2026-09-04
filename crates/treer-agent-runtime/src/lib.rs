@@ -17,6 +17,7 @@ use treer_host_protocol::{
 use uuid::Uuid;
 
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
+const COMPLETED_PROCESS_LIMIT: usize = 256;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const BRACKETED_PASTE_ENABLE: &[u8] = b"\x1b[?2004h";
 const BRACKETED_PASTE_DISABLE: &[u8] = b"\x1b[?2004l";
@@ -62,15 +63,16 @@ struct RuntimeInner {
     host_epoch: String,
     root: PathBuf,
     processes: RwLock<HashMap<String, Arc<HostProcess>>>,
+    completed_processes: Mutex<VecDeque<String>>,
     process_events: broadcast::Sender<HostProcessInfo>,
     output_events: broadcast::Sender<HostOutputChunk>,
 }
 
 struct HostProcess {
     info: Mutex<HostProcessInfo>,
-    input: std_mpsc::Sender<InputWrite>,
-    child: Mutex<Box<dyn Child + Send + Sync>>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    input: Mutex<Option<std_mpsc::Sender<InputWrite>>>,
+    child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     output: Mutex<OutputBuffer>,
     stopping: AtomicBool,
 }
@@ -194,6 +196,7 @@ impl HostRuntime {
                 host_epoch: format!("host_{}", Uuid::new_v4().simple()),
                 root,
                 processes: RwLock::new(HashMap::new()),
+                completed_processes: Mutex::new(VecDeque::new()),
                 process_events,
                 output_events,
             }),
@@ -292,9 +295,9 @@ impl HostRuntime {
         };
         let process = Arc::new(HostProcess {
             info: Mutex::new(info.clone()),
-            input,
-            child: Mutex::new(child),
-            master: Mutex::new(pair.master),
+            input: Mutex::new(Some(input)),
+            child: Mutex::new(Some(child)),
+            master: Mutex::new(Some(pair.master)),
             output: Mutex::new(output),
             stopping: AtomicBool::new(false),
         });
@@ -332,8 +335,14 @@ impl HostRuntime {
         let process = self.get_running(process_id)?;
         for write in writes {
             let (result, result_rx) = std_mpsc::sync_channel(1);
-            process
+            let input = process
                 .input
+                .lock()
+                .map_err(|_| RuntimeError::Terminal("terminal input lock poisoned".to_string()))?
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?;
+            input
                 .send(InputWrite {
                     data: write.data.clone(),
                     delay: Duration::from_millis(write.delay_ms),
@@ -358,11 +367,14 @@ impl HostRuntime {
         cols: u16,
         rows: u16,
     ) -> Result<HostProcessInfo, RuntimeError> {
-        let process = self.get(process_id)?;
-        process
+        let process = self.get_running(process_id)?;
+        let master = process
             .master
             .lock()
-            .map_err(|_| RuntimeError::Terminal("terminal lock poisoned".to_string()))?
+            .map_err(|_| RuntimeError::Terminal("terminal lock poisoned".to_string()))?;
+        master
+            .as_ref()
+            .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?
             .resize(PtySize {
                 rows: rows.max(1),
                 cols: cols.max(1),
@@ -384,6 +396,8 @@ impl HostRuntime {
             .child
             .lock()
             .map_err(|_| RuntimeError::Terminal("child lock poisoned".to_string()))?
+            .as_mut()
+            .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?
             .kill()
             .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
         self.inner
@@ -452,6 +466,46 @@ impl RuntimeInner {
         let _ = self.process_events.send(snapshot.clone());
         Some(snapshot)
     }
+
+    fn finish_process(&self, process: &HostProcess) {
+        if let Ok(mut input) = process.input.lock() {
+            input.take();
+        }
+        if let Ok(mut master) = process.master.lock() {
+            master.take();
+        }
+        if let Ok(mut child) = process.child.lock() {
+            child.take();
+        }
+
+        let process_id = process.info.lock().ok().map(|info| info.process_id.clone());
+        let Some(process_id) = process_id else {
+            return;
+        };
+        let evicted = self
+            .completed_processes
+            .lock()
+            .ok()
+            .and_then(|mut completed| {
+                push_bounded(&mut completed, process_id, COMPLETED_PROCESS_LIMIT)
+            });
+        if let Some(evicted) = evicted {
+            if let Ok(mut processes) = self.processes.write() {
+                processes.remove(&evicted);
+            }
+        }
+    }
+}
+
+fn push_bounded(
+    completed: &mut VecDeque<String>,
+    process_id: String,
+    limit: usize,
+) -> Option<String> {
+    completed.push_back(process_id);
+    (completed.len() > limit)
+        .then(|| completed.pop_front())
+        .flatten()
 }
 
 impl Drop for RuntimeInner {
@@ -462,8 +516,10 @@ impl Drop for RuntimeInner {
         for process in processes.values() {
             process.stopping.store(true, Ordering::Release);
             if let Ok(mut child) = process.child.lock() {
-                if let Err(error) = child.kill() {
-                    warn!(%error, "failed to stop child while dropping host runtime");
+                if let Some(child) = child.as_mut() {
+                    if let Err(error) = child.kill() {
+                        warn!(%error, "failed to stop child while dropping host runtime");
+                    }
                 }
             }
         }
@@ -544,11 +600,11 @@ fn spawn_process_monitor(runtime: Weak<RuntimeInner>, process: Arc<HostProcess>)
         let Some(runtime) = runtime.upgrade() else {
             break;
         };
-        let exit = process
-            .child
-            .lock()
-            .ok()
-            .and_then(|mut child| child.try_wait().ok().flatten());
+        let exit = process.child.lock().ok().and_then(|mut child| {
+            child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+        });
         if let Some(exit) = exit {
             let exit_code = i32::try_from(exit.exit_code()).ok();
             runtime.update_process(&process, |info| {
@@ -556,6 +612,7 @@ fn spawn_process_monitor(runtime: Weak<RuntimeInner>, process: Arc<HostProcess>)
                 info.exit_code = exit_code;
                 info.exited_at = Some(Utc::now());
             });
+            runtime.finish_process(&process);
             break;
         }
     });
@@ -595,6 +652,29 @@ mod tests {
                 return replay;
             }
             assert!(Instant::now() < deadline, "process output did not arrive");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_resources_released(process: &HostProcess) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let exited = process
+                .info
+                .lock()
+                .expect("process info")
+                .exited_at
+                .is_some();
+            let input_released = process.input.lock().expect("process input").is_none();
+            let child_released = process.child.lock().expect("process child").is_none();
+            let master_released = process.master.lock().expect("process master").is_none();
+            if exited && input_released && child_released && master_released {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "exited process resources were not released"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -671,6 +751,79 @@ mod tests {
         assert!(output.bracketed_paste);
         output.push("p1", b"\x1b[?2004l");
         assert!(!output.bracketed_paste);
+    }
+
+    #[test]
+    fn completed_process_history_is_bounded() {
+        let mut completed = VecDeque::new();
+        assert_eq!(push_bounded(&mut completed, "p1".to_string(), 2), None);
+        assert_eq!(push_bounded(&mut completed, "p2".to_string(), 2), None);
+        assert_eq!(
+            push_bounded(&mut completed, "p3".to_string(), 2),
+            Some("p1".to_string())
+        );
+        assert_eq!(
+            completed,
+            VecDeque::from(["p2".to_string(), "p3".to_string()])
+        );
+    }
+
+    #[test]
+    fn exited_process_releases_live_resources_and_keeps_replay() {
+        let temporary = std::env::temp_dir().join(format!(
+            "treer-host-runtime-cleanup-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temporary).expect("create temporary directory");
+        let runtime = HostRuntime::new(&temporary).expect("create runtime");
+        runtime
+            .spawn(HostSpawnRequest {
+                process_id: "p1".to_string(),
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "printf cleanup-ok".to_string()],
+                cwd: ".".to_string(),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                metadata: json!({"opaque": true}).to_string(),
+            })
+            .expect("spawn process");
+        wait_for_output(&runtime, "p1", "cleanup-ok");
+
+        let process = runtime.get("p1").expect("process record");
+        wait_for_resources_released(&process);
+
+        let replay = runtime.read("p1", None).expect("read retained output");
+        assert!(decoded(&replay).contains("cleanup-ok"));
+        std::fs::remove_dir_all(temporary).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn stopped_process_releases_live_resources() {
+        let temporary = std::env::temp_dir().join(format!(
+            "treer-host-runtime-stop-cleanup-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temporary).expect("create temporary directory");
+        let runtime = HostRuntime::new(&temporary).expect("create runtime");
+        runtime
+            .spawn(HostSpawnRequest {
+                process_id: "p1".to_string(),
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "printf ready; exec cat".to_string()],
+                cwd: ".".to_string(),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                metadata: json!({"opaque": true}).to_string(),
+            })
+            .expect("spawn process");
+        wait_for_output(&runtime, "p1", "ready");
+
+        let process = runtime.get("p1").expect("process record");
+        runtime.stop("p1").expect("stop process");
+        wait_for_resources_released(&process);
+        std::fs::remove_dir_all(temporary).expect("remove temporary directory");
     }
 
     #[test]

@@ -4,6 +4,11 @@ CREATE TABLE IF NOT EXISTS proxy_secrets (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS proxy_schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,
@@ -61,7 +66,81 @@ CREATE TABLE IF NOT EXISTS workspaces (
     created_by TEXT NOT NULL,
     FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE
 );
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'organization';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'workspaces'::regclass
+          AND conname = 'workspaces_access_mode_check'
+    ) THEN
+        ALTER TABLE workspaces ADD CONSTRAINT workspaces_access_mode_check
+            CHECK(access_mode IN ('organization', 'restricted'));
+    END IF;
+END
+$$;
 CREATE INDEX IF NOT EXISTS workspaces_organization_id ON workspaces(organization_id);
+CREATE INDEX IF NOT EXISTS workspaces_active_organization
+    ON workspaces(organization_id) WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS organization_groups (
+    group_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS organization_groups_name
+    ON organization_groups(organization_id, lower(name));
+
+CREATE TABLE IF NOT EXISTS organization_group_members (
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    added_at TEXT NOT NULL,
+    added_by TEXT NOT NULL,
+    PRIMARY KEY(group_id, user_id),
+    FOREIGN KEY(group_id) REFERENCES organization_groups(group_id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workspace_user_grants (
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, user_id),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workspace_group_grants (
+    workspace_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, group_id),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(group_id) REFERENCES organization_groups(group_id) ON DELETE CASCADE
+);
+
+WITH migration AS (
+    INSERT INTO proxy_schema_migrations(name, applied_at)
+    VALUES('workspace-access-v1', CURRENT_TIMESTAMP::TEXT)
+    ON CONFLICT(name) DO NOTHING
+    RETURNING 1
+)
+INSERT INTO workspace_user_grants(workspace_id, user_id, role, created_at, created_by)
+SELECT w.workspace_id, w.created_by, 'owner', w.created_at, w.created_by
+FROM workspaces w
+JOIN organization_members om
+  ON om.organization_id = w.organization_id AND om.user_id = w.created_by
+WHERE EXISTS(SELECT 1 FROM migration)
+ON CONFLICT(workspace_id, user_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS agent_launch_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -415,5 +494,26 @@ CREATE TABLE IF NOT EXISTS machine_traffic_hourly (
 );
 CREATE INDEX IF NOT EXISTS machine_traffic_hourly_workspace_window
     ON machine_traffic_hourly(workspace_id, window_start DESC);
+CREATE TABLE IF NOT EXISTS traffic_usage_hourly (
+    workspace_id TEXT NOT NULL,
+    window_start BIGINT NOT NULL,
+    traffic_class TEXT NOT NULL CHECK(traffic_class IN ('virtual_network', 'service_ingress', 'virtual_host', 'agent_interface')),
+    source_type TEXT NOT NULL CHECK(source_type IN ('client', 'machine')),
+    source_id TEXT NOT NULL,
+    destination_type TEXT NOT NULL CHECK(destination_type IN ('client', 'machine')),
+    destination_id TEXT NOT NULL,
+    payload_bytes BIGINT NOT NULL DEFAULT 0 CHECK(payload_bytes >= 0),
+    payload_frames BIGINT NOT NULL DEFAULT 0 CHECK(payload_frames >= 0),
+    billable_bytes BIGINT NOT NULL DEFAULT 0 CHECK(billable_bytes >= 0),
+    meter_version INTEGER NOT NULL CHECK(meter_version > 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(
+        workspace_id, window_start, traffic_class, source_type, source_id,
+        destination_type, destination_id, meter_version
+    ),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+);
+CREATE INDEX IF NOT EXISTS traffic_usage_hourly_workspace_window
+    ON traffic_usage_hourly(workspace_id, window_start DESC);
 CREATE INDEX IF NOT EXISTS virtual_network_hosts_service
     ON virtual_network_hosts(workspace_id, service_id);

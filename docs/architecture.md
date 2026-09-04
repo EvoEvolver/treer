@@ -83,13 +83,17 @@ also checks current service existence and, for humans, current membership.
 
 A Managed App is a durable Proxy record for one command, one machine, and one
 HTTP UI port. Creation transactionally allocates a stable machine service and
-virtual host. Start, stop, restart, delete, list, and show are available through
-the browser, public API, Controller-local API, and `treer app` CLI. User-triggered
-lifecycle changes append workspace audit events.
+virtual host. When wildcard ingress is configured, it also allocates a stable
+workspace-authenticated origin and exposes it as `public_url`; startup
+reconciliation backfills that origin for existing Apps. Start, stop, restart,
+delete, list, and show are available through the browser, public API,
+Controller-local API, and `treer app` CLI. User-triggered lifecycle changes
+append workspace audit events.
 
 Managed App lifecycle is the only Agent-authorized path that allocates a
-service or virtual host. Direct Agent routes for service, virtual-host, and
-ingress mutation return `managed_app_required`, including for older CLIs.
+service, virtual host, or its owned ingress. Direct Agent routes for arbitrary
+service, virtual-host, and ingress mutation return `managed_app_required`,
+including for older CLIs.
 Logged-in workspace users retain those controls through the browser/public API
 for operator-managed infrastructure.
 
@@ -134,14 +138,15 @@ runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
 
-The Host is supervised by a per-user systemd service on Linux or a LaunchAgent
-on macOS when that user manager is available. An Apple container machine is a
-Linux guest: install it with `treer --skill macos-container` and a system
-unit, not a Mac LaunchAgent. Do not reuse a Mac `server_id` inside the guest.
-Installation probes supervision
-before consuming a single-use enrollment key. Automatic mode visibly falls
-back to an attached foreground Host when persistent supervision is unavailable;
-the persisted service-manager choice and fallback reason keep later lifecycle
+Automatic mode starts the Host as a detached `nohup` process on Linux and
+macOS. Treer records the PID and process start identity and redirects output to
+its state directory so lifecycle commands can reject reused PIDs and manage the
+correct Host. This intentionally does not provide start-at-boot or Host crash
+restart. A per-user systemd service or LaunchAgent remains an explicit operator
+choice, and attached foreground mode remains available for diagnostics. An
+Apple container machine is a Linux guest: install it with `treer --skill
+macos-container` and do not reuse a Mac `server_id` inside the guest. The
+persisted service-manager choice and fallback reason keep later lifecycle
 commands and machine diagnostics consistent. The Controller publishes that
 state as an optional machine snapshot field so older Controllers remain valid
 during rolling upgrades. TUI reads the same persisted state locally.
@@ -149,10 +154,16 @@ Startup is complete only when the Controller identity endpoint reports
 `proxy_connected`. Local `/api/agents` success is not a Proxy lease. Because
 service configuration is saved before native registration, `service repair` can
 reconstruct a partial installation without another enrollment key. Manager
-changes remove the old native registration first and reject transitions that
-would leave a running Host owned by the wrong supervisor. `connect` reuses the
+changes remove the old native registration or stop the old `nohup` process
+first, and reject transitions that would leave a running Host owned by the
+wrong supervisor. `connect` reuses the
 existing `server_id` for an already-installed hostname and workspace; a second
 Controller for that `server_id` fails if the listen socket is already live.
+Re-enrollment sends the installed `server_id` with the persistent installation
+identity, and the Proxy validates and rotates the credential in the enrollment
+transaction. Recovery therefore does not depend on the previous machine
+credential and does not consume the one-use key before identity conflicts have
+been checked.
 Service commands without `--workspace` list local installs or, when exactly one
 exists, use it. They no longer imply the workspace name `default`.
 
@@ -192,7 +203,10 @@ Browser terminal attach is revisioned. The Host keeps a bounded PTY output ring
 keyed by stream epoch. Reconnects send the client's last cursor; the Host
 returns only later chunks and a gap flag when the ring has slid past that
 cursor. Live Controller lag resyncs from the same Host read instead of dropping
-bytes. This is opaque byte replay, not Agent-protocol item storage.
+bytes. When a process exits, the Host releases its child and PTY resources
+immediately and retains only the latest 256 completed process records for
+Controller restart recovery. This is opaque byte replay, not Agent-protocol
+item storage.
 
 ## Agent Interface Server
 
@@ -280,11 +294,35 @@ confirmed, so noise and coughs do not spend ASR tokens. Vendor ASR and LLM keys 
 Proxy environment variables. This is not the later confirm-card Voice Live
 protocol, and the phone does not run the Treer CLI.
 
+Workspace access is either `organization` or `restricted`. The former admits
+every current organization member; the latter admits only direct user grants,
+group grants, workspace creators, and organization managers. Direct and group
+grants carry `owner` or `member`, with owner taking precedence. Organization
+`owner`/`admin` roles imply workspace ownership, and workspace creation adds an
+explicit owner grant for the creator.
+Removing an organization member also clears that user's direct workspace and
+group grants.
+
+Workspace deletion is workspace-owner-only and requires every
+Machine in the workspace to be deleted first. Deletion is lazy: PostgreSQL
+marks the workspace with a deletion tombstone and revokes remaining Agent
+credentials, while retaining its messages, traffic history, policies, and
+other records. Active workspace queries and authentication exclude tombstoned
+rows. The Proxy then evicts the affected credential, service-ingress, and
+virtual-host caches, removes the workspace from in-memory active state, and
+broadcasts a `WorkspaceDeleted` cluster projection so other Proxies stop
+serving it.
+
 PostgreSQL is the durable source for accounts, organizations, workspaces,
 machine credentials, services, ingresses, App OAuth codes, policy, audit,
-traffic counters, and Core Message. NATS supplies events and cross-Proxy live
-routing but is not Message truth. App SQLite databases contain only App-owned
-sessions or external delivery mappings.
+the logical traffic-usage ledger, and Core Message. Usage is metered once after
+payload delivery and classified by route and meter version; NATS framing,
+control messages, fan-out, and retries are operational transport costs rather
+than customer usage. The legacy machine-traffic table remains read-compatible
+during retention while new counters write to `traffic_usage_hourly`. NATS
+supplies events and cross-Proxy live routing but is not Message or billing
+truth. App SQLite databases contain only App-owned sessions or external
+delivery mappings.
 
 ## Self-hosted control plane updates
 

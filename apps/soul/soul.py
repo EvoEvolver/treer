@@ -63,6 +63,27 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def root_representation(accept: str, user_agent: str) -> str:
+    choices: list[tuple[float, int, str]] = []
+    for order, raw_entry in enumerate(accept.split(",")):
+        parts = [part.strip().lower() for part in raw_entry.split(";")]
+        media_type = parts[0]
+        if media_type not in {"text/html", "text/markdown"}:
+            continue
+        quality = 1.0
+        for parameter in parts[1:]:
+            if parameter.startswith("q="):
+                try:
+                    quality = float(parameter[2:])
+                except ValueError:
+                    quality = 0.0
+        if 0 < quality <= 1:
+            choices.append((-quality, order, media_type))
+    if choices:
+        return min(choices)[2]
+    return "text/html" if "mozilla/" in user_agent.lower() else "text/markdown"
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -360,15 +381,16 @@ class SoulHandler(BaseHTTPRequestHandler):
         try:
             path = urlsplit(self.path).path.rstrip("/") or "/"
             if path == "/":
-                self._file(APP_ROOT / "AGENT.md", "text/plain; charset=utf-8", head=head)
+                representation = root_representation(
+                    self.headers.get("Accept", ""), self.headers.get("User-Agent", "")
+                )
+                target = APP_ROOT / ("web/index.html" if representation == "text/html" else "AGENT.md")
+                self._file(target, f"{representation}; charset=utf-8", head=head, vary=True)
                 return
-            if path == "/_human":
-                self._file(APP_ROOT / "web" / "index.html", "text/html; charset=utf-8", head=head)
-                return
-            if path == "/_human/app.css":
+            if path == "/app.css":
                 self._file(APP_ROOT / "web" / "app.css", "text/css; charset=utf-8", head=head)
                 return
-            if path == "/_human/app.js":
+            if path == "/app.js":
                 self._file(APP_ROOT / "web" / "app.js", "text/javascript; charset=utf-8", head=head)
                 return
             if path == "/health":
@@ -504,7 +526,7 @@ class SoulHandler(BaseHTTPRequestHandler):
             raise SoulError(400, "invalid_json", "request body must be an object")
         return value
 
-    def _file(self, path: Path, content_type: str, head: bool = False) -> None:
+    def _file(self, path: Path, content_type: str, head: bool = False, vary: bool = False) -> None:
         try:
             size = path.stat().st_size
         except FileNotFoundError as error:
@@ -514,6 +536,8 @@ class SoulHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(size))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if vary:
+            self.send_header("Vary", "Accept, User-Agent")
         if content_type.startswith("text/html"):
             self.send_header(
                 "Content-Security-Policy",

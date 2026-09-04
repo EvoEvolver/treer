@@ -3,6 +3,8 @@
 Treer supports two deployment forms. A Managed App is a single HTTP process
 created with `treer app create`; Treer persists its command, machine, service,
 and virtual host, and restores the process after exit or Controller reconnect.
+With wildcard ingress configured, Treer also owns a stable,
+workspace-authenticated `public_url` for the App.
 An externally managed App is started by an operator or another supervisor; a
 logged-in workspace user then registers its ordinary service through the
 control plane. Managed Agents cannot register service, virtual-host, or ingress
@@ -14,11 +16,11 @@ with the Agent's existing Policy subject. Core rechecks Policy for every
 operation; process isolation, secrets, configuration, state, upgrades, and
 network access remain deployment concerns.
 
-Every standalone App follows the [App guidelines](GUIDELINES.md): `/` is an
-Agent-readable GitHub Flavored Markdown manual, data pages are JSON, and human
-HTML and browser assets live below `/_human/`. Agent Interfaces such as Codex UI
-and Pi UI are embedded AIS surfaces rather than standalone App indexes and
-continue to expose their registered `ui_path`.
+Every standalone App follows the [App guidelines](GUIDELINES.md): `/` negotiates
+between an Agent-readable GitHub Flavored Markdown manual and the human HTML
+interface, while data pages remain JSON. Agent Interfaces such as Codex UI and
+Pi UI are embedded AIS surfaces rather than standalone App indexes and continue
+to expose their registered `ui_path`.
 
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
@@ -30,6 +32,8 @@ continue to expose their registered `ui_path`.
   uploads environment-bound state bundles and launches command Agents from them.
 - [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for
   repositories shared by Agents and humans.
+- [`paper`](paper/README.md) is a small filesystem-backed collaborative LaTeX
+  editor with Yjs, inline review macros, and server-side PDF compilation.
 - [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
   [`dsh-ais`](dsh-ais/README.md), [`claude-ais`](claude-ais/README.md),

@@ -30,11 +30,24 @@ interface TerminalControlMessage {
   stream_epoch?: string
   revision?: number
   gap?: boolean
+  replay_chunks?: number
   reason?: string
   error?: { message?: string }
 }
 
 const MAX_PENDING_INPUT_BYTES = 32_768
+const TERMINAL_FLOW_WINDOW_BYTES = 256 * 1024
+const MAX_PENDING_OUTPUT_BYTES = TERMINAL_FLOW_WINDOW_BYTES * 2
+const MAX_PENDING_OUTPUT_WRITES = 1024
+
+interface PendingTerminalWrite {
+  data: Uint8Array | null
+  bytes: number
+  cursor: StreamCursor | null
+  waitsForCursor: boolean
+  refreshAfterWrite: boolean
+  parsed: boolean
+}
 
 function shouldResetTerminal(cursor: StreamCursor | null, message: TerminalControlMessage) {
   if (message.gap || !message.stream_epoch) return true
@@ -42,7 +55,7 @@ function shouldResetTerminal(cursor: StreamCursor | null, message: TerminalContr
 }
 
 function terminalUrl(workspaceId: string, agentId: string, cols: number, rows: number, cursor: StreamCursor | null) {
-  const params = new URLSearchParams({ cols: String(cols), rows: String(rows) })
+  const params = new URLSearchParams({ cols: String(cols), rows: String(rows), flow_control: "true" })
   if (cursor) {
     params.set("stream_epoch", cursor.stream_epoch)
     params.set("since_revision", String(cursor.revision))
@@ -73,12 +86,22 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     let socket: WebSocket | null = null
     let reconnectTimer: number | undefined
     let resizeTimer: number | undefined
+    let refreshFrame = 0
     let reconnectAttempt = 0
     let reconnectAllowed = true
     let lastHostWidth = 0
     let lastHostHeight = 0
     let cursor: StreamCursor | null = null
+    let replayChunksRemaining = 0
+    let replayCursor: StreamCursor | null = null
+    let activeWrite = false
+    let pendingOutputBytes = 0
+    let reconnectAfterWrites = false
+    let resetOnReady = false
+    let flowControlActive = false
     const pendingInput: string[] = []
+    const writeQueue: PendingTerminalWrite[] = []
+    const commitQueue: PendingTerminalWrite[] = []
     let pendingInputBytes = 0
     const terminal = new Terminal({
       cursorBlink: false,
@@ -146,6 +169,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       }
     }
 
+    const acknowledgeWrite = (target: WebSocket, bytes: number) => {
+      if (!flowControlActive || target.readyState !== WebSocket.OPEN) return
+      target.send(JSON.stringify({ type: "ack", bytes }))
+    }
+
     const fitIfHostChanged = () => {
       const { width, height } = host.getBoundingClientRect()
       const widthChanged = Math.abs(width - lastHostWidth) >= 0.5
@@ -163,6 +191,83 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       sendResize()
     }
 
+    const finalizeWrites = () => {
+      while (commitQueue.length > 0) {
+        const next = commitQueue[0]
+        if (!next.parsed || (next.waitsForCursor && !next.cursor)) break
+        if (next.cursor) cursor = next.cursor
+        commitQueue.shift()
+      }
+    }
+
+    const maybeReconnect = () => {
+      if (disposed || !reconnectAfterWrites || activeWrite || writeQueue.length > 0) return
+      reconnectAfterWrites = false
+      const delay = Math.min(1_000 * 2 ** reconnectAttempt, 10_000)
+      reconnectAttempt += 1
+      reconnectTimer = window.setTimeout(() => connect(false), delay)
+    }
+
+    const pumpWrites = () => {
+      if (disposed) return
+      if (activeWrite || writeQueue.length === 0) {
+        maybeReconnect()
+        return
+      }
+      const next = writeQueue.shift()!
+      const data = next.data!
+      activeWrite = true
+      const writeSocket = socket
+      terminal.write(data, () => {
+        next.data = null
+        next.parsed = true
+        activeWrite = false
+        pendingOutputBytes = Math.max(0, pendingOutputBytes - next.bytes)
+        if (disposed) return
+        if (writeSocket) acknowledgeWrite(writeSocket, next.bytes)
+        finalizeWrites()
+        if (next.refreshAfterWrite) {
+          window.cancelAnimationFrame(refreshFrame)
+          refreshFrame = window.requestAnimationFrame(() => {
+            refreshFrame = 0
+            if (!disposed) terminal.refresh(0, terminal.rows - 1)
+          })
+        }
+        pumpWrites()
+      })
+    }
+
+    const queueOutput = (data: Uint8Array, currentSocket: WebSocket) => {
+      let outputCursor: StreamCursor | null = null
+      let waitsForCursor = true
+      let refreshAfterWrite = false
+      if (replayChunksRemaining > 0) {
+        replayChunksRemaining -= 1
+        waitsForCursor = false
+        if (replayChunksRemaining === 0) {
+          outputCursor = replayCursor
+          replayCursor = null
+          refreshAfterWrite = true
+        }
+      }
+      const pending: PendingTerminalWrite = {
+        data,
+        bytes: data.byteLength,
+        cursor: outputCursor,
+        waitsForCursor,
+        refreshAfterWrite,
+        parsed: false,
+      }
+      pendingOutputBytes += data.byteLength
+      writeQueue.push(pending)
+      commitQueue.push(pending)
+      if (pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES || commitQueue.length > MAX_PENDING_OUTPUT_WRITES) {
+        resetOnReady = true
+        currentSocket.close(1013, "terminal output backlog")
+      }
+      pumpWrites()
+    }
+
     const connect = (initial = false) => {
       if (disposed) return
       window.clearTimeout(reconnectTimer)
@@ -174,22 +279,35 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       currentSocket.onmessage = (event) => {
         if (disposed || socket !== currentSocket) return
         if (event.data instanceof ArrayBuffer) {
-          terminal.write(new Uint8Array(event.data))
+          queueOutput(new Uint8Array(event.data), currentSocket)
           return
         }
         const message = JSON.parse(event.data) as TerminalControlMessage
         if (message.type === "ready") {
           reconnectAttempt = 0
-          if (shouldResetTerminal(cursor, message)) terminal.reset()
+          flowControlActive = message.replay_chunks != null
+          if (resetOnReady || shouldResetTerminal(cursor, message)) terminal.reset()
+          resetOnReady = false
           if (message.stream_epoch && message.revision != null) {
-            cursor = { stream_epoch: message.stream_epoch, revision: message.revision }
+            replayCursor = { stream_epoch: message.stream_epoch, revision: message.revision }
+            replayChunksRemaining = message.replay_chunks ?? 1
+            if (replayChunksRemaining === 0) {
+              cursor = replayCursor
+              replayCursor = null
+            }
           }
           onStatusChange("live")
           terminal.focus()
           flushPendingInput()
         } else if (message.type === "cursor") {
           if (message.stream_epoch && message.revision != null) {
-            cursor = { stream_epoch: message.stream_epoch, revision: message.revision }
+            const pending = commitQueue.find((write) => write.waitsForCursor && !write.cursor)
+            if (pending) {
+              pending.cursor = { stream_epoch: message.stream_epoch, revision: message.revision }
+              finalizeWrites()
+            } else {
+              cursor = { stream_epoch: message.stream_epoch, revision: message.revision }
+            }
           }
         } else if (message.type === "closed") {
           reconnectAllowed = message.reason === "agent server disconnected"
@@ -210,9 +328,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
         }
         if (!reconnectAllowed) return
         onStatusChange("reconnecting")
-        const delay = Math.min(1_000 * 2 ** reconnectAttempt, 10_000)
-        reconnectAttempt += 1
-        reconnectTimer = window.setTimeout(() => connect(false), delay)
+        for (const pending of commitQueue) {
+          if (pending.waitsForCursor && !pending.cursor) {
+            pending.waitsForCursor = false
+            resetOnReady = true
+          }
+        }
+        finalizeWrites()
+        reconnectAfterWrites = true
+        maybeReconnect()
       }
     }
 
@@ -237,9 +361,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       disposed = true
       window.clearTimeout(reconnectTimer)
       window.clearTimeout(resizeTimer)
+      window.cancelAnimationFrame(refreshFrame)
       observer.disconnect()
       input.dispose()
       socket?.close()
+      writeQueue.length = 0
+      commitQueue.length = 0
       terminal.dispose()
       focusRef.current = () => undefined
       sendRef.current = () => undefined

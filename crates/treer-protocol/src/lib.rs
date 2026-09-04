@@ -71,6 +71,7 @@ pub struct BuildInfo {
 pub enum MachineSupervisionMode {
     SystemdUser,
     Launchd,
+    Nohup,
     Foreground,
 }
 
@@ -732,6 +733,8 @@ pub struct AppDeployment {
     pub port: u16,
     pub hostname: String,
     pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
     pub desired_state: AppDesiredState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_agent_id: Option<String>,
@@ -985,6 +988,8 @@ pub struct LaunchAgentProfileRequest {
     pub server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default = "default_cols")]
     pub cols: u16,
     #[serde(default = "default_rows")]
@@ -1487,10 +1492,15 @@ pub struct UpdateServiceIngressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineTrafficRecord {
     pub window_start: DateTime<Utc>,
+    pub traffic_class: String,
+    pub source_type: String,
     pub source_server_id: String,
+    pub destination_type: String,
     pub destination_server_id: String,
     pub payload_bytes: u64,
     pub payload_frames: u64,
+    pub billable_bytes: u64,
+    pub meter_version: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1630,6 +1640,7 @@ pub struct TerminalCursor {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TerminalClientMessage {
     Resize { cols: u16, rows: u16 },
+    Ack { bytes: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1643,6 +1654,8 @@ pub enum TerminalServerMessage {
         revision: Option<u64>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         gap: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_chunks: Option<u32>,
     },
     Cursor {
         stream_epoch: String,
@@ -1718,6 +1731,8 @@ pub struct MachineEnrollmentKey {
 pub struct MachineEnrollmentRequest {
     pub installation_id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_server_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1829,6 +1844,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_profile_request_round_trips_optional_cwd_override() {
+        let request = LaunchAgentProfileRequest {
+            server_id: Some("srv_1".to_string()),
+            agent_name: Some("reviewer".to_string()),
+            cwd: Some("packages/api".to_string()),
+            cols: 100,
+            rows: 30,
+        };
+        let encoded = serde_json::to_value(&request).expect("serialize launch request");
+        assert_eq!(encoded["cwd"], "packages/api");
+        assert_eq!(
+            serde_json::from_value::<LaunchAgentProfileRequest>(encoded)
+                .expect("deserialize launch request"),
+            request
+        );
+
+        let legacy = serde_json::from_value::<LaunchAgentProfileRequest>(serde_json::json!({
+            "server_id": "srv_1",
+            "cols": 120,
+            "rows": 36
+        }))
+        .expect("deserialize request without cwd");
+        assert_eq!(legacy.cwd, None);
+    }
+
+    #[test]
     fn machine_supervision_is_optional_for_older_controllers() {
         let now = Utc::now();
         let server = ServerInfo {
@@ -1871,6 +1912,21 @@ mod tests {
         let decoded: ServerInfo =
             serde_json::from_value(legacy).expect("deserialize older server info");
         assert_eq!(decoded.supervision, None);
+    }
+
+    #[test]
+    fn nohup_supervision_round_trips() {
+        let supervision = MachineSupervision {
+            mode: MachineSupervisionMode::Nohup,
+            fallback_reason: None,
+        };
+        let encoded = serde_json::to_value(&supervision).expect("serialize nohup supervision");
+        assert_eq!(encoded["mode"], "nohup");
+        assert_eq!(
+            serde_json::from_value::<MachineSupervision>(encoded)
+                .expect("deserialize nohup supervision"),
+            supervision
+        );
     }
 
     #[test]
@@ -2050,6 +2106,12 @@ mod tests {
             serde_json::to_value(message).expect("serialize"),
             serde_json::json!({ "type": "resize", "cols": 140, "rows": 48 })
         );
+
+        assert_eq!(
+            serde_json::to_value(TerminalClientMessage::Ack { bytes: 32_768 })
+                .expect("serialize acknowledgement"),
+            serde_json::json!({ "type": "ack", "bytes": 32768 })
+        );
     }
 
     #[test]
@@ -2075,6 +2137,7 @@ mod tests {
             stream_epoch: Some("stream_a".to_string()),
             revision: Some(9),
             gap: true,
+            replay_chunks: Some(3),
         };
         assert_eq!(
             serde_json::to_value(&message).expect("serialize"),
@@ -2083,7 +2146,8 @@ mod tests {
                 "session_id": "term_1",
                 "stream_epoch": "stream_a",
                 "revision": 9,
-                "gap": true
+                "gap": true,
+                "replay_chunks": 3
             })
         );
         let parsed: TerminalServerMessage = serde_json::from_value(serde_json::json!({
@@ -2098,6 +2162,7 @@ mod tests {
                 stream_epoch: None,
                 revision: None,
                 gap: false,
+                replay_chunks: None,
             }
         );
     }

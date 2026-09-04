@@ -26,6 +26,14 @@ const workspace = {
   organization_id: "org-1",
 }
 
+const workspaceAccess = {
+  workspace_id: "ws-1",
+  access_mode: "organization" as const,
+  current_role: "owner" as const,
+  members: [],
+  groups: [],
+}
+
 const secondWorkspace = {
   workspace_id: "ws-2",
   name: "Experiments",
@@ -74,6 +82,13 @@ const agentB = {
   status: "running",
 }
 
+const appRuntimeAgent = {
+  ...agentA,
+  agent_id: "appw-1",
+  name: "app:Soul Archive",
+  kind: "app",
+}
+
 const serviceA = {
   service_id: "svc-1",
   name: "api",
@@ -105,6 +120,7 @@ const managedApp = {
   port: 9420,
   hostname: "soul.demo.internal",
   service_id: "svc-app-1",
+  public_url: "https://soul-app1.canary.apps.treer.ai/",
   desired_state: "running" as const,
   runtime_agent_id: "appw-1",
   restart_count: 1,
@@ -138,16 +154,26 @@ const codexProfile = {
   command: "codex",
 }
 
+const longScriptProfile = {
+  ...recipeProfile,
+  profile_id: "alp-long-script",
+  name: "Codex + UI",
+  description: "Portable Codex UI bootstrap",
+  cwd: ".",
+  command: "sh",
+  args: ["-lc", `set -eu\n${"echo bootstrap-step-with-a-long-value\n".repeat(80)}`],
+}
+
 const snapshot = {
   revision: 1,
   workspace,
   servers: [machineA, machineB],
-  agents: [agentA, agentB],
+  agents: [agentA, agentB, appRuntimeAgent],
 }
 
 const traffic = [
-  { window_start: NOW, source_server_id: "srv-a", destination_server_id: "srv-b", payload_bytes: 1500, payload_frames: 12 },
-  { window_start: NOW, source_server_id: "srv-b", destination_server_id: "srv-a", payload_bytes: 750, payload_frames: 9 },
+  { window_start: NOW, traffic_class: "virtual_network", source_type: "machine", source_server_id: "srv-a", destination_type: "machine", destination_server_id: "srv-b", payload_bytes: 1500, payload_frames: 12, billable_bytes: 1500, meter_version: 1 },
+  { window_start: NOW, traffic_class: "virtual_network", source_type: "machine", source_server_id: "srv-b", destination_type: "machine", destination_server_id: "srv-a", payload_bytes: 750, payload_frames: 9, billable_bytes: 750, meter_version: 1 },
 ]
 
 function ok(route: Route, body: unknown) {
@@ -173,7 +199,11 @@ async function mockApi(page: Page) {
       return ok(route, currentUser)
     }
     if (path === "/organizations") return ok(route, { organizations: [organization, secondOrganization] })
+    if (path === "/organizations/org-1" && route.request().method() === "PATCH") return ok(route, {})
     if (path === "/organizations/org-1/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "owner" }] })
+    if (path === "/organizations/org-1/groups") return ok(route, { groups: [{ group_id: "grp-1", organization_id: "org-1", name: "Platform", member_ids: [user.user_id] }] })
+    if (path === "/organizations/org-2/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "member" }] })
+    if (path === "/organizations/org-2/groups") return ok(route, { groups: [] })
     if (path === "/organizations/org-1/audit-events") return ok(route, { events: [] })
     if (path === "/workspaces") return ok(route, {
       workspaces: url.searchParams.get("organization_id") === "org-1"
@@ -182,6 +212,12 @@ async function mockApi(page: Page) {
     })
     if (path === "/workspaces/ws-1/snapshot") return ok(route, snapshot)
     if (path === "/workspaces/ws-2/snapshot") return ok(route, { ...snapshot, workspace: secondWorkspace, servers: [], agents: [] })
+    if (path === "/workspaces/ws-1/access") return ok(route, { access: workspaceAccess })
+    if (path === "/workspaces/ws-2/access") return ok(route, { access: { workspace_id: "ws-2", access_mode: "organization", current_role: "member", members: [], groups: [] } })
+    if (path === "/workspaces/ws-1" && route.request().method() === "PATCH") {
+      const body = route.request().postDataJSON() as { name: string }
+      return ok(route, { workspace: { ...workspace, name: body.name } })
+    }
     if (path === "/workspaces/ws-1/agents" && route.request().method() === "POST") return ok(route, {
       agent_id: "ag-installer",
       server_id: "srv-a",
@@ -198,7 +234,7 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-2/ingresses") return ok(route, { ingresses: [] })
     if (path === "/workspaces/ws-1/traffic") return ok(route, { traffic })
     if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
-    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile] })
+    if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile, longScriptProfile] })
     if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
     if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [managedApp] })
     if (path === "/workspaces/ws-1/apps" && route.request().method() === "POST") return ok(route, { app: managedApp })
@@ -214,26 +250,35 @@ test.beforeEach(async ({ page }) => {
   await mockApi(page)
 })
 
-// Helpers — machine entries in the machines list are <button>s whose accessible
+// Helpers — machine entries in workspace settings are <button>s whose accessible
 // name includes the machine name, root path and build label.
 const workstationRow = (page: Page) => page.getByRole("button", { name: /^workstation / })
 const cloudboxRow = (page: Page) => page.getByRole("button", { name: /^cloudbox / })
 const agentsTab = (page: Page) => page.getByRole("tab", { name: /Agents/ })
-const machinesTab = (page: Page) => page.getByRole("tab", { name: /Machines/ })
+const appsTab = (page: Page) => page.getByRole("tab", { name: /Apps/ })
 
-test("opens app, shows org, workspace, machines and agents", async ({ page }) => {
+async function openWorkspaceSettings(page: Page) {
+  await page.getByRole("button", { name: "Workspace settings" }).click()
+  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
+}
+
+test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await page.goto("/")
   await expect(page.locator("aside").getByText("Acme")).toBeVisible()
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1/workspaces/ws-1")
+  await expect(page).toHaveTitle("Acme / Demo")
+  await expect(page.locator("aside [role=tab]").nth(0)).toContainText("Agents")
+  await expect(page.locator("aside [role=tab]").nth(1)).toContainText("Apps")
 
-  await machinesTab(page).click()
-  await expect(workstationRow(page)).toBeVisible()
-  await expect(cloudboxRow(page)).toBeVisible()
+  await appsTab(page).click()
+  await expect(page.locator("aside").getByRole("button", { name: "Open Soul Archive app" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
 
   await agentsTab(page).click()
   await expect(page.getByRole("button", { name: /^api-server / })).toBeVisible()
   await expect(page.getByRole("button", { name: /^worker / })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^app:Soul Archive / })).toHaveCount(0)
 })
 
 test("restores organization and workspace from the URL after reload", async ({ page }) => {
@@ -241,12 +286,43 @@ test("restores organization and workspace from the URL after reload", async ({ p
   await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
   await expect.poll(() => new URL(page.url()).searchParams.get("source")).toBe("bookmark")
+  await expect(page).toHaveTitle("Research / Experiments")
 
   await page.reload()
 
   await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-2/workspaces/ws-2")
+  await expect(page).toHaveTitle("Research / Experiments")
+})
+
+test("late snapshots from the previous workspace cannot replace the current inventory", async ({ page }) => {
+  let releaseFirstSnapshot = () => {}
+  let firstSnapshotStarted = false
+  const firstSnapshotBlocked = new Promise<void>((resolve) => { releaseFirstSnapshot = resolve })
+  let firstSnapshotResponded = () => {}
+  const firstSnapshotResponse = new Promise<void>((resolve) => { firstSnapshotResponded = resolve })
+  await page.route("**/api/workspaces/ws-1/snapshot", async (route) => {
+    firstSnapshotStarted = true
+    await firstSnapshotBlocked
+    await ok(route, snapshot)
+    firstSnapshotResponded()
+  })
+
+  await page.goto("/")
+  await expect.poll(() => firstSnapshotStarted).toBe(true)
+  await page.getByRole("combobox", { name: "Organization" }).click()
+  await page.getByRole("option", { name: "Research" }).click()
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
+  await expect(page).toHaveTitle("Research / Experiments")
+
+  releaseFirstSnapshot()
+  await firstSnapshotResponse
+  await page.waitForTimeout(100)
+  await expect(page.getByRole("tab", { name: /Apps 0/ })).toBeVisible()
+  await expect(page.getByRole("tab", { name: /Agents 0/ })).toBeVisible()
+  await expect(workstationRow(page)).toHaveCount(0)
+  await expect(page.getByRole("button", { name: /^api-server / })).toHaveCount(0)
 })
 
 test("agent list row menu can rename and delete", async ({ page }) => {
@@ -267,53 +343,104 @@ test("agent list row menu can rename and delete", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Delete agent" })).toBeVisible()
 })
 
-test("org dropdown contains Members and Audit entries", async ({ page }) => {
+test("organization actions open a settings page with inline management", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: "Organization actions" }).click()
-  await expect(page.getByRole("menuitem", { name: "Create organization" })).toBeVisible()
-  await expect(page.getByRole("menuitem", { name: "Members" })).toBeVisible()
-  await expect(page.getByRole("menuitem", { name: "Audit" })).toBeVisible()
+  const organizationSettings = page.getByRole("button", { name: "Organization settings" })
+  await expect(organizationSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
+  await organizationSettings.click()
+
+  await expect(page.getByRole("heading", { name: "Acme", exact: true })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "General" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Workspaces" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Groups" })).toBeVisible()
+  await expect(page.getByText("Platform", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "New organization" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Open audit" })).toBeVisible()
+
+  await expect(page.getByLabel("Organization name")).toBeEnabled()
+  await page.getByRole("button", { name: "Select Demo workspace" }).click()
+  await expect(page.getByRole("heading", { name: "General" })).toBeHidden()
 })
 
-test("workspace dropdown opens Profiles and Apps without exposing Network", async ({ page }) => {
+test("mobile organization settings hide the sidebar and fit the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await page.getByRole("button", { name: /Workspace/ }).click()
-  await page.getByRole("menuitem", { name: "Profiles" }).click()
-  await expect(page.getByRole("heading", { name: "Profiles" })).toBeVisible()
+  await page.getByRole("button", { name: "Organization settings" }).click()
 
-  await page.getByRole("button", { name: "Workspace views" }).click()
-  await page.getByRole("menuitem", { name: "Apps" }).click()
-  await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
+  await expect(page.locator("aside")).toBeHidden()
+  await expect(page.getByRole("heading", { name: "Acme", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
 
-  await page.getByRole("button", { name: "Workspace views" }).click()
-  await expect(page.getByRole("menuitem", { name: "Network" })).toHaveCount(0)
+test("audit view presents versioned traffic as billable usage", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Organization settings" }).click()
+  await page.getByRole("button", { name: "Open audit" }).click()
+
+  await expect(page.getByText("Billable usage")).toBeVisible()
+  await expect(page.getByText("Data frames")).toBeVisible()
+  await expect(page.getByText("Machine", { exact: true })).toHaveCount(2)
+})
+
+test("workspace settings contain Machines and launch profiles without a separate views menu", async ({ page }) => {
+  await page.goto("/")
+  await expect(page.getByRole("button", { name: "Workspace views" })).toHaveCount(0)
+  await openWorkspaceSettings(page)
+  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
+  await expect(workstationRow(page)).toBeVisible()
+  await expect(page.getByText("Codex Agent UI", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "New profile" })).toBeVisible()
+  await expect(appsTab(page)).toBeVisible()
+})
+
+test("workspace controls open a settings page with inline rename", async ({ page }) => {
+  await page.goto("/")
+  const workspaceSettings = page.getByRole("button", { name: "Workspace settings" })
+  await expect(workspaceSettings).toHaveCount(1)
+  await expect(workspaceSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
+  await expect(page.getByRole("button", { name: "Rename workspace" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Delete workspace" })).toHaveCount(0)
+
+  await openWorkspaceSettings(page)
+  await expect(page.getByRole("heading", { name: "Demo", exact: true })).toBeVisible()
+  await expect(page.getByText("ws-1", { exact: true })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
+
+  const name = page.getByLabel("Workspace name")
+  await name.fill("Platform")
+  const renaming = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/ws-1") && request.method() === "PATCH")
+  await page.getByRole("button", { name: "Save" }).click()
+  const request = await renaming
+  expect(request.postDataJSON()).toEqual({ name: "Platform" })
+  await expect(page).toHaveTitle("Acme / Platform")
+  await expect(page.getByRole("heading", { name: "Platform", exact: true })).toBeVisible()
 })
 
 test("managed App view exposes lifecycle actions and creation", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: /Workspace/ }).click()
-  await page.getByRole("menuitem", { name: "Apps" }).click()
+  await appsTab(page).click()
 
-  await expect(page.getByText("Soul Archive")).toBeVisible()
-  await expect(page.getByText("soul.demo.internal/", { exact: true })).toBeVisible()
-  await expect(page.getByText("soul.demo.internal/_human/", { exact: true })).toBeVisible()
+  await expect(page.locator("main > section").getByText("Soul Archive")).toBeVisible()
+  await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/", { exact: true })).toBeVisible()
+  await expect(page.getByText(/_human/)).toHaveCount(0)
   await page.evaluate(() => {
     window.open = ((url?: string | URL) => {
       document.documentElement.dataset.lastOpenedUrl = String(url)
       return null
     }) as typeof window.open
   })
-  await page.getByRole("button", { name: "Open Soul Archive Agent interface" }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/")
-  await page.getByRole("button", { name: "Open Soul Archive Human interface" }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/_human/")
+  await page.getByRole("button", { name: "Open Soul Archive interface" }).click()
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
   await page.getByRole("button", { name: "Open Soul Archive", exact: true }).click()
-  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toContain("/virtual-hosts/soul.demo.internal/proxy/_human/")
+  await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
   const restarting = page.waitForRequest((request) => request.url().includes("/apps/app-1/restart") && request.method() === "POST")
   await page.getByRole("button", { name: "Restart Soul Archive" }).click()
   await restarting
 
-  await page.getByRole("button", { name: "New App" }).click()
+  await page.locator("header").getByRole("button", { name: "New App" }).click()
   const dialog = page.getByRole("dialog", { name: "New App" })
   await dialog.getByLabel("Name", { exact: true }).fill("Docs")
   await dialog.getByLabel("Command", { exact: true }).fill("python3 -m http.server 8080")
@@ -334,7 +461,7 @@ test("managed App view exposes lifecycle actions and creation", async ({ page })
 
 test("clicking a machine opens an overview with identity, agents, services, virtual hosts, and traffic", async ({ page }) => {
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
 
   // Identity
@@ -360,11 +487,33 @@ test("clicking a machine opens an overview with identity, agents, services, virt
 
   // Network summary (traffic totals + peers)
   await expect(page.getByText("Network (last 24h)")).toBeVisible()
-  await expect(page.getByText("Data sent")).toBeVisible()
-  await expect(page.getByText("Data received")).toBeVisible()
+  await expect(page.getByText("Routed out")).toBeVisible()
+  await expect(page.getByText("Routed in")).toBeVisible()
 
   await page.getByRole("button", { name: "Close" }).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeHidden()
+})
+
+test("workspace members can see machine traffic without audit permission", async ({ page }) => {
+  await page.route(/\/api\/organizations$/, (route) => ok(route, {
+    organizations: [{ ...organization, role: "member" }],
+  }))
+  await page.route("**/api/workspaces/ws-1/traffic?hours=24", (route) => ok(route, {
+    traffic: traffic.map((item) => ({
+      window_start: item.window_start,
+      source_server_id: item.source_server_id,
+      destination_server_id: item.destination_server_id,
+      payload_bytes: item.payload_bytes,
+      payload_frames: item.payload_frames,
+    })),
+  }))
+  await page.goto("/")
+  await openWorkspaceSettings(page)
+  await workstationRow(page).click()
+
+  await expect(page.getByText("Routed out")).toBeVisible()
+  await expect(page.getByText("1.46 KB")).toBeVisible()
+  await expect(page.getByText("750 B")).toBeVisible()
 })
 
 test("offline machines show copyable recovery commands with the workspace id", async ({ page }) => {
@@ -378,7 +527,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
     agents: [agentA, agentB],
   }))
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await expect(page.getByText("workstation · srv-b :8794")).toBeVisible()
   await page.getByRole("button", { name: /^workstation / }).first().click()
   await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
@@ -388,7 +537,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
 
 test("machine overview only shows agents for the selected machine", async ({ page }) => {
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeVisible()
 
@@ -408,9 +557,9 @@ test("machine overview only shows agents for the selected machine", async ({ pag
 
 test("from a machine overview, clicking Terminal opens the agent terminal", async ({ page }) => {
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
-  await page.getByRole("button", { name: "Terminal" }).click()
+  await page.getByRole("button", { name: "Terminal", exact: true }).click()
 
   // Returns to the terminal main view; header shows agent name
   await expect(page.locator("header").getByText("api-server")).toBeVisible()
@@ -458,12 +607,34 @@ test("create agent dialog lists an installed recipe launch profile", async ({ pa
   await expect(page.getByRole("button", { name: "Create agent" })).toBeVisible()
 })
 
+test("create agent dialog contains a long profile command on narrow screens", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await agentsTab(page).click()
+  await page.getByRole("button", { name: "New" }).click()
+  const dialog = page.getByRole("dialog")
+  await dialog.getByRole("combobox", { name: "Launch" }).click()
+  await page.getByRole("option", { name: "Codex + UI" }).click()
+
+  const dialogBox = await dialog.boundingBox()
+  const commandBox = await dialog.locator("code").boundingBox()
+  expect(dialogBox).not.toBeNull()
+  expect(commandBox).not.toBeNull()
+  expect(dialogBox!.x).toBeGreaterThanOrEqual(0)
+  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(390)
+  expect(commandBox!.x).toBeGreaterThanOrEqual(dialogBox!.x)
+  expect(commandBox!.x + commandBox!.width).toBeLessThanOrEqual(dialogBox!.x + dialogBox!.width)
+})
+
 test("mobile: machine overview hides sidebar and shows back button", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await machinesTab(page).click()
+  await openWorkspaceSettings(page)
   await workstationRow(page).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeVisible()
+  await expect(page.locator("aside")).toBeHidden()
+  await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
+  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
   await expect(page.locator("aside")).toBeHidden()
   await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
   await expect(page.locator("aside")).toBeVisible()
@@ -532,4 +703,62 @@ test("General settings show theme and English language, and toggle dark class", 
   await expect(page.locator("html")).toHaveClass(/dark/)
   await page.getByRole("button", { name: "Light" }).click()
   await expect(page.locator("html")).not.toHaveClass(/dark/)
+})
+
+test("manager can delete a workspace and the app recovers to no workspace", async ({ page }) => {
+  let workspaces = [workspace]
+  const deletedPaths: string[] = []
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
+    ...snapshot,
+    servers: [],
+    agents: [],
+  }))
+  await page.route(/\/api\/workspaces/, (route) => {
+    const url = new URL(route.request().url())
+    const path = url.pathname.replace(/^\/api/, "")
+    if (path === "/workspaces/ws-1" && route.request().method() === "DELETE") {
+      deletedPaths.push(url.pathname)
+      workspaces = []
+      return ok(route, {
+        workspace_id: "ws-1",
+        organization_id: "org-1",
+        name: "Demo",
+        machine_count: 0,
+        agent_count: 2,
+        app_count: 1,
+      })
+    }
+    if (path === "/workspaces" && route.request().method() === "GET") {
+      return ok(route, {
+        workspaces: workspaces.filter(
+          (item) => item.organization_id === url.searchParams.get("organization_id"),
+        ),
+      })
+    }
+    return route.fallback()
+  })
+
+  await page.goto("/")
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
+
+  await page.getByRole("button", { name: "Workspace settings" }).click()
+  await page.getByRole("button", { name: "Delete workspace" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByRole("heading", { name: "Delete workspace" })).toBeVisible()
+  await expect(dialog.getByText("Delete Demo?")).toBeVisible()
+  await expect(dialog.getByText("historical traffic and messages are retained")).toBeVisible()
+  await expect(dialog.getByText("This cannot be undone.")).toBeVisible()
+
+  await dialog.getByRole("button", { name: "Delete workspace" }).click()
+  await expect(deletedPaths).toEqual(["/api/workspaces/ws-1"])
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("No workspace")
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1")
+})
+
+test("workspace deletion is blocked until every machine is deleted", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Workspace settings" }).click()
+  await expect(page.getByText("Delete all 2 machines before deleting this workspace.")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Delete workspace" })).toBeDisabled()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
 })

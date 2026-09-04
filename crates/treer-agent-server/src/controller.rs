@@ -24,6 +24,8 @@ use crate::host_client::{HostClient, HostEvents};
 use crate::interface_cache::{CachedAgentInterface, InterfaceCache};
 
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
+const OUTPUT_TRIM_SLACK_BYTES: usize = 64 * 1024;
+const STATUS_SCAN_LIMIT_BYTES: usize = 16 * 1024;
 const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
 const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
@@ -921,7 +923,7 @@ impl ControllerRuntime {
         let agent = agent
             .lock()
             .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
-        let text = select_lines(&agent.text, lines);
+        let text = select_lines(recent_text(&agent.text, OUTPUT_LIMIT_BYTES), lines);
         Ok(ReadAgentOutputResponse {
             agent_id: agent_id.to_string(),
             revision: agent.info.output_revision,
@@ -1645,7 +1647,7 @@ fn plain_text(replay: &HostOutputReplay) -> Result<String, ProtocolError> {
 }
 
 fn trim_text(text: &mut String) {
-    if text.len() <= OUTPUT_LIMIT_BYTES {
+    if text.len() <= OUTPUT_LIMIT_BYTES + OUTPUT_TRIM_SLACK_BYTES {
         return;
     }
     let mut split = text.len().saturating_sub(OUTPUT_LIMIT_BYTES);
@@ -1674,6 +1676,7 @@ fn select_lines(text: &str, lines: Option<usize>) -> String {
 }
 
 fn detect_status(text: &str) -> Option<AgentStatus> {
+    let text = recent_text(text, STATUS_SCAN_LIMIT_BYTES);
     let lower = text.to_lowercase();
     let blocked = [
         "allow command?",
@@ -1701,6 +1704,17 @@ fn detect_status(text: &str) -> Option<AgentStatus> {
         return Some(AgentStatus::Idle);
     }
     None
+}
+
+fn recent_text(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut split = text.len() - limit;
+    while split < text.len() && !text.is_char_boundary(split) {
+        split += 1;
+    }
+    &text[split..]
 }
 
 fn protocol_error(code: &str, error: impl std::fmt::Display) -> ProtocolError {
@@ -1786,6 +1800,27 @@ mod tests {
             detect_status("Working (esc to interrupt)\nAllow command?"),
             Some(AgentStatus::Blocked)
         );
+    }
+
+    #[test]
+    fn status_detector_only_scans_recent_output() {
+        let text = format!("Allow command?{}$", " ".repeat(STATUS_SCAN_LIMIT_BYTES));
+        assert_eq!(detect_status(&text), Some(AgentStatus::Idle));
+    }
+
+    #[test]
+    fn output_trimming_uses_slack_and_preserves_utf8() {
+        let mut below_slack = "x".repeat(OUTPUT_LIMIT_BYTES + OUTPUT_TRIM_SLACK_BYTES);
+        trim_text(&mut below_slack);
+        assert_eq!(
+            below_slack.len(),
+            OUTPUT_LIMIT_BYTES + OUTPUT_TRIM_SLACK_BYTES
+        );
+
+        let mut oversized = "é".repeat((OUTPUT_LIMIT_BYTES + OUTPUT_TRIM_SLACK_BYTES) / 2 + 1);
+        trim_text(&mut oversized);
+        assert_eq!(oversized.len(), OUTPUT_LIMIT_BYTES);
+        assert_eq!(oversized.chars().count(), OUTPUT_LIMIT_BYTES / 2);
     }
 
     #[test]

@@ -451,10 +451,10 @@ impl ProxyClient {
                         }
                         ProxyMessage::TerminalAttach { session_id, agent_id, cols, rows, cursor } => {
                             let operation_id = format!("{session_id}:attach");
-                            match self.runtime.terminal_snapshot(&agent_id, cursor.as_ref()).await {
-                                Ok(snapshot) => {
-                                    match self.runtime.resize(&operation_id, &agent_id, cols, rows).await {
-                                        Ok(()) => {
+                            match self.runtime.resize(&operation_id, &agent_id, cols, rows).await {
+                                Ok(()) => {
+                                    match self.runtime.terminal_snapshot(&agent_id, cursor.as_ref()).await {
+                                        Ok(snapshot) => {
                                             terminal_sessions.insert(
                                                 session_id.clone(),
                                                 TerminalRelay {

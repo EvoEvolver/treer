@@ -161,57 +161,16 @@ TREER_ENROLLMENT_KEY="enr_v1_..." \
   treer-agent-server connect \
   --proxy "https://PROXY_HOST/" \
   --root "$TREER_WORKSPACE_ROOT" \
-  --service-mode foreground \
+  --service-mode nohup \
   --non-interactive --accept-risk \
   --name apple-container
 '
 ```
 
-`--service-mode foreground` is required: the guest has no user systemd
-session for Treer's LaunchAgent/user-unit path. Wait until connect prints
-that Controller and Proxy are ready (`proxy_connected`). Then stop that
-foreground Host (kill the `connect` / `treer-agent-host` process) and
-install a **system** unit so the Host survives `container machine run`
-exiting.
-
-Find the saved host config (guest):
-
-```bash
-ls "$HOME/.config/treer/agent-servers/"*-host.json
-```
-
-Install `/etc/systemd/system/treer-agent-host.service`:
-
-```ini
-[Unit]
-Description=Treer Host in Apple Container Machine
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=USER
-WorkingDirectory=ROOT
-Environment=HOME=/home/USER
-Environment=SHELL=/bin/bash
-Environment=PATH=/home/USER/.local/bin:/home/USER/.local/libexec/treer:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=TREER_NETWORK_MODE=transparent
-ExecStartPre=+/bin/sh -c 'test -e /dev/net/tun && chgrp $(id -gn USER) /dev/net/tun && chmod 0660 /dev/net/tun || true'
-ExecStart=/home/USER/.local/libexec/treer/treer-agent-host run --config HOST_JSON
-Restart=always
-RestartSec=2
-KillMode=control-group
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Substitute `USER`, `ROOT`, and `HOST_JSON`. Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now treer-agent-host.service
-```
+`--service-mode nohup` avoids requiring a user systemd session in the guest.
+Wait until connect prints that Controller and Proxy are ready
+(`proxy_connected`). The Host stays detached when `container machine run`
+exits, but it is intentionally not restarted after a crash or machine reboot.
 
 ## 6. Verify
 
@@ -219,7 +178,7 @@ From the guest:
 
 ```bash
 hostname
-systemctl is-active treer-agent-host.service
+treer-agent-server service status
 LISTEN="$(python3 - <<'PY'
 import glob, json, os
 paths = glob.glob(os.path.expanduser("~/.config/treer/agent-servers/*-controller.json"))
@@ -236,13 +195,13 @@ server id still installed as a Mac LaunchAgent
 
 `container machine run` without a command is a login shell. Leaving that
 shell does **not** stop the machine. Stop the Host with
-`sudo systemctl stop treer-agent-host.service` in the guest, or
+`treer-agent-server service stop` in the guest, or
 `container machine stop treer` on the Mac.
 
 ## Boundaries
 
-- Do not `treer-agent-server service start` in the guest; there is no user
-  LaunchAgent/user unit for this layout.
+- After a guest reboot, run `treer-agent-server service start`; nohup does not
+  provide boot activation or crash restart.
 - Do not copy Mac `~/.config/treer/agent-servers` into the guest.
 - Do not enroll the same `server_id` on the Mac and in the container.
 - Do not set guest `HOME` to `/Users/<name>`.

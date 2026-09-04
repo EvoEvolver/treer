@@ -5,8 +5,8 @@ Treer's standard App OAuth flow; the local HttpOnly cookie maps to the returned
 short-lived App access token. Core remains the canonical store for Messages,
 contexts, deliveries, and acknowledgements.
 
-The App index `/` is a plain-text manual for Agents. The browser UI is served
-under `/_human/`; its App OAuth callback remains `/api/auth/callback`.
+The App index `/` negotiates between a Markdown manual for Agents and the
+browser UI. Its App OAuth callback remains `/api/auth/callback`.
 
 Build the frontend:
 

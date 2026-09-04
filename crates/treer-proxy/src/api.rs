@@ -33,7 +33,7 @@ use treer_protocol::{
     ServiceIngressAccess, TerminalClientMessage, TerminalCursor, TerminalServerMessage,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
     VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, AGENT_ID_HEADER,
+    WorkspaceEvent, WorkspaceSnapshot, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -41,7 +41,10 @@ use uuid::Uuid;
 use crate::admin;
 use crate::agent_socket;
 use crate::audit::NewWorkspaceAuditEvent;
-use crate::auth::{self, AuthStore, CurrentSession, MachineSession, ProfileMutationActor};
+use crate::auth::{
+    self, managed_app_ingress_hostname, AuthStore, CurrentSession, MachineSession,
+    ProfileMutationActor,
+};
 use crate::identity::IdentityIssuer;
 use crate::message_store::{MessageStore, MessageStoreError};
 use crate::policy::{
@@ -58,10 +61,13 @@ use crate::policy::{
     RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT, RESOURCE_MESSAGE_MAILBOX,
     RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
-use crate::state::{AppState, SocketFrame};
+use crate::state::{AppState, SocketFrame, TERMINAL_BROWSER_QUEUE_CAPACITY};
+use crate::traffic::TrafficClass;
 use crate::updater::UpdaterClient;
 use crate::voice::{VoiceAsrConfig, VoiceServices};
 use crate::voice_llm::{self, VoiceCommandError, VoiceLlmConfig};
+
+const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;
 
 fn control_audit_actor<'a>(
     session: Option<&'a CurrentSession>,
@@ -184,6 +190,10 @@ impl IngressConfig {
 
     pub fn public_url(&self) -> Option<&Url> {
         self.public_url.as_ref()
+    }
+
+    pub fn base_domain_if_configured(&self) -> Option<&str> {
+        self.base_domain.as_deref()
     }
 
     fn base_domain(&self) -> Result<&str, ApiFailure> {
@@ -554,6 +564,19 @@ pub fn router(
             get(auth::members),
         )
         .route(
+            "/api/organizations/{organization_id}/groups",
+            get(auth::organization_groups).post(auth::create_organization_group_handler),
+        )
+        .route(
+            "/api/organizations/{organization_id}/groups/{group_id}",
+            axum::routing::delete(auth::delete_organization_group_handler),
+        )
+        .route(
+            "/api/organizations/{organization_id}/groups/{group_id}/members/{user_id}",
+            axum::routing::put(auth::add_organization_group_member_handler)
+                .delete(auth::remove_organization_group_member_handler),
+        )
+        .route(
             "/api/organizations/{organization_id}/audit-events",
             get(auth::audit_events),
         )
@@ -576,7 +599,21 @@ pub fn router(
         )
         .route(
             "/api/workspaces/{workspace_id}",
-            axum::routing::patch(rename_workspace),
+            axum::routing::patch(rename_workspace).delete(delete_workspace),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/access",
+            get(auth::workspace_access).patch(auth::update_workspace_access),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/access/users/{user_id}",
+            axum::routing::put(auth::update_workspace_user_grant)
+                .delete(auth::delete_workspace_user_grant),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/access/groups/{group_id}",
+            axum::routing::put(auth::update_workspace_group_grant)
+                .delete(auth::delete_workspace_group_grant),
         )
         .route(
             "/api/workspaces/{workspace_id}/snapshot",
@@ -1860,7 +1897,7 @@ fn bootstrap_commands(public_url: &Url, enrollment_key: &str) -> (String, String
     let script_url = install_script_url(public_url);
     let install_command = format!("curl -fsSL {} | sh", shell_quote(script_url.as_str()));
     let connect_command = format!(
-        "TREER_ENROLLMENT_KEY={} treer-agent-server connect --proxy {}",
+        "treer-agent-server connect --key {} --proxy {}",
         shell_quote(enrollment_key),
         shell_quote(public_url.as_str()),
     );
@@ -1888,6 +1925,7 @@ async fn enroll_machine(
             &headers,
             request.map(|request| request.installation_id.as_str()),
             request.map(|request| request.name.as_str()),
+            request.and_then(|request| request.existing_server_id.as_deref()),
         )
         .await?;
     state
@@ -2135,6 +2173,20 @@ async fn rename_workspace(
     Ok(Json(json!({ "workspace": info })))
 }
 
+async fn delete_workspace(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiFailure> {
+    let deleted = auth
+        .delete_workspace(&workspace_id, &session.user_id)
+        .await?;
+    state.delete_workspace(&workspace_id).await?;
+    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
+    Ok(Json(serde_json::to_value(&deleted)?))
+}
+
 async fn workspace_snapshot(
     State(state): State<AppState>,
     Extension(policy): Extension<PolicyEngine>,
@@ -2142,8 +2194,7 @@ async fn workspace_snapshot(
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let mut snapshot = state.snapshot(&workspace_id).await?;
-    snapshot.agents.retain(|agent| agent.kind != "app");
+    let mut snapshot = visible_workspace_snapshot(state.snapshot(&workspace_id).await?);
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -2178,6 +2229,16 @@ async fn workspace_snapshot(
         snapshot.agents = visible;
     }
     Ok(Json(serde_json::to_value(snapshot)?))
+}
+
+fn visible_workspace_snapshot(mut snapshot: WorkspaceSnapshot) -> WorkspaceSnapshot {
+    snapshot.agents.retain(|agent| agent.kind != "app");
+    snapshot
+}
+
+fn is_internal_app_agent_event(event: &WorkspaceEvent) -> bool {
+    event.event.starts_with("agent.")
+        && event.data.get("kind").and_then(Value::as_str) == Some("app")
 }
 
 async fn list_servers(
@@ -2252,14 +2313,47 @@ async fn hydrate_app_deployment(state: &AppState, app: &mut AppDeployment) {
     };
 }
 
+fn attach_app_public_url(
+    config: &IngressConfig,
+    ingresses: &[ServiceIngress],
+    app: &mut AppDeployment,
+) {
+    let managed_hostname = config.base_domain_if_configured().and_then(|base_domain| {
+        managed_app_ingress_hostname(&app.name, &app.app_id, base_domain).ok()
+    });
+    app.public_url = ingresses
+        .iter()
+        .find(|ingress| {
+            managed_hostname.as_deref() == Some(ingress.hostname.as_str())
+                && ingress.service_id == app.service_id
+                && ingress.access == ServiceIngressAccess::Workspace
+                && ingress.enabled
+        })
+        .and_then(|ingress| config.url_for_hostname(&ingress.hostname).ok())
+        .map(|url| url.to_string());
+}
+
+async fn hydrate_app_public_url(
+    auth: &AuthStore,
+    config: &IngressConfig,
+    app: &mut AppDeployment,
+) -> Result<(), ApiFailure> {
+    let ingresses = auth.list_service_ingresses(&app.workspace_id).await?;
+    attach_app_public_url(config, &ingresses, app);
+    Ok(())
+}
+
 async fn list_app_deployments(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
     let mut apps = auth.list_app_deployments(&workspace_id).await?;
+    let ingresses = auth.list_service_ingresses(&workspace_id).await?;
     for app in &mut apps {
         hydrate_app_deployment(&state, app).await;
+        attach_app_public_url(&config, &ingresses, app);
     }
     Ok(Json(json!({ "apps": apps })))
 }
@@ -2267,10 +2361,12 @@ async fn list_app_deployments(
 async fn get_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let mut app = auth.resolve_app_deployment(&workspace_id, &target).await?;
     hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2418,6 +2514,7 @@ async fn stop_app_runtime(
 async fn create_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2449,6 +2546,13 @@ async fn create_app_deployment(
     let mut app = auth
         .create_app_deployment(&workspace_id, actor, server_id, request)
         .await?;
+    if let Some(base_domain) = config.base_domain_if_configured() {
+        if let Err(error) = auth.ensure_app_ingress(&app, actor, base_domain).await {
+            let _ = auth.delete_app_deployment(&workspace_id, &app.app_id).await;
+            publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
+            return Err(error.into());
+        }
+    }
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     match launch_app_runtime(&state, &auth, &app, actor).await {
         Ok(started) => app = started,
@@ -2468,6 +2572,7 @@ async fn create_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2475,6 +2580,7 @@ async fn create_app_deployment(
 async fn start_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2529,6 +2635,7 @@ async fn start_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2536,6 +2643,7 @@ async fn start_app_deployment(
 async fn stop_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2578,6 +2686,7 @@ async fn stop_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2585,6 +2694,7 @@ async fn stop_app_deployment(
 async fn restart_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2628,6 +2738,7 @@ async fn restart_app_deployment(
         &app,
     )
     .await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -2635,6 +2746,7 @@ async fn restart_app_deployment(
 async fn delete_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
     Extension(policy): Extension<PolicyEngine>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
@@ -2642,6 +2754,8 @@ async fn delete_app_deployment(
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let current = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let mut response_app = current.clone();
+    hydrate_app_public_url(&auth, &config, &mut response_app).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -2671,7 +2785,8 @@ async fn delete_app_deployment(
         &app,
     )
     .await;
-    Ok(Json(json!({ "app": app })))
+    response_app.status = app.status;
+    Ok(Json(json!({ "app": response_app })))
 }
 
 pub(crate) async fn reconcile_app_deployments_for_server(
@@ -3086,6 +3201,7 @@ async fn proxy_service_ingress(
         request,
         false,
         "service ingress",
+        TrafficClass::ServiceIngress,
     )
     .await
 }
@@ -3257,6 +3373,7 @@ async fn proxy_virtual_network_host(
         request,
         true,
         "virtual host",
+        TrafficClass::VirtualHost,
     )
     .await
 }
@@ -3325,6 +3442,7 @@ async fn proxy_agent_interface_ui(
         request,
         true,
         "Agent Interface UI",
+        TrafficClass::AgentInterface,
     )
     .await
 }
@@ -3340,6 +3458,7 @@ async fn tunnel_http_request(
     mut request: Request<Body>,
     strip_response_cookies: bool,
     route_kind: &'static str,
+    traffic_class: TrafficClass,
 ) -> Result<Response, ApiFailure> {
     let stream = state
         .open_browser_network_stream(
@@ -3348,6 +3467,7 @@ async fn tunnel_http_request(
             target_agent_id,
             target_host,
             target_port,
+            traffic_class,
         )
         .await?;
     let upgraded = request.headers().contains_key(header::UPGRADE);
@@ -4186,7 +4306,7 @@ fn agent_request_from_launch_profile(
         server_id: request.server_id,
         kind: "shell".to_string(),
         name: agent_name,
-        cwd: profile.cwd.clone(),
+        cwd: request.cwd.unwrap_or_else(|| profile.cwd.clone()),
         args,
         cols: request.cols,
         rows: request.rows,
@@ -4971,6 +5091,8 @@ struct TerminalQuery {
     stream_epoch: Option<String>,
     #[serde(default)]
     since_revision: Option<u64>,
+    #[serde(default)]
+    flow_control: bool,
 }
 
 const fn default_terminal_cols() -> u16 {
@@ -5023,17 +5145,7 @@ async fn agent_terminal(
         agent_policy_resource(&agent),
     )
     .await?;
-    Ok(ws.on_upgrade(move |socket| {
-        stream_terminal(
-            socket,
-            state,
-            workspace_id,
-            agent_id,
-            query.cols,
-            query.rows,
-            query.cursor(),
-        )
-    }))
+    Ok(ws.on_upgrade(move |socket| stream_terminal(socket, state, workspace_id, agent_id, query)))
 }
 
 async fn stream_terminal(
@@ -5041,14 +5153,21 @@ async fn stream_terminal(
     state: AppState,
     workspace_id: String,
     agent_id: String,
-    cols: u16,
-    rows: u16,
-    cursor: Option<TerminalCursor>,
+    query: TerminalQuery,
 ) {
     let (mut outgoing, mut incoming) = socket.split();
-    let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::unbounded_channel::<SocketFrame>();
+    let (terminal_tx, mut terminal_rx) =
+        tokio::sync::mpsc::channel::<SocketFrame>(TERMINAL_BROWSER_QUEUE_CAPACITY);
+    let cursor = query.cursor();
     let attached = state
-        .attach_terminal(&workspace_id, &agent_id, cols, rows, cursor, terminal_tx)
+        .attach_terminal(
+            &workspace_id,
+            &agent_id,
+            query.cols,
+            query.rows,
+            cursor,
+            terminal_tx,
+        )
         .await;
     let session_id = match attached {
         Ok(session_id) => session_id,
@@ -5061,21 +5180,10 @@ async fn stream_terminal(
         }
     };
 
+    let flow_window_bytes = query.flow_control.then_some(TERMINAL_FLOW_WINDOW_BYTES);
+    let mut in_flight_bytes = 0usize;
     loop {
         tokio::select! {
-            frame = terminal_rx.recv() => {
-                let Some(frame) = frame else { break };
-                let message = match frame {
-                    SocketFrame::Text(encoded) => Message::Text(encoded.into()),
-                    SocketFrame::Binary(data) => Message::Binary(data.into()),
-                    SocketFrame::Ping(payload) => Message::Ping(payload.into()),
-                    SocketFrame::Pong(payload) => Message::Pong(payload.into()),
-                    SocketFrame::Close => Message::Close(None),
-                };
-                if outgoing.send(message).await.is_err() {
-                    break;
-                }
-            }
             message = incoming.next() => {
                 let Some(Ok(message)) = message else { break };
                 let result = match message {
@@ -5083,6 +5191,21 @@ async fn stream_terminal(
                     Message::Text(text) => match serde_json::from_str::<TerminalClientMessage>(&text) {
                         Ok(TerminalClientMessage::Resize { cols, rows }) => {
                             state.terminal_resize(&session_id, cols, rows).await
+                        }
+                        Ok(TerminalClientMessage::Ack { bytes }) => {
+                            let Some(_) = flow_window_bytes else {
+                                continue;
+                            };
+                            let bytes = bytes as usize;
+                            if bytes > in_flight_bytes {
+                                Err(ProtocolError::new(
+                                    "invalid_terminal_ack",
+                                    "terminal acknowledgement exceeds outstanding output",
+                                ))
+                            } else {
+                                in_flight_bytes -= bytes;
+                                Ok(())
+                            }
                         }
                         Err(error) => Err(ProtocolError::new("invalid_terminal_message", error.to_string())),
                     },
@@ -5096,6 +5219,26 @@ async fn stream_terminal(
                             break;
                         }
                     }
+                }
+            }
+            frame = terminal_rx.recv(), if flow_window_bytes.is_none_or(|window| in_flight_bytes < window) => {
+                let Some(frame) = frame else { break };
+                let binary_bytes = match &frame {
+                    SocketFrame::Binary(data) => data.len(),
+                    _ => 0,
+                };
+                let message = match frame {
+                    SocketFrame::Text(encoded) => Message::Text(encoded.into()),
+                    SocketFrame::Binary(data) => Message::Binary(data.into()),
+                    SocketFrame::Ping(payload) => Message::Ping(payload.into()),
+                    SocketFrame::Pong(payload) => Message::Pong(payload.into()),
+                    SocketFrame::Close => Message::Close(None),
+                };
+                if outgoing.send(message).await.is_err() {
+                    break;
+                }
+                if flow_window_bytes.is_some() {
+                    in_flight_bytes = in_flight_bytes.saturating_add(binary_bytes);
                 }
             }
         }
@@ -5188,6 +5331,7 @@ async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_i
     let (mut outgoing, mut incoming) = socket.split();
     let mut events = state.subscribe();
     if let Ok(snapshot) = state.snapshot(&workspace_id).await {
+        let snapshot = visible_workspace_snapshot(snapshot);
         let initial = WorkspaceEvent {
             revision: snapshot.revision,
             workspace_id: workspace_id.clone(),
@@ -5203,6 +5347,9 @@ async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_i
         tokio::select! {
             event = events.recv() => match event {
                 Ok(event) if event.workspace_id == workspace_id => {
+                    if is_internal_app_agent_event(&event) {
+                        continue;
+                    }
                     if send_event(&mut outgoing, &event).await.is_err() {
                         break;
                     }
@@ -5210,6 +5357,7 @@ async fn stream_workspace_events(socket: WebSocket, state: AppState, workspace_i
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let Ok(snapshot) = state.snapshot(&workspace_id).await else { break };
+                    let snapshot = visible_workspace_snapshot(snapshot);
                     let event = WorkspaceEvent {
                         revision: snapshot.revision,
                         workspace_id: workspace_id.clone(),
@@ -5453,6 +5601,34 @@ mod tests {
             .await
             .expect("apply agent snapshot");
         state
+    }
+
+    #[tokio::test]
+    async fn public_workspace_updates_hide_app_runtime_agents() {
+        let state = state_with_managed_agent().await;
+        let mut app_agent = state
+            .resolve_agent("default", "agent-a")
+            .await
+            .expect("resolve fixture agent");
+        app_agent.agent_id = "appw-test".to_string();
+        app_agent.name = "app:Docs".to_string();
+        app_agent.kind = "app".to_string();
+        state.test_insert_agent(app_agent.clone()).await;
+
+        let snapshot = state.snapshot("default").await.expect("workspace snapshot");
+        assert!(snapshot.agents.iter().any(|agent| agent.kind == "app"));
+
+        let visible = visible_workspace_snapshot(snapshot);
+        assert!(visible.agents.iter().all(|agent| agent.kind != "app"));
+        assert_eq!(visible.agents.len(), 2);
+
+        let event = WorkspaceEvent {
+            revision: 1,
+            workspace_id: "default".to_string(),
+            event: "agent.updated".to_string(),
+            data: serde_json::to_value(app_agent).expect("encode app agent"),
+        };
+        assert!(is_internal_app_agent_event(&event));
     }
 
     #[tokio::test]
@@ -5740,6 +5916,194 @@ mod tests {
             .await
             .expect("route response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn workspace_deletion_route_requires_auth_and_deletes_the_workspace() {
+        let auth = AuthStore::for_test("admin-password").await;
+        let (invite, _) = auth
+            .create_personal_invitation()
+            .await
+            .expect("personal invitation");
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://treer.example/").expect("public URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth.clone(),
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/register")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "invite": invite,
+                            "email": "owner@example.com",
+                            "preferred_name": "Owner",
+                            "password": "password123",
+                        }))
+                        .expect("register body"),
+                    ))
+                    .expect("register request"),
+            )
+            .await
+            .expect("register response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/organizations")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("organization list request"),
+            )
+            .await
+            .expect("organization list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("organization list body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("organization list JSON");
+        let organization_id = payload["organizations"]
+            .as_array()
+            .expect("organization array")
+            .first()
+            .expect("personal organization")
+            .get("organization_id")
+            .expect("organization id")
+            .as_str()
+            .expect("organization id text")
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workspaces")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "organization_id": organization_id,
+                            "name": "Deletable",
+                        }))
+                        .expect("create workspace body"),
+                    ))
+                    .expect("create workspace request"),
+            )
+            .await
+            .expect("create workspace response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("create workspace body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("create workspace JSON");
+        let workspace_id = payload["workspace"]["workspace_id"]
+            .as_str()
+            .expect("workspace id")
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/workspaces/{workspace_id}"))
+                    .body(Body::empty())
+                    .expect("unauthenticated delete"),
+            )
+            .await
+            .expect("unauthenticated response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/workspaces/{workspace_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("authenticated delete"),
+            )
+            .await
+            .expect("delete response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("delete body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("delete JSON");
+        assert_eq!(payload["workspace_id"], workspace_id);
+        assert_eq!(payload["name"], "Deletable");
+        assert_eq!(payload["organization_id"], organization_id);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/workspaces?organization_id={organization_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("workspace list request"),
+            )
+            .await
+            .expect("list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("list JSON");
+        assert!(payload["workspaces"]
+            .as_array()
+            .expect("workspace array")
+            .is_empty());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/workspaces/{workspace_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("repeat delete"),
+            )
+            .await
+            .expect("repeat delete response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn session_cookie(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.starts_with("treer_session="))
+            .map(|value| value.split(';').next().expect("cookie pair").to_string())
+            .expect("session cookie")
     }
 
     #[tokio::test]
@@ -6559,8 +6923,10 @@ mod tests {
         );
         assert!(!install.contains("enr_"));
         assert!(!install.contains("connect"));
-        assert!(connect.contains(key));
-        assert!(connect.contains("treer-agent-server connect --proxy"));
+        assert_eq!(
+            connect,
+            format!("treer-agent-server connect --key '{key}' --proxy 'https://treer.example/'")
+        );
         assert!(!connect.contains("install.sh"));
     }
 
@@ -6684,6 +7050,7 @@ mod tests {
             LaunchAgentProfileRequest {
                 server_id: Some("machine-a".to_string()),
                 agent_name: None,
+                cwd: Some("reviews/42".to_string()),
                 cols: 100,
                 rows: 30,
             },
@@ -6692,9 +7059,22 @@ mod tests {
         assert_eq!(request.server_id.as_deref(), Some("machine-a"));
         assert_eq!(request.kind, "shell");
         assert_eq!(request.name, "Reviewer");
-        assert_eq!(request.cwd, "packages/api");
+        assert_eq!(request.cwd, "reviews/42");
         assert_eq!(request.args, ["codex", "review", "--base", "main"]);
         assert_eq!((request.cols, request.rows), (100, 30));
+
+        let request = agent_request_from_launch_profile(
+            &profile,
+            LaunchAgentProfileRequest {
+                server_id: None,
+                agent_name: None,
+                cwd: None,
+                cols: 120,
+                rows: 36,
+            },
+        )
+        .expect("build request with profile cwd");
+        assert_eq!(request.cwd, "packages/api");
     }
 
     #[test]

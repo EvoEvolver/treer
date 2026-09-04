@@ -15,13 +15,42 @@ export interface Workspace {
   name: string
 }
 
+export interface OrganizationGroup {
+  group_id: string
+  organization_id: string
+  name: string
+  member_ids: string[]
+}
+
+export interface WorkspaceAccessMember {
+  user_id: string
+  preferred_name: string
+  email: string
+  role: "owner" | "member"
+}
+
+export interface WorkspaceAccessGroup {
+  group_id: string
+  name: string
+  role: "owner" | "member"
+  member_count: number
+}
+
+export interface WorkspaceAccess {
+  workspace_id: string
+  access_mode: "organization" | "restricted"
+  current_role: "owner" | "member"
+  members: WorkspaceAccessMember[]
+  groups: WorkspaceAccessGroup[]
+}
+
 export interface BuildInfo {
   version: string
   git_commit: string
 }
 
 export interface MachineSupervision {
-  mode: "systemd_user" | "launchd" | "foreground"
+  mode: "systemd_user" | "launchd" | "nohup" | "foreground"
   fallback_reason?: string
 }
 
@@ -81,6 +110,7 @@ export interface AppDeployment {
   port: number
   hostname: string
   service_id: string
+  public_url?: string
   desired_state: "running" | "stopped"
   runtime_agent_id?: string
   restart_count: number
@@ -231,10 +261,15 @@ export interface ServiceIngress {
 
 export interface MachineTrafficRecord {
   window_start: string
+  traffic_class?: "virtual_network" | "service_ingress" | "virtual_host" | "agent_interface"
+  source_type?: "client" | "machine"
   source_server_id: string
+  destination_type?: "client" | "machine"
   destination_server_id: string
   payload_bytes: number
   payload_frames: number
+  billable_bytes?: number
+  meter_version?: number
 }
 
 export interface OrganizationAuditEvent {

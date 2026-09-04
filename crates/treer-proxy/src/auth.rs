@@ -67,6 +67,16 @@ pub(crate) struct ProfileMutationActor<'a> {
     pub label: &'a str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeletedWorkspace {
+    pub workspace_id: String,
+    pub organization_id: String,
+    pub name: String,
+    pub machine_count: i64,
+    pub agent_count: i64,
+    pub app_count: i64,
+}
+
 #[derive(Clone)]
 pub struct AuthStore {
     pool: PgPool,
@@ -250,6 +260,39 @@ pub struct OrganizationMember {
     pub joined_at: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct OrganizationGroup {
+    pub group_id: String,
+    pub organization_id: String,
+    pub name: String,
+    pub member_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAccessMember {
+    pub user_id: String,
+    pub preferred_name: String,
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAccessGroup {
+    pub group_id: String,
+    pub name: String,
+    pub role: String,
+    pub member_count: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAccessInfo {
+    pub workspace_id: String,
+    pub access_mode: String,
+    pub current_role: String,
+    pub members: Vec<WorkspaceAccessMember>,
+    pub groups: Vec<WorkspaceAccessGroup>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineSession {
     pub server_id: Option<String>,
@@ -414,6 +457,21 @@ pub struct RenameOrganizationRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemberRoleRequest {
     role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceAccessRequest {
+    access_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceGrantRequest {
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOrganizationGroupRequest {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -730,7 +788,8 @@ impl AuthStore {
 
     pub async fn all_workspaces(&self) -> Result<Vec<WorkspaceInfo>, AuthFailure> {
         let rows = sqlx::query(
-            "SELECT workspace_id, name, created_at FROM workspaces ORDER BY workspace_id",
+            "SELECT workspace_id, name, created_at FROM workspaces \
+             WHERE deleted_at IS NULL ORDER BY workspace_id",
         )
         .fetch_all(&self.pool)
         .await
@@ -941,16 +1000,79 @@ impl AuthStore {
         workspace_id: &str,
         user_id: &str,
     ) -> Result<String, AuthFailure> {
-        let organization_id = sqlx::query_scalar::<_, String>(
-            "SELECT organization_id FROM workspaces WHERE workspace_id = $1",
+        if self.disabled {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = $1 AND deleted_at IS NULL)",
+            )
+            .bind(workspace_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            return exists.then(|| "owner".to_string()).ok_or_else(|| {
+                AuthFailure::not_found("workspace_not_found", "workspace does not exist")
+            });
+        }
+        let role = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT CASE \
+                 WHEN om.role IN ('owner', 'admin') THEN 'owner' \
+                 WHEN ug.role = 'owner' OR EXISTS( \
+                   SELECT 1 FROM workspace_group_grants wg \
+                   JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                   WHERE wg.workspace_id = w.workspace_id AND gm.user_id = $2 AND wg.role = 'owner' \
+                 ) THEN 'owner' \
+                 WHEN w.access_mode = 'organization' OR ug.user_id IS NOT NULL OR EXISTS( \
+                   SELECT 1 FROM workspace_group_grants wg \
+                   JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                   WHERE wg.workspace_id = w.workspace_id AND gm.user_id = $2 \
+                 ) THEN 'member' \
+                 ELSE NULL END \
+             FROM workspaces w \
+             JOIN organization_members om ON om.organization_id = w.organization_id AND om.user_id = $2 \
+             LEFT JOIN workspace_user_grants ug ON ug.workspace_id = w.workspace_id AND ug.user_id = $2 \
+             WHERE w.workspace_id = $1 AND w.deleted_at IS NULL",
         )
         .bind(workspace_id)
+        .bind(user_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(AuthFailure::database)?
-        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
-        self.require_organization_member(&organization_id, user_id)
-            .await
+        .flatten();
+        if let Some(role) = role {
+            return Ok(role);
+        }
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = $1 AND deleted_at IS NULL)",
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if exists {
+            Err(AuthFailure::forbidden(
+                "workspace_access_denied",
+                "you do not have access to this workspace",
+            ))
+        } else {
+            Err(AuthFailure::not_found(
+                "workspace_not_found",
+                "workspace does not exist",
+            ))
+        }
+    }
+
+    pub async fn require_workspace_owner(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Result<(), AuthFailure> {
+        if self.workspace_member_role(workspace_id, user_id).await? == "owner" {
+            Ok(())
+        } else {
+            Err(AuthFailure::forbidden(
+                "workspace_owner_required",
+                "workspace owner access required",
+            ))
+        }
     }
 
     pub async fn list_members(
@@ -988,12 +1110,24 @@ impl AuthStore {
         workspace_id: &str,
     ) -> Result<Vec<WorkspaceHuman>, AuthFailure> {
         let rows = sqlx::query(
-            "SELECT u.id AS user_id, u.preferred_name, m.role \
+            "SELECT u.id AS user_id, u.preferred_name, CASE \
+               WHEN m.role IN ('owner', 'admin') OR ug.role = 'owner' OR EXISTS( \
+                 SELECT 1 FROM workspace_group_grants wg \
+                 JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                 WHERE wg.workspace_id = w.workspace_id AND gm.user_id = u.id AND wg.role = 'owner' \
+               ) THEN 'owner' ELSE 'member' END AS role \
              FROM workspaces w \
              JOIN organization_members m ON m.organization_id = w.organization_id \
              JOIN users u ON u.id = m.user_id \
-             WHERE w.workspace_id = $1 \
-             ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, \
+             LEFT JOIN workspace_user_grants ug ON ug.workspace_id = w.workspace_id AND ug.user_id = u.id \
+             WHERE w.workspace_id = $1 AND w.deleted_at IS NULL AND ( \
+               w.access_mode = 'organization' OR m.role IN ('owner', 'admin') OR ug.user_id IS NOT NULL OR EXISTS( \
+                 SELECT 1 FROM workspace_group_grants wg \
+                 JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                 WHERE wg.workspace_id = w.workspace_id AND gm.user_id = u.id \
+               ) \
+             ) \
+             ORDER BY CASE WHEN m.role IN ('owner', 'admin') OR ug.role = 'owner' THEN 0 ELSE 1 END, \
                       lower(u.preferred_name), u.id",
         )
         .bind(workspace_id)
@@ -1019,13 +1153,389 @@ impl AuthStore {
             .await?;
         let rows = sqlx::query(
             "SELECT workspace_id, name, created_at FROM workspaces \
-             WHERE organization_id = $1 ORDER BY lower(name), workspace_id",
+             WHERE organization_id = $1 AND deleted_at IS NULL AND ( \
+               $3::BOOLEAN OR access_mode = 'organization' OR EXISTS( \
+                 SELECT 1 FROM organization_members om \
+                 WHERE om.organization_id = workspaces.organization_id AND om.user_id = $2 \
+                   AND om.role IN ('owner', 'admin') \
+               ) OR EXISTS( \
+                 SELECT 1 FROM workspace_user_grants ug \
+                 WHERE ug.workspace_id = workspaces.workspace_id AND ug.user_id = $2 \
+               ) OR EXISTS( \
+                 SELECT 1 FROM workspace_group_grants wg \
+                 JOIN organization_group_members gm ON gm.group_id = wg.group_id \
+                 WHERE wg.workspace_id = workspaces.workspace_id AND gm.user_id = $2 \
+               ) \
+             ) \
+             ORDER BY lower(name), workspace_id",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(self.disabled)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        rows.into_iter().map(workspace_from_row).collect()
+    }
+
+    pub async fn workspace_access_info(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        let current_role = self.workspace_member_role(workspace_id, user_id).await?;
+        let access_mode = sqlx::query_scalar::<_, String>(
+            "SELECT access_mode FROM workspaces WHERE workspace_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let members = sqlx::query(
+            "SELECT u.id AS user_id, u.preferred_name, u.email, g.role \
+             FROM workspace_user_grants g \
+             JOIN workspaces w ON w.workspace_id = g.workspace_id \
+             JOIN organization_members om ON om.organization_id = w.organization_id AND om.user_id = g.user_id \
+             JOIN users u ON u.id = g.user_id \
+             WHERE g.workspace_id = $1 \
+             ORDER BY CASE g.role WHEN 'owner' THEN 0 ELSE 1 END, lower(u.preferred_name), u.id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .into_iter()
+        .map(|row| WorkspaceAccessMember {
+            user_id: row.get("user_id"),
+            preferred_name: row.get("preferred_name"),
+            email: row.get("email"),
+            role: row.get("role"),
+        })
+        .collect();
+        let groups = sqlx::query(
+            "SELECT og.group_id, og.name, wg.role, COUNT(gm.user_id) AS member_count \
+             FROM workspace_group_grants wg \
+             JOIN organization_groups og ON og.group_id = wg.group_id \
+             LEFT JOIN organization_group_members gm ON gm.group_id = og.group_id \
+             WHERE wg.workspace_id = $1 \
+             GROUP BY og.group_id, og.name, wg.role \
+             ORDER BY CASE wg.role WHEN 'owner' THEN 0 ELSE 1 END, lower(og.name), og.group_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .into_iter()
+        .map(|row| WorkspaceAccessGroup {
+            group_id: row.get("group_id"),
+            name: row.get("name"),
+            role: row.get("role"),
+            member_count: row.get("member_count"),
+        })
+        .collect();
+        Ok(WorkspaceAccessInfo {
+            workspace_id: workspace_id.to_string(),
+            access_mode,
+            current_role,
+            members,
+            groups,
+        })
+    }
+
+    pub async fn update_workspace_access_mode(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        access_mode: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, user_id).await?;
+        if !matches!(access_mode, "organization" | "restricted") {
+            return Err(AuthFailure::bad_request(
+                "invalid_workspace_access_mode",
+                "workspace access mode must be organization or restricted",
+            ));
+        }
+        sqlx::query(
+            "UPDATE workspaces SET access_mode = $1 WHERE workspace_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(access_mode)
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, user_id).await
+    }
+
+    pub async fn upsert_workspace_user_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        target_user_id: &str,
+        role: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        validate_workspace_role(role)?;
+        if actor == target_user_id && role != "owner" {
+            return Err(AuthFailure::conflict(
+                "workspace_owner_cannot_demote_self",
+                "add another owner before changing your own workspace role",
+            ));
+        }
+        let belongs = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM workspaces w JOIN organization_members om \
+             ON om.organization_id = w.organization_id \
+             WHERE w.workspace_id = $1 AND om.user_id = $2 AND w.deleted_at IS NULL)",
+        )
+        .bind(workspace_id)
+        .bind(target_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if !belongs {
+            return Err(AuthFailure::bad_request(
+                "workspace_member_must_belong_to_organization",
+                "workspace members must belong to the organization",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO workspace_user_grants(workspace_id, user_id, role, created_at, created_by) \
+             VALUES($1, $2, $3, $4, $5) ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role",
+        )
+        .bind(workspace_id)
+        .bind(target_user_id)
+        .bind(role)
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn remove_workspace_user_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        target_user_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        if actor == target_user_id {
+            return Err(AuthFailure::conflict(
+                "workspace_owner_cannot_remove_self",
+                "another workspace owner must remove your access",
+            ));
+        }
+        sqlx::query("DELETE FROM workspace_user_grants WHERE workspace_id = $1 AND user_id = $2")
+            .bind(workspace_id)
+            .bind(target_user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn upsert_workspace_group_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        group_id: &str,
+        role: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        validate_workspace_role(role)?;
+        let same_organization = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM workspaces w JOIN organization_groups g \
+             ON g.organization_id = w.organization_id \
+             WHERE w.workspace_id = $1 AND g.group_id = $2 AND w.deleted_at IS NULL)",
+        )
+        .bind(workspace_id)
+        .bind(group_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if !same_organization {
+            return Err(AuthFailure::bad_request(
+                "workspace_group_must_belong_to_organization",
+                "workspace groups must belong to the organization",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO workspace_group_grants(workspace_id, group_id, role, created_at, created_by) \
+             VALUES($1, $2, $3, $4, $5) ON CONFLICT(workspace_id, group_id) DO UPDATE SET role = excluded.role",
+        )
+        .bind(workspace_id)
+        .bind(group_id)
+        .bind(role)
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn remove_workspace_group_grant(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        group_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner(workspace_id, actor).await?;
+        sqlx::query("DELETE FROM workspace_group_grants WHERE workspace_id = $1 AND group_id = $2")
+            .bind(workspace_id)
+            .bind(group_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        self.workspace_access_info(workspace_id, actor).await
+    }
+
+    pub async fn list_organization_groups(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
+        self.require_organization_member(organization_id, user_id)
+            .await?;
+        let rows = sqlx::query(
+            "SELECT group_id, organization_id, name FROM organization_groups \
+             WHERE organization_id = $1 ORDER BY lower(name), group_id",
         )
         .bind(organization_id)
         .fetch_all(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        rows.into_iter().map(workspace_from_row).collect()
+        let mut groups = Vec::with_capacity(rows.len());
+        for row in rows {
+            let group_id: String = row.get("group_id");
+            let member_ids = sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM organization_group_members WHERE group_id = $1 ORDER BY user_id",
+            )
+            .bind(&group_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            groups.push(OrganizationGroup {
+                group_id,
+                organization_id: row.get("organization_id"),
+                name: row.get("name"),
+                member_ids,
+            });
+        }
+        Ok(groups)
+    }
+
+    pub async fn create_organization_group(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        name: &str,
+    ) -> Result<OrganizationGroup, AuthFailure> {
+        self.require_manager(organization_id, actor).await?;
+        let name = validate_resource_name(name, "group")?;
+        let group = OrganizationGroup {
+            group_id: format!("grp_{}", Uuid::new_v4().simple()),
+            organization_id: organization_id.to_string(),
+            name,
+            member_ids: Vec::new(),
+        };
+        sqlx::query(
+            "INSERT INTO organization_groups(group_id, organization_id, name, created_at, created_by) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&group.group_id)
+        .bind(organization_id)
+        .bind(&group.name)
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                AuthFailure::conflict("group_exists", "group name already exists")
+            } else {
+                AuthFailure::database(error)
+            }
+        })?;
+        Ok(group)
+    }
+
+    pub async fn delete_organization_group(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        group_id: &str,
+    ) -> Result<(), AuthFailure> {
+        self.require_manager(organization_id, actor).await?;
+        let result = sqlx::query(
+            "DELETE FROM organization_groups WHERE organization_id = $1 AND group_id = $2",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if result.rows_affected() == 0 {
+            return Err(AuthFailure::not_found(
+                "group_not_found",
+                "group does not exist",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn set_organization_group_member(
+        &self,
+        organization_id: &str,
+        actor: &str,
+        group_id: &str,
+        target_user_id: &str,
+        present: bool,
+    ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
+        self.require_manager(organization_id, actor).await?;
+        let valid = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM organization_groups g JOIN organization_members om \
+             ON om.organization_id = g.organization_id \
+             WHERE g.organization_id = $1 AND g.group_id = $2 AND om.user_id = $3)",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(target_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if !valid {
+            return Err(AuthFailure::bad_request(
+                "invalid_group_member",
+                "the group and member must belong to the organization",
+            ));
+        }
+        if present {
+            sqlx::query(
+                "INSERT INTO organization_group_members(group_id, user_id, added_at, added_by) \
+                 VALUES($1, $2, $3, $4) ON CONFLICT(group_id, user_id) DO NOTHING",
+            )
+            .bind(group_id)
+            .bind(target_user_id)
+            .bind(Utc::now().to_rfc3339())
+            .bind(actor)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        } else {
+            sqlx::query(
+                "DELETE FROM organization_group_members WHERE group_id = $1 AND user_id = $2",
+            )
+            .bind(group_id)
+            .bind(target_user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        }
+        self.list_organization_groups(organization_id, actor).await
     }
 
     pub async fn create_workspace(
@@ -1061,6 +1571,16 @@ impl AuthStore {
                 AuthFailure::database(error)
             }
         })?;
+        sqlx::query(
+            "INSERT INTO workspace_user_grants(workspace_id, user_id, role, created_at, created_by) \
+             SELECT $1, id, 'owner', $2, $3 FROM users WHERE id = $3",
+        )
+        .bind(workspace_id)
+        .bind(now.to_rfc3339())
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         insert_default_agent_launch_profiles(&mut transaction, workspace_id, user_id, &now).await?;
         audit::insert(
             &mut transaction,
@@ -1097,7 +1617,8 @@ impl AuthStore {
         let name = validate_resource_name(name, "workspace")?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let row = sqlx::query(
-            "SELECT organization_id, name FROM workspaces WHERE workspace_id = $1 FOR UPDATE",
+            "SELECT organization_id, name FROM workspaces \
+             WHERE workspace_id = $1 AND deleted_at IS NULL FOR UPDATE",
         )
         .bind(workspace_id)
         .fetch_optional(&mut *transaction)
@@ -1106,12 +1627,15 @@ impl AuthStore {
         .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
         let organization_id: String = row.get("organization_id");
         let old_name: String = row.get("name");
-        sqlx::query("UPDATE workspaces SET name = $1 WHERE workspace_id = $2")
-            .bind(&name)
-            .bind(workspace_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE workspaces SET name = $1 \
+             WHERE workspace_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(&name)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         audit::insert(
             &mut transaction,
             NewAuditEvent {
@@ -1131,7 +1655,8 @@ impl AuthStore {
         .map_err(AuthFailure::database)?;
         let info = workspace_from_row(
             sqlx::query(
-                "SELECT workspace_id, name, created_at FROM workspaces WHERE workspace_id = $1",
+                "SELECT workspace_id, name, created_at FROM workspaces \
+                 WHERE workspace_id = $1 AND deleted_at IS NULL",
             )
             .bind(workspace_id)
             .fetch_one(&mut *transaction)
@@ -1140,6 +1665,121 @@ impl AuthStore {
         )?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(info)
+    }
+
+    pub async fn delete_workspace(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Result<DeletedWorkspace, AuthFailure> {
+        self.require_workspace_owner(workspace_id, user_id).await?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let row = sqlx::query(
+            "SELECT organization_id, name FROM workspaces \
+             WHERE workspace_id = $1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
+        let organization_id: String = row.get("organization_id");
+        let name: String = row.get("name");
+        let machine_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM machines WHERE workspace_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if machine_count != 0 {
+            return Err(AuthFailure::conflict(
+                "workspace_has_machines",
+                "delete all machines in this workspace first",
+            ));
+        }
+        let agent_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        let app_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM app_deployments WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE agent_credentials SET revoked_at = $1 \
+             WHERE workspace_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(&now)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id: &organization_id,
+                workspace_id: Some(workspace_id),
+                actor_kind: "user",
+                actor_id: Some(user_id),
+                source: "api",
+                action: "workspace.deleted",
+                resource_kind: "workspace",
+                resource_id: workspace_id,
+                resource_name: Some(&name),
+                payload: json!({
+                    "machine_count": machine_count,
+                    "agent_count": agent_count,
+                    "app_count": app_count,
+                }),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE workspaces SET deleted_at = $1, deleted_by = $2 \
+             WHERE workspace_id = $3 AND deleted_at IS NULL",
+        )
+        .bind(&now)
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        self.agent_credentials
+            .write()
+            .await
+            .retain(|_, record| record.workspace_id != workspace_id);
+        let _update = self.service_ingresses_update.lock().await;
+        self.service_ingresses
+            .write()
+            .await
+            .retain(|_, resolved| resolved.ingress.workspace_id != workspace_id);
+        if self
+            .virtual_hosts
+            .write()
+            .await
+            .remove(workspace_id)
+            .is_some()
+        {
+            self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(DeletedWorkspace {
+            workspace_id: workspace_id.to_string(),
+            organization_id,
+            name,
+            machine_count,
+            agent_count,
+            app_count,
+        })
     }
 
     pub async fn list_agent_launch_profiles(
@@ -1467,6 +2107,7 @@ impl AuthStore {
             port: request.port,
             hostname: hostname.clone(),
             service_id: service.service_id.clone(),
+            public_url: None,
             desired_state: AppDesiredState::Running,
             runtime_agent_id: None,
             restart_count: 0,
@@ -1626,6 +2267,7 @@ impl AuthStore {
         target: &str,
     ) -> Result<AppDeployment, AuthFailure> {
         let update_guard = self.virtual_hosts_update.lock().await;
+        let _ingress_update = self.service_ingresses_update.lock().await;
         let deployment = self.resolve_app_deployment(workspace_id, target).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM app_deployments WHERE workspace_id = $1 AND app_id = $2")
@@ -1641,6 +2283,10 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
+        self.service_ingresses
+            .write()
+            .await
+            .retain(|_, resolved| resolved.ingress.service_id != deployment.service_id);
         drop(update_guard);
         self.refresh_virtual_network_hosts()
             .await
@@ -2010,7 +2656,10 @@ impl AuthStore {
             "SELECT v.workspace_id, v.hostname, v.service_id, s.protocol AS service_protocol, \
              s.server_id AS destination_server_id, s.target_agent_id AS destination_agent_id, \
              s.target_host, s.target_port, v.created_at, v.created_by \
-             FROM virtual_network_hosts v JOIN machine_services s ON s.service_id = v.service_id",
+             FROM virtual_network_hosts v \
+             JOIN machine_services s ON s.service_id = v.service_id \
+             JOIN workspaces w ON w.workspace_id = v.workspace_id \
+             WHERE w.deleted_at IS NULL",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -2105,7 +2754,8 @@ impl AuthStore {
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \
              FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id \
-             WHERE lower(i.hostname) = lower($1)",
+             JOIN workspaces w ON w.workspace_id = i.workspace_id \
+             WHERE lower(i.hostname) = lower($1) AND w.deleted_at IS NULL",
         )
         .bind(hostname)
         .fetch_optional(&self.pool)
@@ -2196,6 +2846,114 @@ impl AuthStore {
         Ok(ingress)
     }
 
+    pub async fn ensure_app_ingress(
+        &self,
+        app: &AppDeployment,
+        actor: &str,
+        base_domain: &str,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let service = self
+            .resolve_machine_service(&app.workspace_id, &app.service_id)
+            .await?;
+        let _update = self.service_ingresses_update.lock().await;
+        let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+        if let Some(existing) = self.service_ingresses.read().await.get(&hostname) {
+            return if existing.ingress.service_id == app.service_id
+                && existing.ingress.access == ServiceIngressAccess::Workspace
+            {
+                Ok(existing.ingress.clone())
+            } else {
+                Err(AuthFailure::conflict(
+                    "ingress_exists",
+                    "generated App ingress hostname already exists",
+                ))
+            };
+        }
+        let now = Utc::now();
+        let ingress = ServiceIngress {
+            ingress_id: format!("ing_{}", Uuid::new_v4().simple()),
+            workspace_id: app.workspace_id.clone(),
+            service_id: app.service_id.clone(),
+            hostname: hostname.clone(),
+            access: ServiceIngressAccess::Workspace,
+            enabled: true,
+            created_at: now,
+            created_by: actor.to_string(),
+            updated_at: now,
+            updated_by: actor.to_string(),
+        };
+        let inserted = sqlx::query(
+            "INSERT INTO service_ingresses(\
+             ingress_id, workspace_id, service_id, hostname, access, enabled, created_at, \
+             created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, 'workspace', TRUE, $5, $6, $7, $8) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&ingress.ingress_id)
+        .bind(&ingress.workspace_id)
+        .bind(&ingress.service_id)
+        .bind(&ingress.hostname)
+        .bind(ingress.created_at.to_rfc3339())
+        .bind(&ingress.created_by)
+        .bind(ingress.updated_at.to_rfc3339())
+        .bind(&ingress.updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if inserted.rows_affected() == 0 {
+            return self
+                .resolve_service_ingress_hostname(&hostname)
+                .await?
+                .filter(|resolved| {
+                    resolved.ingress.service_id == app.service_id
+                        && resolved.ingress.access == ServiceIngressAccess::Workspace
+                })
+                .map(|resolved| resolved.ingress)
+                .ok_or_else(|| {
+                    AuthFailure::conflict(
+                        "ingress_exists",
+                        "generated App ingress hostname already exists",
+                    )
+                });
+        }
+        self.service_ingresses.write().await.insert(
+            hostname,
+            ResolvedServiceIngress {
+                ingress: ingress.clone(),
+                service,
+            },
+        );
+        Ok(ingress)
+    }
+
+    pub async fn ensure_managed_app_ingresses(
+        &self,
+        actor: &str,
+        base_domain: &str,
+    ) -> Result<usize, AuthFailure> {
+        let rows = sqlx::query(
+            "SELECT a.app_id, a.workspace_id, a.name, a.server_id, a.command, a.args, a.cwd, \
+             a.port, a.hostname, a.service_id, a.desired_state, a.runtime_agent_id, \
+             a.restart_count, a.last_error, a.created_at, a.created_by, a.updated_at, a.updated_by \
+             FROM app_deployments a JOIN workspaces w ON w.workspace_id = a.workspace_id \
+             WHERE w.deleted_at IS NULL ORDER BY a.app_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let apps = rows
+            .into_iter()
+            .map(app_deployment_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut created = 0;
+        for app in apps {
+            let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+            let existed = self.service_ingresses.read().await.contains_key(&hostname);
+            self.ensure_app_ingress(&app, actor, base_domain).await?;
+            created += usize::from(!existed);
+        }
+        Ok(created)
+    }
+
     pub async fn update_service_ingress(
         &self,
         workspace_id: &str,
@@ -2262,7 +3020,9 @@ impl AuthStore {
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \
-             FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id",
+             FROM service_ingresses i JOIN machine_services s ON s.service_id = i.service_id \
+             JOIN workspaces w ON w.workspace_id = i.workspace_id \
+             WHERE w.deleted_at IS NULL",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -2810,7 +3570,7 @@ impl AuthStore {
         &self,
         token: &str,
     ) -> Result<MachineEnrollmentClaim, AuthFailure> {
-        self.claim_machine_enrollment_for_installation(token, None, None)
+        self.claim_machine_enrollment_for_installation(token, None, None, None)
             .await
     }
 
@@ -2819,11 +3579,21 @@ impl AuthStore {
         token: &str,
         installation_id: Option<&str>,
         machine_name: Option<&str>,
+        existing_server_id: Option<&str>,
     ) -> Result<MachineEnrollmentClaim, AuthFailure> {
         let installation_id = installation_id.map(validate_installation_id).transpose()?;
         let machine_name = machine_name
             .map(|name| validate_resource_name(name, "machine"))
             .transpose()?;
+        let existing_server_id = existing_server_id
+            .map(validate_machine_server_id)
+            .transpose()?;
+        if existing_server_id.is_some() && installation_id.is_none() {
+            return Err(AuthFailure::bad_request(
+                "invalid_machine_identity",
+                "an installed machine ID requires an installation identity",
+            ));
+        }
         let enrollment =
             parse_machine_enrollment_key(token).map_err(|_| invalid_machine_enrollment())?;
         let now = Utc::now();
@@ -2850,7 +3620,16 @@ impl AuthStore {
         let machine_secret = random_secret();
         let machine_secret_hash = hash_password(&machine_secret)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let existing_server_id = if let Some(installation_id) = installation_id.as_deref() {
+        let workspace =
+            sqlx::query("SELECT deleted_at FROM workspaces WHERE workspace_id = $1 FOR KEY SHARE")
+                .bind(&workspace_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        if workspace.is_some_and(|row| row.get::<Option<String>, _>("deleted_at").is_some()) {
+            return Err(invalid_machine_enrollment());
+        }
+        let server_for_installation = if let Some(installation_id) = installation_id.as_deref() {
             sqlx::query_scalar::<_, String>(
                 "SELECT server_id FROM machines WHERE workspace_id = $1 AND installation_id = $2",
             )
@@ -2862,9 +3641,43 @@ impl AuthStore {
         } else {
             None
         };
-        let server_id = existing_server_id
-            .clone()
-            .unwrap_or_else(|| format!("srv_{}", Uuid::new_v4().simple()));
+        let server_id = match (
+            server_for_installation.as_deref(),
+            existing_server_id.as_deref(),
+        ) {
+            (Some(server_id), Some(expected)) if server_id != expected => {
+                return Err(AuthFailure::conflict(
+                    "machine_identity_conflict",
+                    "this installation identity is already bound to another machine",
+                ));
+            }
+            (Some(server_id), _) => server_id.to_string(),
+            (None, Some(server_id)) => {
+                let existing = sqlx::query(
+                    "SELECT workspace_id, installation_id FROM machines WHERE server_id = $1",
+                )
+                .bind(server_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+                if let Some(existing) = existing {
+                    let existing_workspace: String = existing.get("workspace_id");
+                    let existing_installation: Option<String> = existing.get("installation_id");
+                    if existing_workspace != workspace_id
+                        || existing_installation
+                            .as_deref()
+                            .is_some_and(|value| Some(value) != installation_id.as_deref())
+                    {
+                        return Err(AuthFailure::conflict(
+                            "machine_identity_conflict",
+                            "the installed machine is bound to another workspace or installation identity",
+                        ));
+                    }
+                }
+                server_id.to_string()
+            }
+            (None, None) => format!("srv_{}", Uuid::new_v4().simple()),
+        };
         let update = sqlx::query(
             "UPDATE machine_enrollments SET used_at = $1, server_id = $2 \
              WHERE enrollment_id = $3 AND used_at IS NULL AND expires_at > $4",
@@ -2879,11 +3692,19 @@ impl AuthStore {
         if update.rows_affected() != 1 {
             return Err(invalid_machine_enrollment());
         }
-        if existing_server_id.is_some() {
+        let existing_machine =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM machines WHERE server_id = $1")
+                .bind(&server_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?
+                != 0;
+        if existing_machine {
             sqlx::query(
-                "UPDATE machines SET secret_hash = $1, enrolled_by = $2, revoked_at = NULL \
-                 WHERE server_id = $3 AND workspace_id = $4",
+                "UPDATE machines SET installation_id = $1, secret_hash = $2, enrolled_by = $3, revoked_at = NULL \
+                 WHERE server_id = $4 AND workspace_id = $5",
             )
+            .bind(installation_id.as_deref())
             .bind(machine_secret_hash)
             .bind(&created_by)
             .bind(&server_id)
@@ -2934,10 +3755,16 @@ impl AuthStore {
         headers: &HeaderMap,
         installation_id: Option<&str>,
         machine_name: Option<&str>,
+        existing_server_id: Option<&str>,
     ) -> Result<MachineEnrollmentClaim, AuthFailure> {
         let token = bearer_token(headers).ok_or_else(invalid_machine_enrollment)?;
-        self.claim_machine_enrollment_for_installation(token, installation_id, machine_name)
-            .await
+        self.claim_machine_enrollment_for_installation(
+            token,
+            installation_id,
+            machine_name,
+            existing_server_id,
+        )
+        .await
     }
 
     pub async fn bind_machine_identity(
@@ -3010,8 +3837,9 @@ impl AuthStore {
         let token = bearer_token(headers).ok_or_else(machine_auth_required)?;
         let (server_id, secret) = parse_credential(token, "srv_")?;
         let row = sqlx::query(
-            "SELECT workspace_id, secret_hash FROM machines \
-             WHERE server_id = $1 AND revoked_at IS NULL",
+            "SELECT m.workspace_id, m.secret_hash FROM machines m \
+             LEFT JOIN workspaces w ON w.workspace_id = m.workspace_id \
+             WHERE m.server_id = $1 AND m.revoked_at IS NULL AND w.deleted_at IS NULL",
         )
         .bind(server_id)
         .fetch_optional(&self.pool)
@@ -3094,8 +3922,9 @@ impl AuthStore {
             record
         } else {
             let row = sqlx::query(
-                "SELECT workspace_id, server_id, secret_hash FROM agent_credentials \
-                 WHERE agent_id = $1 AND revoked_at IS NULL",
+                "SELECT c.workspace_id, c.server_id, c.secret_hash FROM agent_credentials c \
+                 LEFT JOIN workspaces w ON w.workspace_id = c.workspace_id \
+                 WHERE c.agent_id = $1 AND c.revoked_at IS NULL AND w.deleted_at IS NULL",
             )
             .bind(agent_id)
             .fetch_optional(&self.pool)
@@ -3688,6 +4517,24 @@ impl AuthStore {
                 "the organization owner cannot be removed",
             ));
         }
+        sqlx::query(
+            "DELETE FROM organization_group_members gm USING organization_groups g \
+             WHERE gm.group_id = g.group_id AND g.organization_id = $1 AND gm.user_id = $2",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "DELETE FROM workspace_user_grants g USING workspaces w \
+             WHERE g.workspace_id = w.workspace_id AND w.organization_id = $1 AND g.user_id = $2",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         sqlx::query(
             "DELETE FROM organization_members \
              WHERE organization_id = $1 AND user_id = $2",
@@ -4647,6 +5494,120 @@ pub async fn members(
     })))
 }
 
+pub async fn organization_groups(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "groups": auth.list_organization_groups(&organization_id, &session.user_id).await?
+    })))
+}
+
+pub async fn create_organization_group_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+    Json(request): Json<CreateOrganizationGroupRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "group": auth.create_organization_group(&organization_id, &session.user_id, &request.name).await?
+    })))
+}
+
+pub async fn delete_organization_group_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, group_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    auth.delete_organization_group(&organization_id, &session.user_id, &group_id)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn add_organization_group_member_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, group_id, user_id)): AxumPath<(String, String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "groups": auth.set_organization_group_member(&organization_id, &session.user_id, &group_id, &user_id, true).await?
+    })))
+}
+
+pub async fn remove_organization_group_member_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, group_id, user_id)): AxumPath<(String, String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "groups": auth.set_organization_group_member(&organization_id, &session.user_id, &group_id, &user_id, false).await?
+    })))
+}
+
+pub async fn workspace_access(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(workspace_id): AxumPath<String>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.workspace_access_info(&workspace_id, &session.user_id).await?
+    })))
+}
+
+pub async fn update_workspace_access(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(workspace_id): AxumPath<String>,
+    Json(request): Json<UpdateWorkspaceAccessRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.update_workspace_access_mode(&workspace_id, &session.user_id, &request.access_mode).await?
+    })))
+}
+
+pub async fn update_workspace_user_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, user_id)): AxumPath<(String, String)>,
+    Json(request): Json<UpdateWorkspaceGrantRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.upsert_workspace_user_grant(&workspace_id, &session.user_id, &user_id, &request.role).await?
+    })))
+}
+
+pub async fn delete_workspace_user_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, user_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.remove_workspace_user_grant(&workspace_id, &session.user_id, &user_id).await?
+    })))
+}
+
+pub async fn update_workspace_group_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, group_id)): AxumPath<(String, String)>,
+    Json(request): Json<UpdateWorkspaceGrantRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.upsert_workspace_group_grant(&workspace_id, &session.user_id, &group_id, &request.role).await?
+    })))
+}
+
+pub async fn delete_workspace_group_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((workspace_id, group_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "access": auth.remove_workspace_group_grant(&workspace_id, &session.user_id, &group_id).await?
+    })))
+}
+
 pub async fn audit_events(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
@@ -5130,6 +6091,17 @@ fn validate_resource_name(value: &str, resource: &str) -> Result<String, AuthFai
     Ok(value.to_string())
 }
 
+fn validate_workspace_role(role: &str) -> Result<(), AuthFailure> {
+    if matches!(role, "owner" | "member") {
+        Ok(())
+    } else {
+        Err(AuthFailure::bad_request(
+            "invalid_workspace_role",
+            "workspace role must be owner or member",
+        ))
+    }
+}
+
 fn validate_installation_id(value: &str) -> Result<String, AuthFailure> {
     if value.len() != 36
         || !value.starts_with("mid_")
@@ -5138,6 +6110,19 @@ fn validate_installation_id(value: &str) -> Result<String, AuthFailure> {
         return Err(AuthFailure::bad_request(
             "invalid_machine_identity",
             "machine installation identity is invalid",
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn validate_machine_server_id(value: &str) -> Result<String, AuthFailure> {
+    if value.len() != 36
+        || !value.starts_with("srv_")
+        || !value[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_machine_identity",
+            "installed machine ID is invalid",
         ));
     }
     Ok(value.to_ascii_lowercase())
@@ -5225,6 +6210,7 @@ fn app_deployment_from_row(row: sqlx::postgres::PgRow) -> Result<AppDeployment, 
         port,
         hostname: row.get("hostname"),
         service_id: row.get("service_id"),
+        public_url: None,
         desired_state,
         runtime_agent_id: row.get("runtime_agent_id"),
         restart_count,
@@ -5526,6 +6512,30 @@ fn normalize_ingress_slug(value: &str) -> Result<String, AuthFailure> {
     Ok(slug)
 }
 
+pub(crate) fn managed_app_ingress_hostname(
+    app_name: &str,
+    app_id: &str,
+    base_domain: &str,
+) -> Result<String, AuthFailure> {
+    let slug = normalize_ingress_slug(app_name).unwrap_or_else(|_| "app".to_string());
+    let suffix = app_id
+        .strip_prefix("app_")
+        .unwrap_or(app_id)
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(12)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let hostname = format!("{slug}-{suffix}.{base_domain}");
+    if suffix.is_empty() || hostname.len() > 253 {
+        return Err(AuthFailure::bad_request(
+            "invalid_ingress_slug",
+            "generated App ingress hostname is invalid",
+        ));
+    }
+    Ok(hostname)
+}
+
 fn validate_ingress_return_path(value: &str) -> Result<String, AuthFailure> {
     if !value.starts_with('/')
         || value.starts_with("//")
@@ -5753,6 +6763,21 @@ mod tests {
     use treer_protocol::{AgentInfo, AgentStatus, CreateVirtualNetworkHostRequest, ServerStatus};
 
     type EmailCapture = Arc<Mutex<Option<oneshot::Sender<(HeaderMap, Value)>>>>;
+
+    #[test]
+    fn managed_app_ingress_hostnames_are_stable_and_dns_safe() {
+        assert_eq!(
+            managed_app_ingress_hostname("Soul Archive", "app_abcdef1234567890", "apps.treer.test")
+                .expect("managed App hostname"),
+            "soul-archive-abcdef123456.apps.treer.test"
+        );
+        assert_eq!(
+            managed_app_ingress_hostname("灵魂", "app_1234567890abcdef", "apps.treer.test")
+                .expect("fallback App hostname"),
+            "app-1234567890ab.apps.treer.test"
+        );
+        assert!(managed_app_ingress_hostname("Soul", "app_---", "apps.treer.test").is_err());
+    }
 
     async fn capture_email(
         State(capture): State<EmailCapture>,
@@ -6092,6 +7117,22 @@ mod tests {
             .expect("resolve App virtual host")
             .expect("App virtual host");
         assert_eq!(host.service_id, app.service_id);
+        let ingress = store
+            .ensure_app_ingress(&app, "owner", "apps.treer.test")
+            .await
+            .expect("create App ingress");
+        assert_eq!(ingress.service_id, app.service_id);
+        assert_eq!(ingress.access, ServiceIngressAccess::Workspace);
+        assert!(ingress.hostname.starts_with("soul-"));
+        assert!(ingress.hostname.ends_with(".apps.treer.test"));
+        assert_eq!(
+            store
+                .ensure_app_ingress(&app, "owner", "apps.treer.test")
+                .await
+                .expect("reuse App ingress")
+                .ingress_id,
+            ingress.ingress_id
+        );
 
         let first = store
             .claim_app_runtime("apps", &app.app_id, None, "appw_first", "reconciler")
@@ -6131,6 +7172,11 @@ mod tests {
             .resolve_virtual_network_host("apps", "soul.internal")
             .await
             .expect("resolve deleted host")
+            .is_none());
+        assert!(store
+            .resolve_service_ingress_hostname(&ingress.hostname)
+            .await
+            .expect("resolve deleted ingress")
             .is_none());
     }
 
@@ -6831,6 +7877,237 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_deletion_requires_a_manager_and_revokes_credentials() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let organization = store
+            .create_organization(&owner.user_id, "Engineering")
+            .await
+            .expect("create organization");
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "ws_deletable",
+                "Deletable",
+                &owner.user_id,
+            )
+            .await
+            .expect("create workspace");
+        let (invite, _) = store
+            .create_invitation(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("invite member");
+        let member = store
+            .register(Some(&invite), "member@example.com", "Member", "password123")
+            .await
+            .expect("register member");
+        assert!(
+            store
+                .delete_workspace("ws_deletable", &member.user_id)
+                .await
+                .is_err(),
+            "a plain member cannot delete a workspace"
+        );
+
+        let enrollment = store
+            .create_machine_enrollment("ws_deletable", &owner.user_id)
+            .await
+            .expect("create enrollment");
+        let machine = store
+            .claim_machine_enrollment(&enrollment)
+            .await
+            .expect("claim machine");
+        sqlx::query(
+            "INSERT INTO agent_credentials(agent_id, workspace_id, server_id, secret_hash, created_at) \
+             VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind("agent-1")
+        .bind("ws_deletable")
+        .bind(&machine.server_id)
+        .bind("agent-secret-hash")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert agent credential");
+        sqlx::query(
+            "INSERT INTO machine_names(server_id, workspace_id, name, updated_at) \
+             VALUES($1, $2, $3, $4)",
+        )
+        .bind(&machine.server_id)
+        .bind("ws_deletable")
+        .bind("machine name")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert machine name");
+        sqlx::query(
+            "INSERT INTO agent_names(agent_id, workspace_id, name, updated_at) \
+             VALUES($1, $2, $3, $4)",
+        )
+        .bind("agent-1")
+        .bind("ws_deletable")
+        .bind("agent name")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert agent name");
+        store
+            .create_agent_launch_profile(
+                "ws_deletable",
+                ProfileMutationActor {
+                    kind: "user",
+                    id: Some(&owner.user_id),
+                    label: &owner.preferred_name,
+                },
+                CreateAgentLaunchProfileRequest {
+                    name: "Custom".to_string(),
+                    description: "".to_string(),
+                    cwd: ".".to_string(),
+                    command: "bash".to_string(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("create launch profile");
+
+        sqlx::query(
+            "INSERT INTO machine_traffic_hourly(\
+             workspace_id, window_start, source_server_id, destination_server_id, \
+             payload_bytes, payload_frames, updated_at) VALUES($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind("ws_deletable")
+        .bind(Utc::now().timestamp())
+        .bind(&machine.server_id)
+        .bind("peer-machine")
+        .bind(128_i64)
+        .bind(1_i64)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert traffic history");
+        sqlx::query(
+            "INSERT INTO traffic_usage_hourly(\
+             workspace_id, window_start, traffic_class, source_type, source_id, \
+             destination_type, destination_id, payload_bytes, payload_frames, \
+             billable_bytes, meter_version, updated_at) \
+             VALUES($1, $2, 'service_ingress', 'client', 'browser', 'machine', $3, $4, $5, $4, 1, $6)",
+        )
+        .bind("ws_deletable")
+        .bind(Utc::now().timestamp())
+        .bind(&machine.server_id)
+        .bind(256_i64)
+        .bind(2_i64)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert usage history");
+        crate::message_store::MessageStore::open(store.pool())
+            .await
+            .expect("initialize message store");
+        sqlx::query(
+            "INSERT INTO core_messages(\
+             message_id, workspace_id, sender_kind, sender_id, sender_name, body, created_at) \
+             VALUES($1, $2, 'agent', $3, $4, $5, $6)",
+        )
+        .bind("msg-history")
+        .bind("ws_deletable")
+        .bind("agent-1")
+        .bind("Agent One")
+        .bind("retained history")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&store.pool)
+        .await
+        .expect("insert message history");
+        let unused_enrollment = store
+            .create_machine_enrollment("ws_deletable", &owner.user_id)
+            .await
+            .expect("create unused enrollment");
+
+        let blocked = store
+            .delete_workspace("ws_deletable", &owner.user_id)
+            .await
+            .expect_err("an active machine must block workspace deletion");
+        let (status, error) = blocked.into_parts();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "workspace_has_machines");
+
+        store
+            .delete_machine("ws_deletable", &machine.server_id, &["agent-1".to_string()])
+            .await
+            .expect("delete machine first");
+
+        let deleted = store
+            .delete_workspace("ws_deletable", &owner.user_id)
+            .await
+            .expect("delete workspace");
+        assert_eq!(deleted.workspace_id, "ws_deletable");
+        assert_eq!(deleted.organization_id, organization.organization_id);
+        assert_eq!(deleted.name, "Deletable");
+        assert_eq!(deleted.machine_count, 0);
+        assert_eq!(deleted.agent_count, 1);
+        assert_eq!(deleted.app_count, 0);
+
+        assert!(store
+            .list_workspaces(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("list workspaces")
+            .is_empty());
+        let retained = sqlx::query(
+            "SELECT deleted_at, deleted_by, \
+             (SELECT COUNT(*) FROM machines WHERE workspace_id = $1) AS machines, \
+             (SELECT COUNT(*) FROM agent_credentials WHERE workspace_id = $1) AS agents, \
+             (SELECT COUNT(*) FROM agent_launch_profiles WHERE workspace_id = $1) AS profiles, \
+             (SELECT COUNT(*) FROM machine_traffic_hourly WHERE workspace_id = $1) AS legacy_traffic, \
+             (SELECT COUNT(*) FROM traffic_usage_hourly WHERE workspace_id = $1) AS traffic, \
+             (SELECT COUNT(*) FROM core_messages WHERE workspace_id = $1) AS messages \
+             FROM workspaces WHERE workspace_id = $1",
+        )
+        .bind("ws_deletable")
+        .fetch_one(&store.pool)
+        .await
+        .expect("load retained workspace history");
+        assert!(retained.get::<Option<String>, _>("deleted_at").is_some());
+        assert_eq!(
+            retained.get::<Option<String>, _>("deleted_by"),
+            Some(owner.user_id.clone())
+        );
+        assert_eq!(retained.get::<i64, _>("machines"), 1);
+        assert_eq!(retained.get::<i64, _>("agents"), 1);
+        assert_eq!(retained.get::<i64, _>("profiles"), 5);
+        assert_eq!(retained.get::<i64, _>("legacy_traffic"), 1);
+        assert_eq!(retained.get::<i64, _>("traffic"), 1);
+        assert_eq!(retained.get::<i64, _>("messages"), 1);
+        assert!(store
+            .claim_machine_enrollment(&unused_enrollment)
+            .await
+            .is_err());
+        assert!(
+            store
+                .delete_workspace("ws_deletable", &owner.user_id)
+                .await
+                .is_err(),
+            "a deleted workspace cannot be deleted again"
+        );
+        let audit_events = store
+            .list_audit_events(
+                &organization.organization_id,
+                &owner.user_id,
+                None,
+                None,
+                100,
+            )
+            .await
+            .expect("owner audit events");
+        let deletion = audit_events
+            .iter()
+            .find(|event| event.action == "workspace.deleted")
+            .expect("workspace.deleted audit event");
+        assert_eq!(deletion.resource_id, "ws_deletable");
+        assert_eq!(deletion.payload["machine_count"], 0);
+        assert_eq!(deletion.payload["agent_count"], 1);
+    }
+
+    #[tokio::test]
     async fn organization_roles_control_members_and_share_workspaces() {
         let store = AuthStore::for_test("owner-password").await;
         let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
@@ -7015,6 +8292,120 @@ mod tests {
             .await
             .expect_err("cross-organization access must fail");
         assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn restricted_workspaces_support_user_and_group_grants() {
+        let store = AuthStore::for_test("owner-password").await;
+        let owner = bootstrap_owner(&store, "owner@example.com", "Owner").await;
+        let organization = store
+            .create_organization(&owner.user_id, "Engineering")
+            .await
+            .expect("create organization");
+        store
+            .create_workspace(
+                &organization.organization_id,
+                "ws_restricted",
+                "Restricted",
+                &owner.user_id,
+            )
+            .await
+            .expect("create workspace");
+        let (alice_invite, _) = store
+            .create_invitation(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("invite alice");
+        let alice = store
+            .register(
+                Some(&alice_invite),
+                "alice@example.com",
+                "Alice",
+                "password123",
+            )
+            .await
+            .expect("register alice");
+        let (bob_invite, _) = store
+            .create_invitation(&organization.organization_id, &owner.user_id)
+            .await
+            .expect("invite bob");
+        let bob = store
+            .register(Some(&bob_invite), "bob@example.com", "Bob", "password123")
+            .await
+            .expect("register bob");
+
+        store
+            .update_workspace_access_mode("ws_restricted", &owner.user_id, "restricted")
+            .await
+            .expect("restrict workspace");
+        assert!(store
+            .list_workspaces(&organization.organization_id, &alice.user_id)
+            .await
+            .expect("alice workspace list")
+            .is_empty());
+        assert_eq!(
+            store
+                .require_workspace_member("ws_restricted", &alice.user_id)
+                .await
+                .expect_err("ungranted member must be denied")
+                .status,
+            StatusCode::FORBIDDEN
+        );
+
+        store
+            .upsert_workspace_user_grant("ws_restricted", &owner.user_id, &alice.user_id, "member")
+            .await
+            .expect("grant alice");
+        assert_eq!(
+            store
+                .workspace_member_role("ws_restricted", &alice.user_id)
+                .await
+                .expect("alice role"),
+            "member"
+        );
+        assert!(store
+            .delete_workspace("ws_restricted", &alice.user_id)
+            .await
+            .is_err());
+
+        let group = store
+            .create_organization_group(&organization.organization_id, &owner.user_id, "Reviewers")
+            .await
+            .expect("create group");
+        store
+            .set_organization_group_member(
+                &organization.organization_id,
+                &owner.user_id,
+                &group.group_id,
+                &bob.user_id,
+                true,
+            )
+            .await
+            .expect("add bob to group");
+        store
+            .upsert_workspace_group_grant(
+                "ws_restricted",
+                &owner.user_id,
+                &group.group_id,
+                "member",
+            )
+            .await
+            .expect("grant group");
+        assert_eq!(
+            store
+                .workspace_member_role("ws_restricted", &bob.user_id)
+                .await
+                .expect("bob group role"),
+            "member"
+        );
+
+        store
+            .upsert_workspace_user_grant("ws_restricted", &owner.user_id, &alice.user_id, "owner")
+            .await
+            .expect("promote alice");
+        store
+            .delete_workspace("ws_restricted", &alice.user_id)
+            .await
+            .expect("workspace owner may delete");
     }
 
     #[tokio::test]
@@ -7290,6 +8681,7 @@ mod tests {
                 &first_enrollment,
                 Some(installation_id),
                 Some("Builder one"),
+                None,
             )
             .await
             .expect("claim first enrollment");
@@ -7302,6 +8694,7 @@ mod tests {
                 &second_enrollment,
                 Some(installation_id),
                 Some("Builder two"),
+                None,
             )
             .await
             .expect("claim second enrollment");
@@ -7337,6 +8730,65 @@ mod tests {
         new_headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", second.machine_token))
+                .expect("new authorization"),
+        );
+        assert!(store.authenticate_machine(&new_headers).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn enrollment_recovers_a_revoked_legacy_machine_without_its_old_credential() {
+        let store = AuthStore::for_test("owner-password").await;
+        let first_enrollment = store
+            .create_machine_enrollment("workspace-a", "admin")
+            .await
+            .expect("create legacy enrollment");
+        let legacy = store
+            .claim_machine_enrollment(&first_enrollment)
+            .await
+            .expect("claim legacy enrollment");
+        sqlx::query("UPDATE machines SET revoked_at = $1 WHERE server_id = $2")
+            .bind(Utc::now().to_rfc3339())
+            .bind(&legacy.server_id)
+            .execute(&store.pool)
+            .await
+            .expect("revoke legacy machine");
+
+        let installation_id = "mid_abcdef0123456789abcdef0123456789";
+        let replacement_enrollment = store
+            .create_machine_enrollment("workspace-a", "admin")
+            .await
+            .expect("create replacement enrollment");
+        let replacement = store
+            .claim_machine_enrollment_for_installation(
+                &replacement_enrollment,
+                Some(installation_id),
+                Some("Recovered builder"),
+                Some(&legacy.server_id),
+            )
+            .await
+            .expect("recover revoked machine");
+
+        assert_eq!(replacement.server_id, legacy.server_id);
+        let stored_installation = sqlx::query_scalar::<_, String>(
+            "SELECT installation_id FROM machines WHERE server_id = $1",
+        )
+        .bind(&legacy.server_id)
+        .fetch_one(&store.pool)
+        .await
+        .expect("load recovered installation identity");
+        assert_eq!(stored_installation, installation_id);
+
+        let mut old_headers = HeaderMap::new();
+        old_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", legacy.machine_token))
+                .expect("old authorization"),
+        );
+        assert!(store.authenticate_machine(&old_headers).await.is_err());
+        let mut new_headers = HeaderMap::new();
+        new_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", replacement.machine_token))
                 .expect("new authorization"),
         );
         assert!(store.authenticate_machine(&new_headers).await.is_ok());
@@ -7383,6 +8835,7 @@ mod tests {
                 &second_enrollment,
                 Some(installation_id),
                 Some("Migrated builder"),
+                None,
             )
             .await
             .expect("reenroll migrated machine");

@@ -24,21 +24,7 @@ check:
     cd web && pnpm typecheck
     cd web && pnpm build
     cd web && pnpm test:e2e
-    cd apps/mail/web && pnpm typecheck
-    cd apps/mail/web && pnpm build
-    python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
-    python3 -m unittest discover -s apps/gits/tests -p 'test_*.py' -v
-    python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
-    python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
     python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
-    node --test apps/ais-kit/*.test.mjs
-    node --test apps/pi-ui/*.test.mjs
-    node --test apps/codex-ais/*.test.mjs
-    node --test apps/opencode-ais/*.test.mjs
-    node --test apps/dsh-ais/*.test.mjs
-    node --test apps/claude-ais/*.test.mjs
-    node --test apps/grok-ais/*.test.mjs
-    node --test apps/cursor-ais/*.test.mjs
     cargo build --workspace
     cargo fmt --all -- --check
     cargo test --workspace
@@ -74,6 +60,9 @@ telegram-test:
 soul-test:
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
 
+paper-test:
+    npm --prefix apps/paper test
+
 updater-test:
     python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
 
@@ -82,6 +71,7 @@ app-test:
     python3 -m unittest discover -s apps/gits/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
+    npm --prefix apps/paper test
     node --test apps/ais-kit/*.test.mjs
     node --test apps/pi-ui/*.test.mjs
     node --test apps/codex-ais/*.test.mjs

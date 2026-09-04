@@ -66,6 +66,27 @@ def validate_description(value: object) -> str:
     return value.strip()
 
 
+def root_representation(accept: str, user_agent: str) -> str:
+    choices: list[tuple[float, int, str]] = []
+    for order, raw_entry in enumerate(accept.split(",")):
+        parts = [part.strip().lower() for part in raw_entry.split(";")]
+        media_type = parts[0]
+        if media_type not in {"text/html", "text/markdown"}:
+            continue
+        quality = 1.0
+        for parameter in parts[1:]:
+            if parameter.startswith("q="):
+                try:
+                    quality = float(parameter[2:])
+                except ValueError:
+                    quality = 0.0
+        if 0 < quality <= 1:
+            choices.append((-quality, order, media_type))
+    if choices:
+        return min(choices)[2]
+    return "text/html" if "mozilla/" in user_agent.lower() else "text/markdown"
+
+
 class RepositoryStore:
     def __init__(self, root: Path, public_url: str, git_bin: str) -> None:
         self.root = root
@@ -248,15 +269,16 @@ class GitsHandler(BaseHTTPRequestHandler):
             parsed = urlsplit(self.path)
             path = unquote(parsed.path).rstrip("/") or "/"
             if self.command in {"GET", "HEAD"} and path == "/":
-                self._file(APP_ROOT / "AGENT.md", "text/markdown; charset=utf-8", head)
+                representation = root_representation(
+                    self.headers.get("Accept", ""), self.headers.get("User-Agent", "")
+                )
+                target = APP_ROOT / ("web/index.html" if representation == "text/html" else "AGENT.md")
+                self._file(target, f"{representation}; charset=utf-8", head, vary=True)
                 return
-            if self.command in {"GET", "HEAD"} and path == "/_human":
-                self._file(APP_ROOT / "web" / "index.html", "text/html; charset=utf-8", head)
-                return
-            if self.command in {"GET", "HEAD"} and path == "/_human/app.css":
+            if self.command in {"GET", "HEAD"} and path == "/app.css":
                 self._file(APP_ROOT / "web" / "app.css", "text/css; charset=utf-8", head)
                 return
-            if self.command in {"GET", "HEAD"} and path == "/_human/app.js":
+            if self.command in {"GET", "HEAD"} and path == "/app.js":
                 self._file(APP_ROOT / "web" / "app.js", "text/javascript; charset=utf-8", head)
                 return
             if self.command in {"GET", "HEAD"} and path == "/health":
@@ -373,12 +395,14 @@ class GitsHandler(BaseHTTPRequestHandler):
             raise GitsError(400, "short_request", "request body ended before Content-Length")
         return body
 
-    def _file(self, path: Path, content_type: str, head: bool) -> None:
+    def _file(self, path: Path, content_type: str, head: bool, vary: bool = False) -> None:
         try:
             body = path.read_bytes()
         except FileNotFoundError as error:
             raise GitsError(404, "not_found", "file not found") from error
-        self._bytes(200, body, content_type, head=head, html=content_type.startswith("text/html"))
+        self._bytes(
+            200, body, content_type, head=head, html=content_type.startswith("text/html"), vary=vary
+        )
 
     def _json(self, status: int, value: dict[str, Any], head: bool = False) -> None:
         body = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
@@ -387,12 +411,16 @@ class GitsHandler(BaseHTTPRequestHandler):
     def _error(self, error: GitsError, head: bool = False) -> None:
         self._json(error.status, {"error": {"code": error.code, "message": error.message}}, head=head)
 
-    def _bytes(self, status: int, body: bytes, content_type: str, head: bool, html: bool = False) -> None:
+    def _bytes(
+        self, status: int, body: bytes, content_type: str, head: bool, html: bool = False, vary: bool = False
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if vary:
+            self.send_header("Vary", "Accept, User-Agent")
         if html:
             self.send_header(
                 "Content-Security-Policy",

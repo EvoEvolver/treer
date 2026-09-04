@@ -25,6 +25,7 @@ matching the question; follow its source links for implementation detail.
 | [Treer install skill](../skills/treer-install/SKILL.md) | Recipe-install contract prompted when creating an installer with a git URL |
 | [macOS container skill](../skills/treer-macos-container/SKILL.md) | Apple container machine Host setup on a Mac |
 | [Treer voice skill](../skills/treer-voice/SKILL.md) | Spoken assistant context used by the Proxy Voice LLM; not printed by `treer --skill` |
+| [Mobile clients](mobile.md) | Native iOS/Android fleet screens, Voice ASR, and spoken command |
 
 ## Active execution plans
 

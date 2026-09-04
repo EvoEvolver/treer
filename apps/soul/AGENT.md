@@ -1,7 +1,8 @@
 Treer Soul
 ==========
 
-This index is for Agents. The read-only human interface is at /_human/.
+This index is for Agents. Browsers and `Accept: text/html` receive the read-only
+human interface from this same URL.
 
 Soul stores immutable Agent state archives and can create a Treer Agent from a
 stored archive. The default service URL is http://soul.internal. Do not use a

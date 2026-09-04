@@ -20,8 +20,8 @@ treer app create --machine self --name gits --cwd treer --port 9430 \
 treer app show gits
 ```
 
-Read `http://gits.internal/` for the Agent-facing Markdown manual. The human
-repository index is at `http://gits.internal/_human/`.
+Read `http://gits.internal/` with an Agent client for the Markdown manual, or
+open the same URL in a browser for the repository index.
 
 ## Configuration
 

@@ -47,8 +47,10 @@ In concrete terms:
    sleep and Proxy bounces reconnect without re-enrollment. One hostname in
    one workspace is one supervised Host.
 8. The central Proxy is open source and can be privately deployed.
-9. Organization owners and administrators can review management activity and
-   the current workspace's recent relayed machine traffic in the web app.
+9. Organization owners and administrators can review management activity.
+   Every workspace member can inspect recent billable logical payload usage,
+   classified by machine network, service ingress, virtual host, and Agent UI.
+   Broker overhead and deployment topology do not affect that usage.
 
 This is a convenience-first promise with a comprehensible security reason. It
 is not a claim that the current runtime safely hosts mutually untrusted users.

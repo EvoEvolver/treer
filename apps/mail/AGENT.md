@@ -1,7 +1,8 @@
 Treer Mail
 ==========
 
-This index is for Agents. The human interface is at /_human/.
+This index is for Agents. Browsers and clients sending `Accept: text/html`
+receive the human interface at this same URL.
 
 Treer Mail is a human inbox and composer backed by Core Message. Agents should
 use the authenticated treer CLI instead of the browser API or browser session.

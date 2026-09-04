@@ -45,6 +45,8 @@ pub(crate) struct ClusterSessionDelivery {
     pub server_id: String,
     pub session_id: String,
     pub revision: Option<u64>,
+    #[serde(default)]
+    pub cursor: bool,
     pub close: bool,
     pub frame: SocketFrame,
 }
@@ -53,6 +55,9 @@ pub(crate) struct ClusterSessionDelivery {
 pub(crate) enum ClusterProjectionUpdate {
     WorkspaceUpsert {
         workspace: WorkspaceInfo,
+    },
+    WorkspaceDeleted {
+        workspace_id: String,
     },
     ServerRenamed {
         workspace_id: String,
@@ -841,6 +846,10 @@ fn projection_key(update: &ClusterProjectionUpdate) -> String {
         ClusterProjectionUpdate::WorkspaceUpsert { workspace } => format!(
             "workspace.{}",
             URL_SAFE_NO_PAD.encode(workspace.workspace_id.as_bytes())
+        ),
+        ClusterProjectionUpdate::WorkspaceDeleted { workspace_id } => format!(
+            "workspace.{}",
+            URL_SAFE_NO_PAD.encode(workspace_id.as_bytes())
         ),
         ClusterProjectionUpdate::ServerRenamed {
             workspace_id,

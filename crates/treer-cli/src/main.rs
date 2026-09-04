@@ -359,6 +359,8 @@ enum ProfileCommand {
         machine: Option<String>,
         #[arg(long)]
         name: Option<String>,
+        #[arg(long, help = "Override the profile working directory for this launch")]
+        cwd: Option<String>,
     },
 }
 
@@ -1233,6 +1235,7 @@ async fn run_profile_command(client: &ApiClient, command: ProfileCommand) -> any
             target,
             machine,
             name,
+            cwd,
         } => {
             let target = normalize_target(&target)?;
             client
@@ -1242,6 +1245,7 @@ async fn run_profile_command(client: &ApiClient, command: ProfileCommand) -> any
                     Some(serde_json::to_value(LaunchAgentProfileRequest {
                         server_id: machine,
                         agent_name: name,
+                        cwd,
                         cols: 120,
                         rows: 36,
                     })?),
@@ -2097,6 +2101,8 @@ mod tests {
             "builder",
             "--name",
             "review-42",
+            "--cwd",
+            "packages/api",
         ])
         .expect("profile launch should parse");
         assert!(matches!(
@@ -2104,10 +2110,13 @@ mod tests {
             Some(Command::Agent {
                 command: AgentCommand::Admin {
                     command: AgentAdminCommand::Profile {
-                        command: ProfileCommand::Launch { target, machine, name }
+                        command: ProfileCommand::Launch { target, machine, name, cwd }
                     }
                 }
-            }) if target == "reviewer" && machine.as_deref() == Some("builder") && name.as_deref() == Some("review-42")
+            }) if target == "reviewer"
+                && machine.as_deref() == Some("builder")
+                && name.as_deref() == Some("review-42")
+                && cwd.as_deref() == Some("packages/api")
         ));
         assert!(Args::try_parse_from(["treer", "profile", "list"]).is_err());
     }
