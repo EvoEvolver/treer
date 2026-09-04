@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -168,7 +169,7 @@ pub async fn serve(mut config: AisConfig) -> Result<AisServer> {
     // Keep AIS ui_path as `/`. Proxy joins this as a path prefix for assets;
     // Treer embed query defaults live on `crate::ui::TREER_EMBED_UI_QUERY`.
     let ui_path = config.ui_dist.as_ref().map(|_| "/".to_string());
-    let (ui_events, _) = broadcast::channel(32);
+    let (ui_events, _) = broadcast::channel(256);
     let state = Arc::new(AppState {
         agent_id: config.agent_id.clone(),
         instance_id: instance_id.clone(),
@@ -385,9 +386,27 @@ async fn submit_prompt(
     let state_clone = state.clone();
     let turn_id = operation_id.clone();
     tokio::spawn(async move {
+        let last_emit = std::sync::Mutex::new(
+            std::time::Instant::now()
+                .checked_sub(Duration::from_millis(50))
+                .unwrap_or_else(std::time::Instant::now),
+        );
         let result = state_clone
             .runtime
-            .prompt(&state_clone.session_key, &text, &turn_id, cancel)
+            .prompt_with_progress(&state_clone.session_key, &text, &turn_id, cancel, |items| {
+                for item in items {
+                    let _ = state_clone.journal.upsert_entry(&history_to_entry(item));
+                }
+                let mut last = last_emit.lock().expect("progress throttle");
+                if last.elapsed() >= Duration::from_millis(40) {
+                    *last = std::time::Instant::now();
+                    drop(last);
+                    let state = state_clone.clone();
+                    tokio::spawn(async move {
+                        let _ = state.ui_events.send(ui_state_value(&state).await);
+                    });
+                }
+            })
             .await;
         match result {
             Ok(items) => {
@@ -542,20 +561,9 @@ async fn ui_prompt(
         }),
     )
     .await?;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        {
-            let current = state.status.lock().await;
-            if !current.busy {
-                break;
-            }
-        }
-        if tokio::time::Instant::now() > deadline {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    Ok(Json(ui_state_value(&state).await))
+    let payload = ui_state_value(&state).await;
+    let _ = state.ui_events.send(payload.clone());
+    Ok(Json(payload))
 }
 
 async fn ui_interrupt(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -623,7 +631,16 @@ async fn ui_ws_session(mut socket: WebSocket, state: Arc<AppState>) {
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let latest = ui_state_value(&state).await;
+                        if socket
+                            .send(Message::Text(latest.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }

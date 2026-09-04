@@ -162,6 +162,54 @@ async fn abort_interrupts_a_slow_turn() {
 }
 
 #[tokio::test]
+async fn ui_prompt_returns_immediately_and_streams_into_state() {
+    let running = start_fake().await;
+    let base = &running.base;
+    let started = tokio::time::Instant::now();
+    let accepted = reqwest::Client::new()
+        .post(format!("{base}/api/prompt"))
+        .json(&json!({ "prompt": "slow-cancel" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(accepted.status().is_success());
+    let surface: Value = accepted.json().await.unwrap();
+    assert_eq!(surface["detail"]["thread"]["status"], "running");
+    let items = surface["detail"]["turns"][0]["items"].as_array().unwrap();
+    assert_eq!(items[0]["kind"], "userMessage");
+    assert_eq!(items[0]["text"], "slow-cancel");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let live = get_json(&format!("{base}/api/state")).await;
+        let kinds: Vec<_> = live["detail"]["turns"][0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["kind"].as_str())
+            .collect();
+        if kinds
+            .iter()
+            .any(|kind| *kind == "reasoning" || *kind == "toolCall" || *kind == "commandExecution")
+        {
+            assert_eq!(live["detail"]["thread"]["status"], "running");
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("did not stream live items before the turn finished: {kinds:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    wait_idle(base).await;
+    let done = get_json(&format!("{base}/api/state")).await;
+    assert_eq!(done["detail"]["thread"]["status"], "idle");
+    assert_eq!(done["detail"]["turns"][0]["status"], "completed");
+    running.server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn permission_requests_are_auto_allowed() {
     let running = start_fake().await;
     let base = &running.base;

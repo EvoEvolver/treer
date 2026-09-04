@@ -67,8 +67,10 @@ pub fn history_item(entry: &AgentTranscriptEntry) -> Value {
     item
 }
 
-pub fn turns_from_entries(entries: &[AgentTranscriptEntry]) -> Vec<Value> {
-    group_transcript_turns(entries)
+pub fn turns_from_entries(entries: &[AgentTranscriptEntry], busy: bool) -> Vec<Value> {
+    let groups = group_transcript_turns(entries);
+    let last_index = groups.len().saturating_sub(1);
+    groups
         .into_iter()
         .enumerate()
         .map(|(index, group)| {
@@ -80,10 +82,17 @@ pub fn turns_from_entries(entries: &[AgentTranscriptEntry]) -> Vec<Value> {
                 matches!(entry.kind.as_str(), "error")
                     || entry.content.get("status").and_then(Value::as_str) == Some("failed")
             });
+            let status = if failed {
+                "failed"
+            } else if busy && index == last_index {
+                "running"
+            } else {
+                "completed"
+            };
             json!({
                 "id": group.first().map(|entry| entry.id.as_str()).unwrap_or("turn"),
                 "startedAt": if started.is_empty() { Value::Null } else { json!(started) },
-                "status": if failed { "failed" } else { "completed" },
+                "status": status,
                 "error": Value::Null,
                 "items": group.iter().map(history_item).collect::<Vec<_>>(),
                 "turnNumber": index + 1,
@@ -119,9 +128,9 @@ pub struct SurfaceInput<'a> {
 
 pub fn state_payload(input: SurfaceInput<'_>) -> Value {
     let now = crate::types::now_rfc3339();
-    let turns = turns_from_entries(input.entries);
-    let title = thread_title(input.entries, input.harness_label);
     let busy = input.status == AgentStatus::Working;
+    let turns = turns_from_entries(input.entries, busy);
+    let title = thread_title(input.entries, input.harness_label);
     let thread_status = if busy {
         "running"
     } else if input.status == AgentStatus::Blocked {
@@ -291,5 +300,28 @@ mod tests {
         assert_eq!(payload["detail"]["thread"]["reasoningEffort"], "high");
         assert_eq!(payload["modelOptions"][0]["displayName"], "Grok 4.6");
         assert_eq!(payload["modelOptions"][0]["isDefault"], true);
+        assert_eq!(turns[0]["status"], "completed");
+    }
+
+    #[test]
+    fn last_turn_is_running_while_the_agent_is_working() {
+        let entries = [entry("u1", "message", Some("user"), "hello")];
+        let payload = state_payload(SurfaceInput {
+            agent_id: "ag_1",
+            harness_id: "grok",
+            harness_label: "Grok",
+            cwd: ".",
+            session_id: "sess_1",
+            entries: &entries,
+            status: AgentStatus::Working,
+            error: None,
+            ready: true,
+            model: None,
+            reasoning_effort: None,
+            model_options: Vec::new(),
+        });
+        assert_eq!(payload["detail"]["thread"]["status"], "running");
+        assert_eq!(payload["detail"]["turns"][0]["status"], "running");
+        assert_eq!(payload["detail"]["thread"]["activeTurnId"], "u1");
     }
 }

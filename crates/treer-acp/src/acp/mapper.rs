@@ -159,33 +159,41 @@ impl TurnMapper {
         mapped
     }
 
+    pub fn snapshot(&self) -> Vec<HistoryItem> {
+        self.collect_items("running", false)
+    }
+
     pub fn finish(self, interrupted: bool) -> Vec<HistoryItem> {
         let status = if interrupted {
             "interrupted"
         } else {
             "completed"
         };
+        self.collect_items(status, !interrupted)
+    }
+
+    fn collect_items(&self, status: &str, empty_placeholder: bool) -> Vec<HistoryItem> {
         let mut items = Vec::new();
         if !self.thought_text.is_empty() {
             let mut thought = item(
                 format!("{}:thought", self.turn_id),
                 "reasoning",
-                self.thought_text,
+                self.thought_text.clone(),
                 status,
                 &self.turn_id,
             );
-            if let Some(created_at) = self.thought_created_at {
-                thought.created_at = Some(created_at);
+            if let Some(created_at) = &self.thought_created_at {
+                thought.created_at = Some(created_at.clone());
             }
             items.push(thought);
         }
-        items.extend(self.tools);
-        items.extend(self.plans);
-        items.extend(self.compactions);
-        let text = if self.agent_text.is_empty() && items.is_empty() && !interrupted {
+        items.extend(self.tools.clone());
+        items.extend(self.plans.clone());
+        items.extend(self.compactions.clone());
+        let text = if self.agent_text.is_empty() && items.is_empty() && empty_placeholder {
             "(no output)".into()
         } else {
-            self.agent_text
+            self.agent_text.clone()
         };
         if !text.is_empty() {
             let mut agent = item(
@@ -195,8 +203,8 @@ impl TurnMapper {
                 status,
                 &self.turn_id,
             );
-            if let Some(created_at) = self.agent_created_at {
-                agent.created_at = Some(created_at);
+            if let Some(created_at) = &self.agent_created_at {
+                agent.created_at = Some(created_at.clone());
             }
             items.push(agent);
         }
@@ -593,6 +601,27 @@ mod tests {
         assert!(kinds.contains(&"agentMessage"));
         assert!(kinds.contains(&"reasoning"));
         assert!(items.iter().any(|i| i.text == "hi"));
+    }
+
+    #[test]
+    fn snapshot_exposes_partial_assistant_text_as_running() {
+        let mut mapper = TurnMapper::new("t1");
+        mapper.apply(&json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "hel" }
+        }));
+        mapper.apply(&json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "lo" }
+        }));
+        let live = mapper.snapshot();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].kind, "agentMessage");
+        assert_eq!(live[0].text, "hello");
+        assert_eq!(live[0].status.as_deref(), Some("running"));
+        let finished = mapper.finish(false);
+        assert_eq!(finished[0].status.as_deref(), Some("completed"));
+        assert_eq!(finished[0].text, "hello");
     }
 
     #[test]

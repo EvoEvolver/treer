@@ -228,6 +228,21 @@ impl AcpRuntime {
         turn_id: &str,
         cancel: Cancel,
     ) -> Result<Vec<HistoryItem>> {
+        self.prompt_with_progress(session_key, prompt, turn_id, cancel, |_| {})
+            .await
+    }
+
+    pub async fn prompt_with_progress<F>(
+        &self,
+        session_key: &str,
+        prompt: &str,
+        turn_id: &str,
+        cancel: Cancel,
+        mut on_progress: F,
+    ) -> Result<Vec<HistoryItem>>
+    where
+        F: FnMut(&[HistoryItem]) + Send,
+    {
         {
             let sessions = self.inner.sessions.lock().await;
             let live = sessions
@@ -308,6 +323,7 @@ impl AcpRuntime {
                                 }
                             }
                             let _ = mapper.apply(&update);
+                            on_progress(&mapper.snapshot());
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "ACP session/update receiver lagged");
