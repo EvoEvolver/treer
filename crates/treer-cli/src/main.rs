@@ -93,6 +93,11 @@ enum Command {
         #[command(subcommand)]
         command: InterfaceCommand,
     },
+    #[command(about = "Install and inspect the Host-wide Agent thread UI")]
+    Ui {
+        #[command(subcommand)]
+        command: UiCommand,
+    },
     #[command(about = "Obtain a short-lived identity token for a workspace service")]
     Token {
         #[command(subcommand)]
@@ -393,6 +398,28 @@ enum TokenCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum UiCommand {
+    #[command(about = "Clone or refresh the Host-wide thread UI and build its dist")]
+    Install {
+        #[arg(
+            value_name = "GIT-URL",
+            help = "Git remote to clone (default: remote-codex-thread-ui-rust)"
+        )]
+        git_url: Option<String>,
+        #[arg(long = "ref", value_name = "REV", help = "Git ref to check out")]
+        git_ref: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Use a local checkout instead of cloning"
+        )]
+        dir: Option<PathBuf>,
+    },
+    #[command(about = "Show the Host-wide thread UI install record")]
+    Show,
+}
+
+#[derive(Debug, Subcommand)]
 enum InterfaceCommand {
     #[command(about = "Show this Agent's registered interface")]
     Show,
@@ -659,6 +686,11 @@ async fn run_cli() -> anyhow::Result<()> {
     let command = args
         .command
         .context("a command is required; run `treer --help` for usage")?;
+    if let Command::Ui { command } = command {
+        let value = run_ui_command(command)?;
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
     if let Command::Network {
         command: NetworkCommand::Connect { host, port },
     } = &command
@@ -670,6 +702,7 @@ async fn run_cli() -> anyhow::Result<()> {
         &args.workspace,
     );
     let value = match command {
+        Command::Ui { .. } => unreachable!("Host UI commands do not use the Agent Server API"),
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::App { command } => run_app_command(&client, command).await?,
         Command::Member { command } => match command {
@@ -1405,6 +1438,25 @@ async fn consume_socks_address(
     let mut address = vec![0_u8; length];
     socket.read_exact(&mut address).await?;
     Ok(())
+}
+
+fn run_ui_command(command: UiCommand) -> anyhow::Result<Value> {
+    match command {
+        UiCommand::Install {
+            git_url,
+            git_ref,
+            dir,
+        } => {
+            let status = treer_acp::install_host_ui(treer_acp::InstallOptions {
+                git_url,
+                git_ref,
+                dir,
+                ui_home: None,
+            })?;
+            Ok(serde_json::to_value(status)?)
+        }
+        UiCommand::Show => Ok(serde_json::to_value(treer_acp::show_host_ui(None)?)?),
+    }
 }
 
 async fn run_interface_command(
@@ -2239,6 +2291,62 @@ mod tests {
             .expect("read payload");
         assert_eq!(&response, b"pong");
         server.await.expect("SOCKS server task");
+    }
+
+    #[test]
+    fn host_ui_commands_parse() {
+        let install = Args::try_parse_from(["treer", "ui", "install"])
+            .expect("ui install should parse without a git url");
+        assert!(matches!(
+            install.command,
+            Some(Command::Ui {
+                command: UiCommand::Install {
+                    git_url: None,
+                    git_ref: None,
+                    dir: None,
+                }
+            })
+        ));
+
+        let pin = Args::try_parse_from([
+            "treer",
+            "ui",
+            "install",
+            "https://github.com/example/thread-ui.git",
+            "--ref",
+            "abc123",
+        ])
+        .expect("ui install should parse a git url and ref");
+        assert!(matches!(
+            pin.command,
+            Some(Command::Ui {
+                command: UiCommand::Install {
+                    git_url: Some(git_url),
+                    git_ref: Some(git_ref),
+                    dir: None,
+                }
+            }) if git_url == "https://github.com/example/thread-ui.git" && git_ref == "abc123"
+        ));
+
+        let local = Args::try_parse_from(["treer", "ui", "install", "--dir", "/tmp/ui-fixture"])
+            .expect("ui install --dir should parse");
+        assert!(matches!(
+            local.command,
+            Some(Command::Ui {
+                command: UiCommand::Install {
+                    dir: Some(dir),
+                    ..
+                }
+            }) if dir.as_os_str() == "/tmp/ui-fixture"
+        ));
+
+        let show = Args::try_parse_from(["treer", "ui", "show"]).expect("ui show should parse");
+        assert!(matches!(
+            show.command,
+            Some(Command::Ui {
+                command: UiCommand::Show
+            })
+        ));
     }
 
     #[test]

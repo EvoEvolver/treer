@@ -84,6 +84,10 @@ app-test:
 ais-e2e:
     node scripts/ais-e2e.mjs
 
+treer-acp-e2e:
+    cargo build -p treer-cli -p treer-acp
+    node scripts/treer-acp-e2e.mjs
+
 messaging-e2e:
     cargo test -p treer-proxy message_
     just app-test

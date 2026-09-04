@@ -1,9 +1,13 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use treer_acp::{default_state_dir, AisConfig, HarnessSpec};
+use treer_acp::{
+    default_state_dir, discover_installed_dist, AisConfig, HarnessSpec, AIS_CAPABILITIES,
+};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum Harness {
@@ -73,12 +77,16 @@ async fn main() -> Result<()> {
         HarnessSpec::Named(name.to_string())
     };
 
+    let ui_dist = args.ui_dist.or_else(discover_installed_dist);
+    if let Some(dist) = ui_dist.as_ref() {
+        tracing::info!(path = %dist.display(), "serving Host thread UI dist");
+    }
     let server = treer_acp::serve(AisConfig {
         agent_id: args.agent_id,
         cwd,
         state_dir,
         port: args.port,
-        ui_dist: args.ui_dist,
+        ui_dist,
         harness,
         bind_session_id: args.session_id,
         startup_timeout_ms: 20_000,
@@ -87,7 +95,70 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], server.port));
     tracing::info!(%addr, instance_id = %server.instance_id, "treer-acp listening");
     println!("listening on {addr}");
+    maybe_register_interface(server.port, &server.instance_id, server.ui_path.as_deref());
     tokio::signal::ctrl_c().await?;
     server.shutdown().await?;
     Ok(())
+}
+
+fn maybe_register_interface(port: u16, instance_id: &str, ui_path: Option<&str>) {
+    if std::env::var_os("TREER_AGENT_ID").is_none() {
+        return;
+    }
+    if std::env::var("AIS_AUTO_REGISTER").as_deref() == Ok("0") {
+        return;
+    }
+    let instance_id = instance_id.to_string();
+    let ui_path = ui_path.map(str::to_string);
+    tokio::spawn(async move {
+        register_interface_once(port, &instance_id, ui_path.as_deref()).await;
+        let mut interval = tokio::time::interval(Duration::from_secs(20));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            register_interface_once(port, &instance_id, ui_path.as_deref()).await;
+        }
+    });
+}
+
+async fn register_interface_once(port: u16, instance_id: &str, ui_path: Option<&str>) {
+    let treer = treer_binary();
+    let mut command = Command::new(&treer);
+    command
+        .arg("interface")
+        .arg("register")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--instance-id")
+        .arg(instance_id);
+    for capability in AIS_CAPABILITIES {
+        command.arg("--capability").arg(*capability);
+    }
+    if let Some(ui_path) = ui_path {
+        command.arg("--ui-path").arg(ui_path);
+    }
+    match tokio::task::spawn_blocking(move || command.status()).await {
+        Ok(Ok(status)) if status.success() => {
+            tracing::info!("registered AIS with treer interface register");
+        }
+        Ok(Ok(status)) => {
+            tracing::debug!(%status, "treer interface register skipped");
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(error = %error, "treer interface register skipped");
+        }
+        Err(error) => {
+            tracing::debug!(error = %error, "treer interface register skipped");
+        }
+    }
+}
+
+fn treer_binary() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| {
+            let candidate = executable.parent()?.join("treer");
+            candidate.is_file().then_some(candidate)
+        })
+        .unwrap_or_else(|| PathBuf::from("treer"))
 }

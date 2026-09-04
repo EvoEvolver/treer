@@ -33,6 +33,7 @@ just updater-test
 just messaging-e2e
 just web-test
 just ais-e2e
+just treer-acp-e2e
 just service-canary
 cargo test -p treer-proxy message_
 cargo test -p treer-proxy -- updater::
@@ -57,6 +58,7 @@ node scripts/check-docs.mjs
 | Release | Four-platform metadata/checksums, GHCR publish workflow, and signed-manifest Node tests | Installed machine updater does not enforce signatures |
 | Self-host update | Updater unit tests; Proxy admin forward tests; `/admin` e2e | No unattended Compose apply against live Docker |
 | Security | Explicit trust tier and Policy tests | Missing allow-by-default hardening and production isolation backend |
+| ACP runtime | Fake-harness AIS tests, Host `treer ui --dir` install, and `just treer-acp-e2e` | No live grok/codex harness e2e in this slice |
 
 ## Review Triggers
 
@@ -71,6 +73,7 @@ node scripts/check-docs.mjs
 | Network or ingress | Authentication/header, streaming, WebSocket, containment, Agent mutation denial, and Canary coverage |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
+| `treer-acp` / Host thread UI | `cargo test -p treer-acp`, `cargo test -p treer-cli` for `treer ui` parse tests, and `just treer-acp-e2e` (fake ACP, no live grok/codex binary) |
 | Voice ASR or command | Proxy `voice` / `voice_llm` tests plus authenticated `/voice/command` route tests; optional `TREER_VOICE_LLM_LIVE_TEST=1` against a configured upstream |
 | Native iOS/Android fleet | `just mobile-ios-ci`, `just mobile-android-ci`, Android `CreateFlowTest`, iOS `CreateFlowTests` / `TreerUITests`; live AOSP + iOS simulator login/create-machine/create-agent/prompt when a Proxy and Host are available |
 | Documentation | `node scripts/check-docs.mjs` |

@@ -27,7 +27,7 @@ flowchart LR
 | `treer-agent-server` | Machine Controller, local authenticated API, Proxy connection, network bridge, and Agent definitions |
 | `treer-agent-host` | Stable local child-process ownership and idempotent mutations |
 | `treer-agent-runtime` | PTY lifecycle, bounded output replay, and working-directory containment |
-| `treer-acp` | ACP runtime, per-Agent SQLite journal, cwd explorer, and AIS HTTP (`treer.agent-interface/v1`) |
+| `treer-acp` | ACP runtime, per-Agent SQLite journal, cwd explorer, Host-wide thread UI dist, and AIS HTTP (`treer.agent-interface/v1`) |
 | `treer-cli` | Human/operator and managed-Agent commands, including Core Message |
 | `treer-protocol` | Shared public and Controller wire models |
 | `apps` | Ordinary service code, presentation, external APIs, configuration, secrets, and App-owned state |
@@ -246,6 +246,20 @@ Treer Agent and deliberately has no thread list or session switcher. Each
 serves its browser UI and semantic routes from the same private listener; its
 verified descriptor is the single registration for both capabilities and
 presentation.
+
+`crates/treer-acp` is the ACP runtime for one Agent: AIS HTTP, a Host-local
+SQLite journal, cwd-jailed file routes, and auto-allow for ACP
+`session/request_permission`. The generic thread UI is not vendored in `apps/`.
+An operator runs Host-scoped `treer ui install` once (default git
+`https://github.com/dufangshi/remote-codex-thread-ui-rust.git`). The checkout
+lives under `$TREER_UI_HOME`, `$TREER_HOST_ROOT/.treer/ui`, the enrolled Host
+root `.treer/ui` (marker `.treer/server-id`), or `~/.treer/ui`. Every
+`treer-acp` process on that machine may serve the same dist at `/` when
+`--ui-dist` is unset and then `interface register --ui-path /`. There is no
+per-Agent UI install and no `--ui` on `agent create`. Treer's iframe should
+pass `presentation=embedded-single-thread`, `explorer=1`, `shell=0`,
+`permissions=0`, and `nav=0`; AIS `ui_path` stays `/` so Proxy asset tunneling
+keeps a path prefix.
 
 Launch-profile sidecars in `apps/codex-ais`, `apps/opencode-ais`,
 `apps/dsh-ais`, `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`

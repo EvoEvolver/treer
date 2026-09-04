@@ -50,6 +50,12 @@ operations to callers already authorized by Proxy Policy. Interface ports stay
 on Agent-private loopback; the Controller is the external routing and policy
 boundary.
 
+`treer-acp` auto-allows ACP permission requests
+(`session/request_permission`). That is a supported claim only for the
+trusted-machine tier; there is no human permission card. The Host-installed
+thread UI (`treer ui install` of an external git checkout) is ordinary files on
+that machine. It is not a sandbox and is not vendored into Treer `apps/`.
+
 The Create Agent dialog's one-click CLI installs execute cataloged third-party
 install scripts or package-manager commands with the machine account's
 authority. Treer does not mirror, pin, attest, or sandbox those upstream

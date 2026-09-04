@@ -7,6 +7,7 @@ pub mod journal;
 pub mod local_sessions;
 pub mod transcript;
 pub mod types;
+pub mod ui;
 
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -16,6 +17,10 @@ pub use import_id::{bind_import_target, parse_session_ref, scoped_session_id};
 pub use journal::Journal;
 pub use local_sessions::{find_local_session, list_local_sessions, LocalSessionHomes};
 pub use types::{BoundSession, SessionCandidate, AIS_CAPABILITIES};
+pub use ui::{
+    discover_installed_dist, install as install_host_ui, show as show_host_ui, InstallOptions,
+    UiStatus, DEFAULT_UI_GIT, TREER_EMBED_UI_QUERY,
+};
 
 /// Bind a local harness session to this Agent's journal.
 ///

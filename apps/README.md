@@ -26,7 +26,8 @@ Every standalone App follows the [App guidelines](GUIDELINES.md): `/` negotiates
 between an Agent-readable GitHub Flavored Markdown manual and the human HTML
 interface, while data pages remain JSON. Agent Interfaces such as Codex UI and
 Pi UI are embedded AIS surfaces rather than standalone App indexes and continue
-to expose their registered `ui_path`.
+to expose their registered `ui_path`. The generic ACP thread UI is not an
+in-tree App; install it once on the Host with `treer ui install`.
 
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.

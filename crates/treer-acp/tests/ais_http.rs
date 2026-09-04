@@ -225,6 +225,40 @@ async fn file_routes_are_jailed_to_cwd() {
 }
 
 #[tokio::test]
+async fn serves_host_ui_dist_at_root() {
+    let dir = TempDir::new().unwrap();
+    let cwd = dir.path().join("cwd");
+    let state_dir = dir.path().join("state");
+    let ui_dist = dir.path().join("ui");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&ui_dist).unwrap();
+    std::fs::write(ui_dist.join("index.html"), "<html>hello-ui</html>").unwrap();
+    let server = serve(AisConfig {
+        agent_id: "agent-1".into(),
+        cwd,
+        state_dir,
+        port: 0,
+        ui_dist: Some(ui_dist),
+        harness: HarnessSpec::Fake,
+        bind_session_id: None,
+        startup_timeout_ms: 8_000,
+    })
+    .await
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", server.port);
+    let manifest = get_json(&format!("{base}/v1/manifest")).await;
+    assert_eq!(manifest["ui_path"], "/");
+    let page = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("hello-ui"));
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn journal_survives_restart() {
     let dir = TempDir::new().unwrap();
     let cwd = dir.path().join("cwd");

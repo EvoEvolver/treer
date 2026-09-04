@@ -52,6 +52,7 @@ pub struct AisServer {
     pub port: u16,
     pub instance_id: String,
     pub journal_path: PathBuf,
+    pub ui_path: Option<String>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<Result<()>>>,
 }
@@ -142,6 +143,8 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
     )?;
 
     let instance_id = format!("acp_{}", Uuid::new_v4().simple());
+    // Keep AIS ui_path as `/`. Proxy joins this as a path prefix for assets;
+    // Treer embed query defaults live on `crate::ui::TREER_EMBED_UI_QUERY`.
     let ui_path = config.ui_dist.as_ref().map(|_| "/".to_string());
     let state = Arc::new(AppState {
         agent_id: config.agent_id.clone(),
@@ -156,7 +159,7 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
             error: None,
         }),
         abort: Mutex::new(None),
-        ui_path,
+        ui_path: ui_path.clone(),
     });
 
     let mut router = Router::new()
@@ -192,6 +195,7 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
         port,
         instance_id,
         journal_path,
+        ui_path,
         shutdown: Some(tx),
         task: Some(task),
     })

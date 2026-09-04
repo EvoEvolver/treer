@@ -38,6 +38,7 @@ treer machine --help
 treer message --help
 treer network --help
 treer interface --help
+treer ui --help
 treer member --help
 treer token --help
 ```
@@ -189,6 +190,36 @@ stream-json, `apps/grok-ais` for Grok Build ACP, and `apps/cursor-ais` for
 Cursor ACP. Launch Cursor with `cursor-agent`, not `agent`. Each Agent is one
 thread/session. Built-in `--kind codex` and `--kind claude` stay on the terminal
 path and are not Interfaces.
+
+## Install the Host thread UI
+
+The generic ACP thread UI is installed once per Host. It is not per Agent and
+there is no `--ui` on `agent create`. `treer-acp` looks up that Host checkout
+and serves it at `/` when `--ui-dist` is unset.
+
+```bash
+treer ui install
+treer ui install https://github.com/dufangshi/remote-codex-thread-ui-rust.git --ref main
+treer ui install --dir /path/to/local-checkout
+treer ui show
+```
+
+Default git is `https://github.com/dufangshi/remote-codex-thread-ui-rust.git`.
+`--dir` uses a local checkout (tests and operators with an existing tree).
+Install home, first match:
+
+1. `$TREER_UI_HOME`
+2. `$TREER_HOST_ROOT/.treer/ui`
+3. the enrolled Host root's `.treer/ui`, found by walking from the current
+   directory until `.treer/server-id` exists
+4. `~/.treer/ui`
+
+The git checkout is `remote-codex-thread-ui-rust` under that home. `treer ui
+show` prints JSON with `git`, `ref`, `path`, `dist_path`, and `installed`.
+`treer-acp` registers AIS `ui_path=/`. The Treer iframe should append
+`?presentation=embedded-single-thread&explorer=1&shell=0&permissions=0&nav=0`.
+ACP permission prompts are auto-allowed on trusted machines; there is no
+permission card.
 
 ## Authenticate to an identity-aware service
 

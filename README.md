@@ -828,6 +828,19 @@ bundled page live under `apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`,
 `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`. Built-in `--kind
 codex` and `--kind claude` stay on the terminal path.
 
+Install the generic ACP thread UI once per Host. `treer-acp` serves that dist
+at `/` when present:
+
+```bash
+treer ui install
+treer ui show
+```
+
+Default git is `https://github.com/dufangshi/remote-codex-thread-ui-rust.git`.
+The checkout lives under `$TREER_UI_HOME`, `$TREER_HOST_ROOT/.treer/ui`, the
+enrolled Host root `.treer/ui`, or `~/.treer/ui`. There is no per-Agent UI
+install.
+
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles
 without exposing email addresses:

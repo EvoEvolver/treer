@@ -39,7 +39,9 @@ In concrete terms:
 6. An Agent Interface Server can declare a browser UI path alongside its
    semantic capabilities. The control plane embeds that page in place of the
    Agent terminal, and transparently tunnels relative HTTP and WebSocket
-   traffic to the Agent-private Interface port.
+   traffic to the Agent-private Interface port. Generic ACP Agents serve a
+   Host-wide thread UI installed once with `treer ui install`; ACP permission
+   prompts are auto-allowed on trusted machines.
 7. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed. A workspace member can tell whether a
    machine is Online, local-only, fenced as a duplicate, or stopped, and can
