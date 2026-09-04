@@ -73,6 +73,7 @@ export interface Agent {
   name: string
   kind: string
   status: string
+  cwd?: string
   interface?: AgentInterface
 }
 

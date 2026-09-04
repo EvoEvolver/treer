@@ -41,6 +41,7 @@ const agentWithUi = {
   name: "dashboard",
   kind: "command",
   status: "running",
+  cwd: ".",
   interface: {
     protocol: "treer.agent-interface/v1",
     instance_id: "interface-ui-1",
@@ -57,6 +58,7 @@ const agentPlain = {
   name: "plain-tty",
   kind: "command",
   status: "running",
+  cwd: "packages/api",
 }
 
 const agentAcp = {
@@ -177,11 +179,20 @@ test("ACP thread iframe appends Treer embed chrome flags", async ({ page }) => {
   await page.getByRole("button", { name: /^grok-thread / }).click()
   const frame = page.locator("iframe[title='grok-thread interface']")
   await expect(frame).toBeVisible()
-  await expect(frame).toHaveAttribute("src", /presentation=workspace/)
+  await expect(frame).toHaveAttribute("src", /presentation=embedded-single-thread/)
   await expect(frame).toHaveAttribute("src", /explorer=1/)
   await expect(frame).toHaveAttribute("src", /shell=0/)
   await expect(frame).toHaveAttribute("src", /permissions=0/)
   await expect(frame).toHaveAttribute("src", /nav=0/)
+})
+
+test("agent card and header show the working directory", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("tab", { name: /Agents/ }).click()
+  const row = page.getByRole("button", { name: /^grok-thread / })
+  await expect(row).toContainText("/Users/test/worker")
+  await row.click()
+  await expect(page.locator("header")).toContainText("/Users/test/worker")
 })
 
 test("selecting a plain terminal agent shows the terminal pane, not an iframe", async ({ page }) => {

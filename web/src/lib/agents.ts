@@ -79,4 +79,20 @@ export function acpLaunchArgs(harness: string, sessionId?: string): string[] {
   return args
 }
 
-export const TREER_EMBED_UI_QUERY = "presentation=workspace&explorer=1&shell=0&permissions=0&nav=0"
+export const TREER_EMBED_UI_QUERY = "presentation=embedded-single-thread&explorer=1&shell=0&permissions=0&nav=0"
+
+/** Display an Agent cwd, resolved against the machine root when the cwd is relative. */
+export function formatAgentCwd(cwd?: string | null, machineRoot?: string | null) {
+  const relative = (cwd ?? ".").trim() || "."
+  if (relative.startsWith("/") || /^[A-Za-z]:[\\/]/.test(relative)) {
+    return relative.replaceAll("\\", "/")
+  }
+  const root = (machineRoot ?? "").trim().replace(/[/\\]+$/, "")
+  if (!root) {
+    return relative
+  }
+  if (relative === ".") {
+    return root
+  }
+  return `${root}/${relative.replace(/^\.\//, "")}`
+}
