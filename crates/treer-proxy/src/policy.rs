@@ -18,6 +18,7 @@ pub const ACTION_AGENT_OUTPUT_READ: &str = "agent.output.read";
 pub const ACTION_AGENT_PROMPT: &str = "agent.prompt";
 pub const ACTION_AGENT_INPUT: &str = "agent.input";
 pub const ACTION_AGENT_STOP: &str = "agent.stop";
+pub const ACTION_AGENT_ABORT: &str = "agent.abort";
 pub const ACTION_AGENT_UPDATE: &str = "agent.update";
 pub const ACTION_AGENT_DELETE: &str = "agent.delete";
 pub const ACTION_AGENT_CREATE: &str = "agent.create";

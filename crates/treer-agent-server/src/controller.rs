@@ -537,6 +537,31 @@ impl ControllerRuntime {
         self.process_response(response, AgentStatus::Working)
     }
 
+    pub async fn abort(
+        &self,
+        operation_id: &str,
+        agent_id: &str,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let interface = self.interface_for(agent_id, "abort")?.ok_or_else(|| {
+            ProtocolError::new(
+                "agent_interface_capability_unavailable",
+                "Agent does not expose abort",
+            )
+        })?;
+        crate::agent_interface::abort(
+            agent_id,
+            &interface,
+            operation_id,
+            self.inner.sandbox_executable.is_some(),
+        )
+        .await?;
+        let agent = self.get(agent_id)?;
+        agent
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))
+            .map(|guard| guard.info.clone())
+    }
+
     pub async fn transcript(
         &self,
         agent_id: &str,

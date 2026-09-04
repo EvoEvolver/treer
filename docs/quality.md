@@ -70,6 +70,8 @@ node scripts/check-docs.mjs
 | Network or ingress | Authentication/header, streaming, WebSocket, containment, Agent mutation denial, and Canary coverage |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
+| Voice ASR or command | Proxy `voice` / `voice_llm` tests plus authenticated `/voice/command` route tests; optional `TREER_VOICE_LLM_LIVE_TEST=1` against a configured upstream |
+| Native iOS/Android fleet | `just mobile-ios-ci`, `just mobile-android-ci`, Android `CreateFlowTest`, iOS `CreateFlowTests` / `TreerUITests`; live AOSP + iOS simulator login/create-machine/create-agent/prompt when a Proxy and Host are available |
 | Documentation | `node scripts/check-docs.mjs` |
 | Release publishing | `node --test scripts/release-r2.test.mjs` plus isolated R2 verification |
 | Self-host GHCR or updater | `just updater-test`, Proxy admin update tests, and `/admin` e2e |

@@ -1059,6 +1059,9 @@ pub enum AgentCommand {
     Stop {
         agent_id: String,
     },
+    Abort {
+        agent_id: String,
+    },
     ProbeNetwork {
         host: String,
         port: u16,
@@ -1885,6 +1888,22 @@ mod tests {
         let json = serde_json::to_value(message).expect("serialize command");
         assert_eq!(json["type"], "command");
         assert_eq!(json["envelope"]["command"]["action"], "stop");
+    }
+
+    #[test]
+    fn abort_command_wire_shape_is_stable() {
+        let message = ProxyMessage::Command {
+            envelope: CommandEnvelope {
+                command_id: "cmd_abort".to_string(),
+                workspace_id: "default".to_string(),
+                command: AgentCommand::Abort {
+                    agent_id: "ag_1".to_string(),
+                },
+            },
+        };
+        let json = serde_json::to_value(message).expect("serialize abort command");
+        assert_eq!(json["envelope"]["command"]["action"], "abort");
+        assert_eq!(json["envelope"]["command"]["agent_id"], "ag_1");
     }
 
     #[test]

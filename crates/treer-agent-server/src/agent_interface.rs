@@ -33,6 +33,24 @@ pub async fn manifest(
     .await
 }
 
+pub async fn abort(
+    agent_id: &str,
+    interface: &AgentInterfaceDescriptor,
+    operation_id: &str,
+    transparent_networking: bool,
+) -> Result<(), ProtocolError> {
+    let _: serde_json::Value = request(
+        agent_id,
+        interface,
+        Method::POST,
+        "/v1/abort",
+        Some(&serde_json::json!({ "operation_id": operation_id })),
+        transparent_networking,
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn submit_prompt(
     agent_id: &str,
     interface: &AgentInterfaceDescriptor,

@@ -567,6 +567,12 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::Abort { agent_id } => self
+                .runtime
+                .abort(&command_id, &agent_id)
+                .await
+                .map(|agent| CommandResult::success(command_id.clone(), agent))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
             AgentCommand::ProbeNetwork {
                 host,
                 port,

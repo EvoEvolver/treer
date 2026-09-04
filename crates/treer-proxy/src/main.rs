@@ -11,6 +11,8 @@ pub mod policy;
 mod state;
 mod traffic;
 mod updater;
+mod voice;
+mod voice_llm;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -277,6 +279,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     api::spawn_network_metadata_refresh(state.clone(), auth.clone());
+    let voice = voice::VoiceServices::from_env();
+    if voice.asr.enabled() {
+        info!(config = ?voice.asr, "qwen voice ASR is enabled");
+    }
+    if voice.llm.enabled() {
+        info!(config = ?voice.llm, "voice command LLM is enabled");
+    }
     let app = api::router(
         state,
         bootstrap,
@@ -288,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
         messages,
         api::CapabilityRollout::new(args.enable_core_messages),
         updater,
+        voice,
     )
     .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)

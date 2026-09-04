@@ -45,10 +45,10 @@ use crate::auth::{self, AuthStore, CurrentSession, MachineSession, ProfileMutati
 use crate::identity::IdentityIssuer;
 use crate::message_store::{MessageStore, MessageStoreError};
 use crate::policy::{
-    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_CREATE,
-    ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT, ACTION_AGENT_METADATA_READ,
-    ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP, ACTION_AGENT_UPDATE,
-    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_LIST,
+    PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_ABORT,
+    ACTION_AGENT_CREATE, ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT,
+    ACTION_AGENT_METADATA_READ, ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP,
+    ACTION_AGENT_UPDATE, ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_LIST,
     ACTION_LAUNCH_PROFILE_CREATE, ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST,
     ACTION_LAUNCH_PROFILE_READ, ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE,
     ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT,
@@ -60,6 +60,8 @@ use crate::policy::{
 };
 use crate::state::{AppState, SocketFrame};
 use crate::updater::UpdaterClient;
+use crate::voice::{VoiceAsrConfig, VoiceServices};
+use crate::voice_llm::{self, VoiceCommandError, VoiceLlmConfig};
 
 fn control_audit_actor<'a>(
     session: Option<&'a CurrentSession>,
@@ -321,6 +323,7 @@ pub fn router(
     messages: MessageStore,
     rollout: CapabilityRollout,
     updater: UpdaterClient,
+    voice: VoiceServices,
 ) -> Router {
     let cors = browser.cors_layer();
     let workload_identity = WorkloadIdentityApi {
@@ -442,6 +445,10 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/stop",
             post(stop_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/abort",
+            post(abort_agent),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
@@ -699,12 +706,28 @@ pub fn router(
             post(stop_agent),
         )
         .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/abort",
+            post(abort_agent),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
         )
         .route(
             "/api/workspaces/{workspace_id}/events",
             get(workspace_events),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/voice/asr",
+            get(voice_asr_status),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/voice/asr/stream",
+            get(voice_asr_stream),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/voice/command",
+            get(voice_command_status).post(voice_command),
         )
         .route("/api/auth/me", get(auth::me))
         .route(
@@ -784,6 +807,8 @@ pub fn router(
         .layer(Extension(ingress))
         .layer(Extension(messages))
         .layer(Extension(updater))
+        .layer(Extension(voice.asr))
+        .layer(Extension(voice.llm))
         .with_state(state)
 }
 
@@ -4872,6 +4897,70 @@ async fn stop_agent(
     Ok(Json(data))
 }
 
+async fn abort_agent(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_ABORT,
+        agent_policy_resource(&agent),
+    )
+    .await?;
+    if !agent
+        .interface
+        .as_ref()
+        .is_some_and(|interface| interface.supports("abort"))
+    {
+        return Err(ApiFailure::bad_request(
+            "agent_interface_capability_unavailable",
+            "Agent does not expose abort",
+        ));
+    }
+    let data = state
+        .send_command(
+            &workspace_id,
+            &agent.server_id,
+            AgentCommand::Abort {
+                agent_id: agent.agent_id.clone(),
+            },
+        )
+        .await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "agent.aborted",
+            resource_kind: "agent",
+            resource_id: &agent.agent_id,
+            resource_name: Some(&agent.name),
+            payload: json!({ "server_id": &agent.server_id }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, agent_id = %agent.agent_id, "failed to record runtime audit event");
+    }
+    Ok(Json(data))
+}
+
 #[derive(Debug, Deserialize)]
 struct TerminalQuery {
     #[serde(default = "default_terminal_cols")]
@@ -5012,6 +5101,75 @@ async fn stream_terminal(
         }
     }
     state.detach_terminal(&session_id).await;
+}
+
+async fn voice_asr_status(Extension(voice): Extension<VoiceAsrConfig>) -> Json<Value> {
+    Json(voice.status_json())
+}
+
+async fn voice_asr_stream(
+    Extension(browser): Extension<BrowserAccess>,
+    Extension(voice): Extension<VoiceAsrConfig>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiFailure> {
+    browser.validate_if_present(&headers)?;
+    if !voice.enabled() {
+        return Err(ApiFailure::not_found(
+            "voice_asr_unavailable",
+            "Voice ASR is unavailable until this Proxy has TREER_VOICE_ASR_PROVIDER=qwen and an API key",
+        ));
+    }
+    Ok(ws.on_upgrade(move |socket| crate::voice::proxy_qwen_asr(socket, voice)))
+}
+
+async fn voice_command_status(Extension(llm): Extension<VoiceLlmConfig>) -> Json<Value> {
+    Json(llm.status_json())
+}
+
+#[derive(Debug, Deserialize)]
+struct VoiceCommandBody {
+    text: String,
+    #[serde(default)]
+    history: Vec<voice_llm::VoiceHistoryTurn>,
+}
+
+async fn voice_command(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Extension(llm): Extension<VoiceLlmConfig>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<VoiceCommandBody>,
+) -> Result<Json<Value>, ApiFailure> {
+    let result = voice_llm::run_voice_command(voice_llm::VoiceCommandRequest {
+        config: &llm,
+        state: &state,
+        auth: &auth,
+        session: &session,
+        workspace_id: &workspace_id,
+        utterance: &body.text,
+        history: &body.history,
+    })
+    .await
+    .map_err(map_voice_command_error)?;
+    Ok(Json(result.to_json()))
+}
+
+fn map_voice_command_error(error: VoiceCommandError) -> ApiFailure {
+    match error {
+        VoiceCommandError::Unavailable => ApiFailure::not_found(
+            "voice_llm_unavailable",
+            "Voice command is unavailable until this Proxy has TREER_VOICE_LLM_API_KEY",
+        ),
+        VoiceCommandError::EmptyUtterance => {
+            ApiFailure::bad_request("invalid_utterance", "utterance text is required")
+        }
+        VoiceCommandError::Upstream(message) => {
+            ApiFailure::bad_gateway("voice_llm_failed", &message)
+        }
+        VoiceCommandError::Protocol(error) => error.into(),
+    }
 }
 
 async fn workspace_events(
@@ -5473,6 +5631,7 @@ mod tests {
             messages,
             CapabilityRollout::all_enabled(),
             updater,
+            crate::voice::VoiceServices::disabled(),
         )
     }
 
@@ -5569,6 +5728,7 @@ mod tests {
             messages,
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
         );
         let response = app
             .oneshot(
@@ -5616,6 +5776,7 @@ mod tests {
             messages,
             CapabilityRollout::new(false),
             crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
         );
 
         for path in [
@@ -5675,6 +5836,7 @@ mod tests {
             messages,
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
         );
         let response = app
             .clone()
@@ -5852,6 +6014,7 @@ mod tests {
             messages,
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
         );
         let response = app
             .oneshot(
@@ -5877,6 +6040,16 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
             Some(&HeaderValue::from_static("true"))
         );
+        if let Some(allow_headers) = response.headers().get(header::ACCESS_CONTROL_ALLOW_HEADERS) {
+            assert!(
+                !allow_headers
+                    .to_str()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .contains("x-treer-client"),
+                "native client header must not be CORS-allowed"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5902,6 +6075,7 @@ mod tests {
             messages,
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
         );
         let response = app
             .oneshot(
@@ -5939,6 +6113,356 @@ mod tests {
             .await
             .expect("update response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn voice_asr_status_requires_authentication() {
+        let auth = AuthStore::for_test("admin-password").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workspaces/default/voice/asr")
+                    .body(Body::empty())
+                    .expect("voice asr status request"),
+            )
+            .await
+            .expect("voice asr status response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn voice_command_status_requires_authentication() {
+        let auth = AuthStore::for_test("admin-password").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let app = router(
+            AppState::new(),
+            test_config(),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workspaces/default/voice/command")
+                    .body(Body::empty())
+                    .expect("voice command status request"),
+            )
+            .await
+            .expect("voice command status response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn voice_member_token(
+        auth: &AuthStore,
+        app: Router,
+        workspace_id: &str,
+    ) -> (Router, String) {
+        let (invite, _) = auth
+            .create_personal_invitation()
+            .await
+            .expect("personal invitation");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/register")
+                    .header("X-Treer-Client", "mobile")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "email": "voice@example.com",
+                            "preferred_name": "Voice",
+                            "password": "password123",
+                            "invite": invite,
+                        }))
+                        .expect("register body"),
+                    ))
+                    .expect("register request"),
+            )
+            .await
+            .expect("register response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("register body bytes"),
+        )
+        .expect("register json");
+        let token = body["token"].as_str().expect("native token").to_string();
+        let user_id = body["user_id"].as_str().expect("user id");
+        sqlx::query(
+            "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
+             VALUES($1, $2, 'owner', $3)",
+        )
+        .bind(format!("org_{workspace_id}"))
+        .bind(user_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&auth.pool())
+        .await
+        .expect("workspace membership");
+        (app, token)
+    }
+
+    #[tokio::test]
+    async fn voice_command_is_unavailable_until_configured() {
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let state = AppState::new();
+        state.ensure_workspace("default", "default").await;
+        let app = router(
+            state,
+            test_config(),
+            auth.clone(),
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
+        );
+        let (app, token) = voice_member_token(&auth, app, "default").await;
+        let status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workspaces/default/voice/command")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("status response");
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(status.into_body(), usize::MAX)
+                .await
+                .expect("status body"),
+        )
+        .expect("status json");
+        assert_eq!(status_body["enabled"], false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workspaces/default/voice/command")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"text":"看一下 mac 上的 reviewer"}"#))
+                    .expect("command request"),
+            )
+            .await
+            .expect("command response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let error: ApiError = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("error body"),
+        )
+        .expect("error json");
+        assert_eq!(error.error.code, "voice_llm_unavailable");
+    }
+
+    #[tokio::test]
+    async fn voice_command_turns_asr_text_into_agent_prompt() {
+        let auth = AuthStore::for_test("admin-password").await;
+        auth.seed_test_workspace("default").await;
+        let messages = MessageStore::open(auth.pool())
+            .await
+            .expect("message store");
+        let identity = IdentityIssuer::load(
+            &auth,
+            &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+        )
+        .await
+        .expect("identity issuer");
+        let state = AppState::new();
+        state.ensure_workspace("default", "lab").await;
+        let now = Utc::now();
+        let server = treer_protocol::ServerInfo {
+            server_id: "srv_mac".to_string(),
+            workspace_id: "default".to_string(),
+            name: "mac".to_string(),
+            hostname: "MacBook-Pro.local".to_string(),
+            root: "/tmp".to_string(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "test".to_string(),
+                git_commit: "test".to_string(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "test".to_string(),
+                git_commit: "test".to_string(),
+            },
+            supervision: None,
+            labels: Default::default(),
+            available_agents: None,
+            status: ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+        let agent = treer_protocol::AgentInfo {
+            agent_id: "ag_reviewer".to_string(),
+            workspace_id: "default".to_string(),
+            server_id: "srv_mac".to_string(),
+            kind: "codex".to_string(),
+            name: "reviewer".to_string(),
+            cwd: ".".to_string(),
+            status: treer_protocol::AgentStatus::Idle,
+            pid: None,
+            started_at: now,
+            updated_at: now,
+            exited_at: None,
+            exit_code: None,
+            output_revision: 0,
+            interface: None,
+        };
+        let connection_id = Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), connection_id, tx)
+            .await
+            .expect("register server");
+        state
+            .apply_snapshot(
+                connection_id,
+                treer_protocol::AgentServerSnapshot {
+                    server,
+                    agents: vec![agent],
+                },
+            )
+            .await
+            .expect("snapshot");
+        let responder = state.clone();
+        tokio::spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                let SocketFrame::Text(encoded) = frame else {
+                    continue;
+                };
+                let ProxyMessage::Command { envelope } =
+                    serde_json::from_str(&encoded).expect("command")
+                else {
+                    continue;
+                };
+                responder
+                    .complete_command(CommandResult::success(
+                        envelope.command_id,
+                        json!({"ok": true}),
+                    ))
+                    .await;
+            }
+        });
+        let upstream = crate::voice_llm::spawn_scripted_upstream(vec![
+            json!({
+                "id": "resp_1",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "treer",
+                    "arguments": "{\"argv\":[\"agent\",\"prompt\",\"--machine\",\"mac\",\"reviewer\",\"给这个仓库写测试\"]}"
+                }]
+            }),
+            json!({
+                "id": "resp_2",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type":"output_text","text":"已经把写测试的任务发给 Mac 上的 reviewer 了。"}]
+                }]
+            }),
+        ])
+        .await;
+        let llm = crate::voice_llm::VoiceLlmConfig::for_test(
+            upstream.as_str(),
+            crate::voice_llm::WireApi::Responses,
+            "sk-test",
+            "gpt-5.6-luna",
+        );
+        let app = router(
+            state,
+            test_config(),
+            auth.clone(),
+            PolicyEngine::allow_all(),
+            identity,
+            test_browser_access(),
+            test_ingress_config(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::with_llm(llm),
+        );
+        let (app, token) = voice_member_token(&auth, app, "default").await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workspaces/default/voice/command")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"text":"请看一下 mac 这个设备上运行的 reviewer agent，让它进行写测试"}"#,
+                    ))
+                    .expect("command request"),
+            )
+            .await
+            .expect("command response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("command body"),
+        )
+        .expect("command json");
+        assert!(body["reply"].as_str().expect("reply").contains("reviewer"));
+        assert_eq!(body["tools"][0]["ok"], true);
+        assert_eq!(body["tools"][0]["argv"][1], "prompt");
     }
 
     #[tokio::test]

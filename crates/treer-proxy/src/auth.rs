@@ -36,6 +36,8 @@ use crate::audit::{self, NewAuditEvent, NewWorkspaceAuditEvent};
 
 const SESSION_COOKIE: &str = "treer_session";
 const ADMIN_SESSION_COOKIE: &str = "treer_admin_session";
+const NATIVE_CLIENT_HEADER: &str = "x-treer-client";
+const MAX_DEVICE_NAME_CHARS: usize = 128;
 const SESSION_TTL_DAYS: i64 = 30;
 const ADMIN_SESSION_TTL_HOURS: i64 = 8;
 const PASSWORD_RESET_TTL_MINUTES: i64 = 30;
@@ -296,6 +298,10 @@ pub struct MachineEnrollmentClaim {
 pub struct LoginRequest {
     email: String,
     password: String,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    device_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,6 +310,17 @@ pub struct RegisterRequest {
     email: String,
     preferred_name: String,
     password: String,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    device_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeClientAttribution {
+    client: String,
+    device_id: Option<String>,
+    device_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3132,7 +3149,17 @@ impl AuthStore {
         Ok(count == 1)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn login(&self, email: &str, password: &str) -> Result<CurrentSession, AuthFailure> {
+        self.login_with_client(email, password, None).await
+    }
+
+    async fn login_with_client(
+        &self,
+        email: &str,
+        password: &str,
+        client: Option<NativeClientAttribution>,
+    ) -> Result<CurrentSession, AuthFailure> {
         let identifier = email.trim().to_ascii_lowercase();
         if identifier.is_empty()
             || identifier.len() > 254
@@ -3166,8 +3193,13 @@ impl AuthStore {
                 "invalid email or password",
             ));
         }
-        self.create_session(row.get("id"), row.get("email"), row.get("preferred_name"))
-            .await
+        self.create_session(
+            row.get("id"),
+            row.get("email"),
+            row.get("preferred_name"),
+            client,
+        )
+        .await
     }
 
     async fn request_password_reset(&self, email: &str) -> Result<(), AuthFailure> {
@@ -3339,6 +3371,7 @@ impl AuthStore {
         user_id: String,
         email: String,
         preferred_name: String,
+        client: Option<NativeClientAttribution>,
     ) -> Result<CurrentSession, AuthFailure> {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let now = Utc::now();
@@ -3349,13 +3382,16 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         sqlx::query(
-            "INSERT INTO sessions(token, user_id, created_at, expires_at) \
-             VALUES($1, $2, $3, $4)",
+            "INSERT INTO sessions(token, user_id, created_at, expires_at, device_id, device_name, client) \
+             VALUES($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&token)
         .bind(&user_id)
         .bind(now.to_rfc3339())
         .bind(expires_at.to_rfc3339())
+        .bind(client.as_ref().and_then(|value| value.device_id.as_deref()))
+        .bind(client.as_ref().and_then(|value| value.device_name.as_deref()))
+        .bind(client.as_ref().map(|value| value.client.as_str()))
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
@@ -3979,7 +4015,9 @@ impl AuthStore {
             let email = user.get("email");
             let preferred_name = user.get("preferred_name");
             transaction.commit().await.map_err(AuthFailure::database)?;
-            return self.create_session(user_id, email, preferred_name).await;
+            return self
+                .create_session(user_id, email, preferred_name, None)
+                .await;
         }
 
         let existing_user = sqlx::query(
@@ -4076,13 +4114,16 @@ impl AuthStore {
             }
         })?;
         transaction.commit().await.map_err(AuthFailure::database)?;
-        let session = self.create_session(user_id, email, preferred_name).await?;
+        let session = self
+            .create_session(user_id, email, preferred_name, None)
+            .await?;
         if created {
             self.send_welcome_email(&session);
         }
         Ok(session)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn register(
         &self,
         invite: Option<&str>,
@@ -4117,7 +4158,51 @@ impl AuthStore {
         )
         .await?;
         transaction.commit().await.map_err(AuthFailure::database)?;
-        let session = self.create_session(user_id, email, preferred_name).await?;
+        let session = self
+            .create_session(user_id, email, preferred_name, None)
+            .await?;
+        self.send_welcome_email(&session);
+        Ok(session)
+    }
+
+    async fn register_with_client(
+        &self,
+        invite: Option<&str>,
+        email: &str,
+        preferred_name: &str,
+        password: &str,
+        client: Option<NativeClientAttribution>,
+    ) -> Result<CurrentSession, AuthFailure> {
+        let email = normalize_email(email)?;
+        let preferred_name = validate_preferred_name(preferred_name)?;
+        let password = validate_new_password(password)?;
+        let password_hash = hash_password(&password)?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let invitation = self
+            .load_registration_invitation(&mut transaction, invite)
+            .await?;
+        let now = Utc::now().to_rfc3339();
+        let user_id = insert_user(
+            &mut transaction,
+            &email,
+            &preferred_name,
+            password_hash,
+            false,
+            &now,
+        )
+        .await?;
+        apply_registration_membership(
+            &mut transaction,
+            invitation,
+            &user_id,
+            &preferred_name,
+            &now,
+        )
+        .await?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        let session = self
+            .create_session(user_id, email, preferred_name, client)
+            .await?;
         self.send_welcome_email(&session);
         Ok(session)
     }
@@ -4395,9 +4480,12 @@ pub(crate) async fn authenticate_request(
             preferred_name: "Local user".to_string(),
         });
     }
-    let token = cookie_value(headers, SESSION_COOKIE).ok_or_else(|| {
-        AuthFailure::unauthorized("authentication_required", "authentication required")
-    })?;
+    let token = bearer_token(headers)
+        .map(str::to_owned)
+        .or_else(|| cookie_value(headers, SESSION_COOKIE))
+        .ok_or_else(|| {
+            AuthFailure::unauthorized("authentication_required", "authentication required")
+        })?;
     auth.session(&token).await?.ok_or_else(|| {
         AuthFailure::unauthorized("authentication_required", "authentication required")
     })
@@ -4405,10 +4493,18 @@ pub(crate) async fn authenticate_request(
 
 pub async fn login(
     Extension(auth): Extension<AuthStore>,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> Result<Response, AuthFailure> {
-    let session = auth.login(&request.email, &request.password).await?;
-    Ok(session_response(&auth, &session))
+    let client = native_client_attribution(
+        &headers,
+        request.device_id.as_deref(),
+        request.device_name.as_deref(),
+    )?;
+    let session = auth
+        .login_with_client(&request.email, &request.password, client)
+        .await?;
+    Ok(session_response(&auth, &session, &headers))
 }
 
 pub async fn oauth_config(Extension(auth): Extension<AuthStore>) -> Json<Value> {
@@ -4470,17 +4566,24 @@ pub async fn reset_password(
 
 pub async fn register(
     Extension(auth): Extension<AuthStore>,
+    headers: HeaderMap,
     Json(request): Json<RegisterRequest>,
 ) -> Result<Response, AuthFailure> {
+    let client = native_client_attribution(
+        &headers,
+        request.device_id.as_deref(),
+        request.device_name.as_deref(),
+    )?;
     let session = auth
-        .register(
+        .register_with_client(
             request.invite.as_deref(),
             &request.email,
             &request.preferred_name,
             &request.password,
+            client,
         )
         .await?;
-    Ok(session_response(&auth, &session))
+    Ok(session_response(&auth, &session, &headers))
 }
 
 pub async fn me(Extension(session): Extension<CurrentSession>) -> Json<Value> {
@@ -4652,14 +4755,20 @@ pub async fn admin_logout(
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response())
 }
 
-fn session_response(auth: &AuthStore, session: &CurrentSession) -> Response {
+fn session_response(auth: &AuthStore, session: &CurrentSession, headers: &HeaderMap) -> Response {
     let cookie = format!(
         "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
         session.token,
         SESSION_TTL_DAYS * 24 * 60 * 60,
         secure_cookie_suffix(auth)
     );
-    ([(header::SET_COOKIE, cookie)], Json(user_json(session))).into_response()
+    let mut body = user_json(session);
+    if native_client_kind(headers).is_some() {
+        if let Some(object) = body.as_object_mut() {
+            object.insert("token".to_string(), json!(session.token));
+        }
+    }
+    ([(header::SET_COOKIE, cookie)], Json(body)).into_response()
 }
 
 fn oauth_session_redirect(auth: &AuthStore, session: &CurrentSession) -> Response {
@@ -4700,6 +4809,45 @@ fn secure_cookie_suffix(auth: &AuthStore) -> &'static str {
     } else {
         ""
     }
+}
+
+fn native_client_kind(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(NATIVE_CLIENT_HEADER)?.to_str().ok()?.trim();
+    matches!(value, "mobile" | "mobile_ios" | "mobile_android").then_some(value)
+}
+
+fn native_client_attribution(
+    headers: &HeaderMap,
+    device_id: Option<&str>,
+    device_name: Option<&str>,
+) -> Result<Option<NativeClientAttribution>, AuthFailure> {
+    let Some(client) = native_client_kind(headers) else {
+        return Ok(None);
+    };
+    let device_id = match device_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            Uuid::parse_str(value).map_err(|_| {
+                AuthFailure::bad_request("invalid_device_id", "device_id must be a UUID")
+            })?;
+            Some(value.to_string())
+        }
+        None => None,
+    };
+    let device_name = match device_name.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value.chars().count() > MAX_DEVICE_NAME_CHARS => {
+            return Err(AuthFailure::bad_request(
+                "invalid_device_name",
+                "device_name is too long",
+            ));
+        }
+        Some(value) => Some(value.to_string()),
+        None => None,
+    };
+    Ok(Some(NativeClientAttribution {
+        client: client.to_string(),
+        device_id,
+        device_name,
+    }))
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -6987,6 +7135,55 @@ mod tests {
             .await
             .expect("session lookup")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn bearer_authorization_authenticates_the_session() {
+        let store = AuthStore::for_test("owner-password").await;
+        let session = bootstrap_owner(&store, "bearer@example.com", "Bearer").await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", session.token)).expect("bearer header"),
+        );
+        let authenticated = authenticate_request(&store, &headers)
+            .await
+            .expect("bearer session");
+        assert_eq!(authenticated.user_id, session.user_id);
+        assert_eq!(authenticated.email, "bearer@example.com");
+    }
+
+    #[test]
+    fn native_client_kind_is_exact() {
+        let mut headers = HeaderMap::new();
+        headers.insert(NATIVE_CLIENT_HEADER, HeaderValue::from_static("mobile_ios"));
+        assert_eq!(native_client_kind(&headers), Some("mobile_ios"));
+        headers.insert(NATIVE_CLIENT_HEADER, HeaderValue::from_static("browser"));
+        assert_eq!(native_client_kind(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn session_json_includes_token_only_for_native_clients() {
+        let store = AuthStore::for_test("owner-password").await;
+        let session = bootstrap_owner(&store, "ios@example.com", "iOS").await;
+        let mut headers = HeaderMap::new();
+        headers.insert(NATIVE_CLIENT_HEADER, HeaderValue::from_static("mobile_ios"));
+        let native = session_response(&store, &session, &headers);
+        let native_body = axum::body::to_bytes(native.into_body(), usize::MAX)
+            .await
+            .expect("native body");
+        let native_json: Value = serde_json::from_slice(&native_body).expect("native session json");
+        assert_eq!(native_json["token"], session.token);
+        assert_eq!(native_json["user_id"], session.user_id);
+
+        let browser = session_response(&store, &session, &HeaderMap::new());
+        let browser_body = axum::body::to_bytes(browser.into_body(), usize::MAX)
+            .await
+            .expect("browser body");
+        let browser_json: Value =
+            serde_json::from_slice(&browser_body).expect("browser session json");
+        assert!(browser_json.get("token").is_none());
+        assert_eq!(browser_json["user_id"], session.user_id);
     }
 
     #[test]

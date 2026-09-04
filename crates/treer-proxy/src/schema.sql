@@ -178,6 +178,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_name TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client TEXT;
 CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (

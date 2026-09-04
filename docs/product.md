@@ -23,9 +23,11 @@ In concrete terms:
 1. A user installs a small persistent service on a machine they control.
 2. A short-lived, single-use link enrolls that machine into one workspace.
 3. Workspace members can save reusable command-based launch profiles and use
-   them to create, observe, prompt, and stop Agents through the web application
-   or CLI, including a full-screen mobile terminal with touch controls and a
-   full-screen Agent UI iframe on the same narrow layout.
+   them to create, observe, prompt, and stop Agents through the web application,
+   CLI, or native iOS/Android clients. The browser still includes a full-screen
+   mobile terminal with touch controls and a full-screen Agent UI iframe. The
+   native apps use a fleet Home, an AIS WebView for thread UI, and an optional
+   native TUI overlay.
 4. Managed Agents and humans exchange durable Core Messages with explicit
    acknowledgement and an ordered context DAG. Mail and Telegram are
    replaceable workspace Apps over public contracts rather than privileged

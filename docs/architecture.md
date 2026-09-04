@@ -5,8 +5,10 @@ Treer separates durable coordination from machine-local process ownership.
 ```mermaid
 flowchart LR
     Web[Browser control plane] --> Proxy[Proxy]
+    Phone[iOS / Android] -->|PCM ASR + utterance text| Proxy
     Proxy --> DB[(PostgreSQL)]
     Proxy <--> NATS[(NATS)]
+    Proxy --> VoiceLLM[Voice LLM upstream]
     Controller[Agent Server / Controller] <--> Proxy
     Controller <--> Host[Agent Host]
     Host --> Runtime[Agent runtime and PTY]
@@ -21,7 +23,7 @@ flowchart LR
 
 | Component | Owns |
 | --- | --- |
-| `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, and distributed coordination |
+| `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, distributed coordination, Voice ASR proxy, and Voice command LLM |
 | `treer-agent-server` | Machine Controller, local authenticated API, Proxy connection, network bridge, and Agent definitions |
 | `treer-agent-host` | Stable local child-process ownership and idempotent mutations |
 | `treer-agent-runtime` | PTY lifecycle, bounded output replay, and working-directory containment |
@@ -262,6 +264,21 @@ event in the same PostgreSQL transaction. Successful Agent create, rename, stop,
 and delete operations, App lifecycle operations, and machine rename and delete operations append runtime
 audit events after the Controller result; an audit write failure is logged
 without turning a completed runtime mutation into a retryable API failure.
+
+Hold-to-talk audio stays on the Proxy only long enough to forward 16 kHz PCM16
+to the configured ASR vendor. After a transcript is available, `POST
+/api/workspaces/{workspace_id}/voice/command` sends that text to an OpenAI
+Responses or Chat Completions upstream. The model receives
+[the voice skill](../skills/treer-voice/SKILL.md) and a compact roster, then
+calls a `treer` tool. The Proxy executes allowed CLI-equivalent commands
+(`status`, `whoami`, `machine list`, `agent list|show|prompt|read`) in-process
+as the signed-in user and returns a speakable reply. The native app reads that
+reply with system TTS on the media stream. Conversation mode runs an
+on-device speech gate (adaptive energy, zero-crossing rate, and a 360ms
+minimum speech window) and only opens the ASR stream after speech is
+confirmed, so noise and coughs do not spend ASR tokens. Vendor ASR and LLM keys stay in
+Proxy environment variables. This is not the later confirm-card Voice Live
+protocol, and the phone does not run the Treer CLI.
 
 PostgreSQL is the durable source for accounts, organizations, workspaces,
 machine credentials, services, ingresses, App OAuth codes, policy, audit,

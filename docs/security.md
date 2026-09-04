@@ -74,9 +74,12 @@ macOS `proxy-env` as a forced proxy for GitHub or other public sites.
 | Local operator credential | One Controller install; protects the local API but is not a same-account sandbox |
 | Workload identity token | One Agent/machine/service audience for 60 seconds |
 | Human App token | One user/workspace/service audience; verification rechecks membership and service |
+| Human user session | Cookie `treer_session` for browsers; native iOS/Android also receive the same token in JSON when `X-Treer-Client` is exactly `mobile`, `mobile_ios`, or `mobile_android`. `Authorization: Bearer` is accepted on every user route. The header is not CORS-allowed. Do not put the token in query strings |
 | Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts; can list emails and issue password-reset links |
 | Updater token | Shared Bearer secret between Proxy and the Compose updater sidecar; never exposed to browsers |
 | Mail cookie | Local opaque handle to an App token; compromise of Mail state grants that token until expiry |
+| Voice ASR vendor key | Proxy process only (`TREER_VOICE_ASR_API_KEY` / `DASHSCOPE_API_KEY`); never the iOS/Android app |
+| Voice LLM vendor key | Proxy process only (`TREER_VOICE_LLM_API_KEY`); used for utterance-to-command; never the phone |
 | Telegram bot token | One Telegram bot; Telegram and any process that can inspect it can act as the bot |
 | Release signing key | All official release manifests; must remain offline and outside runtime systems |
 

@@ -17,6 +17,8 @@ second manual.
 - Apple container Host setup on a Mac uses
   [the macOS container skill](skills/treer-macos-container/SKILL.md), printed
   by `treer --skill macos-container`.
+- The Proxy Voice LLM uses [the voice skill](skills/treer-voice/SKILL.md). It is
+  not printed by `treer --skill`.
 - The root [README](README.md) owns setup and operator examples.
 - [PLAN.md](PLAN.md) and dated [research](docs/research/) preserve design
   history. Use source, tests, and maintained docs for current behavior.
@@ -34,12 +36,13 @@ second manual.
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
 | Install a git recipe with an installer Agent | [skills/treer-install/SKILL.md](skills/treer-install/SKILL.md) |
 | Put a Treer Host in an Apple container machine | [skills/treer-macos-container/SKILL.md](skills/treer-macos-container/SKILL.md) |
+| Change Voice ASR or spoken command | [docs/mobile.md](docs/mobile.md), [skills/treer-voice/SKILL.md](skills/treer-voice/SKILL.md) |
 
 ## Source map
 
 | Path | Responsibility |
 | --- | --- |
-| `crates/treer-proxy` | Public API, auth, policy, App identity, Core Message/DAG/outbox, workspace routing |
+| `crates/treer-proxy` | Public API, auth, policy, App identity, Core Message/DAG/outbox, workspace routing, Voice ASR, Voice command |
 | `crates/treer-agent-server` | Machine Controller, local API, Proxy link, networking |
 | `crates/treer-agent-host` | Stable local process ownership and idempotent mutations |
 | `crates/treer-agent-runtime` | PTY lifecycle, output replay, working-directory boundary |
