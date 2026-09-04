@@ -2108,6 +2108,7 @@ impl AuthStore {
             hostname: hostname.clone(),
             service_id: service.service_id.clone(),
             public_url: None,
+            access: None,
             desired_state: AppDesiredState::Running,
             runtime_agent_id: None,
             restart_count: 0,
@@ -2851,6 +2852,7 @@ impl AuthStore {
         app: &AppDeployment,
         actor: &str,
         base_domain: &str,
+        requested_access: Option<ServiceIngressAccess>,
     ) -> Result<ServiceIngress, AuthFailure> {
         let service = self
             .resolve_machine_service(&app.workspace_id, &app.service_id)
@@ -2859,7 +2861,7 @@ impl AuthStore {
         let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
         if let Some(existing) = self.service_ingresses.read().await.get(&hostname) {
             return if existing.ingress.service_id == app.service_id
-                && existing.ingress.access == ServiceIngressAccess::Workspace
+                && (requested_access.is_none() || requested_access == Some(existing.ingress.access))
             {
                 Ok(existing.ingress.clone())
             } else {
@@ -2870,12 +2872,13 @@ impl AuthStore {
             };
         }
         let now = Utc::now();
+        let access = requested_access.unwrap_or(ServiceIngressAccess::Workspace);
         let ingress = ServiceIngress {
             ingress_id: format!("ing_{}", Uuid::new_v4().simple()),
             workspace_id: app.workspace_id.clone(),
             service_id: app.service_id.clone(),
             hostname: hostname.clone(),
-            access: ServiceIngressAccess::Workspace,
+            access,
             enabled: true,
             created_at: now,
             created_by: actor.to_string(),
@@ -2885,13 +2888,14 @@ impl AuthStore {
         let inserted = sqlx::query(
             "INSERT INTO service_ingresses(\
              ingress_id, workspace_id, service_id, hostname, access, enabled, created_at, \
-             created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, 'workspace', TRUE, $5, $6, $7, $8) \
+             created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9) \
              ON CONFLICT DO NOTHING",
         )
         .bind(&ingress.ingress_id)
         .bind(&ingress.workspace_id)
         .bind(&ingress.service_id)
         .bind(&ingress.hostname)
+        .bind(service_ingress_access_str(ingress.access))
         .bind(ingress.created_at.to_rfc3339())
         .bind(&ingress.created_by)
         .bind(ingress.updated_at.to_rfc3339())
@@ -2905,7 +2909,8 @@ impl AuthStore {
                 .await?
                 .filter(|resolved| {
                     resolved.ingress.service_id == app.service_id
-                        && resolved.ingress.access == ServiceIngressAccess::Workspace
+                        && (requested_access.is_none()
+                            || requested_access == Some(resolved.ingress.access))
                 })
                 .map(|resolved| resolved.ingress)
                 .ok_or_else(|| {
@@ -2948,7 +2953,8 @@ impl AuthStore {
         for app in apps {
             let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
             let existed = self.service_ingresses.read().await.contains_key(&hostname);
-            self.ensure_app_ingress(&app, actor, base_domain).await?;
+            self.ensure_app_ingress(&app, actor, base_domain, None)
+                .await?;
             created += usize::from(!existed);
         }
         Ok(created)
@@ -6211,6 +6217,7 @@ fn app_deployment_from_row(row: sqlx::postgres::PgRow) -> Result<AppDeployment, 
         hostname: row.get("hostname"),
         service_id: row.get("service_id"),
         public_url: None,
+        access: None,
         desired_state,
         runtime_agent_id: row.get("runtime_agent_id"),
         restart_count,
@@ -7101,6 +7108,7 @@ mod tests {
                     cwd: ".".to_string(),
                     port: 9420,
                     hostname: "soul.internal".to_string(),
+                    public: false,
                 },
             )
             .await
@@ -7118,7 +7126,12 @@ mod tests {
             .expect("App virtual host");
         assert_eq!(host.service_id, app.service_id);
         let ingress = store
-            .ensure_app_ingress(&app, "owner", "apps.treer.test")
+            .ensure_app_ingress(
+                &app,
+                "owner",
+                "apps.treer.test",
+                Some(ServiceIngressAccess::Workspace),
+            )
             .await
             .expect("create App ingress");
         assert_eq!(ingress.service_id, app.service_id);
@@ -7127,11 +7140,52 @@ mod tests {
         assert!(ingress.hostname.ends_with(".apps.treer.test"));
         assert_eq!(
             store
-                .ensure_app_ingress(&app, "owner", "apps.treer.test")
+                .ensure_app_ingress(&app, "owner", "apps.treer.test", None)
                 .await
                 .expect("reuse App ingress")
                 .ingress_id,
             ingress.ingress_id
+        );
+
+        let public_app = store
+            .create_app_deployment(
+                "apps",
+                "owner",
+                "machine-a".to_string(),
+                CreateAppDeploymentRequest {
+                    server_id: Some("machine-a".to_string()),
+                    name: "Public Docs".to_string(),
+                    command: "python3".to_string(),
+                    args: vec!["-m".to_string(), "http.server".to_string()],
+                    cwd: ".".to_string(),
+                    port: 8080,
+                    hostname: "public-docs.internal".to_string(),
+                    public: true,
+                },
+            )
+            .await
+            .expect("create public App deployment");
+        let public_ingress = store
+            .ensure_app_ingress(
+                &public_app,
+                "owner",
+                "apps.treer.test",
+                Some(ServiceIngressAccess::Public),
+            )
+            .await
+            .expect("create public App ingress");
+        assert_eq!(public_ingress.access, ServiceIngressAccess::Public);
+        store
+            .ensure_managed_app_ingresses("reconciler", "apps.treer.test")
+            .await
+            .expect("reconcile App ingresses");
+        assert_eq!(
+            store
+                .ensure_app_ingress(&public_app, "reconciler", "apps.treer.test", None)
+                .await
+                .expect("reuse public ingress after reconciliation")
+                .access,
+            ServiceIngressAccess::Public
         );
 
         let first = store

@@ -87,15 +87,20 @@ virtual host across runtime replacement and Controller reconnects:
 ```bash
 treer app create --machine build-machine --name docs --port 8080 \
   --hostname docs.internal python3 -- -m http.server 8080
+treer app create --public --machine build-machine --name public-docs --port 8081 \
+  --hostname public-docs.internal python3 -- -m http.server 8081
 treer app list
 treer app restart docs
 ```
 
-When wildcard ingress is configured, every Managed App receives a stable,
-workspace-authenticated `public_url` on its own origin. Browser assets,
-root-relative paths, redirects, and App routes therefore resolve without the
-control plane's `/virtual-hosts/.../proxy/` tunnel prefix. Installations without
-wildcard ingress continue to use that authenticated tunnel as a fallback.
+When wildcard ingress is configured, every Managed App receives a stable
+`public_url` on its own origin. It requires Workspace authentication by default;
+an Agent can explicitly pass `--public` at creation time to allow anonymous
+internet access to that App. Browser assets, root-relative paths, redirects,
+and App routes therefore resolve without the control plane's
+`/virtual-hosts/.../proxy/` tunnel prefix. Public creation fails when wildcard
+ingress is unavailable; private Apps continue to use the authenticated tunnel
+as a fallback.
 
 Managed Apps do not add a new security boundary or secret store. More complex
 Apps may still use an external supervisor and register ordinary Treer services.

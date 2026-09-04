@@ -111,6 +111,7 @@ export interface AppDeployment {
   hostname: string
   service_id: string
   public_url?: string
+  access?: "public" | "workspace"
   desired_state: "running" | "stopped"
   runtime_agent_id?: string
   restart_count: number

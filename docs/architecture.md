@@ -84,16 +84,18 @@ also checks current service existence and, for humans, current membership.
 A Managed App is a durable Proxy record for one command, one machine, and one
 HTTP UI port. Creation transactionally allocates a stable machine service and
 virtual host. When wildcard ingress is configured, it also allocates a stable
-workspace-authenticated origin and exposes it as `public_url`; startup
-reconciliation backfills that origin for existing Apps. Start, stop, restart,
-delete, list, and show are available through the browser, public API,
-Controller-local API, and `treer app` CLI. User-triggered lifecycle changes
-append workspace audit events.
+origin and exposes it as `public_url`. The origin requires Workspace
+authentication by default. An Agent may opt its Managed App into anonymous
+access at creation time with `treer app create --public`; startup reconciliation
+preserves that access mode and backfills private origins for existing Apps.
+Start, stop, restart, delete, list, and show are available through the browser,
+public API, Controller-local API, and `treer app` CLI. User-triggered lifecycle
+changes append workspace audit events.
 
 Managed App lifecycle is the only Agent-authorized path that allocates a
-service, virtual host, or its owned ingress. Direct Agent routes for arbitrary
-service, virtual-host, and ingress mutation return `managed_app_required`,
-including for older CLIs.
+service, virtual host, or its owned ingress. The public option applies only to
+that App-owned ingress. Direct Agent routes for arbitrary service, virtual-host,
+and ingress mutation return `managed_app_required`, including for older CLIs.
 Logged-in workspace users retain those controls through the browser/public API
 for operator-managed infrastructure.
 

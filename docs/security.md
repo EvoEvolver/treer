@@ -125,15 +125,19 @@ is not an internet listener. Any process on that machine that can reach
 separate Unix bridge into the same namespace and do not open a host TCP port.
 Managed Apps use `publish_ports` for their declared HTTP UI port, then route the
 stable service and virtual hostname to that loopback listener. When wildcard
-ingress is configured, Core creates a dedicated `workspace` ingress for each
-Managed App; browser access requires a current workspace session and Agent
-access requires a service-audience credential. Their command, arguments,
-working directory, hostname, and `public_url` are plaintext Proxy metadata; the
-Managed App API deliberately has no secret field.
+ingress is configured, Core creates a dedicated ingress for each Managed App.
+It uses `workspace` access by default, requiring a current workspace session or
+service-audience credential. An Agent may request `public` access only while
+creating a Managed App; that App then accepts anonymous internet requests and
+must implement any application-level authentication it needs. Their command,
+arguments, working directory, hostname, access choice, and `public_url` are
+plaintext Proxy metadata; the Managed App API deliberately has no secret field.
 
 Only a logged-in workspace user or operator API may directly mutate service,
 virtual-host, and ingress records. Managed Agents can list or probe existing
-records for compatibility but cannot publish their own sandbox listeners.
+records for compatibility but cannot publish arbitrary sandbox listeners. Their
+only publication authority is the declared HTTP port of a Managed App created
+through the atomic App lifecycle.
 
 ## Policy And Rollout
 

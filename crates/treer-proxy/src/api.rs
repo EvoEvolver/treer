@@ -2321,14 +2321,13 @@ fn attach_app_public_url(
     let managed_hostname = config.base_domain_if_configured().and_then(|base_domain| {
         managed_app_ingress_hostname(&app.name, &app.app_id, base_domain).ok()
     });
-    app.public_url = ingresses
-        .iter()
-        .find(|ingress| {
-            managed_hostname.as_deref() == Some(ingress.hostname.as_str())
-                && ingress.service_id == app.service_id
-                && ingress.access == ServiceIngressAccess::Workspace
-                && ingress.enabled
-        })
+    let ingress = ingresses.iter().find(|ingress| {
+        managed_hostname.as_deref() == Some(ingress.hostname.as_str())
+            && ingress.service_id == app.service_id
+            && ingress.enabled
+    });
+    app.access = ingress.map(|ingress| ingress.access);
+    app.public_url = ingress
         .and_then(|ingress| config.url_for_hostname(&ingress.hostname).ok())
         .map(|url| url.to_string());
 }
@@ -2407,6 +2406,7 @@ async fn record_app_audit(
                 "server_id": &app.server_id,
                 "service_id": &app.service_id,
                 "hostname": &app.hostname,
+                "access": app.access,
             }),
         })
         .await
@@ -2522,6 +2522,11 @@ async fn create_app_deployment(
     Path(workspace_id): Path<String>,
     Json(mut request): Json<CreateAppDeploymentRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
+    let ingress_access = if request.public {
+        ServiceIngressAccess::Public
+    } else {
+        ServiceIngressAccess::Workspace
+    };
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -2542,12 +2547,20 @@ async fn create_app_deployment(
         PolicyResource::new(RESOURCE_MACHINE, &server_id),
     )
     .await?;
+    let ingress_base_domain = if request.public {
+        Some(config.base_domain()?)
+    } else {
+        config.base_domain_if_configured()
+    };
     let actor = app_mutation_actor(session.as_deref(), subject.as_ref());
     let mut app = auth
         .create_app_deployment(&workspace_id, actor, server_id, request)
         .await?;
-    if let Some(base_domain) = config.base_domain_if_configured() {
-        if let Err(error) = auth.ensure_app_ingress(&app, actor, base_domain).await {
+    if let Some(base_domain) = ingress_base_domain {
+        if let Err(error) = auth
+            .ensure_app_ingress(&app, actor, base_domain, Some(ingress_access))
+            .await
+        {
             let _ = auth.delete_app_deployment(&workspace_id, &app.app_id).await;
             publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
             return Err(error.into());
@@ -2564,6 +2577,7 @@ async fn create_app_deployment(
         }
     }
     hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
     record_app_audit(
         &auth,
         session.as_deref(),
@@ -2572,7 +2586,6 @@ async fn create_app_deployment(
         &app,
     )
     .await;
-    hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
 
@@ -5648,6 +5661,7 @@ mod tests {
                     cwd: ".".to_string(),
                     port: 8080,
                     hostname: "docs.internal".to_string(),
+                    public: false,
                 },
             )
             .await
@@ -5783,6 +5797,63 @@ mod tests {
             &Url::parse("https://app.treer.ai/").expect("app URL"),
         )
         .expect("ingress config")
+    }
+
+    #[test]
+    fn app_public_url_reports_the_managed_ingress_access() {
+        let config = test_ingress_config();
+        let now = Utc::now();
+        let mut app = AppDeployment {
+            app_id: "app_1234".to_string(),
+            workspace_id: "default".to_string(),
+            name: "Public Docs".to_string(),
+            server_id: "machine-a".to_string(),
+            command: "python3".to_string(),
+            args: vec![],
+            cwd: ".".to_string(),
+            port: 8080,
+            hostname: "docs.internal".to_string(),
+            service_id: "svc_docs".to_string(),
+            public_url: None,
+            access: None,
+            desired_state: AppDesiredState::Running,
+            runtime_agent_id: None,
+            restart_count: 0,
+            status: AppDeploymentStatus::Pending,
+            pid: None,
+            exit_code: None,
+            last_error: None,
+            created_at: now,
+            created_by: "agent-a".to_string(),
+            updated_at: now,
+            updated_by: "agent-a".to_string(),
+        };
+        let hostname = managed_app_ingress_hostname(
+            &app.name,
+            &app.app_id,
+            config.base_domain().expect("base domain"),
+        )
+        .expect("managed hostname");
+        let ingress = ServiceIngress {
+            ingress_id: "ing_docs".to_string(),
+            workspace_id: "default".to_string(),
+            service_id: app.service_id.clone(),
+            hostname,
+            access: ServiceIngressAccess::Public,
+            enabled: true,
+            created_at: now,
+            created_by: "agent-a".to_string(),
+            updated_at: now,
+            updated_by: "agent-a".to_string(),
+        };
+
+        attach_app_public_url(&config, &[ingress], &mut app);
+
+        assert_eq!(app.access, Some(ServiceIngressAccess::Public));
+        assert!(app
+            .public_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://public-docs-")));
     }
 
     async fn admin_router(updater: crate::updater::UpdaterClient) -> Router {

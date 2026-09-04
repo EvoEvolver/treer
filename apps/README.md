@@ -4,7 +4,10 @@ Treer supports two deployment forms. A Managed App is a single HTTP process
 created with `treer app create`; Treer persists its command, machine, service,
 and virtual host, and restores the process after exit or Controller reconnect.
 With wildcard ingress configured, Treer also owns a stable,
-workspace-authenticated `public_url` for the App.
+workspace-authenticated `public_url` for the App by default. An Agent may pass
+`treer app create --public` to make only that Managed App's declared HTTP port
+an anonymously accessible public origin; the App is then responsible for any
+application-level authentication.
 An externally managed App is started by an operator or another supervisor; a
 logged-in workspace user then registers its ordinary service through the
 control plane. Managed Agents cannot register service, virtual-host, or ingress

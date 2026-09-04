@@ -735,6 +735,8 @@ pub struct AppDeployment {
     pub service_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ServiceIngressAccess>,
     pub desired_state: AppDesiredState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_agent_id: Option<String>,
@@ -766,6 +768,8 @@ pub struct CreateAppDeploymentRequest {
     pub cwd: String,
     pub port: u16,
     pub hostname: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub public: bool,
 }
 
 pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKILL.md");
@@ -1842,6 +1846,36 @@ fn invalid_enrollment_key() -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_app_public_access_is_explicit_and_backward_compatible() {
+        let legacy: CreateAppDeploymentRequest = serde_json::from_value(serde_json::json!({
+            "name": "docs",
+            "command": "python3",
+            "args": ["-m", "http.server", "8080"],
+            "cwd": ".",
+            "port": 8080,
+            "hostname": "docs.internal"
+        }))
+        .expect("deserialize legacy App request");
+        assert!(!legacy.public);
+        assert_eq!(
+            serde_json::to_value(&legacy)
+                .expect("serialize private App request")
+                .get("public"),
+            None
+        );
+
+        let public: CreateAppDeploymentRequest = serde_json::from_value(serde_json::json!({
+            "name": "docs",
+            "command": "python3",
+            "port": 8080,
+            "hostname": "docs.internal",
+            "public": true
+        }))
+        .expect("deserialize public App request");
+        assert!(public.public);
+    }
 
     #[test]
     fn launch_profile_request_round_trips_optional_cwd_override() {

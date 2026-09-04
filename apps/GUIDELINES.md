@@ -101,10 +101,13 @@ scripts, stylesheets, fonts, images, and other browser assets at stable paths
 relative to the App root. Do not introduce a `/_human/` route family.
 
 Managed Apps receive a dedicated wildcard-ingress origin when the deployment
-configures `TREER_INGRESS_PUBLIC_URL`. Human pages should still work below
-Treer's authenticated browser-tunnel fallback used by installations without a
-wildcard domain. Use document-relative asset URLs such as `./app.js` and
-configure frontend build tools with a relative base such as `./`.
+configures `TREER_INGRESS_PUBLIC_URL`. The origin requires Workspace
+authentication by default. `treer app create --public` deliberately makes it
+anonymous, so the App must enforce any authentication its data requires. Human
+pages should still work below Treer's authenticated browser-tunnel fallback
+used by installations without a wildcard domain. Use document-relative asset
+URLs such as `./app.js` and configure frontend build tools with a relative base
+such as `./`.
 
 Resolve API URLs relative to the negotiated App root while preserving any
 tunnel prefix. For example, a page at

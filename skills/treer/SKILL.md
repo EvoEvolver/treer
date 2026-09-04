@@ -99,6 +99,9 @@ reconnects:
 ```bash
 treer app create --machine build-machine --name docs --cwd . --port 8080 \
   --hostname docs.internal python3 -- -m http.server 8080
+# Explicitly allow anonymous internet access to this Managed App:
+treer app create --public --machine build-machine --name public-docs --cwd . \
+  --port 8081 --hostname public-docs.internal python3 -- -m http.server 8081
 treer app list
 treer app show docs
 treer app stop docs
@@ -107,17 +110,21 @@ treer app restart docs
 treer app delete docs
 ```
 
-Read `public_url` from `treer app create`, `list`, or `show` and use it as the
-App's external root when present. It has no control-plane `/proxy/` suffix and
-preserves root-relative assets and redirects. The default managed ingress
-requires Workspace authentication. `public_url` is absent when the Proxy has no
-wildcard ingress configured.
+Read `public_url` and `access` from `treer app create`, `list`, or `show`. Use
+`public_url` as the App's external root when present; `access` is `workspace` or
+`public`. The URL has no control-plane `/proxy/` suffix and preserves
+root-relative assets and redirects. The default managed ingress
+requires Workspace authentication. Pass `--public` only when anonymous internet
+access is intended; the App must provide its own authentication if it needs one.
+Public creation fails, and `public_url` is absent for private Apps, when the
+Proxy has no wildcard ingress configured.
 
 Use this only for a single-process HTTP App. It does not install dependencies,
 store secrets, migrate state, or isolate hostile code. Service, virtual-host,
-and ingress records are owned by the Managed App. An Agent cannot create or mutate them,
-including through an older CLI. Use the browser control plane for externally
-supervised or non-HTTP processes.
+and ingress records are owned by the Managed App. `--public` selects access for
+that owned ingress, but an Agent cannot create or mutate arbitrary network
+records, including through an older CLI. Use the browser control plane for
+externally supervised or non-HTTP processes.
 
 ## Connect to an existing service
 

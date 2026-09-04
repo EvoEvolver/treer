@@ -127,6 +127,11 @@ enum AppCommand {
         port: u16,
         #[arg(long)]
         hostname: String,
+        #[arg(
+            long,
+            help = "Expose the App without Treer authentication on its managed public URL"
+        )]
+        public: bool,
         #[arg(value_name = "COMMAND")]
         executable: String,
         #[arg(last = true)]
@@ -786,6 +791,7 @@ async fn run_app_command(client: &ApiClient, command: AppCommand) -> anyhow::Res
             cwd,
             port,
             hostname,
+            public,
             executable,
             args,
         } => {
@@ -802,6 +808,7 @@ async fn run_app_command(client: &ApiClient, command: AppCommand) -> anyhow::Res
                         cwd,
                         port,
                         hostname,
+                        public,
                     })?),
                 )
                 .await
@@ -2487,6 +2494,7 @@ mod tests {
             "9420",
             "--hostname",
             "soul.internal",
+            "--public",
             "python3",
             "--",
             "apps/soul/soul.py",
@@ -2500,6 +2508,7 @@ mod tests {
                     name,
                     port: 9420,
                     hostname,
+                    public: true,
                     executable,
                     args,
                     ..
