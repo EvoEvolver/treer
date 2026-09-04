@@ -1872,7 +1872,7 @@ fn bootstrap_commands(public_url: &Url, enrollment_key: &str) -> (String, String
     let script_url = install_script_url(public_url);
     let install_command = format!("curl -fsSL {} | sh", shell_quote(script_url.as_str()));
     let connect_command = format!(
-        "TREER_ENROLLMENT_KEY={} treer-agent-server connect --proxy {}",
+        "treer-agent-server connect --key {} --proxy {}",
         shell_quote(enrollment_key),
         shell_quote(public_url.as_str()),
     );
@@ -6399,8 +6399,10 @@ mod tests {
         );
         assert!(!install.contains("enr_"));
         assert!(!install.contains("connect"));
-        assert!(connect.contains(key));
-        assert!(connect.contains("treer-agent-server connect --proxy"));
+        assert_eq!(
+            connect,
+            format!("treer-agent-server connect --key '{key}' --proxy 'https://treer.example/'")
+        );
         assert!(!connect.contains("install.sh"));
     }
 

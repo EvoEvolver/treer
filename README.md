@@ -204,8 +204,8 @@ needed.
 The separate connection command contains a 10-minute, single-use enrollment key:
 
 ```bash
-TREER_ENROLLMENT_KEY='enr_v1_...' \
-  treer-agent-server connect \
+treer-agent-server connect \
+  --key 'enr_v1_...' \
   --proxy 'https://PROXY_HOST/'
 ```
 
@@ -252,8 +252,8 @@ the node-local runtime directory (`$XDG_RUNTIME_DIR/treer`, normally
 Automation must opt in explicitly and provide a name on first setup:
 
 ```bash
-TREER_ENROLLMENT_KEY='enr_v1_...' \
-  treer-agent-server connect \
+treer-agent-server connect \
+  --key 'enr_v1_...' \
   --proxy 'https://PROXY_HOST/' \
   --non-interactive --accept-risk --name 'build-machine'
 ```

@@ -1243,7 +1243,7 @@ fn classify_service_request(
 fn no_install_hint() -> String {
     let hostname = current_hostname().unwrap_or_else(|_| "this host".to_string());
     format!(
-        "no agent-server service is installed on {hostname}\nConnect this machine from the workspace Add machine dialog, then run the copied connect command, or:\n  TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy '<proxy-url>'"
+        "no agent-server service is installed on {hostname}\nConnect this machine from the workspace Add machine dialog, then run the copied connect command, or:\n  treer-agent-server connect --key 'enr_v1_…' --proxy '<proxy-url>'"
     )
 }
 

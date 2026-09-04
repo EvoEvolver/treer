@@ -84,7 +84,7 @@ const PREVIEW_PROFILES: AgentLaunchProfile[] = [
   { profile_id: "opencode", workspace_id: "ws_preview", name: "OpenCode", description: "OpenCode", cwd: ".", command: "opencode", args: [], created_at: PREVIEW_NOW, created_by: "usr_preview", updated_at: PREVIEW_NOW, updated_by: "usr_preview" },
 ]
 const PREVIEW_INSTALL = "curl -fsSL 'https://treer.example/install.sh' | sh"
-const PREVIEW_CONNECT = "TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy 'https://treer.example/'"
+const PREVIEW_CONNECT = "treer-agent-server connect --key 'enr_v1_…' --proxy 'https://treer.example/'"
 
 const activeStatuses = new Set(["starting", "working", "idle", "blocked"])
 
@@ -1722,7 +1722,7 @@ function WorkspaceApp() {
     if (preview || !workspaceId) {
       const origin = window.location.origin
       setInstallCommand(preview ? PREVIEW_INSTALL : `curl -fsSL '${origin}/install.sh' | sh`)
-      setConnectCommand(preview ? PREVIEW_CONNECT : `TREER_ENROLLMENT_KEY='enr_v1_…' treer-agent-server connect --proxy '${origin}/'`)
+      setConnectCommand(preview ? PREVIEW_CONNECT : `treer-agent-server connect --key 'enr_v1_…' --proxy '${origin}/'`)
       setInstallOpen(true)
       return
     }
