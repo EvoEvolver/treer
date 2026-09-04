@@ -1,0 +1,38 @@
+[package]
+name = "treer-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ACP runtime, Host-local journal, and AIS HTTP for one Treer Agent"
+
+[[bin]]
+name = "treer-acp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+shell-words = "1"
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+treer-protocol = { path = "../treer-protocol" }
+url.workspace = true
+uuid.workspace = true
+walkdir = "2"
+which = "7"
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

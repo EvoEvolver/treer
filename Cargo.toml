@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/treer-acp",
   "crates/treer-agent-runtime",
   "crates/treer-agent-server",
   "crates/treer-agent-host",

@@ -46,6 +46,7 @@ second manual.
 | `crates/treer-agent-server` | Machine Controller, local API, Proxy link, networking |
 | `crates/treer-agent-host` | Stable local process ownership and idempotent mutations |
 | `crates/treer-agent-runtime` | PTY lifecycle, output replay, working-directory boundary |
+| `crates/treer-acp` | ACP catalog/adapters, Host-local journal, cwd files, and AIS HTTP for one Agent |
 | `crates/treer-cli` | Human/Agent commands and the Core Message surface |
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |

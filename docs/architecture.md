@@ -27,6 +27,7 @@ flowchart LR
 | `treer-agent-server` | Machine Controller, local authenticated API, Proxy connection, network bridge, and Agent definitions |
 | `treer-agent-host` | Stable local child-process ownership and idempotent mutations |
 | `treer-agent-runtime` | PTY lifecycle, bounded output replay, and working-directory containment |
+| `treer-acp` | ACP runtime, per-Agent SQLite journal, cwd explorer, and AIS HTTP (`treer.agent-interface/v1`) |
 | `treer-cli` | Human/operator and managed-Agent commands, including Core Message |
 | `treer-protocol` | Shared public and Controller wire models |
 | `apps` | Ordinary service code, presentation, external APIs, configuration, secrets, and App-owned state |
