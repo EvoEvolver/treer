@@ -33,7 +33,10 @@ Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
 
-_None._
+- The proposed [Remote Codex rust/ACP migration plan](research/2026-09-03-rc-acp-migration-plan.md)
+  is held until RC rust lands on RC `main`. UI fork is
+  `EvoEvolver/treer-agent-ui`. Implement from a Treer worktree and feature
+  branch, not `main`.
 
 ## Historical material
 
