@@ -1,0 +1,103 @@
+name: Treer
+options:
+  bundleIdPrefix: ai.treer
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    SUPPORTS_MACCATALYST: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  Treer:
+    type: application
+    platform: iOS
+    sources:
+      - path: Treer
+        excludes:
+          - Resources/AgentUI/**
+    info:
+      path: Treer/Info.plist
+      properties:
+        CFBundleDisplayName: Treer
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSMicrophoneUsageDescription: Treer uses the microphone for Voice Live sessions with your control plane when a voice provider is configured.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsArbitraryLoadsInWebContent: true
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.treer.mobile
+        PRODUCT_NAME: Treer
+        INFOPLIST_FILE: Treer/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+    preBuildScripts:
+      - name: Copy Agent UI
+        basedOnDependencyAnalysis: false
+        outputFileLists: []
+        script: |
+          set -euo pipefail
+          SRC="${SRCROOT}/../agent-ui"
+          DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/AgentUI"
+          mkdir -p "$DEST"
+          rsync -a --delete "${SRC}/" "$DEST/"
+  TreerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - TreerTests
+    dependencies:
+      - target: Treer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.treer.mobile.tests
+        GENERATE_INFOPLIST_FILE: YES
+  TreerUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - TreerUITests
+    dependencies:
+      - target: Treer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.treer.mobile.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Treer
+schemes:
+  Treer:
+    build:
+      targets:
+        Treer: all
+        TreerTests: [test]
+        TreerUITests: [test]
+    test:
+      targets:
+        - TreerTests
+        - TreerUITests
+      gatherCoverageData: false
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

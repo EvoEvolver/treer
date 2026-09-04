@@ -11,6 +11,16 @@ web/.wrangler*/
 web/worker-configuration.d.ts
 web/*.tsbuildinfo
 /.references/
+/www/
+/codex-agent-ui/
+mobile/ios/Treer.xcodeproj/xcuserdata/
+mobile/ios/Treer.xcodeproj/project.xcworkspace/xcuserdata/
+mobile/ios/DerivedData/
+mobile/android/local.properties
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/.idea/
 /.wrangler/
 __pycache__/
 

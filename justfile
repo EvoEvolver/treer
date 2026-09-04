@@ -142,3 +142,18 @@ artifacts-verify version:
 
 artifacts-test:
     node --test scripts/release-r2.test.mjs
+
+mobile-bundle-ui:
+    bash scripts/bundle-mobile-agent-ui.sh
+
+mobile-ios-ci:
+    export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+    export PATH="$DEVELOPER_DIR/usr/bin:/opt/homebrew/bin:$PATH"
+    cd mobile/ios && xcodegen generate
+    xcodebuild -project mobile/ios/Treer.xcodeproj -scheme Treer -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' -configuration Debug build CODE_SIGNING_ALLOWED=NO
+
+mobile-android-ci:
+    export JAVA_HOME=/opt/homebrew/opt/openjdk
+    export ANDROID_HOME="$HOME/Library/Android/sdk"
+    export ANDROID_SDK_ROOT="$ANDROID_HOME"
+    cd mobile/android && ./gradlew :app:assembleDebug --no-daemon

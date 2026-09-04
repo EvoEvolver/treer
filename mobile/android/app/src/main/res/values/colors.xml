@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="treer_background">#0F1215</color>
+    <color name="treer_window">#F7F8F8</color>
+    <color name="treer_on_background">#F4F6F7</color>
+    <color name="ic_launcher_background">#111827</color>
+</resources>
