@@ -65,9 +65,10 @@ the `abort` capability. Policy action is `agent.abort`, distinct from
 
 ## Thread WebView
 
-`mobile/agent-ui/` is the production bundle of `codex-agent-ui`'s web UI
-(`~/dev/codex-agent-ui/apps/web`). Native shells load those assets locally and
-forward relative HTTP/WebSocket to
+`mobile/agent-ui/` is a generated Vite bundle of `codex-agent-ui`'s web UI
+(`~/dev/codex-agent-ui/apps/web`). It is gitignored. Native shells load those
+assets locally after `just mobile-bundle-ui` and forward relative HTTP/WebSocket
+to
 
 `/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/`.
 

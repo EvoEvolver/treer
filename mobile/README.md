@@ -13,7 +13,8 @@ Product contract: `docs/mobile.md`. Screen copy: `docs/research/2026-08-30-mobil
 just mobile-bundle-ui
 ```
 
-Copies `~/dev/codex-agent-ui/apps/web/dist` into `mobile/agent-ui/`.
+Copies `~/dev/codex-agent-ui/apps/web/dist` into `mobile/agent-ui/`. That
+directory is gitignored; rebuild it before an iOS or Android build.
 
 ## Native client header
 

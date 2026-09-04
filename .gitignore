@@ -13,6 +13,7 @@ web/*.tsbuildinfo
 /.references/
 /www/
 /codex-agent-ui/
+mobile/agent-ui/
 mobile/ios/Treer.xcodeproj/xcuserdata/
 mobile/ios/Treer.xcodeproj/project.xcworkspace/xcuserdata/
 mobile/ios/DerivedData/
