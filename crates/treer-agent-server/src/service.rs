@@ -1665,6 +1665,23 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// `launchctl bootstrap` of a disabled LaunchAgent fails with
+/// "Could not find service … Bootstrap failed: 5: Input/output error".
+#[cfg(any(target_os = "macos", test))]
+fn launchd_start_steps(loaded: bool, domain: &str, target: &str, plist: &Path) -> Vec<Vec<String>> {
+    let mut steps = vec![vec!["enable".to_string(), target.to_string()]];
+    if loaded {
+        steps.push(vec!["kickstart".to_string(), target.to_string()]);
+    } else {
+        steps.push(vec![
+            "bootstrap".to_string(),
+            domain.to_string(),
+            plist.to_string_lossy().into_owned(),
+        ]);
+    }
+    steps
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
@@ -2046,23 +2063,16 @@ mod platform {
             .status()
             .context("failed to query LaunchAgent")?
             .success();
-        if loaded {
-            run_checked(
-                Command::new("launchctl").args(["kickstart", target.as_str()]),
-                "launchctl kickstart",
-            )
-        } else {
-            let domain = domain()?;
-            let plist = plist_path(&config.server_id)?;
-            run_checked(
-                Command::new("launchctl").args([
-                    "bootstrap",
-                    domain.as_str(),
-                    plist.to_string_lossy().as_ref(),
-                ]),
-                "launchctl bootstrap",
-            )
+        let domain = domain()?;
+        let plist = plist_path(&config.server_id)?;
+        for args in launchd_start_steps(loaded, &domain, &target, &plist) {
+            let description = format!(
+                "launchctl {}",
+                args.first().map(String::as_str).unwrap_or_default()
+            );
+            run_checked(Command::new("launchctl").args(&args), &description)?;
         }
+        Ok(())
     }
 
     pub fn stop(_paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
@@ -2726,6 +2736,39 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("/Users/a&amp;b/treer-agent-server"));
         assert!(plist.contains("<string>run</string>"));
+    }
+
+    #[test]
+    fn launchd_start_enables_a_disabled_agent_before_bootstrap() {
+        let target = "gui/502/dev.treer.agent-server.srv_94cc4ceea1dc4d8eaadc4d9b6fbe2958";
+        let plist = Path::new(
+            "/Users/mac/Library/LaunchAgents/dev.treer.agent-server.srv_94cc4ceea1dc4d8eaadc4d9b6fbe2958.plist",
+        );
+        let steps = launchd_start_steps(false, "gui/502", target, plist);
+        assert_eq!(
+            steps,
+            vec![
+                vec!["enable".to_string(), target.to_string()],
+                vec![
+                    "bootstrap".to_string(),
+                    "gui/502".to_string(),
+                    plist.to_string_lossy().into_owned(),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn launchd_start_enables_before_kickstart_when_already_loaded() {
+        let target = "gui/502/dev.treer.agent-server.srv_94cc4ceea1dc4d8eaadc4d9b6fbe2958";
+        let steps = launchd_start_steps(true, "gui/502", target, Path::new("/tmp/unused.plist"));
+        assert_eq!(
+            steps,
+            vec![
+                vec!["enable".to_string(), target.to_string()],
+                vec!["kickstart".to_string(), target.to_string()],
+            ]
+        );
     }
 
     #[cfg(unix)]
