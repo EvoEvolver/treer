@@ -33,9 +33,10 @@ Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
 
-- The proposed [Remote Codex rust/ACP migration plan](research/2026-09-03-rc-acp-migration-plan.md)
-  first slice is on `feat/rc-acp-runtime` (not `main`). Generic UI is Host
-  `treer ui install` of `remote-codex-thread-ui-rust`.
+- The [Remote Codex rust/ACP migration plan](research/2026-09-03-rc-acp-migration-plan.md)
+  phases 0–3 product path is on `feat/rc-acp-runtime` (not `main`). Create
+  thread Agents from the control plane; generic UI is Host `treer ui install`
+  of `remote-codex-thread-ui-rust`. Phase 4 remains later.
 
 ## Historical material
 

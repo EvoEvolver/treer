@@ -1,5 +1,8 @@
 # DeepSeek Harness AIS
 
+Compatibility sidecar. There is no `treer-acp` DeepSeek harness yet; keep this
+JS adapter for DeepSeek Harness sessions.
+
 Thin Treer Agent Interface adapter over DeepSeek Harness session APIs. One
 Treer Agent owns one session. This does not attach to a shared `dsh web :3080`
 UI; it starts a dedicated host (default) or an SDK JSON-RPC runtime.

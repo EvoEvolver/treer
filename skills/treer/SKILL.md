@@ -182,30 +182,43 @@ process-bound descriptor and revalidates it after a hot restart:
 treer interface clear
 ```
 
+Humans create Grok/Cursor/Codex/Claude/OpenCode threads from the control plane
+**New** dialog (`kind=acp`). Do not ask them to type a `treer-acp` command.
+Agents that must create a peer from CLI:
+
+```bash
+treer agent admin create --machine <server-id> --kind acp --name grok-thread --cwd . -- grok
+treer agent admin create --machine <server-id> --kind acp --name imported --cwd packages/api -- \
+  --harness grok --session-id <session-id>
+```
+
 In-tree adapters register the same protocol from launch profiles. Use
-`apps/pi-ui` and `apps/codex-ui` for bundled browser UIs, `apps/codex-ais` for a
-Codex app-server sidecar without HTML, `apps/opencode-ais` for OpenCode HTTP,
-`apps/dsh-ais` for DeepSeek Harness, `apps/claude-ais` for Claude Code
-stream-json, `apps/grok-ais` for Grok Build ACP, and `apps/cursor-ais` for
-Cursor ACP. Launch Cursor with `cursor-agent`, not `agent`. Each Agent is one
-thread/session. Built-in `--kind codex` and `--kind claude` stay on the terminal
-path and are not Interfaces.
+`apps/pi-ui` and `apps/codex-ui` for bundled browser UIs. JS `*-ais` sidecars
+(`apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`, `apps/claude-ais`,
+`apps/grok-ais`, `apps/cursor-ais`) are compatibility-only; prefer `kind=acp`
+except for DeepSeek Harness. Launch Cursor with `cursor-agent`, not `agent`.
+Each Agent is one thread/session. Built-in `--kind codex` and `--kind claude`
+stay on the terminal path and are not Interfaces.
 
 ## Install the Host thread UI
 
 The generic ACP thread UI is installed once per Host. It is not per Agent and
 there is no `--ui` on `agent create`. `treer-acp` looks up that Host checkout
-and serves it at `/` when `--ui-dist` is unset.
+and serves it at `/` when `--ui-dist` is unset. The first real (non-fake)
+`treer-acp` process also auto-installs if the dist is missing. The machine
+page **Install thread UI** button starts the same Host-wide install.
 
 ```bash
 treer ui install
-treer ui install https://github.com/dufangshi/remote-codex-thread-ui-rust.git --ref main
+treer ui install https://github.com/dufangshi/remote-codex-thread-ui-rust.git --ref feat/treer-presentation-flags
 treer ui install --dir /path/to/local-checkout
 treer ui show
 ```
 
 Default git is `https://github.com/dufangshi/remote-codex-thread-ui-rust.git`.
-`--dir` uses a local checkout (tests and operators with an existing tree).
+Default ref is `feat/treer-presentation-flags` until those embed flags land on
+`main`. `--dir` uses a local checkout (tests and operators with an existing
+tree).
 Install home, first match:
 
 1. `$TREER_UI_HOME`

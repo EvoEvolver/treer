@@ -1,5 +1,9 @@
 # Cursor AIS
 
+Compatibility sidecar. Prefer **New → Cursor thread** in the Treer control
+plane (`kind=acp`), which starts `treer-acp --harness cursor` and the Host
+thread UI.
+
 Thin Treer Agent Interface adapter over Cursor CLI's Agent Client Protocol
 server (`cursor-agent acp`). One Treer Agent owns one ACP session.
 

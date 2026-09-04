@@ -1,7 +1,7 @@
 # Product direction
 
 - Status: maintained
-- Last source review: 2026-08-28 at `feat/machine-connection-ux`
+- Last source review: 2026-09-04 at `feat/rc-acp-runtime`
 
 ## Purpose
 
@@ -40,8 +40,10 @@ In concrete terms:
    semantic capabilities. The control plane embeds that page in place of the
    Agent terminal, and transparently tunnels relative HTTP and WebSocket
    traffic to the Agent-private Interface port. Generic ACP Agents serve a
-   Host-wide thread UI installed once with `treer ui install`; ACP permission
-   prompts are auto-allowed on trusted machines.
+   Host-wide thread UI installed once per machine (`treer ui install`, the
+   machine page, or the first thread Agent). Create Grok/Cursor/Codex/Claude/
+   OpenCode threads and import local sessions from the control plane New
+   dialog; ACP permission prompts are auto-allowed on trusted machines.
 7. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed. A workspace member can tell whether a
    machine is Online, local-only, fenced as a duplicate, or stopped, and can

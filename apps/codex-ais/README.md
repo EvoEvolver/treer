@@ -1,5 +1,10 @@
 # Codex AIS
 
+Compatibility sidecar. Prefer **New → Codex thread** in the Treer control
+plane (`kind=acp`), which starts `treer-acp --harness codex` and the Host
+thread UI. Keep this sidecar until Codex-over-ACP parity is measured.
+`apps/codex-ui` remains the in-tree Codex app-server UI.
+
 Thin Treer Agent Interface adapter over `codex app-server`. One Treer Agent
 owns one Codex thread. Built-in `--kind codex` remains the TUI path.
 

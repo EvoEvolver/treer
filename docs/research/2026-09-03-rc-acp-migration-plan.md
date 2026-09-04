@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | First slice on `feat/rc-acp-runtime` (not `main`); UI flags on `feat/treer-presentation-flags` |
+| Status | Phases 0–3 product path on `feat/rc-acp-runtime` (not `main`); UI flags on `feat/treer-presentation-flags`. Phase 4 (compact/fork/goal/MCP/hooks/export, mobile) still later. |
 | Date | 2026-09-04 |
 | Audience | Treer maintainers who already know Proxy, Host, AIS, and recipes |
 | Sources | RC `origin/main` (rust line); UI pin `https://github.com/dufangshi/remote-codex-thread-ui-rust` |
@@ -449,9 +449,14 @@ waits for the later mobile merge.
 
 ## Remaining call
 
-None on pin or install scope. Presentation flag names (`explorer`,
-`shell`, `permissions`, `nav`) are a later UI-repo bikeshed; Treer's
-required *effects* are listed above.
+Phases 0–3 are implemented on the feature branches: `treer-acp`, Host-wide
+`treer ui`, web **New** dialog for `kind=acp` threads, session import,
+machine-page thread UI install, iframe embed flags, and JS `*-ais` marked
+compatibility-only. Do **not** land on Treer `main` without review.
+
+Phase 4 (compact, fork, goal, MCP, hooks, PDF export, mobile merge) is still
+later. Live grok/codex harness e2e is still a quality gap; fake ACP and
+mocked web e2e cover the product path.
 
 ## PR sketch
 

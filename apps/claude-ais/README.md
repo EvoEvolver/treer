@@ -1,5 +1,9 @@
 # Claude Code AIS
 
+Compatibility sidecar. Prefer **New → Claude thread** in the Treer control
+plane (`kind=acp`), which starts `treer-acp --harness claude` and the Host
+thread UI.
+
 Thin Treer Agent Interface adapter over Claude Code's stream-json session
 protocol (`--print --output-format stream-json --input-format stream-json`).
 One Treer Agent owns one session. Built-in `--kind claude` remains the TUI

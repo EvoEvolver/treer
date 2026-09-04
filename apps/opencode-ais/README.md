@@ -1,5 +1,9 @@
 # OpenCode AIS
 
+Compatibility sidecar. Prefer **New → OpenCode thread** in the Treer control
+plane (`kind=acp`), which starts `treer-acp --harness opencode` and the Host
+thread UI.
+
 Thin Treer Agent Interface adapter over `opencode serve`. One Treer Agent owns
 one OpenCode session. A TUI-only `opencode` process is not this adapter.
 

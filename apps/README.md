@@ -45,9 +45,10 @@ in-tree App; install it once on the Host with `treer ui install`.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
   [`dsh-ais`](dsh-ais/README.md), [`claude-ais`](claude-ais/README.md),
   [`grok-ais`](grok-ais/README.md), and [`cursor-ais`](cursor-ais/README.md) are
-  per-Agent AIS sidecars over Codex app-server, OpenCode HTTP, DeepSeek Harness
-  session APIs, Claude Code stream-json, and Grok Build / Cursor ACP. They
-  register semantic capabilities without a bundled browser page.
+  compatibility-only JS AIS sidecars. Prefer **New → Grok/Cursor/Codex/Claude/
+  OpenCode thread** (`kind=acp` / `treer-acp`) from the control plane. Keep
+  these sidecars for existing launch profiles and for DeepSeek Harness, which
+  has no `treer-acp` harness yet.
 
 Each bundled App is source code, configuration schema, documentation, and
 tests. Managed Apps currently accept one command and one HTTP UI port; there is

@@ -823,12 +823,15 @@ the Interface manifest before restoring it after a hot restart. Interface
 processes register once at startup and should deduplicate prompts by
 `operation_id`. Raw keys, terminal attach, stop, and delete remain PTY/Host
 operations. The bundled Pi UI and single-Agent [Codex UI](apps/codex-ui/README.md)
-perform this registration automatically. Launch-profile sidecars without a
-bundled page live under `apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`,
-`apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`. Built-in `--kind
-codex` and `--kind claude` stay on the terminal path.
+perform this registration automatically. JS `*-ais` sidecars under
+`apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`, `apps/claude-ais`,
+`apps/grok-ais`, and `apps/cursor-ais` are compatibility-only. Prefer
+**New → Grok/Cursor/Codex/Claude/OpenCode thread** in the control plane
+(`kind=acp`). Built-in `--kind codex` and `--kind claude` stay on the terminal
+path.
 
-Install the generic ACP thread UI once per Host. `treer-acp` serves that dist
+Install the generic ACP thread UI once per Host, from the machine page, or by
+creating the first thread Agent (auto-install). `treer-acp` serves that dist
 at `/` when present:
 
 ```bash
@@ -837,9 +840,9 @@ treer ui show
 ```
 
 Default git is `https://github.com/dufangshi/remote-codex-thread-ui-rust.git`.
-The checkout lives under `$TREER_UI_HOME`, `$TREER_HOST_ROOT/.treer/ui`, the
-enrolled Host root `.treer/ui`, or `~/.treer/ui`. There is no per-Agent UI
-install.
+Default ref is `feat/treer-presentation-flags`. The checkout lives under
+`$TREER_UI_HOME`, `$TREER_HOST_ROOT/.treer/ui`, the enrolled Host root
+`.treer/ui`, or `~/.treer/ui`. There is no per-Agent UI install.
 
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles

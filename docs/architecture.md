@@ -250,28 +250,40 @@ presentation.
 `crates/treer-acp` is the ACP runtime for one Agent: AIS HTTP, a Host-local
 SQLite journal, cwd-jailed file routes, and auto-allow for ACP
 `session/request_permission`. The generic thread UI is not vendored in `apps/`.
-An operator runs Host-scoped `treer ui install` once (default git
-`https://github.com/dufangshi/remote-codex-thread-ui-rust.git`). The checkout
-lives under `$TREER_UI_HOME`, `$TREER_HOST_ROOT/.treer/ui`, the enrolled Host
-root `.treer/ui` (marker `.treer/server-id`), or `~/.treer/ui`. Every
-`treer-acp` process on that machine may serve the same dist at `/` when
-`--ui-dist` is unset and then `interface register --ui-path /`. There is no
-per-Agent UI install and no `--ui` on `agent create`. Treer's iframe should
-pass `presentation=embedded-single-thread`, `explorer=1`, `shell=0`,
+Create a thread from the control plane **New** dialog (`kind=acp`); Host
+spawns `treer-acp` with `--harness`. Importing a local Grok/Codex/Claude
+session is the same create with `--session-id`. `GET
+/api/workspaces/{id}/machines/{server_id}/acp-sessions` lists import
+candidates. `GET`/`POST
+/api/workspaces/{id}/machines/{server_id}/thread-ui` shows or starts a
+Host-wide UI install. An operator may still run `treer ui install` once
+(default git `https://github.com/dufangshi/remote-codex-thread-ui-rust.git`,
+default ref `feat/treer-presentation-flags`). The first non-fake `treer-acp`
+start also auto-installs if the dist is missing (`TREER_ACP_SKIP_UI_INSTALL=1`
+skips that). The checkout lives under `$TREER_UI_HOME`,
+`$TREER_HOST_ROOT/.treer/ui`, the enrolled Host root `.treer/ui` (marker
+`.treer/server-id`), or `~/.treer/ui`. Every `treer-acp` process on that
+machine may serve the same dist at `/` when `--ui-dist` is unset and then
+`interface register --ui-path /`. There is no per-Agent UI install and no
+`--ui` on `agent create`. The control plane iframe for `kind=acp` appends
+`presentation=embedded-single-thread`, `explorer=1`, `shell=0`,
 `permissions=0`, and `nav=0`; AIS `ui_path` stays `/` so Proxy asset tunneling
 keeps a path prefix.
 
 Launch-profile sidecars in `apps/codex-ais`, `apps/opencode-ais`,
 `apps/dsh-ais`, `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`
-register the same protocol without a bundled page. They bind one Treer Agent to
-one downstream thread/session beside `codex app-server`, `opencode serve`, a
-dedicated DeepSeek Harness host (`dsh --profile web`) or SDK runtime, Claude
-Code stream-json, Grok Build ACP (`grok agent stdio`), and Cursor ACP
-(`cursor-agent acp`). Neither Grok Build nor Cursor ships a Codex-style
-app-server; ACP over stdio is their first-party editor integration. The Cursor
-sidecar uses `cursor-agent`, not `agent`, because Grok Build also installs an
-`agent` symlink. Built-in `--kind codex` and `--kind claude` remain TUI/PTY
-paths. Shared helpers live in `apps/ais-kit`.
+are compatibility adapters. Prefer `kind=acp` thread Agents from the web UI
+for Grok, Cursor, Codex, Claude, and OpenCode. The JS sidecars remain for
+older launch profiles and for DeepSeek Harness, which has no `treer-acp`
+harness yet. They bind one Treer Agent to one downstream thread/session
+beside `codex app-server`, `opencode serve`, a dedicated DeepSeek Harness
+host (`dsh --profile web`) or SDK runtime, Claude Code stream-json, Grok
+Build ACP (`grok agent stdio`), and Cursor ACP (`cursor-agent acp`). Neither
+Grok Build nor Cursor ships a Codex-style app-server; ACP over stdio is
+their first-party editor integration. The Cursor sidecar uses
+`cursor-agent`, not `agent`, because Grok Build also installs an `agent`
+symlink. Built-in `--kind codex` and `--kind claude` remain TUI/PTY paths.
+Shared helpers live in `apps/ais-kit`.
 
 `GET /v1/transcript` pages by conversation turn. A turn starts at a user prompt
 and includes the following entries until the next user prompt. Leading non-user

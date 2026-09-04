@@ -1,5 +1,8 @@
 # Grok Build AIS
 
+Compatibility sidecar. Prefer **New → Grok thread** in the Treer control plane
+(`kind=acp`), which starts `treer-acp --harness grok` and the Host thread UI.
+
 Thin Treer Agent Interface adapter over Grok Build's Agent Client Protocol
 server (`grok agent stdio`). One Treer Agent owns one ACP session. Built-in
 `--kind shell` remains the TUI path if you launch `grok` interactively.
