@@ -2,11 +2,11 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed, **held** |
-| Date | 2026-09-03 |
+| Status | Proposed, **held** (docs only; no Treer implementation this round) |
+| Date | 2026-09-04 |
 | Audience | Treer maintainers who already know Proxy, Host, AIS, and recipes |
-| Sources | `remoteCodex` `rust/acp-rewrite`; UI fork `https://github.com/EvoEvolver/treer-agent-ui` (`main` = `4b426db` from `rust/acp-rewrite-composer-stop`) |
-| Scope | Execution plan only. Do not implement until RC merges its rust branch into RC `main`. |
+| Sources | RC `origin/main` (`39d1b7b0` rust line, tip `7e1f9492`); UI `EvoEvolver/treer-agent-ui` and RC sibling `dufangshi/remote-codex-thread-ui-rust` (both `4b426db`) |
+| Scope | Execution plan only. Do not start Treer code until this plan is agreed. |
 | Treer working copy | Never commit this work on Treer `main`. Use a git worktree and a new branch. |
 
 Maintained documents stay authoritative until each phase ships. This plan
@@ -14,14 +14,14 @@ names every document that must change at completion.
 
 ## Hold
 
-Do **not** start Treer implementation while Remote Codex is still landing
-`rust/acp-rewrite` onto RC `main`. After that merge, snapshot the RC `main`
-ACP runtime (not a stale worktree) before porting `treer-acp`.
+RC `main` **is** the Rust ACP rewrite (`39d1b7b0 chore: make Rust
+implementation the main line`). Snapshot `treer-acp` from RC `origin/main`,
+not from a stale `rust/acp-rewrite` worktree.
 
-When work starts:
+Do **not** start Treer implementation in this round. When work starts:
 
-- Do not commit on Treer `main` or push this feature as a fast-forward of
-  `origin/main`.
+- Do not commit on Treer `main` or fast-forward `origin/main` with this
+  feature.
 - Create a dedicated worktree and branch, for example:
 
 ```sh
@@ -32,17 +32,16 @@ git worktree add -b feat/rc-acp-runtime /Users/mac/dev/treer-rc-acp-runtime orig
 - Keep this plan on `docs/rc-acp-migration` (or merge it into the feature
   branch). Implementation PRs come from the feature worktree.
 
-The UI fork already exists and is independent of RC:
+UI git remotes (same commit `4b426db` today):
 
-- Repo: `https://github.com/EvoEvolver/treer-agent-ui`
-- Default branch: `main`
-- Snapshot: `4b426db` (`fix: present ACP permissions as explicit actions`)
-- Upstream at fork time: `dufangshi/remote-codex-thread-ui`
-  `rust/acp-rewrite-composer-stop`
+| Repo | Role |
+| --- | --- |
+| `https://github.com/EvoEvolver/treer-agent-ui` | Treer-owned external Agent UI. This is what Treer pins. |
+| `https://github.com/dufangshi/remote-codex-thread-ui-rust` | RC's independent rust UI fork. |
+| `https://github.com/dufangshi/remote-codex-thread-ui` | Original UI repo. RC CI still clones this URL at `THREAD_UI_COMMIT=4b426db`. |
 
-Do not push Treer UI work to `remote-codex-thread-ui`. Do not merge RC
-`main` into `treer-agent-ui` as a routine; pull selected commits only if
-needed.
+Do not vendor any of these into Treer `apps/`. Do not push Treer UI work
+to RC's repos. Pull selected commits across forks only when needed.
 
 ## Goal
 
@@ -84,13 +83,13 @@ mobile and RC's phone apps.
    tier.
 8. **Journal stays on the machine**, one SQLite file per Agent under Host
    state (for example `.treer/agents/{agent_id}/journal.sqlite`).
-9. **`treer-acp` lives in Treer crates.** Host/AIS tests and versioning stay
-   with the control plane.
-10. **Generic thread UI lives in Treer core**, because it is harness-agnostic
-    (Codex, Grok, Cursor, Claude, OpenCode, …). It is not a Treer `web/`
-    control-plane replacement. Source is **`EvoEvolver/treer-agent-ui`**,
-    forked from `rust/acp-rewrite-composer-stop`. Treer pins that repo's
-    `main`. RC's original `remote-codex-thread-ui` can keep moving.
+9. **`treer-acp` lives in Treer crates.** Runtime, journal, AIS HTTP. No
+   bundled React tree.
+10. **Generic thread UI is external.** It is not Treer `web/` and not an
+    in-tree `apps/` surface. Checkout `EvoEvolver/treer-agent-ui` (or
+    another git) on the machine and **attach it with `treer ui`**. The
+    wire remains AIS `ui_path` via `treer interface register`. Pi UI and
+    Codex UI keep self-registering as they do today.
 11. **Explorer is Agent-cwd scoped** and is in the first product slice. It
     does not recreate RC Workspace (see below).
 12. **Session import is in the first product slice.** Importing a local
@@ -120,7 +119,7 @@ RC thread fork                      -> Launch another Agent
 RC thread import                    -> create Agent bound to an existing local session
 RC files API under workspace id     -> AIS file routes under that Agent's cwd
 RC supervisor-web shell             -> dropped
-RC thread-ui (embedded-single-thread) -> AIS ui_path, in-tree generic Agent UI
+RC thread-ui (embedded-single-thread) -> external git + `treer ui` → AIS ui_path
 ```
 
 ### Thread versus Agent
@@ -188,7 +187,7 @@ flowchart TB
 
   subgraph agentProc [One Agent process]
     AIS["AIS HTTP treer.agent-interface/v1"]
-    UI[Generic thread UI at ui_path]
+    UI[External thread UI dist at ui_path]
     Adapter[Harness adapter]
     ACP[ACP JSON-RPC stdio]
     Native[Other native protocols]
@@ -277,7 +276,8 @@ Browser
   -> Treer Proxy (Treer session / Bearer, Policy)
        -> enrolled Agent Server (outbound)
             -> Host process: one Agent
-                 -> treer-acp (Rust ACP runtime + AIS HTTP + generic thread UI)
+                 -> treer-acp (Rust ACP runtime + AIS HTTP)
+                      -> optional external UI dist (`treer ui use`)
                       -> harness stdio (grok agent stdio, cursor-agent acp,
                          codex-acp, claude-agent-acp, opencode acp, ...)
                  -> Host PTY (emergency TUI only)
@@ -292,9 +292,9 @@ exposes AIS on loopback.
 | Org, Treer Workspace, Policy | `treer-proxy` | unchanged |
 | Machine connection, Host child, PTY, cwd jail | `treer-agent-server` / Host | unchanged |
 | ACP catalog, adapters, session, journal, cwd files | `crates/treer-acp` | one Agent's conversation and its tree |
-| AIS HTTP + `ui_path` | same Agent process | Treer semantic contract + generic UI |
-| Generic thread UI | Treer `apps/` surface, sourced from the new fork's `main` | `embedded-single-thread` |
-| Codex app-server UI | `apps/codex-ui` until ACP Codex parity | fallback |
+| AIS HTTP | same Agent process (`treer-acp`) | Treer semantic contract |
+| Generic thread UI | **external git**, attached by `treer ui` | `embedded-single-thread` static dist served beside AIS |
+| Codex app-server UI | `apps/codex-ui` until ACP Codex parity | in-tree fallback; not the generic ACP UI |
 
 One Agent still has one process owner. Do not run `codex-acp` and `codex
 app-server` against the same Agent. Do not multiplex every ACP session
@@ -319,35 +319,61 @@ Choosing one **creates a Treer Agent** with that cwd, harness, and
 `provider_session_id`. Same as Launch, except the ACP session already
 exists. No RC workspace id.
 
-## Thread UI: fork and in-tree pin
+## Thread UI: external git, attached with `treer ui`
 
-Today three trees overlap:
+Treer does **not** vendor `@remote-codex/thread-ui` into `apps/` or `web/`.
+The generic ACP surface is a separate repository. RC does the same: the
+Rust supervisor-web depends on a sibling checkout; CI clones a pinned
+commit (`THREAD_UI_COMMIT=4b426db`). RC also published
+`dufangshi/remote-codex-thread-ui-rust` as its rust-oriented UI repo.
+Treer's pin is `EvoEvolver/treer-agent-ui` (same snapshot today).
 
-| Checkout | Role today |
-| --- | --- |
-| `remote-codex-thread-ui` `main` | UI packages plus Treer recipe (TS ACP server + web). |
-| `remote-codex-thread-ui` `rust/acp-rewrite-composer-stop` | What RC rust actually builds (composer, deferred turns, explorer). |
-| `codex-agent-ui` | Second recipe; Treer mobile still bundles it. Out of this plan. |
-| Treer `apps/codex-ui` | In-tree Codex app-server UI. Keep as fallback. |
-| Treer `apps/*-ais` | Thin JS AIS sidecars. Compatibility only; no new features. |
+`apps/pi-ui` and `apps/codex-ui` stay in-tree and keep calling
+`treer interface register --ui-path` themselves. They are not the generic
+ACP UI.
 
-Target:
+### `treer ui` (proposed)
 
-1. **Fork is done:** `https://github.com/EvoEvolver/treer-agent-ui`,
-   `main` at `4b426db`. RC keeps `remote-codex-thread-ui`.
-2. **Treer core carries the generic UI** under `apps/` (same class as
-   `pi-ui` / `codex-ui`: AIS `ui_path`, not the org control plane). Pin
-   `EvoEvolver/treer-agent-ui` `main` (subtree, submodule, or vendored
-   copy — pick in the first UI PR, on a Treer feature branch, not
-   `main`).
-3. **`treer-acp` replaces TS `agent-ui-server`.** The Agent command is
-   the Rust binary. It serves AIS and the in-tree UI bundle.
-4. Disable terminal plugin and permission cards on the fork. Keep cwd
-   explorer, pointed at AIS cwd file routes.
-5. `apply.sh` / launch profiles in the Treer checkout create `treer-acp`
-   Agents. External `--recipe` git, if kept, is the same fork URL.
-6. Wind down advertising `codex-agent-ui` as a second ACP recipe when
-   this path ships. Mobile bundle retarget is **not** this plan.
+Today the only CLI is `treer interface register --ui-path`. That remains
+the **wire**. Add an Agent-facing `treer ui` family so operators and
+installer Agents attach an external UI without copying it into Treer:
+
+```text
+treer ui install <git-url> [--ref main] [--name treer-agent-ui]
+treer ui list
+treer ui show
+treer ui use <name-or-url>
+treer ui clear
+```
+
+| Command | Who | Effect |
+| --- | --- | --- |
+| `install` | machine / Host | Clone/pin the git onto the Host (not into the Treer repo). Build dist if the checkout requires it. |
+| `list` / `show` | machine or Agent | Installed UI checkouts and which Agent is using which. |
+| `use` | **this Agent only** | Point `treer-acp` at that dist, serve it next to AIS, `interface register ... --ui-path /`. |
+| `clear` | this Agent | Drop `ui_path`; AIS prompt/transcript/state can remain. |
+
+`use` does not create a second Agent. The UI is files served from the
+same loopback AIS process (or a static mount it already owns). One Agent
+is still one thread.
+
+Optional sugar, not a second model:
+
+```text
+treer agent admin profile create grok-acp --cwd . \
+  --ui https://github.com/EvoEvolver/treer-agent-ui.git \
+  treer-acp -- --harness grok
+```
+
+`--ui` on create/launch means install-if-needed + `use` after the process
+is up. Default git when `--ui` is passed with no URL:
+`https://github.com/EvoEvolver/treer-agent-ui.git`.
+
+Disable terminal plugin and permission cards in the attached UI. Cwd
+explorer talks to AIS extra routes on that same origin.
+
+Installer Agents that currently `--recipe` a UI+ACP TS server should
+move to: create `treer-acp`, then `treer ui use` the Treer-owned git.
 
 ## Non-goals
 
@@ -359,6 +385,8 @@ Target:
 - Native timeline reimplementation.
 - Uploading journals to Core Message or PostgreSQL.
 - Replacing Treer `web/` with `supervisor-web`.
+- Vendoring `treer-agent-ui` / `remote-codex-thread-ui-rust` into Treer
+  `apps/`.
 - Merging Treer mobile with RC iOS/Android (later plan).
 - Compact, fork, goal, MCP, hooks, PDF export in the first slice.
 
@@ -367,16 +395,14 @@ Target:
 Maintained documents that must change when this ships:
 `docs/architecture.md`, `docs/security.md`, `docs/product.md`,
 `docs/quality.md`, `apps/README.md`, `AGENTS.md`,
-`skills/treer/SKILL.md`. `docs/mobile.md` waits for the later mobile
-merge.
+`skills/treer/SKILL.md` (`treer ui` + `interface`). `docs/mobile.md`
+waits for the later mobile merge.
 
-### Phase 0 — Freeze the sources (partially done)
+### Phase 0 — Freeze the sources
 
-- UI fork exists: `EvoEvolver/treer-agent-ui` `main` = `4b426db`.
-- **Wait** until RC `rust/acp-rewrite` is on RC `main`, then snapshot that
-  ACP runtime for `treer-acp`.
-- Harness catalog vs current Treer recipes.
-- Open the Treer feature worktree; do not use Treer `main`.
+- RC `main` is the rust line. Snapshot ACP from `origin/main`.
+- UI pin: `EvoEvolver/treer-agent-ui` `main` = `4b426db`.
+- Open the Treer **feature** worktree; do not use Treer `main`.
 
 ### Phase 1 — `treer-acp`
 
@@ -385,10 +411,10 @@ merge.
 - AIS core routes, auto-allow, Agent cwd, cwd file extra routes.
 - Fake harness tests without a live vendor binary.
 
-### Phase 2 — Agent launch, UI, import
+### Phase 2 — Agent launch, `treer ui`, import
 
-- Host starts one `treer-acp` per Agent with in-tree `ui_path`.
-- Launch profile from the Treer checkout.
+- Host starts one `treer-acp` per Agent (AIS, no bundled React).
+- `treer ui install` / `use` attaches `EvoEvolver/treer-agent-ui`.
 - Session import = create Agent.
 - One live harness e2e (grok or cursor).
 - Resume/load if tests stay cheap.
@@ -397,7 +423,8 @@ merge.
 
 - Keep `apps/codex-ui` until Codex-over-ACP parity is measured.
 - Mark JS `*-ais` compatibility-only.
-- README: one generic ACP UI, fork URL documented.
+- README/skill: generic ACP UI is external; `treer ui` is the attach
+  command. Default git `EvoEvolver/treer-agent-ui`.
 
 ### Phase 4 — Later
 
@@ -406,15 +433,17 @@ merge.
 
 ## Remaining call
 
-UI fork name is **`treer-agent-ui`**. How Treer pins it (git subtree vs
-submodule vs vendored `apps/` copy) is chosen in the first UI PR on the
-feature worktree, not on `main`. The requirement is "Treer core carries
-it" and "upstream is `EvoEvolver/treer-agent-ui` `main`".
+CLI shape for `treer ui` is proposed above (`install` / `use` wrapping
+`interface register --ui-path`). Confirm whether profile/create also
+grow `--ui <git>` as sugar, or CLI-only attach is enough.
+
+Do not retarget Treer's pin to `remote-codex-thread-ui-rust` unless we
+explicitly want one shared rust UI repo for both products.
 
 ## PR sketch
 
-Start only after RC rust is on RC `main`. All PRs from a Treer worktree
-branch, never from `main`.
+All PRs from a Treer worktree branch, never from `main`. Do not start
+until this plan is agreed.
 
 1. Add `crates/treer-acp` with fake-runtime tests.
 2. AIS registration + cwd jail + auto-allow + cwd file extra routes.
