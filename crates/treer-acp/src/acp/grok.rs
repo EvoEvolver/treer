@@ -89,8 +89,17 @@ pub fn apply_model(model: &str) -> SessionSettingOp {
     }
 }
 
+fn models_root(state: &Value) -> Option<&Value> {
+    if state.get("availableModels").is_some() {
+        Some(state)
+    } else {
+        state.get("models")
+    }
+}
+
 pub fn apply_reasoning(effort: &str, state: &Value) -> Option<SessionSettingOp> {
     let wanted = normalize_acp_effort(Some(effort))?;
+    let state = models_root(state)?;
     let current_id = state.get("currentModelId").and_then(Value::as_str);
     let models = state.get("availableModels")?.as_array()?;
     let model = models
@@ -203,5 +212,30 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(apply_reasoning("auto", &state).is_none());
+    }
+
+    #[test]
+    fn apply_reasoning_reads_nested_session_models() {
+        let state = json!({
+            "sessionId": "sess",
+            "models": {
+                "currentModelId": "grok-4.6",
+                "availableModels": [{
+                    "modelId": "grok-4.6",
+                    "_meta": {
+                        "reasoningEfforts": [
+                            { "value": "low" },
+                            { "value": "high" }
+                        ]
+                    }
+                }]
+            }
+        });
+        match apply_reasoning("low", &state) {
+            Some(SessionSettingOp::LoadWithMeta { meta }) => {
+                assert_eq!(meta["reasoningEffort"], "low");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

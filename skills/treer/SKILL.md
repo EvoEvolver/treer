@@ -230,7 +230,7 @@ Install home, first match:
 The git checkout is `remote-codex-thread-ui-rust` under that home. `treer ui
 show` prints JSON with `git`, `ref`, `path`, `dist_path`, and `installed`.
 `treer-acp` registers AIS `ui_path=/`. The Treer iframe should append
-`?presentation=embedded-single-thread&explorer=1&shell=0&permissions=0&nav=0`.
+`?presentation=workspace&explorer=1&shell=0&permissions=0&nav=0`.
 ACP permission prompts are auto-allowed on trusted machines; there is no
 permission card.
 

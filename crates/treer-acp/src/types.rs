@@ -106,6 +106,7 @@ pub struct SessionCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelOption {
     pub id: String,
     pub model: String,
@@ -118,6 +119,7 @@ pub struct ModelOption {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ReasoningEffortOption {
     pub reasoning_effort: String,
     pub description: String,

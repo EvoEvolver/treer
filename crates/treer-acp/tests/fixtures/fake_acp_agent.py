@@ -8,6 +8,8 @@ import time
 
 
 fast_enabled = False
+current_model = "fake-1"
+current_effort = "medium"
 
 
 def config_options():
@@ -20,6 +22,45 @@ def config_options():
             "currentValue": fast_enabled,
         }
     ]
+
+
+def models_payload():
+    return {
+        "currentModelId": current_model,
+        "availableModels": [
+            {
+                "modelId": "fake-1",
+                "name": "Fake One",
+                "_meta": {
+                    "reasoningEffort": current_effort,
+                    "reasoningEfforts": [
+                        {"value": "low", "label": "Low"},
+                        {"value": "medium", "label": "Medium", "default": True},
+                        {"value": "high", "label": "High"},
+                    ],
+                },
+            },
+            {
+                "modelId": "fake-2",
+                "name": "Fake Two",
+                "_meta": {
+                    "reasoningEffort": "low",
+                    "reasoningEfforts": [
+                        {"value": "low", "label": "Low"},
+                        {"value": "high", "label": "High"},
+                    ],
+                },
+            },
+        ],
+    }
+
+
+def session_result(session_id):
+    return {
+        "sessionId": session_id,
+        "configOptions": config_options(),
+        "models": models_payload(),
+    }
 
 
 def send(obj):
@@ -37,7 +78,7 @@ def prompt_text(params):
 
 
 def handle(msg):
-    global fast_enabled
+    global fast_enabled, current_model, current_effort
     method = msg.get("method")
     req_id = msg.get("id")
     params = msg.get("params") or {}
@@ -63,24 +104,41 @@ def handle(msg):
             {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {
-                    "sessionId": "fake-session",
-                    "configOptions": config_options(),
-                },
+                "result": session_result("fake-session"),
             }
         )
         return
     if method in ("session/load", "session/resume"):
+        meta = params.get("_meta") or {}
+        if meta.get("reasoningEffort"):
+            current_effort = str(meta.get("reasoningEffort"))
         send(
             {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {
-                    "sessionId": params.get("sessionId") or "fake-session",
-                    "configOptions": config_options(),
-                },
+                "result": session_result(params.get("sessionId") or "fake-session"),
             }
         )
+        return
+    if method == "session/set_model":
+        model_id = params.get("modelId")
+        if model_id:
+            current_model = str(model_id)
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": session_result(params.get("sessionId") or "fake-session"),
+                }
+            )
+        else:
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": "modelId is required"},
+                }
+            )
         return
     if method == "session/set_config_option":
         if params.get("configId") == "fast-mode" and "--no-fast" not in sys.argv:

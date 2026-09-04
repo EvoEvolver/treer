@@ -54,11 +54,30 @@ pub trait HarnessAdapter: Send + Sync {
     }
 }
 
+pub fn project_session_payload(response: &Value) -> Option<HarnessProjection> {
+    grok::project_session(response)
+}
+
+pub fn set_model_op(model: &str) -> SessionSettingOp {
+    SessionSettingOp::SetModel {
+        model_id: model.to_string(),
+    }
+}
+
 pub struct StandardAdapter;
 
 impl HarnessAdapter for StandardAdapter {
     fn id(&self) -> &'static str {
         "standard"
+    }
+    fn project_session(&self, response: &Value) -> Option<HarnessProjection> {
+        project_session_payload(response)
+    }
+    fn apply_model(&self, model: &str, _state: &Value) -> Option<SessionSettingOp> {
+        Some(set_model_op(model))
+    }
+    fn apply_reasoning(&self, effort: &str, state: &Value) -> Option<SessionSettingOp> {
+        grok::apply_reasoning(effort, state)
     }
 }
 
@@ -68,6 +87,12 @@ impl HarnessAdapter for CodexAdapter {
     fn id(&self) -> &'static str {
         "codex"
     }
+    fn project_session(&self, response: &Value) -> Option<HarnessProjection> {
+        project_session_payload(response)
+    }
+    fn apply_model(&self, model: &str, _state: &Value) -> Option<SessionSettingOp> {
+        Some(set_model_op(model))
+    }
 }
 
 pub struct ClaudeAdapter;
@@ -75,6 +100,12 @@ pub struct ClaudeAdapter;
 impl HarnessAdapter for ClaudeAdapter {
     fn id(&self) -> &'static str {
         "claude"
+    }
+    fn project_session(&self, response: &Value) -> Option<HarnessProjection> {
+        project_session_payload(response)
+    }
+    fn apply_model(&self, model: &str, _state: &Value) -> Option<SessionSettingOp> {
+        Some(set_model_op(model))
     }
 }
 
@@ -105,6 +136,12 @@ impl HarnessAdapter for CursorAdapter {
             .filter_map(|(index, model)| cursor_model(model, index))
             .collect();
         (!projected.is_empty()).then_some(projected)
+    }
+    fn project_session(&self, response: &Value) -> Option<HarnessProjection> {
+        project_session_payload(response)
+    }
+    fn apply_model(&self, model: &str, _state: &Value) -> Option<SessionSettingOp> {
+        Some(set_model_op(model))
     }
 }
 
@@ -139,6 +176,12 @@ pub struct DeepSeekAdapter;
 impl HarnessAdapter for DeepSeekAdapter {
     fn id(&self) -> &'static str {
         "deepseek"
+    }
+    fn project_session(&self, response: &Value) -> Option<HarnessProjection> {
+        project_session_payload(response)
+    }
+    fn apply_model(&self, model: &str, _state: &Value) -> Option<SessionSettingOp> {
+        Some(set_model_op(model))
     }
 }
 

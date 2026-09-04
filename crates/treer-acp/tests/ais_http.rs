@@ -114,6 +114,10 @@ async fn manifest_prompt_duplicate_and_transcript_paging() {
     assert!(surface["detail"]["thread"]["id"].as_str().is_some());
     assert!(surface["detail"]["turns"].is_array());
     assert_eq!(surface["auth"]["status"], "authenticated");
+    assert_eq!(surface["detail"]["thread"]["model"], "fake-1");
+    assert_eq!(surface["detail"]["thread"]["reasoningEffort"], "medium");
+    assert_eq!(surface["modelOptions"][0]["displayName"], "Fake One");
+    assert_eq!(surface["modelOptions"].as_array().unwrap().len(), 2);
 
     let page0 = get_json(&format!("{base}/v1/transcript?page=0&limit=1")).await;
     assert_eq!(page0["page"], 0);
@@ -227,6 +231,25 @@ async fn file_routes_are_jailed_to_cwd() {
         .unwrap();
     assert_eq!(escaped_write.status(), 400);
 
+    running.server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ui_settings_updates_the_projected_model() {
+    let running = start_fake().await;
+    let base = &running.base;
+    let client = reqwest::Client::new();
+    let updated = client
+        .post(format!("{base}/api/settings"))
+        .json(&json!({ "model": "fake-2", "reasoningEffort": "high" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(updated.status().is_success());
+    let surface: Value = updated.json().await.unwrap();
+    assert_eq!(surface["detail"]["thread"]["model"], "fake-2");
+    let again = get_json(&format!("{base}/api/state")).await;
+    assert_eq!(again["detail"]["thread"]["model"], "fake-2");
     running.server.shutdown().await.unwrap();
 }
 

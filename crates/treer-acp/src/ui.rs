@@ -16,7 +16,7 @@ pub const INSTALL_RECORD_NAME: &str = "install.json";
 /// Query string Treer iframes should append. AIS `ui_path` stays `/` so Proxy
 /// asset tunneling keeps working; the control plane applies these later.
 pub const TREER_EMBED_UI_QUERY: &str =
-    "presentation=embedded-single-thread&explorer=1&shell=0&permissions=0&nav=0";
+    "presentation=workspace&explorer=1&shell=0&permissions=0&nav=0";
 
 #[derive(Debug, Clone, Default)]
 pub struct InstallOptions {

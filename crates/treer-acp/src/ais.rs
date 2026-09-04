@@ -200,6 +200,7 @@ pub async fn serve(mut config: AisConfig) -> Result<AisServer> {
         .route("/api/state", get(ui_state))
         .route("/api/prompt", post(ui_prompt))
         .route("/api/interrupt", post(ui_interrupt))
+        .route("/api/settings", post(ui_settings))
         .route("/ws", get(ui_ws))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
@@ -477,12 +478,16 @@ async fn files_write(
 
 async fn ui_state_value(state: &AppState) -> Value {
     let entries = state.journal.entries().unwrap_or_default();
-    let current = state.status.lock().await;
+    let (status, error) = {
+        let current = state.status.lock().await;
+        (current.status, current.error.clone())
+    };
     let session_id = state
         .session_key
         .split_once("::")
         .map(|(_, rest)| rest)
         .unwrap_or(&state.session_key);
+    let projection = state.runtime.session_projection(&state.session_key).await;
     ui_surface::state_payload(SurfaceInput {
         agent_id: &state.agent_id,
         harness_id: &state.harness_id,
@@ -490,9 +495,17 @@ async fn ui_state_value(state: &AppState) -> Value {
         cwd: &state.cwd.to_string_lossy(),
         session_id,
         entries: &entries,
-        status: current.status,
-        error: current.error.as_deref(),
+        status,
+        error: error.as_deref(),
         ready: true,
+        model: projection.as_ref().and_then(|item| item.model.clone()),
+        reasoning_effort: projection
+            .as_ref()
+            .and_then(|item| item.reasoning_effort.clone()),
+        model_options: projection
+            .as_ref()
+            .map(|item| item.models.clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -548,6 +561,31 @@ async fn ui_prompt(
 async fn ui_interrupt(State(state): State<Arc<AppState>>) -> Json<Value> {
     let _ = abort(State(state.clone())).await;
     Json(ui_state_value(&state).await)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiSettingsBody {
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+async fn ui_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UiSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    state
+        .runtime
+        .update_settings(
+            &state.session_key,
+            body.model.as_deref(),
+            body.reasoning_effort.as_deref(),
+        )
+        .await
+        .map_err(ApiError::from)?;
+    let payload = ui_state_value(&state).await;
+    let _ = state.ui_events.send(payload.clone());
+    Ok(Json(payload))
 }
 
 async fn ui_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {

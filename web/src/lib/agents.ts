@@ -79,4 +79,4 @@ export function acpLaunchArgs(harness: string, sessionId?: string): string[] {
   return args
 }
 
-export const TREER_EMBED_UI_QUERY = "presentation=embedded-single-thread&explorer=1&shell=0&permissions=0&nav=0"
+export const TREER_EMBED_UI_QUERY = "presentation=workspace&explorer=1&shell=0&permissions=0&nav=0"

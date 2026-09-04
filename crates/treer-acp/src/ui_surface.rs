@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use treer_protocol::{AgentStatus, AgentTranscriptEntry};
 
 use crate::transcript::group_transcript_turns;
+use crate::types::ModelOption;
 
 pub fn harness_label(id: &str) -> String {
     match id {
@@ -111,6 +112,9 @@ pub struct SurfaceInput<'a> {
     pub status: AgentStatus,
     pub error: Option<&'a str>,
     pub ready: bool,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub model_options: Vec<ModelOption>,
 }
 
 pub fn state_payload(input: SurfaceInput<'_>) -> Value {
@@ -142,8 +146,8 @@ pub fn state_payload(input: SurfaceInput<'_>) -> Value {
         "providerSessionId": input.session_id,
         "source": "supervisor",
         "title": title,
-        "model": Value::Null,
-        "reasoningEffort": Value::Null,
+        "model": input.model,
+        "reasoningEffort": input.reasoning_effort,
         "fastMode": false,
         "collaborationMode": "default",
         "approvalMode": "yolo",
@@ -187,7 +191,7 @@ pub fn state_payload(input: SurfaceInput<'_>) -> Value {
             "lastError": input.error,
             "restartCount": 0,
         },
-        "modelOptions": [],
+        "modelOptions": input.model_options,
         "threads": [thread.clone()],
         "detail": {
             "thread": thread,
@@ -235,12 +239,17 @@ mod tests {
             status: AgentStatus::Idle,
             error: None,
             ready: true,
+            model: None,
+            reasoning_effort: None,
+            model_options: Vec::new(),
         });
         assert_eq!(payload["ready"], true);
         assert_eq!(payload["detail"]["thread"]["id"], "sess_1");
         assert_eq!(payload["detail"]["thread"]["provider"], "grok");
         assert_eq!(payload["detail"]["turns"].as_array().unwrap().len(), 0);
         assert_eq!(payload["auth"]["displayName"], "Grok");
+        assert_eq!(payload["modelOptions"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["detail"]["thread"]["model"], Value::Null);
     }
 
     #[test]
@@ -259,6 +268,18 @@ mod tests {
             status: AgentStatus::Idle,
             error: None,
             ready: true,
+            model: Some("grok-4.6".into()),
+            reasoning_effort: Some("high".into()),
+            model_options: vec![ModelOption {
+                id: "grok-4.6".into(),
+                model: "grok-4.6".into(),
+                display_name: "Grok 4.6".into(),
+                description: String::new(),
+                is_default: true,
+                hidden: false,
+                supported_reasoning_efforts: Vec::new(),
+                default_reasoning_effort: Some("high".into()),
+            }],
         });
         let turns = payload["detail"]["turns"].as_array().unwrap();
         assert_eq!(turns.len(), 1);
@@ -266,5 +287,9 @@ mod tests {
         assert_eq!(turns[0]["items"][1]["kind"], "agentMessage");
         assert_eq!(turns[0]["items"][1]["text"], "pong");
         assert_eq!(payload["detail"]["thread"]["title"], "Reply with pong");
+        assert_eq!(payload["detail"]["thread"]["model"], "grok-4.6");
+        assert_eq!(payload["detail"]["thread"]["reasoningEffort"], "high");
+        assert_eq!(payload["modelOptions"][0]["displayName"], "Grok 4.6");
+        assert_eq!(payload["modelOptions"][0]["isDefault"], true);
     }
 }

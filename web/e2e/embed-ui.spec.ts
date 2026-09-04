@@ -177,7 +177,7 @@ test("ACP thread iframe appends Treer embed chrome flags", async ({ page }) => {
   await page.getByRole("button", { name: /^grok-thread / }).click()
   const frame = page.locator("iframe[title='grok-thread interface']")
   await expect(frame).toBeVisible()
-  await expect(frame).toHaveAttribute("src", /presentation=embedded-single-thread/)
+  await expect(frame).toHaveAttribute("src", /presentation=workspace/)
   await expect(frame).toHaveAttribute("src", /explorer=1/)
   await expect(frame).toHaveAttribute("src", /shell=0/)
   await expect(frame).toHaveAttribute("src", /permissions=0/)

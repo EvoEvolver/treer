@@ -266,9 +266,12 @@ skips that). The checkout lives under `$TREER_UI_HOME`,
 machine may serve the same dist at `/` when `--ui-dist` is unset and then
 `interface register --ui-path /`. There is no per-Agent UI install and no
 `--ui` on `agent create`. The control plane iframe for `kind=acp` appends
-`presentation=embedded-single-thread`, `explorer=1`, `shell=0`,
-`permissions=0`, and `nav=0`; AIS `ui_path` stays `/` so Proxy asset tunneling
-keeps a path prefix.
+`presentation=workspace`, `explorer=1`, `shell=0`,
+`permissions=0`, and `nav=0` so the Host thread UI keeps Remote Codex's
+workspace chrome (rooms rail, explorer, composer) while Treer still maps
+one Agent to one thread. AIS `ui_path` stays `/` so Proxy asset tunneling
+keeps a path prefix. The iframe key is the Interface `instance_id`, not
+`registered_at`, so Host re-registration does not remount the page.
 
 Launch-profile sidecars in `apps/codex-ais`, `apps/opencode-ais`,
 `apps/dsh-ais`, `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`

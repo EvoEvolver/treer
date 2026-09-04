@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use super::adapter::adapter_for;
+use super::adapter::{adapter_for, HarnessAdapter, HarnessProjection, SessionSettingOp};
 use super::capabilities::{negotiate, NegotiatedCaps};
 use super::catalog::{builtin_agents, classify_availability, AcpAgentDef};
 use super::mapper::TurnMapper;
@@ -36,6 +36,7 @@ struct LiveSession {
     cwd: PathBuf,
     negotiated: NegotiatedCaps,
     adapter_id: String,
+    projection: Option<HarnessProjection>,
     active: Option<ActiveTurn>,
 }
 
@@ -163,12 +164,15 @@ impl AcpRuntime {
             bail!("ACP session id missing");
         }
         let scoped = Self::scoped_id(&def.id, &session_id);
+        let projection =
+            load_session_projection(adapter.as_ref(), process.as_ref(), &raw_session).await;
         let live = LiveSession {
             process,
             session_id,
             cwd: PathBuf::from(cwd),
             negotiated,
             adapter_id: def.id.clone(),
+            projection,
             active: None,
         };
         Ok((scoped, live))
@@ -368,6 +372,86 @@ impl AcpRuntime {
         Ok(())
     }
 
+    pub async fn session_projection(&self, session_key: &str) -> Option<HarnessProjection> {
+        self.inner
+            .sessions
+            .lock()
+            .await
+            .get(session_key)
+            .and_then(|live| live.projection.clone())
+    }
+
+    pub async fn update_settings(
+        &self,
+        session_key: &str,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
+    ) -> Result<Option<HarnessProjection>> {
+        let (process, session_id, cwd, adapter_id, mut projection) = {
+            let sessions = self.inner.sessions.lock().await;
+            let live = sessions
+                .get(session_key)
+                .ok_or_else(|| anyhow!("ACP session is not running"))?;
+            (
+                live.process.clone(),
+                live.session_id.clone(),
+                live.cwd.clone(),
+                live.adapter_id.clone(),
+                live.projection.clone(),
+            )
+        };
+        let adapter = adapter_for(&adapter_id);
+        let state = projection
+            .as_ref()
+            .map(|item| item.state.clone())
+            .unwrap_or_else(|| json!({}));
+        if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+            let current = projection.as_ref().and_then(|item| item.model.as_deref());
+            if current != Some(model) {
+                let op = adapter
+                    .apply_model(model, &state)
+                    .ok_or_else(|| anyhow!("this harness cannot change models"))?;
+                let response = apply_setting_op(process.as_ref(), &session_id, &cwd, op).await?;
+                patch_projection(
+                    &mut projection,
+                    adapter.as_ref(),
+                    Some(model),
+                    None,
+                    &response,
+                );
+            }
+        }
+        let state = projection
+            .as_ref()
+            .map(|item| item.state.clone())
+            .unwrap_or(state);
+        if let Some(effort) = reasoning_effort
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let current = projection
+                .as_ref()
+                .and_then(|item| item.reasoning_effort.as_deref());
+            if current != Some(effort) {
+                if let Some(op) = adapter.apply_reasoning(effort, &state) {
+                    let response =
+                        apply_setting_op(process.as_ref(), &session_id, &cwd, op).await?;
+                    patch_projection(
+                        &mut projection,
+                        adapter.as_ref(),
+                        None,
+                        Some(effort),
+                        &response,
+                    );
+                }
+            }
+        }
+        if let Some(live) = self.inner.sessions.lock().await.get_mut(session_key) {
+            live.projection = projection.clone();
+        }
+        Ok(projection)
+    }
+
     pub fn session_loaded(&self, session_id: &str) -> bool {
         self.inner
             .sessions
@@ -388,6 +472,144 @@ impl AcpRuntime {
             return false;
         };
         !live.process.exited().await.unwrap_or(true)
+    }
+}
+
+async fn load_session_projection(
+    adapter: &dyn HarnessAdapter,
+    process: &AcpProcess,
+    raw_session: &Value,
+) -> Option<HarnessProjection> {
+    let from_session = adapter.project_session(raw_session);
+    let from_list = if let Some(method) = adapter.model_list_method() {
+        match process.request(method, json!({})).await {
+            Ok(response) => adapter.project_model_list(&response).and_then(|models| {
+                let selected = models
+                    .iter()
+                    .find(|model| model.is_default)
+                    .or(models.first())?;
+                Some(HarnessProjection {
+                    state: response,
+                    model: Some(selected.model.clone()),
+                    reasoning_effort: selected.default_reasoning_effort.clone(),
+                    models,
+                })
+            }),
+            Err(error) => {
+                tracing::warn!(%error, "ACP model list failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    match (from_list, from_session) {
+        (Some(list), Some(session)) => Some(HarnessProjection {
+            state: if list.state.is_null() {
+                session.state
+            } else {
+                list.state
+            },
+            models: if list.models.is_empty() {
+                session.models
+            } else {
+                list.models
+            },
+            model: list.model.or(session.model),
+            reasoning_effort: list.reasoning_effort.or(session.reasoning_effort),
+        }),
+        (Some(list), None) => Some(list),
+        (None, Some(session)) => Some(session),
+        (None, None) => None,
+    }
+}
+
+async fn apply_setting_op(
+    process: &AcpProcess,
+    session_id: &str,
+    cwd: &Path,
+    op: SessionSettingOp,
+) -> Result<Value> {
+    match op {
+        SessionSettingOp::SetConfig { config_id, value } => {
+            process
+                .request(
+                    "session/set_config_option",
+                    json!({
+                        "sessionId": session_id,
+                        "configId": config_id,
+                        "value": value,
+                    }),
+                )
+                .await
+        }
+        SessionSettingOp::SetModel { model_id } => {
+            process
+                .request(
+                    "session/set_model",
+                    json!({
+                        "sessionId": session_id,
+                        "modelId": model_id,
+                    }),
+                )
+                .await
+        }
+        SessionSettingOp::SetMode { mode_id } => {
+            process
+                .request(
+                    "session/set_mode",
+                    json!({
+                        "sessionId": session_id,
+                        "modeId": mode_id,
+                    }),
+                )
+                .await
+        }
+        SessionSettingOp::LoadWithMeta { meta } => {
+            process
+                .request(
+                    "session/load",
+                    json!({
+                        "sessionId": session_id,
+                        "cwd": cwd,
+                        "mcpServers": [],
+                        "_meta": meta,
+                    }),
+                )
+                .await
+        }
+    }
+}
+
+fn patch_projection(
+    projection: &mut Option<HarnessProjection>,
+    adapter: &dyn HarnessAdapter,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    response: &Value,
+) {
+    if let Some(from_response) = adapter.project_session(response) {
+        *projection = Some(from_response);
+    }
+    let Some(current) = projection.as_mut() else {
+        if let Some(model) = model {
+            *projection = Some(HarnessProjection {
+                state: response.clone(),
+                models: Vec::new(),
+                model: Some(model.to_string()),
+                reasoning_effort: reasoning_effort.map(str::to_string),
+            });
+        }
+        return;
+    };
+    if let Some(model) = model {
+        current.model = Some(model.to_string());
+        if let Some(object) = current.state.as_object_mut() {
+            object.insert("currentModelId".into(), json!(model));
+        }
+    }
+    if let Some(effort) = reasoning_effort {
+        current.reasoning_effort = Some(effort.to_string());
     }
 }
 
