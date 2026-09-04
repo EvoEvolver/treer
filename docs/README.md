@@ -33,7 +33,10 @@ Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
 
-_None._
+- The proposed [Remote Codex rust/ACP migration plan](research/2026-09-03-rc-acp-migration-plan.md)
+  is held (docs only). Generic UI is Host `treer ui install` of
+  `remote-codex-thread-ui-rust`, with presentation flags. Implement from a
+  Treer worktree, not `main`.
 
 ## Historical material
 
