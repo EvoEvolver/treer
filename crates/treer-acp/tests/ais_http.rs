@@ -109,6 +109,12 @@ async fn manifest_prompt_duplicate_and_transcript_paging() {
     let _ = prompt(base, "op-2", "second").await;
     wait_idle(base).await;
 
+    let surface = get_json(&format!("{base}/api/state")).await;
+    assert_eq!(surface["ready"], true);
+    assert!(surface["detail"]["thread"]["id"].as_str().is_some());
+    assert!(surface["detail"]["turns"].is_array());
+    assert_eq!(surface["auth"]["status"], "authenticated");
+
     let page0 = get_json(&format!("{base}/v1/transcript?page=0&limit=1")).await;
     assert_eq!(page0["page"], 0);
     assert_eq!(page0["page_count"], 2);

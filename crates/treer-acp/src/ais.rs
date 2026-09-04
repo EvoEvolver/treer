@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -11,7 +12,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tower_http::services::ServeDir;
 use treer_protocol::{
     AgentInterfaceManifest, AgentInterfaceStatusResponse, AgentStatus, AgentTranscriptEntry,
@@ -25,6 +26,7 @@ use crate::files::{list_tree, preview_file, write_file};
 use crate::journal::{history_to_entry, Journal};
 use crate::transcript::transcript_page_from_entries;
 use crate::types::{now_rfc3339, AIS_CAPABILITIES};
+use crate::ui_surface::{self, SurfaceInput};
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const FILE_PREVIEW_LIMIT: usize = 64 * 1024;
@@ -87,8 +89,11 @@ struct AppState {
     journal: Arc<Journal>,
     runtime: Arc<AcpRuntime>,
     session_key: String,
+    harness_id: String,
+    harness_label: String,
     status: Mutex<RuntimeStatus>,
     abort: Mutex<Option<Cancel>>,
+    ui_events: broadcast::Sender<Value>,
     ui_path: Option<String>,
 }
 
@@ -163,6 +168,7 @@ pub async fn serve(mut config: AisConfig) -> Result<AisServer> {
     // Keep AIS ui_path as `/`. Proxy joins this as a path prefix for assets;
     // Treer embed query defaults live on `crate::ui::TREER_EMBED_UI_QUERY`.
     let ui_path = config.ui_dist.as_ref().map(|_| "/".to_string());
+    let (ui_events, _) = broadcast::channel(32);
     let state = Arc::new(AppState {
         agent_id: config.agent_id.clone(),
         instance_id: instance_id.clone(),
@@ -170,12 +176,15 @@ pub async fn serve(mut config: AisConfig) -> Result<AisServer> {
         journal,
         runtime: Arc::new(runtime),
         session_key,
+        harness_id: def.id.clone(),
+        harness_label: def.display_name.clone(),
         status: Mutex::new(RuntimeStatus {
             status: AgentStatus::Idle,
             busy: false,
             error: None,
         }),
         abort: Mutex::new(None),
+        ui_events,
         ui_path: ui_path.clone(),
     });
 
@@ -188,6 +197,10 @@ pub async fn serve(mut config: AisConfig) -> Result<AisServer> {
         .route("/v1/abort", post(abort))
         .route("/v1/files/tree", get(files_tree))
         .route("/v1/files", get(files_read).put(files_write))
+        .route("/api/state", get(ui_state))
+        .route("/api/prompt", post(ui_prompt))
+        .route("/api/interrupt", post(ui_interrupt))
+        .route("/ws", get(ui_ws))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
     if let Some(ui_dist) = &config.ui_dist {
@@ -394,6 +407,9 @@ async fn submit_prompt(
             }
         }
         *state_clone.abort.lock().await = None;
+        let _ = state_clone
+            .ui_events
+            .send(ui_state_value(&state_clone).await);
     });
     Ok((
         StatusCode::ACCEPTED,
@@ -457,6 +473,124 @@ async fn files_write(
     }
     write_file(&state.cwd, rel, &body.content).map_err(ApiError::from)?;
     Ok(Json(json!({ "ok": true, "path": rel.replace('\\', "/") })))
+}
+
+async fn ui_state_value(state: &AppState) -> Value {
+    let entries = state.journal.entries().unwrap_or_default();
+    let current = state.status.lock().await;
+    let session_id = state
+        .session_key
+        .split_once("::")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&state.session_key);
+    ui_surface::state_payload(SurfaceInput {
+        agent_id: &state.agent_id,
+        harness_id: &state.harness_id,
+        harness_label: &state.harness_label,
+        cwd: &state.cwd.to_string_lossy(),
+        session_id,
+        entries: &entries,
+        status: current.status,
+        error: current.error.as_deref(),
+        ready: true,
+    })
+}
+
+async fn ui_state(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(ui_state_value(&state).await)
+}
+
+#[derive(Debug, Deserialize)]
+struct UiPromptBody {
+    prompt: Option<String>,
+    text: Option<String>,
+}
+
+async fn ui_prompt(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UiPromptBody>,
+) -> Result<Json<Value>, ApiError> {
+    let text = body
+        .prompt
+        .as_deref()
+        .or(body.text.as_deref())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Err(ApiError::bad("prompt is required"));
+    }
+    let operation_id = format!("ui_{}", Uuid::new_v4().simple());
+    let _ = submit_prompt(
+        State(state.clone()),
+        Json(PromptBody {
+            operation_id: Some(operation_id),
+            text: Some(text),
+        }),
+    )
+    .await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        {
+            let current = state.status.lock().await;
+            if !current.busy {
+                break;
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(Json(ui_state_value(&state).await))
+}
+
+async fn ui_interrupt(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let _ = abort(State(state.clone())).await;
+    Json(ui_state_value(&state).await)
+}
+
+async fn ui_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ui_ws_session(socket, state))
+}
+
+async fn ui_ws_session(mut socket: WebSocket, state: Arc<AppState>) {
+    let mut rx = state.ui_events.subscribe();
+    let initial = ui_state_value(&state).await;
+    if socket
+        .send(Message::Text(initial.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            event = rx.recv() => {
+                match event {
+                    Ok(payload) => {
+                        if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
 }
 
 fn parse_u32(value: Option<&str>) -> Option<u32> {

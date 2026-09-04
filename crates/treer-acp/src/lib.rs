@@ -8,6 +8,7 @@ pub mod local_sessions;
 pub mod transcript;
 pub mod types;
 pub mod ui;
+pub mod ui_surface;
 
 use anyhow::{bail, Result};
 use std::path::Path;
