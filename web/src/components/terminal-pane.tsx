@@ -45,6 +45,7 @@ interface PendingTerminalWrite {
   bytes: number
   cursor: StreamCursor | null
   waitsForCursor: boolean
+  refreshAfterWrite: boolean
   parsed: boolean
 }
 
@@ -85,6 +86,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     let socket: WebSocket | null = null
     let reconnectTimer: number | undefined
     let resizeTimer: number | undefined
+    let refreshFrame = 0
     let reconnectAttempt = 0
     let reconnectAllowed = true
     let lastHostWidth = 0
@@ -224,6 +226,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
         if (disposed) return
         if (writeSocket) acknowledgeWrite(writeSocket, next.bytes)
         finalizeWrites()
+        if (next.refreshAfterWrite) {
+          window.cancelAnimationFrame(refreshFrame)
+          refreshFrame = window.requestAnimationFrame(() => {
+            refreshFrame = 0
+            if (!disposed) terminal.refresh(0, terminal.rows - 1)
+          })
+        }
         pumpWrites()
       })
     }
@@ -231,12 +240,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     const queueOutput = (data: Uint8Array, currentSocket: WebSocket) => {
       let outputCursor: StreamCursor | null = null
       let waitsForCursor = true
+      let refreshAfterWrite = false
       if (replayChunksRemaining > 0) {
         replayChunksRemaining -= 1
         waitsForCursor = false
         if (replayChunksRemaining === 0) {
           outputCursor = replayCursor
           replayCursor = null
+          refreshAfterWrite = true
         }
       }
       const pending: PendingTerminalWrite = {
@@ -244,6 +255,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
         bytes: data.byteLength,
         cursor: outputCursor,
         waitsForCursor,
+        refreshAfterWrite,
         parsed: false,
       }
       pendingOutputBytes += data.byteLength
@@ -349,6 +361,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       disposed = true
       window.clearTimeout(reconnectTimer)
       window.clearTimeout(resizeTimer)
+      window.cancelAnimationFrame(refreshFrame)
       observer.disconnect()
       input.dispose()
       socket?.close()
