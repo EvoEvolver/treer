@@ -361,6 +361,14 @@ pub fn router(
             get(agent_list_humans),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/acp-sessions",
+            get(list_acp_sessions),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/thread-ui",
+            get(show_host_ui).post(install_host_ui),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/agents",
             get(list_agents).post(create_agent),
         )
@@ -691,6 +699,14 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/servers/{server_id}",
             axum::routing::patch(rename_server).delete(delete_server),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/acp-sessions",
+            get(list_acp_sessions),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/thread-ui",
+            get(show_host_ui).post(install_host_ui),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents",
@@ -4399,6 +4415,105 @@ async fn list_agents(
         }
     }
     Ok(Json(json!({ "agents": agents })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AcpSessionsQuery {
+    harness: Option<String>,
+}
+
+async fn list_acp_sessions(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Query(query): Query<AcpSessionsQuery>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_DISCOVER,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
+    let data = state
+        .send_command(
+            &workspace_id,
+            &server_id,
+            AgentCommand::ListAcpSessions {
+                harness: query.harness,
+            },
+        )
+        .await?;
+    Ok(Json(data))
+}
+
+async fn show_host_ui(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_DISCOVER,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
+    let data = state
+        .send_command(&workspace_id, &server_id, AgentCommand::ShowHostUi)
+        .await?;
+    Ok(Json(data))
+}
+
+async fn install_host_ui(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_CREATE,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
+    let data = state
+        .send_command(&workspace_id, &server_id, AgentCommand::InstallHostUi)
+        .await?;
+    Ok(Json(data))
 }
 
 async fn get_agent(

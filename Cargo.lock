@@ -4405,6 +4405,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
+ "treer-acp",
  "treer-agent-runtime",
  "treer-build-info",
  "treer-host-protocol",

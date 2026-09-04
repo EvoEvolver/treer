@@ -7,7 +7,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY skills ./skills
 RUN set -eu; \
-    cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
+    cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli -p treer-acp; \
     case "$(uname -m)" in \
       x86_64|amd64) platform=linux-x86_64 ;; \
       aarch64|arm64) platform=linux-aarch64 ;; \
@@ -18,7 +18,8 @@ RUN set -eu; \
     cp target/release/treer-proxy /out/bin/treer-proxy; \
     cp target/release/treer "/out/dist/$platform/treer"; \
     cp target/release/treer-agent-host "/out/dist/$platform/treer-agent-host"; \
-    cp target/release/treer-agent-server "/out/dist/$platform/treer-agent-server"
+    cp target/release/treer-agent-server "/out/dist/$platform/treer-agent-server"; \
+    cp target/release/treer-acp "/out/dist/$platform/treer-acp"
 
 FROM debian:bookworm-slim
 ARG TREER_VERSION=0.0.0

@@ -29,6 +29,7 @@ tracing-subscriber.workspace = true
 treer-agent-runtime = { path = "../treer-agent-runtime" }
 treer-build-info.workspace = true
 treer-host-protocol = { path = "../treer-host-protocol" }
+treer-acp = { path = "../treer-acp" }
 treer-protocol = { path = "../treer-protocol" }
 url.workspace = true
 uuid.workspace = true

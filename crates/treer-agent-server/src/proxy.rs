@@ -584,6 +584,16 @@ impl ProxyClient {
                     .probe(host, port, target_agent_id, timeout_ms)
                     .await,
             ),
+            AgentCommand::ListAcpSessions { harness } => CommandResult::success(
+                command_id.clone(),
+                self.runtime.list_acp_sessions(harness.as_deref()),
+            ),
+            AgentCommand::ShowHostUi => {
+                CommandResult::success(command_id.clone(), self.runtime.show_host_ui())
+            }
+            AgentCommand::InstallHostUi => {
+                CommandResult::success(command_id.clone(), self.runtime.install_host_ui())
+            }
             AgentCommand::ShutdownMachine => {
                 schedule_machine_shutdown(self.server.workspace_id.clone());
                 CommandResult::success(command_id.clone(), serde_json::json!({ "accepted": true }))

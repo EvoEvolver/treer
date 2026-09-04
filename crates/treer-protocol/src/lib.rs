@@ -1078,7 +1078,30 @@ pub enum AgentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_agent_id: Option<String>,
     },
+    ListAcpSessions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        harness: Option<String>,
+    },
+    ShowHostUi,
+    InstallHostUi,
     ShutdownMachine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSessionCandidate {
+    pub harness: String,
+    pub session_id: String,
+    pub cwd: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSessionList {
+    pub sessions: Vec<AcpSessionCandidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1994,6 +2017,49 @@ mod tests {
         let json = serde_json::to_value(message).expect("serialize abort command");
         assert_eq!(json["envelope"]["command"]["action"], "abort");
         assert_eq!(json["envelope"]["command"]["agent_id"], "ag_1");
+    }
+
+    #[test]
+    fn list_acp_sessions_wire_shape_is_stable() {
+        let message = ProxyMessage::Command {
+            envelope: CommandEnvelope {
+                command_id: "cmd_sessions".to_string(),
+                workspace_id: "default".to_string(),
+                command: AgentCommand::ListAcpSessions {
+                    harness: Some("grok".to_string()),
+                },
+            },
+        };
+        let json = serde_json::to_value(message).expect("serialize list sessions");
+        assert_eq!(json["envelope"]["command"]["action"], "list_acp_sessions");
+        assert_eq!(json["envelope"]["command"]["harness"], "grok");
+    }
+
+    #[test]
+    fn host_ui_command_wire_shapes_are_stable() {
+        let show = ProxyMessage::Command {
+            envelope: CommandEnvelope {
+                command_id: "cmd_show_ui".to_string(),
+                workspace_id: "default".to_string(),
+                command: AgentCommand::ShowHostUi,
+            },
+        };
+        let install = ProxyMessage::Command {
+            envelope: CommandEnvelope {
+                command_id: "cmd_install_ui".to_string(),
+                workspace_id: "default".to_string(),
+                command: AgentCommand::InstallHostUi,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(show).expect("serialize show ui")["envelope"]["command"]["action"],
+            "show_host_ui"
+        );
+        assert_eq!(
+            serde_json::to_value(install).expect("serialize install ui")["envelope"]["command"]
+                ["action"],
+            "install_host_ui"
+        );
     }
 
     #[test]

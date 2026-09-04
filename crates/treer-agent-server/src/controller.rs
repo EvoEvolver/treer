@@ -13,9 +13,10 @@ use treer_host_protocol::{
     HostSpawnRequest, HostWrite,
 };
 use treer_protocol::{
-    AgentInfo, AgentInterfaceDescriptor, AgentStatus, AgentTranscriptResponse, CreateAgentRequest,
-    ProtocolError, ReadAgentOutputResponse, RegisterAgentInterfaceRequest, TerminalCursor,
-    VirtualNetworkHostsSnapshot, AGENT_INTERFACE_PROTOCOL_V1,
+    AcpSessionCandidate, AcpSessionList, AgentInfo, AgentInterfaceDescriptor, AgentStatus,
+    AgentTranscriptResponse, CreateAgentRequest, ProtocolError, ReadAgentOutputResponse,
+    RegisterAgentInterfaceRequest, TerminalCursor, VirtualNetworkHostsSnapshot,
+    AGENT_INTERFACE_PROTOCOL_V1,
 };
 #[cfg(test)]
 use uuid::Uuid;
@@ -537,6 +538,80 @@ impl ControllerRuntime {
             .await
             .map_err(|error| protocol_error("host_error", error))?;
         self.process_response(response, AgentStatus::Working)
+    }
+
+    pub fn list_acp_sessions(&self, harness: Option<&str>) -> AcpSessionList {
+        let homes = treer_acp::LocalSessionHomes::from_env();
+        let harnesses: Vec<String> = match harness.map(str::trim).filter(|value| !value.is_empty())
+        {
+            Some(value) => vec![value.to_string()],
+            None => ["grok", "cursor", "codex", "claude", "opencode"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        };
+        let mut sessions = Vec::new();
+        for name in harnesses {
+            for candidate in treer_acp::list_local_sessions(&homes, &name) {
+                sessions.push(AcpSessionCandidate {
+                    harness: name.clone(),
+                    session_id: candidate.session_id,
+                    cwd: candidate.cwd,
+                    title: candidate.title,
+                    preview: candidate.preview,
+                    updated_at: candidate.updated_at,
+                });
+            }
+        }
+        AcpSessionList { sessions }
+    }
+
+    pub fn show_host_ui(&self) -> HostThreadUiStatus {
+        reap_host_ui_install();
+        HostThreadUiStatus {
+            status: host_ui_status_or_missing(),
+            installing: host_ui_install_in_progress(),
+        }
+    }
+
+    pub fn install_host_ui(&self) -> HostThreadUiStatus {
+        reap_host_ui_install();
+        let status = host_ui_status_or_missing();
+        if status.installed {
+            return HostThreadUiStatus {
+                status,
+                installing: false,
+            };
+        }
+        if host_ui_install_in_progress() {
+            return HostThreadUiStatus {
+                status,
+                installing: true,
+            };
+        }
+        match std::thread::Builder::new()
+            .name("treer-ui-install".into())
+            .spawn(|| {
+                treer_acp::install_host_ui(treer_acp::InstallOptions::default())
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(handle) => {
+                if let Ok(mut state) = host_ui_install_state().lock() {
+                    state.handle = Some(handle);
+                }
+                HostThreadUiStatus {
+                    status,
+                    installing: true,
+                }
+            }
+            Err(error) => {
+                warn!(%error, "failed to start Host thread UI install");
+                HostThreadUiStatus {
+                    status,
+                    installing: false,
+                }
+            }
+        }
     }
 
     pub async fn abort(
@@ -1327,6 +1402,12 @@ fn resolve_launch_with_path(
                 publish_ports: Vec::new(),
             }
         }
+        "acp" => AgentLaunch {
+            command: find_treer_acp_binary(),
+            args: acp_launch_args(&request.args),
+            initial_writes: Vec::new(),
+            publish_ports: Vec::new(),
+        },
         other => {
             return Err(ProtocolError::new(
                 "invalid_request",
@@ -1344,6 +1425,93 @@ fn resolve_launch_with_path(
         other => other.to_string(),
     };
     Ok((kind, launch))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostThreadUiStatus {
+    #[serde(flatten)]
+    status: treer_acp::UiStatus,
+    installing: bool,
+}
+
+struct HostUiInstallState {
+    handle: Option<std::thread::JoinHandle<Result<treer_acp::UiStatus, String>>>,
+}
+
+fn host_ui_install_state() -> &'static Mutex<HostUiInstallState> {
+    static STATE: std::sync::OnceLock<Mutex<HostUiInstallState>> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(HostUiInstallState { handle: None }))
+}
+
+fn reap_host_ui_install() {
+    let Ok(mut state) = host_ui_install_state().lock() else {
+        return;
+    };
+    let Some(handle) = state.handle.take() else {
+        return;
+    };
+    if handle.is_finished() {
+        match handle.join() {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => warn!(error = %error, "Host thread UI install failed"),
+            Err(_) => warn!("Host thread UI install thread panicked"),
+        }
+    } else {
+        state.handle = Some(handle);
+    }
+}
+
+fn host_ui_install_in_progress() -> bool {
+    host_ui_install_state()
+        .lock()
+        .ok()
+        .is_some_and(|state| state.handle.is_some())
+}
+
+fn host_ui_status_or_missing() -> treer_acp::UiStatus {
+    treer_acp::show_host_ui(None).unwrap_or_else(|_| treer_acp::UiStatus {
+        git: treer_acp::DEFAULT_UI_GIT.to_string(),
+        git_ref: treer_acp::DEFAULT_UI_REF.to_string(),
+        path: String::new(),
+        dist_path: None,
+        installed: false,
+        ui_home: None,
+        embed_query: Some(treer_acp::TREER_EMBED_UI_QUERY.to_string()),
+    })
+}
+
+fn find_treer_acp_binary() -> String {
+    let name = format!("treer-acp{}", std::env::consts::EXE_SUFFIX);
+    if let Ok(path) = std::env::var("TREER_ACP_BIN") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.with_file_name(&name);
+        if sibling.is_file() {
+            return sibling.to_string_lossy().into_owned();
+        }
+    }
+    name
+}
+
+fn acp_launch_args(args: &[String]) -> Vec<String> {
+    if args
+        .iter()
+        .any(|arg| arg == "--harness" || arg == "--fake" || arg == "--session-id")
+    {
+        return args.to_vec();
+    }
+    let mut out = vec!["--harness".to_string()];
+    if let Some(harness) = args.first().filter(|value| !value.starts_with('-')) {
+        out.push(harness.clone());
+        out.extend(args.iter().skip(1).cloned());
+    } else {
+        out.push("grok".to_string());
+        out.extend(args.iter().cloned());
+    }
+    out
 }
 
 fn validate_publish_ports(ports: &[u16]) -> Result<Vec<u16>, ProtocolError> {
@@ -1966,6 +2134,52 @@ mod tests {
         assert_eq!(launch.command, "/bin/sh");
         assert_eq!(launch.args, ["-c", "pwd"]);
         assert!(launch.initial_writes.is_empty());
+    }
+
+    #[test]
+    fn acp_agents_spawn_treer_acp_with_harness_args() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "acp".to_string(),
+            name: "grok-thread".to_string(),
+            cwd: "packages/api".to_string(),
+            args: vec!["grok".to_string()],
+            cols: 120,
+            rows: 36,
+            publish_ports: Vec::new(),
+            recipe: None,
+        };
+        let (kind, launch) = resolve_launch(&request).expect("resolve acp launch");
+        assert_eq!(kind, "acp");
+        assert!(launch.command.contains("treer-acp"));
+        assert_eq!(launch.args, ["--harness", "grok"]);
+        assert!(launch.initial_writes.is_empty());
+    }
+
+    #[test]
+    fn acp_session_import_passes_harness_and_session_id() {
+        let request = CreateAgentRequest {
+            server_id: None,
+            kind: "acp".to_string(),
+            name: "imported".to_string(),
+            cwd: "/Users/me/proj".to_string(),
+            args: vec![
+                "--harness".to_string(),
+                "codex".to_string(),
+                "--session-id".to_string(),
+                "sess_123".to_string(),
+            ],
+            cols: 120,
+            rows: 36,
+            publish_ports: Vec::new(),
+            recipe: None,
+        };
+        let (kind, launch) = resolve_launch(&request).expect("resolve imported acp launch");
+        assert_eq!(kind, "acp");
+        assert_eq!(
+            launch.args,
+            ["--harness", "codex", "--session-id", "sess_123"]
+        );
     }
 
     #[test]
