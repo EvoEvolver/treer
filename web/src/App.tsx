@@ -48,8 +48,8 @@ import {
   CircleCheck,
   Download,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
-import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AcpSessionCandidate, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AppDeployment, type ControlPlaneUpdateStatus, type HostThreadUi, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
+import { ACP_LAUNCH_OPTIONS, TREER_EMBED_UI_QUERY, acpLaunchArgs, acpOption, agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAcpLaunch, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
 import { cn } from "@/lib/utils"
@@ -60,7 +60,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -114,8 +114,13 @@ function defaultAgentName(kind: string) {
   const now = new Date()
   const month = String(now.getMonth() + 1).padStart(2, "0")
   const day = String(now.getDate()).padStart(2, "0")
-  const prefix = kind === "terminal" ? "terminal" : kind === "command" ? "cmd" : kind === "codex" || kind === "claude" || kind === "installer" ? kind : "agent"
+  const named = new Set(["terminal", "codex", "claude", "grok", "cursor", "opencode", "installer", "import"])
+  const prefix = kind === "command" ? "cmd" : named.has(kind) ? kind : "agent"
   return `${prefix}-${now.getFullYear()}-${month}-${day}`
+}
+
+function acpSessionKey(session: AcpSessionCandidate) {
+  return `${session.harness}:${session.session_id}`
 }
 
 function defaultProfileAgentName(profileName: string) {
@@ -1132,6 +1137,10 @@ function WorkspaceApp() {
   const [agentCommandLine, setAgentCommandLine] = useState("codex")
   const [agentRecipeUrl, setAgentRecipeUrl] = useState("")
   const [agentRecipeKind, setAgentRecipeKind] = useState("")
+  const [acpSessions, setAcpSessions] = useState<AcpSessionCandidate[]>([])
+  const [acpSessionsLoading, setAcpSessionsLoading] = useState(false)
+  const [acpSessionsError, setAcpSessionsError] = useState<string | null>(null)
+  const [selectedAcpSessionKey, setSelectedAcpSessionKey] = useState<string | null>(null)
   const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
   const [apps, setApps] = useState<AppDeployment[]>([])
   const [appsLoading, setAppsLoading] = useState(false)
@@ -1302,6 +1311,15 @@ function WorkspaceApp() {
   const selectedProfileKind = selectedCreateProfile ? agentKindFromCommand(selectedCreateProfile.command) : null
   const selectedProfileInstalled = selectedProfileKind ? isAgentInstalled(selectedCreateMachine, selectedProfileKind) : null
   const selectedProfileInstall = selectedProfileKind ? catalogEntry(selectedProfileKind) : undefined
+  const selectedAcp = acpOption(agentProfileId)
+  const selectedAcpInstalled = selectedAcp ? isAgentInstalled(selectedCreateMachine, selectedAcp.catalogKind) : null
+  const selectedAcpInstall = selectedAcp ? catalogEntry(selectedAcp.catalogKind) : undefined
+  const selectedImportSession = acpSessions.find((session) => acpSessionKey(session) === selectedAcpSessionKey)
+  const missingInstall = selectedProfileInstalled === false && selectedProfileInstall?.install
+    ? selectedProfileInstall
+    : selectedAcpInstalled === false && selectedAcpInstall?.install
+      ? selectedAcpInstall
+      : undefined
   const recipeInstallers = availableCatalog(selectedCreateMachine)
   const organization = organizations.find((item) => item.organization_id === organizationId)
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
@@ -1318,7 +1336,7 @@ function WorkspaceApp() {
 
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
   const interfaceUiUrl = workspaceId && selectedAgent && selectedAgentInterface
-    ? proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`)
+    ? `${proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`)}${selectedAgent.kind === "acp" ? `?${TREER_EMBED_UI_QUERY}` : ""}`
     : null
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
   const currentRole = organization?.role ?? "member"
@@ -1507,6 +1525,11 @@ function WorkspaceApp() {
         const kind = parsed.command === "codex" || parsed.command === "claude" ? parsed.command : "command"
         const args = kind === "command" ? [parsed.command, ...parsed.args] : parsed.args
         agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind, name: agentName, cwd: agentCwd, args, cols: 120, rows: 36 }) })
+      } else if (agentProfileId === "import") {
+        if (!selectedImportSession) throw new Error("Select a session to import")
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "acp", name: agentName, cwd: agentCwd || selectedImportSession.cwd || ".", args: acpLaunchArgs(selectedImportSession.harness, selectedImportSession.session_id), cols: 120, rows: 36 }) })
+      } else if (selectedAcp) {
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "acp", name: agentName, cwd: agentCwd, args: acpLaunchArgs(selectedAcp.harness), cols: 120, rows: 36 }) })
       } else {
         agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(agentProfileId)}/launch`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, agent_name: agentName, cols: 120, rows: 36 }) })
       }
@@ -1527,10 +1550,33 @@ function WorkspaceApp() {
       setAgentCommandLine("codex")
       setAgentRecipeUrl("")
       setAgentRecipeKind("")
+      setSelectedAcpSessionKey(null)
+      setAcpSessions([])
+      setAcpSessionsError(null)
     }
     setCreateAgentOpen(true)
     if (!preview) void loadLaunchProfiles().catch(showError)
   }
+
+  const loadAcpSessions = useCallback(async (serverId: string) => {
+    if (preview || !workspaceId || !serverId) return
+    setAcpSessionsLoading(true)
+    setAcpSessionsError(null)
+    try {
+      const data = await api<{ sessions: AcpSessionCandidate[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(serverId)}/acp-sessions`)
+      setAcpSessions(data.sessions ?? [])
+    } catch (reason) {
+      setAcpSessions([])
+      setAcpSessionsError(reason instanceof Error ? reason.message : "Could not list sessions on this machine")
+    } finally {
+      setAcpSessionsLoading(false)
+    }
+  }, [preview, workspaceId])
+
+  useEffect(() => {
+    if (!createAgentOpen || agentProfileId !== "import" || !agentServerId) return
+    void loadAcpSessions(agentServerId)
+  }, [createAgentOpen, agentProfileId, agentServerId, loadAcpSessions])
 
   async function installAgent(entry: AgentCatalogEntry, name: string) {
     if (!workspaceId || !entry.install || !agentServerId || installingAgentKind) return
@@ -1548,12 +1594,13 @@ function WorkspaceApp() {
   }
 
   async function installSelectedAgent() {
-    if (!selectedProfileInstall) return
-    await installAgent(selectedProfileInstall, agentName || defaultProfileAgentName(selectedProfileInstall.label))
+    if (!missingInstall) return
+    await installAgent(missingInstall, agentName || defaultProfileAgentName(missingInstall.label))
   }
 
   function selectAgentProfile(profileId: string) {
     changeAgentProfile(profileId)
+    if (isAcpLaunch(profileId) || profileId === "terminal" || profileId === "manual" || profileId === "recipe") return
     const profile = launchProfiles.find((item) => item.profile_id === profileId)
     const kind = profile ? agentKindFromCommand(profile.command) : null
     const entry = kind ? catalogEntry(kind) : undefined
@@ -1589,6 +1636,17 @@ function WorkspaceApp() {
     }
     if (profileId === "recipe") {
       setAgentName(defaultAgentName("installer"))
+      setAgentNameCustomized(false)
+      return
+    }
+    if (profileId === "import") {
+      setAgentName(defaultAgentName("import"))
+      setAgentNameCustomized(false)
+      return
+    }
+    const option = acpOption(profileId)
+    if (option) {
+      setAgentName(defaultAgentName(option.harness))
       setAgentNameCustomized(false)
       return
     }
@@ -1840,7 +1898,11 @@ function WorkspaceApp() {
     setAgentLaunch: (kind) => {
       if (kind === "ui-profile") {
         const profile = launchProfiles.find((item) => item.name === "Codex") ?? launchProfiles[0]
-        changeAgentProfile(profile?.profile_id ?? "terminal")
+        changeAgentProfile(profile?.profile_id ?? "acp-grok")
+        return
+      }
+      if (kind === "acp-grok") {
+        changeAgentProfile("acp-grok")
         return
       }
       changeAgentProfile(kind)
@@ -2174,7 +2236,7 @@ function WorkspaceApp() {
         <form onSubmit={createAgent} className="min-w-0 space-y-4">
           <DialogHeader>
             <DialogTitle>Create agent</DialogTitle>
-            <DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription>
+            <DialogDescription>Start a thread, terminal, or installer on an online machine. Thread agents open in this window; you do not type a CLI command.</DialogDescription>
           </DialogHeader>
           <Field label="Machine">
             <Select value={agentServerId} onValueChange={setAgentServerId} required>
@@ -2186,50 +2248,114 @@ function WorkspaceApp() {
             <Select value={agentProfileId} onValueChange={selectAgentProfile}>
               <SelectTrigger aria-label="Launch" data-tour="agent-launch"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="terminal">Terminal</SelectItem>
-                <SelectItem value="manual">Custom command</SelectItem>
-                <SelectItem value="recipe">Install recipe</SelectItem>
-                {launchProfiles.map((profile) => {
-                  const kind = agentKindFromCommand(profile.command)
-                  const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null
-                  const installable = installed === false && Boolean(kind && catalogEntry(kind)?.install)
-                  const installing = Boolean(kind && installingAgentKind === kind)
-                  return (
-                    <SelectItem
-                      key={profile.profile_id}
-                      value={profile.profile_id}
-                      className={installed === false ? "text-muted-foreground" : undefined}
-                      trailing={installed === true
-                        ? <CircleCheck className="size-3.5 text-emerald-700" />
-                        : installable
-                          ? installing ? <RotateCw className="size-3.5 animate-spin" /> : <Download className="size-3.5" />
-                          : null}
-                    >
-                      {installable ? `Install ${profile.name}` : profile.name}
-                    </SelectItem>
-                  )
-                })}
+                <SelectGroup>
+                  <SelectLabel>Thread</SelectLabel>
+                  {ACP_LAUNCH_OPTIONS.map((option) => {
+                    const installed = isAgentInstalled(selectedCreateMachine, option.catalogKind)
+                    return (
+                      <SelectItem
+                        key={option.id}
+                        value={option.id}
+                        className={installed === false ? "text-muted-foreground" : undefined}
+                        trailing={installed === true ? <CircleCheck className="size-3.5 text-emerald-700" /> : null}
+                      >
+                        {option.label}
+                      </SelectItem>
+                    )
+                  })}
+                  <SelectItem value="import">Import session</SelectItem>
+                </SelectGroup>
+                <SelectSeparator />
+                <SelectGroup>
+                  <SelectLabel>Process</SelectLabel>
+                  <SelectItem value="terminal">Terminal</SelectItem>
+                  <SelectItem value="manual">Custom command</SelectItem>
+                  <SelectItem value="recipe">Install recipe</SelectItem>
+                </SelectGroup>
+                {launchProfiles.length > 0 && <>
+                  <SelectSeparator />
+                  <SelectGroup>
+                    <SelectLabel>Saved profiles</SelectLabel>
+                    {launchProfiles.map((profile) => {
+                      const kind = agentKindFromCommand(profile.command)
+                      const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null
+                      const installable = installed === false && Boolean(kind && catalogEntry(kind)?.install)
+                      const installing = Boolean(kind && installingAgentKind === kind)
+                      return (
+                        <SelectItem
+                          key={profile.profile_id}
+                          value={profile.profile_id}
+                          className={installed === false ? "text-muted-foreground" : undefined}
+                          trailing={installed === true
+                            ? <CircleCheck className="size-3.5 text-emerald-700" />
+                            : installable
+                              ? installing ? <RotateCw className="size-3.5 animate-spin" /> : <Download className="size-3.5" />
+                              : null}
+                        >
+                          {installable ? `Install ${profile.name}` : profile.name}
+                        </SelectItem>
+                      )
+                    })}
+                  </SelectGroup>
+                </>}
               </SelectContent>
             </Select>
           </Field>
-          {agentProfileId === "terminal" || agentProfileId === "manual"
-            ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field>
+          {agentProfileId === "terminal" || agentProfileId === "manual" || isAcpLaunch(agentProfileId)
+            ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} aria-label="Working directory" /></Field>
             : selectedCreateProfile
               ? <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 px-3 py-2"><code className="block max-w-full truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block max-w-full truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div>
               : null}
           {agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}
+          {agentProfileId === "import" && (
+            <div className="space-y-2" data-tour="agent-import">
+              <Label>Local session</Label>
+              {acpSessionsLoading
+                ? <p className="text-[11px] text-muted-foreground">Looking for sessions on {machineName(selectedCreateMachine)}…</p>
+                : acpSessionsError
+                  ? <p className="text-[11px] text-destructive">{acpSessionsError}</p>
+                  : acpSessions.length === 0
+                    ? <p className="text-[11px] text-muted-foreground">No local Grok, Codex, or Claude sessions were found for this user on the machine.</p>
+                    : <div className="max-h-48 space-y-1 overflow-auto rounded-md border p-1">
+                        {acpSessions.map((session) => {
+                          const key = acpSessionKey(session)
+                          const selected = key === selectedAcpSessionKey
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              className={cn("w-full rounded-sm px-2 py-1.5 text-left hover:bg-accent", selected && "bg-accent")}
+                              onClick={() => {
+                                setSelectedAcpSessionKey(key)
+                                setAgentCwd(session.cwd || ".")
+                                if (!agentNameCustomized) setAgentName((session.title || defaultAgentName(session.harness)).slice(0, 80))
+                              }}
+                            >
+                              <span className="block truncate text-xs font-medium">{session.title || session.session_id}</span>
+                              <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{session.harness} · {session.cwd || "."}</span>
+                              {session.preview && <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{session.preview}</span>}
+                            </button>
+                          )
+                        })}
+                      </div>}
+            </div>
+          )}
           {agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Installer"><Select value={agentRecipeKind} onValueChange={setAgentRecipeKind} disabled={!recipeInstallers.length}><SelectTrigger><SelectValue placeholder={recipeInstallers.length ? "Select an installed agent" : "No installed agent on this machine"} /></SelectTrigger><SelectContent>{recipeInstallers.map((entry) => <SelectItem key={entry.kind} value={entry.kind} trailing={<CircleCheck className="size-3.5 text-emerald-700" />}>{entry.label}</SelectItem>)}</SelectContent></Select><span className="mt-1 block text-[10px] text-muted-foreground">{recipeInstallers.length ? "Only agents already installed on the selected machine can run a recipe." : "Install Claude, Cursor, Codex, OpenCode, or Pi on this machine first."}</span></Field><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /></Field></div>}
-          {selectedCreateProfile && selectedProfileInstalled === false && selectedProfileInstall?.install
-            ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">Installation runs on {machineName(selectedCreateMachine)} and opens a terminal for setup and login.</div>
-            : selectedCreateProfile
-              ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>
-              : null}
-          <Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
+          {missingInstall
+            ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">{missingInstall.label} is not on {machineName(selectedCreateMachine)} yet. Installation opens a terminal for setup and login, then you can create the thread from this dialog.</div>
+            : selectedAcp
+              ? <span className="block text-[10px] text-muted-foreground">Creates a thread Agent. The shared thread UI is installed on this machine the first time, then reused. Each Agent is one conversation.</span>
+              : agentProfileId === "import"
+                ? <span className="block text-[10px] text-muted-foreground">Creates a Treer Agent bound to that existing local session and working directory.</span>
+                : selectedCreateProfile
+                  ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>
+                  : null}
+          <Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} aria-label="Agent name" required /></Field>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>
-            {selectedProfileInstalled === false && selectedProfileInstall?.install
-              ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId || Boolean(installingAgentKind)}>{installingAgentKind ? <RotateCw className="animate-spin" /> : <Download />}{installingAgentKind ? "Starting installer…" : `Install ${selectedProfileInstall.label}`}</Button>
-              : <Button type="submit" disabled={creatingAgent || Boolean(installingAgentKind) || !agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind))}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button>}
+            {missingInstall
+              ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId || Boolean(installingAgentKind)}>{installingAgentKind ? <RotateCw className="animate-spin" /> : <Download />}{installingAgentKind ? "Starting installer…" : `Install ${missingInstall.label}`}</Button>
+              : <Button type="submit" disabled={creatingAgent || Boolean(installingAgentKind) || !agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind)) || (agentProfileId === "import" && !selectedImportSession)}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : agentProfileId === "import" ? "Import as agent" : selectedAcp ? `Create ${selectedAcp.label.toLowerCase()}` : "Create agent"}</Button>}
           </DialogFooter>
         </form>
       </DialogContent>
@@ -2262,6 +2388,8 @@ function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {
 
 function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
+  const [threadUi, setThreadUi] = useState<HostThreadUi | null>(null)
+  const [threadUiBusy, setThreadUiBusy] = useState(false)
   const outBytes = traffic.filter((t) => (t.source_type ?? "machine") === "machine" && t.source_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
   const inBytes = traffic.filter((t) => (t.destination_type ?? "machine") === "machine" && t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
   const peers = Array.from(new Set(
@@ -2276,6 +2404,41 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
       setLocalHealth((current) => ({ ...current, [serviceId]: "healthy" }))
     } catch {
       setLocalHealth((current) => ({ ...current, [serviceId]: "unreachable" }))
+    }
+  }
+
+  useEffect(() => {
+    if (!workspaceId || !machine || machine.status !== "online") {
+      setThreadUi(null)
+      return
+    }
+    let cancelled = false
+    void api<HostThreadUi>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}/thread-ui`)
+      .then((data) => { if (!cancelled) setThreadUi(data) })
+      .catch(() => { if (!cancelled) setThreadUi(null) })
+    return () => { cancelled = true }
+  }, [workspaceId, machine?.server_id, machine?.status])
+
+  useEffect(() => {
+    if (!threadUi?.installing || !workspaceId || !machine) return
+    const timer = window.setInterval(() => {
+      void api<HostThreadUi>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}/thread-ui`)
+        .then(setThreadUi)
+        .catch(() => undefined)
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [threadUi?.installing, workspaceId, machine?.server_id])
+
+  async function installThreadUi() {
+    if (!workspaceId || !machine) return
+    setThreadUiBusy(true)
+    try {
+      const data = await api<HostThreadUi>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}/thread-ui`, { method: "POST", body: "{}" })
+      setThreadUi(data)
+    } catch {
+      /* keep the last known status */
+    } finally {
+      setThreadUiBusy(false)
     }
   }
 
@@ -2312,6 +2475,22 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
         </dl>
         {machine.supervision?.fallback_reason && <div className="flex gap-2 border-t pt-3 text-[11px] leading-5 text-amber-700"><TriangleAlert className="mt-0.5 size-3.5 shrink-0" /><p><span className="font-medium">{supervisionLabel(machine.supervision.mode)} fallback.</span> {machine.supervision.fallback_reason}</p></div>}
       </section>
+
+      {threadUi && <section className="space-y-3 rounded-md border p-4">
+        <h2 className="text-sm font-semibold">Thread UI</h2>
+        <p className="text-[11px] leading-5 text-muted-foreground">Shared by every thread Agent on this machine. Creating a Grok, Cursor, Codex, Claude, or OpenCode thread also installs it the first time.</p>
+        <dl className="grid gap-2 text-xs">
+          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Status</dt><dd className="truncate font-medium">{threadUi.installing ? "Installing…" : threadUi.installed ? "Installed" : "Not installed"}</dd></div>
+          {threadUi.ref && <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Ref</dt><dd className="truncate font-mono">{threadUi.ref}</dd></div>}
+        </dl>
+        <div className="flex flex-wrap gap-2 pt-1">
+          <Button size="sm" onClick={() => void installThreadUi()} disabled={machine.status !== "online" || threadUiBusy || threadUi.installed || threadUi.installing}>
+            {threadUiBusy || threadUi.installing ? <RotateCw className="animate-spin" /> : <Download />}
+            {threadUi.installed ? "Installed" : threadUi.installing || threadUiBusy ? "Installing…" : "Install thread UI"}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => onCopy("treer ui install")}><Copy />Copy CLI</Button>
+        </div>
+      </section>}
 
       <section className="space-y-3 rounded-md border p-4">
         <h2 className="text-sm font-semibold">Network (last 24h)</h2>

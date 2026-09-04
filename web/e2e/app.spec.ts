@@ -235,6 +235,34 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-1/traffic") return ok(route, { traffic })
     if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
     if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile, longScriptProfile] })
+    if (/^\/workspaces\/ws-1\/machines\/[^/]+\/acp-sessions$/.test(path)) return ok(route, {
+      sessions: [{
+        harness: "grok",
+        session_id: "sess-imported",
+        cwd: "packages/api",
+        title: "Review the auth crate",
+        preview: "Look at the token refresh path",
+        updated_at: NOW,
+      }],
+    })
+    if (/^\/workspaces\/ws-1\/machines\/[^/]+\/thread-ui$/.test(path)) {
+      if (route.request().method() === "POST") {
+        return ok(route, {
+          git: "https://github.com/dufangshi/remote-codex-thread-ui-rust.git",
+          ref: "feat/treer-presentation-flags",
+          path: "/tmp/ui",
+          installed: false,
+          installing: true,
+        })
+      }
+      return ok(route, {
+        git: "https://github.com/dufangshi/remote-codex-thread-ui-rust.git",
+        ref: "feat/treer-presentation-flags",
+        path: "/tmp/ui",
+        installed: false,
+        installing: false,
+      })
+    }
     if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
     if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [currentApp] })
     if (path === "/workspaces/ws-1/apps/app-1/access" && route.request().method() === "PATCH") {
@@ -572,6 +600,58 @@ test("from a machine overview, clicking Terminal opens the agent terminal", asyn
 
   // Returns to the terminal main view; header shows agent name
   await expect(page.locator("header").getByText("api-server")).toBeVisible()
+})
+
+test("create agent dialog starts a Grok thread without a CLI command", async ({ page }) => {
+  await page.goto("/")
+  await agentsTab(page).click()
+  await page.getByRole("button", { name: "New" }).click()
+  await expect(page.getByRole("dialog")).toBeVisible()
+  await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
+  await page.getByRole("option", { name: "Grok thread" }).click()
+  await page.getByRole("dialog").getByLabel("Working directory").fill("packages/api")
+  const createRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/ws-1/agents")
+  await page.getByRole("button", { name: "Create grok thread" }).click()
+  const request = await createRequest
+  expect(request.postDataJSON()).toMatchObject({
+    server_id: "srv-a",
+    kind: "acp",
+    cwd: "packages/api",
+    args: ["--harness", "grok"],
+  })
+  await expect(page.getByRole("dialog")).toBeHidden()
+})
+
+test("create agent dialog imports a local session as a Treer Agent", async ({ page }) => {
+  await page.goto("/")
+  await agentsTab(page).click()
+  await page.getByRole("button", { name: "New" }).click()
+  await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
+  await page.getByRole("option", { name: "Import session" }).click()
+  await expect(page.getByRole("button", { name: /Review the auth crate/ })).toBeVisible()
+  await page.getByRole("button", { name: /Review the auth crate/ }).click()
+  await expect(page.getByRole("dialog").getByLabel("Working directory")).toHaveValue("packages/api")
+  const createRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/ws-1/agents")
+  await page.getByRole("button", { name: "Import as agent" }).click()
+  const request = await createRequest
+  expect(request.postDataJSON()).toMatchObject({
+    server_id: "srv-a",
+    kind: "acp",
+    cwd: "packages/api",
+    args: ["--harness", "grok", "--session-id", "sess-imported"],
+  })
+})
+
+test("machine overview can install the shared thread UI", async ({ page }) => {
+  await page.goto("/")
+  await openWorkspaceSettings(page)
+  await workstationRow(page).click()
+  await expect(page.getByRole("heading", { name: "Thread UI" })).toBeVisible()
+  await expect(page.getByText("Not installed")).toBeVisible()
+  const installRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/ws-1/machines/srv-a/thread-ui")
+  await page.getByRole("button", { name: "Install thread UI" }).click()
+  await installRequest
+  await expect(page.getByRole("button", { name: "Installing…" })).toBeVisible()
 })
 
 test("create agent dialog can install a git recipe", async ({ page }) => {

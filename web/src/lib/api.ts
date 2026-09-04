@@ -85,6 +85,26 @@ export interface AgentInterface {
   registered_at: string
 }
 
+export interface AcpSessionCandidate {
+  harness: string
+  session_id: string
+  cwd: string
+  title: string
+  preview?: string
+  updated_at?: string
+}
+
+export interface HostThreadUi {
+  git: string
+  ref: string
+  path: string
+  dist_path?: string
+  installed: boolean
+  ui_home?: string
+  embed_query?: string
+  installing?: boolean
+}
+
 export interface AgentLaunchProfile {
   profile_id: string
   workspace_id: string

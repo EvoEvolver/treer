@@ -59,6 +59,13 @@ const agentPlain = {
   status: "running",
 }
 
+const agentAcp = {
+  ...agentWithUi,
+  agent_id: "ag-acp",
+  name: "grok-thread",
+  kind: "acp",
+}
+
 const service = {
   service_id: "svc-1",
   name: "dashboard-app",
@@ -74,7 +81,7 @@ const snapshot = {
   revision: 1,
   workspace,
   servers: [machine],
-  agents: [agentWithUi, agentPlain],
+  agents: [agentWithUi, agentPlain, agentAcp],
 }
 
 function ok(route: Route, body: unknown) {
@@ -162,6 +169,19 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
   await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
   await expect(page.getByRole("button", { name: "Copy restart-controller" })).toBeVisible()
   await expect(page.getByRole("button", { name: "Copy start" })).toBeVisible()
+})
+
+test("ACP thread iframe appends Treer embed chrome flags", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.getByRole("button", { name: /^grok-thread / }).click()
+  const frame = page.locator("iframe[title='grok-thread interface']")
+  await expect(frame).toBeVisible()
+  await expect(frame).toHaveAttribute("src", /presentation=embedded-single-thread/)
+  await expect(frame).toHaveAttribute("src", /explorer=1/)
+  await expect(frame).toHaveAttribute("src", /shell=0/)
+  await expect(frame).toHaveAttribute("src", /permissions=0/)
+  await expect(frame).toHaveAttribute("src", /nav=0/)
 })
 
 test("selecting a plain terminal agent shows the terminal pane, not an iframe", async ({ page }) => {

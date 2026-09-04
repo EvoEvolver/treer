@@ -16,7 +16,7 @@ export type FirstRunTourHost = {
   closeInstall: () => void
   openCreateAgent: (reset: boolean) => void
   closeCreateAgent: () => void
-  setAgentLaunch: (kind: "terminal" | "recipe" | "ui-profile") => void
+  setAgentLaunch: (kind: "terminal" | "recipe" | "ui-profile" | "acp-grok") => void
 }
 
 const STORAGE_PREFIX = `treer.first-run-tour.${FIRST_RUN_TOUR_VERSION}`
@@ -274,7 +274,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
       popover: {
         title: "Start an agent",
         description:
-          "<p>Once a machine is online, open <strong>Agents</strong> and click <strong>New</strong>. An agent is a process Treer keeps alive on that machine: a shell, a coding agent, or a short-lived installer. This button stays disabled until at least one machine is online.</p>",
+          "<p>Once a machine is online, open <strong>Agents</strong> and click <strong>New</strong>. Pick a thread such as <strong>Grok thread</strong> — Treer starts it on that machine and opens the conversation here. You do not type a CLI command. A terminal or installer is still available in the same dialog.</p>",
         side: "bottom",
         align: "end",
         onPrevClick: () => {
@@ -300,7 +300,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
           tour.movePrevious()
         },
         onNextClick: () => {
-          host.setAgentLaunch("ui-profile")
+          host.setAgentLaunch("acp-grok")
           tour.moveNext()
         },
       },
@@ -308,9 +308,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='agent-launch']",
       popover: {
-        title: "UI agents (AIS / ACP-style)",
+        title: "Thread agents",
         description:
-          "<p>Saved profiles such as <strong>Codex</strong>, <strong>Claude</strong>, <strong>Pi</strong>, and <strong>OpenCode</strong> start a coding agent that can register an <strong>Agent Interface Server</strong> (AIS), similar to ACP.</p><p>If that agent publishes a <code>ui_path</code>, Treer embeds the page instead of the terminal. Prompts and transcripts go through the interface, not by typing into the shell. The list shows <code>· AIS</code> when that happens.</p>",
+          "<p>Choose <strong>Grok thread</strong>, <strong>Cursor thread</strong>, <strong>Codex thread</strong>, <strong>Claude thread</strong>, or <strong>OpenCode thread</strong>. Treer starts <code>treer-acp</code> on that machine, installs the shared thread UI the first time, and embeds the conversation. <strong>Import session</strong> turns a local Codex/Grok/Claude chat into a Treer Agent.</p><p>Each Agent is one thread. The list shows <code>· AIS</code> when the interface is ready.</p>",
         side: "left",
         align: "start",
         onPrevClick: () => {
@@ -331,7 +331,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
         side: "left",
         align: "start",
         onPrevClick: () => {
-          host.setAgentLaunch("ui-profile")
+          host.setAgentLaunch("acp-grok")
           tour.movePrevious()
         },
         onNextClick: () => {
@@ -344,7 +344,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
       popover: {
         title: "You’re ready",
         description:
-          "<p>Create a workspace, enroll a machine with the two commands, then start a terminal or a saved profile. Replay this tour anytime from the user menu.</p>",
+          "<p>Create a workspace, enroll a machine with the two commands, then click <strong>New</strong> and pick a thread. Replay this tour anytime from the user menu.</p>",
         onPrevClick: () => {
           void (async () => {
             host.openCreateAgent(false)
