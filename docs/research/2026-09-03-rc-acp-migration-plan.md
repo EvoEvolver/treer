@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed, **held** (docs only; no Treer implementation this round) |
+| Status | First slice on `feat/rc-acp-runtime` (not `main`); UI flags on `feat/treer-presentation-flags` |
 | Date | 2026-09-04 |
 | Audience | Treer maintainers who already know Proxy, Host, AIS, and recipes |
 | Sources | RC `origin/main` (rust line); UI pin `https://github.com/dufangshi/remote-codex-thread-ui-rust` |
@@ -18,7 +18,8 @@ RC `main` **is** the Rust ACP rewrite (`39d1b7b0 chore: make Rust
 implementation the main line`). Snapshot `treer-acp` from RC `origin/main`,
 not from a stale `rust/acp-rewrite` worktree.
 
-Do **not** start Treer implementation in this round. When work starts:
+First slice is on `feat/rc-acp-runtime` / UI `feat/treer-presentation-flags`.
+Do **not** land it on Treer `main` without review. When continuing:
 
 - Do not commit on Treer `main` or fast-forward `origin/main` with this
   feature.
