@@ -5,7 +5,7 @@
 | Status | Proposed, **held** (docs only; no Treer implementation this round) |
 | Date | 2026-09-04 |
 | Audience | Treer maintainers who already know Proxy, Host, AIS, and recipes |
-| Sources | RC `origin/main` (`39d1b7b0` rust line, tip `7e1f9492`); UI `EvoEvolver/treer-agent-ui` and RC sibling `dufangshi/remote-codex-thread-ui-rust` (both `4b426db`) |
+| Sources | RC `origin/main` (rust line); UI pin `https://github.com/dufangshi/remote-codex-thread-ui-rust` |
 | Scope | Execution plan only. Do not start Treer code until this plan is agreed. |
 | Treer working copy | Never commit this work on Treer `main`. Use a git worktree and a new branch. |
 
@@ -32,16 +32,19 @@ git worktree add -b feat/rc-acp-runtime /Users/mac/dev/treer-rc-acp-runtime orig
 - Keep this plan on `docs/rc-acp-migration` (or merge it into the feature
   branch). Implementation PRs come from the feature worktree.
 
-UI git remotes (same commit `4b426db` today):
+UI git remotes:
 
 | Repo | Role |
 | --- | --- |
-| `https://github.com/EvoEvolver/treer-agent-ui` | Treer-owned external Agent UI. This is what Treer pins. |
-| `https://github.com/dufangshi/remote-codex-thread-ui-rust` | RC's independent rust UI fork. |
-| `https://github.com/dufangshi/remote-codex-thread-ui` | Original UI repo. RC CI still clones this URL at `THREAD_UI_COMMIT=4b426db`. |
+| `https://github.com/dufangshi/remote-codex-thread-ui-rust` | **Treer pin.** RC rust UI. Host `treer ui install` this git once. |
+| `https://github.com/dufangshi/remote-codex-thread-ui` | Original UI repo. RC CI may still clone a pinned commit from here. |
+| `https://github.com/EvoEvolver/treer-agent-ui` | Earlier Treer-owned snapshot at `4b426db`. Not the pin. Leave unused. |
 
-Do not vendor any of these into Treer `apps/`. Do not push Treer UI work
-to RC's repos. Pull selected commits across forks only when needed.
+Do not vendor the UI into Treer `apps/`. Treer-specific chrome is **not** a
+hard fork of RC: add launch/query parameters in
+`remote-codex-thread-ui-rust` so the same package can look like RC or like
+an embedded Treer Agent. Default RC supervisor-web stays unchanged if it
+omits those params.
 
 ## Goal
 
@@ -85,20 +88,26 @@ mobile and RC's phone apps.
    state (for example `.treer/agents/{agent_id}/journal.sqlite`).
 9. **`treer-acp` lives in Treer crates.** Runtime, journal, AIS HTTP. No
    bundled React tree.
-10. **Generic thread UI is external.** It is not Treer `web/` and not an
-    in-tree `apps/` surface. Checkout `EvoEvolver/treer-agent-ui` (or
-    another git) on the machine and **attach it with `treer ui`**. The
-    wire remains AIS `ui_path` via `treer interface register`. Pi UI and
-    Codex UI keep self-registering as they do today.
-11. **Explorer is Agent-cwd scoped** and is in the first product slice. It
+10. **Generic thread UI is external.** Pin
+    `https://github.com/dufangshi/remote-codex-thread-ui-rust`. **One Host
+    installs it once** (`treer ui install`); every Agent on that Host may
+    serve that dist. Do not install per Agent. Do not vendor into Treer
+    `apps/`. The wire remains AIS `ui_path`. Pi UI and Codex UI keep
+    self-registering.
+11. **Treer chrome is parameterized, not forked.** `remote-codex-thread-ui-rust`
+    should accept launch/query flags (hide rooms rail, explorer, shell,
+    permission cards, …) so Treer's iframe can DIY without changing RC's
+    default supervisor-web. Code for those flags lands in that UI repo
+    later; this round is docs only.
+12. **Explorer is Agent-cwd scoped** and is in the first product slice. It
     does not recreate RC Workspace (see below).
-12. **Session import is in the first product slice.** Importing a local
+13. **Session import is in the first product slice.** Importing a local
     Codex/Claude/ACP session **creates a Treer Agent** bound to that session
     and cwd. It does not attach a thread to an RC workspace id.
-13. **Phase-1 ACP extras.** prompt, journal-backed transcript, state, abort,
+14. **Phase-1 ACP extras.** prompt, journal-backed transcript, state, abort,
     auto-allow, `ui_path`, cwd explorer, session import. Resume/load if the
     tests are cheap. Compact, fork, goal, MCP, hooks, PDF export wait.
-14. **Mobile UI is deferred.** Do not change the Treer mobile app or bundle
+15. **Mobile UI is deferred.** Do not change the Treer mobile app or bundle
     script in this work. A later plan merges Treer mobile with RC's native
     clients.
 
@@ -119,7 +128,7 @@ RC thread fork                      -> Launch another Agent
 RC thread import                    -> create Agent bound to an existing local session
 RC files API under workspace id     -> AIS file routes under that Agent's cwd
 RC supervisor-web shell             -> dropped
-RC thread-ui (embedded-single-thread) -> external git + `treer ui` → AIS ui_path
+RC thread-ui (embedded-single-thread) -> Host `treer ui install` + AIS ui_path
 ```
 
 ### Thread versus Agent
@@ -187,7 +196,7 @@ flowchart TB
 
   subgraph agentProc [One Agent process]
     AIS["AIS HTTP treer.agent-interface/v1"]
-    UI[External thread UI dist at ui_path]
+    UI[Host-installed thread-ui dist]
     Adapter[Harness adapter]
     ACP[ACP JSON-RPC stdio]
     Native[Other native protocols]
@@ -277,7 +286,7 @@ Browser
        -> enrolled Agent Server (outbound)
             -> Host process: one Agent
                  -> treer-acp (Rust ACP runtime + AIS HTTP)
-                      -> optional external UI dist (`treer ui use`)
+                      -> Host-wide UI dist (`treer ui install`, once)
                       -> harness stdio (grok agent stdio, cursor-agent acp,
                          codex-acp, claude-agent-acp, opencode acp, ...)
                  -> Host PTY (emergency TUI only)
@@ -293,7 +302,7 @@ exposes AIS on loopback.
 | Machine connection, Host child, PTY, cwd jail | `treer-agent-server` / Host | unchanged |
 | ACP catalog, adapters, session, journal, cwd files | `crates/treer-acp` | one Agent's conversation and its tree |
 | AIS HTTP | same Agent process (`treer-acp`) | Treer semantic contract |
-| Generic thread UI | **external git**, attached by `treer ui` | `embedded-single-thread` static dist served beside AIS |
+| Generic thread UI | Host install of `remote-codex-thread-ui-rust` | shared dist; each Agent serves it at `ui_path` |
 | Codex app-server UI | `apps/codex-ui` until ACP Codex parity | in-tree fallback; not the generic ACP UI |
 
 One Agent still has one process owner. Do not run `codex-acp` and `codex
@@ -319,61 +328,65 @@ Choosing one **creates a Treer Agent** with that cwd, harness, and
 `provider_session_id`. Same as Launch, except the ACP session already
 exists. No RC workspace id.
 
-## Thread UI: external git, attached with `treer ui`
+## Thread UI: Host install once, parameters for Treer chrome
 
-Treer does **not** vendor `@remote-codex/thread-ui` into `apps/` or `web/`.
-The generic ACP surface is a separate repository. RC does the same: the
-Rust supervisor-web depends on a sibling checkout; CI clones a pinned
-commit (`THREAD_UI_COMMIT=4b426db`). RC also published
-`dufangshi/remote-codex-thread-ui-rust` as its rust-oriented UI repo.
-Treer's pin is `EvoEvolver/treer-agent-ui` (same snapshot today).
+Treer does **not** vendor the React package into `apps/` or `web/`. Pin:
+
+```text
+https://github.com/dufangshi/remote-codex-thread-ui-rust
+```
 
 `apps/pi-ui` and `apps/codex-ui` stay in-tree and keep calling
 `treer interface register --ui-path` themselves. They are not the generic
 ACP UI.
 
-### `treer ui` (proposed)
+### `treer ui install` (Host-scoped)
 
-Today the only CLI is `treer interface register --ui-path`. That remains
-the **wire**. Add an Agent-facing `treer ui` family so operators and
-installer Agents attach an external UI without copying it into Treer:
+One Host, one install. Every Agent on that machine may serve the same dist.
 
 ```text
-treer ui install <git-url> [--ref main] [--name treer-agent-ui]
-treer ui list
+treer ui install https://github.com/dufangshi/remote-codex-thread-ui-rust.git
 treer ui show
-treer ui use <name-or-url>
-treer ui clear
 ```
 
 | Command | Who | Effect |
 | --- | --- | --- |
-| `install` | machine / Host | Clone/pin the git onto the Host (not into the Treer repo). Build dist if the checkout requires it. |
-| `list` / `show` | machine or Agent | Installed UI checkouts and which Agent is using which. |
-| `use` | **this Agent only** | Point `treer-acp` at that dist, serve it next to AIS, `interface register ... --ui-path /`. |
-| `clear` | this Agent | Drop `ui_path`; AIS prompt/transcript/state can remain. |
+| `install` | Host / operator | Clone/pin/build onto the Host (for example `.treer/ui/`). Not into the Treer git tree. Default git is `remote-codex-thread-ui-rust`. |
+| `show` | Host or Agent | What is installed and where the dist lives. |
 
-`use` does not create a second Agent. The UI is files served from the
-same loopback AIS process (or a static mount it already owns). One Agent
-is still one thread.
+There is **no per-Agent `use`**. `treer-acp` looks up the Host install and
+serves that dist next to AIS, then `interface register --ui-path /`. If
+nothing is installed, the Agent is AIS-only (no iframe).
 
-Optional sugar, not a second model:
+`interface register --ui-path` remains the wire. `treer ui` only manages
+the Host checkout. Do not add `--ui` on `agent create`; install is a
+machine setup step, like putting `grok` on PATH.
 
-```text
-treer agent admin profile create grok-acp --cwd . \
-  --ui https://github.com/EvoEvolver/treer-agent-ui.git \
-  treer-acp -- --harness grok
-```
+Installer recipes that today clone a UI+ACP TS server should become:
+install UI once on the Host, then create `treer-acp` Agents.
 
-`--ui` on create/launch means install-if-needed + `use` after the process
-is up. Default git when `--ui` is passed with no URL:
-`https://github.com/EvoEvolver/treer-agent-ui.git`.
+### Presentation parameters (later, in `remote-codex-thread-ui-rust`)
 
-Disable terminal plugin and permission cards in the attached UI. Cwd
-explorer talks to AIS extra routes on that same origin.
+Do not hard-fork RC chrome. The UI package already has
+`presentation: "workspace" | "embedded-single-thread"` (`embedded` hides
+the rooms rail). Extend that with **opt-in query/launch flags** so Treer
+can DIY without changing RC supervisor-web defaults (no flags = RC look).
 
-Installer Agents that currently `--recipe` a UI+ACP TS server should
-move to: create `treer-acp`, then `treer ui use` the Treer-owned git.
+Treer iframe / `treer-acp` would pass flags such as:
+
+| Flag | Treer default | Effect |
+| --- | --- | --- |
+| `presentation=embedded-single-thread` | on | No thread list / rooms rail (already implemented) |
+| `explorer=0` / `explorer=1` | cwd explorer on | Show or hide the file tree |
+| `shell=0` | off | Hide RC thread shell plugin (Treer uses Host PTY) |
+| `permissions=0` | off | Hide permission cards (AIS auto-allows) |
+| `nav=0` | off | Hide RC app/workspace switcher |
+
+Exact names can wait for the UI-repo change. Contract: **absent flags must
+preserve today's RC supervisor-web**. Treer sets flags; RC does not.
+
+This round does **not** edit `~/dev/remote-codex-thread-ui-rust`. Document
+only.
 
 ## Non-goals
 
@@ -401,7 +414,7 @@ waits for the later mobile merge.
 ### Phase 0 — Freeze the sources
 
 - RC `main` is the rust line. Snapshot ACP from `origin/main`.
-- UI pin: `EvoEvolver/treer-agent-ui` `main` = `4b426db`.
+- UI pin: `dufangshi/remote-codex-thread-ui-rust` (Host `treer ui install`).
 - Open the Treer **feature** worktree; do not use Treer `main`.
 
 ### Phase 1 — `treer-acp`
@@ -414,7 +427,8 @@ waits for the later mobile merge.
 ### Phase 2 — Agent launch, `treer ui`, import
 
 - Host starts one `treer-acp` per Agent (AIS, no bundled React).
-- `treer ui install` / `use` attaches `EvoEvolver/treer-agent-ui`.
+- Host `treer ui install` of `remote-codex-thread-ui-rust` once; Agents
+  share that dist.
 - Session import = create Agent.
 - One live harness e2e (grok or cursor).
 - Resume/load if tests stay cheap.
@@ -423,8 +437,9 @@ waits for the later mobile merge.
 
 - Keep `apps/codex-ui` until Codex-over-ACP parity is measured.
 - Mark JS `*-ais` compatibility-only.
-- README/skill: generic ACP UI is external; `treer ui` is the attach
-  command. Default git `EvoEvolver/treer-agent-ui`.
+- README/skill: `treer ui install` is Host-scoped; default git
+  `remote-codex-thread-ui-rust`. Presentation flags documented in that
+  UI repo.
 
 ### Phase 4 — Later
 
@@ -433,12 +448,9 @@ waits for the later mobile merge.
 
 ## Remaining call
 
-CLI shape for `treer ui` is proposed above (`install` / `use` wrapping
-`interface register --ui-path`). Confirm whether profile/create also
-grow `--ui <git>` as sugar, or CLI-only attach is enough.
-
-Do not retarget Treer's pin to `remote-codex-thread-ui-rust` unless we
-explicitly want one shared rust UI repo for both products.
+None on pin or install scope. Presentation flag names (`explorer`,
+`shell`, `permissions`, `nav`) are a later UI-repo bikeshed; Treer's
+required *effects* are listed above.
 
 ## PR sketch
 
