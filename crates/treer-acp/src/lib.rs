@@ -19,7 +19,7 @@ pub use local_sessions::{find_local_session, list_local_sessions, LocalSessionHo
 pub use types::{BoundSession, SessionCandidate, AIS_CAPABILITIES};
 pub use ui::{
     discover_installed_dist, install as install_host_ui, show as show_host_ui, InstallOptions,
-    UiStatus, DEFAULT_UI_GIT, TREER_EMBED_UI_QUERY,
+    UiStatus, DEFAULT_UI_GIT, DEFAULT_UI_REF, TREER_EMBED_UI_QUERY,
 };
 
 /// Bind a local harness session to this Agent's journal.

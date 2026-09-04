@@ -92,8 +92,25 @@ struct AppState {
     ui_path: Option<String>,
 }
 
-pub async fn serve(config: AisConfig) -> Result<AisServer> {
+pub async fn serve(mut config: AisConfig) -> Result<AisServer> {
     augment_path();
+    if config.ui_dist.is_none() {
+        config.ui_dist = crate::ui::discover_installed_dist();
+    }
+    if config.ui_dist.is_none()
+        && !matches!(config.harness, HarnessSpec::Fake)
+        && std::env::var("TREER_ACP_SKIP_UI_INSTALL").as_deref() != Ok("1")
+    {
+        match crate::ui::install(crate::ui::InstallOptions::default()) {
+            Ok(status) => {
+                config.ui_dist = status
+                    .dist_path
+                    .map(PathBuf::from)
+                    .or_else(crate::ui::discover_installed_dist);
+            }
+            Err(error) => tracing::warn!(%error, "Host thread UI auto-install failed"),
+        }
+    }
     std::fs::create_dir_all(&config.cwd)
         .with_context(|| format!("create cwd {}", config.cwd.display()))?;
     std::fs::create_dir_all(&config.state_dir)

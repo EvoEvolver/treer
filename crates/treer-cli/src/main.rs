@@ -406,7 +406,11 @@ enum UiCommand {
             help = "Git remote to clone (default: remote-codex-thread-ui-rust)"
         )]
         git_url: Option<String>,
-        #[arg(long = "ref", value_name = "REV", help = "Git ref to check out")]
+        #[arg(
+            long = "ref",
+            value_name = "REV",
+            help = "Git ref to check out (default: feat/treer-presentation-flags)"
+        )]
         git_ref: Option<String>,
         #[arg(
             long,

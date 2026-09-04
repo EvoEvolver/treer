@@ -9,7 +9,7 @@ use crate::types::home_dir;
 
 /// Default Host-wide thread UI git remote.
 pub const DEFAULT_UI_GIT: &str = "https://github.com/dufangshi/remote-codex-thread-ui-rust.git";
-pub const DEFAULT_UI_REF: &str = "main";
+pub const DEFAULT_UI_REF: &str = "feat/treer-presentation-flags";
 pub const UI_CHECKOUT_NAME: &str = "remote-codex-thread-ui-rust";
 pub const INSTALL_RECORD_NAME: &str = "install.json";
 
