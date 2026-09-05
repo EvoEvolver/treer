@@ -400,23 +400,34 @@ async fn submit_prompt(
         );
         let result = state_clone
             .runtime
-            .prompt_with_progress(&state_clone.session_key, &text, &turn_id, cancel, |items| {
-                for item in items {
-                    let _ = state_clone.journal.upsert_entry(&history_to_entry(item));
-                }
-                let mut last = last_emit.lock().expect("progress throttle");
-                if last.elapsed() >= Duration::from_millis(40) {
-                    *last = std::time::Instant::now();
-                    drop(last);
-                    #[cfg(feature = "remote-codex-ui")]
-                    {
-                        let state = state_clone.clone();
-                        tokio::spawn(async move {
-                            remote_codex::emit_state(&state).await;
-                        });
+            .prompt_with_progress(
+                &state_clone.session_key,
+                &text,
+                &turn_id,
+                cancel,
+                |items, usage| {
+                    for item in items {
+                        let _ = state_clone.journal.upsert_entry(&history_to_entry(item));
                     }
-                }
-            })
+                    if let Some(usage) = usage {
+                        let _ = state_clone
+                            .journal
+                            .set_kv(&format!("turn_usage:{turn_id}"), &usage.to_string());
+                    }
+                    let mut last = last_emit.lock().expect("progress throttle");
+                    if last.elapsed() >= Duration::from_millis(40) {
+                        *last = std::time::Instant::now();
+                        drop(last);
+                        #[cfg(feature = "remote-codex-ui")]
+                        {
+                            let state = state_clone.clone();
+                            tokio::spawn(async move {
+                                remote_codex::emit_state(&state).await;
+                            });
+                        }
+                    }
+                },
+            )
             .await;
         match result {
             Ok(items) => {

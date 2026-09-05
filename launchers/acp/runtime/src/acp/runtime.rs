@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -84,6 +85,8 @@ impl AcpRuntime {
         cwd: &str,
         load_id: Option<&str>,
     ) -> Result<(String, LiveSession)> {
+        let cwd = harness_cwd(cwd);
+        let cwd = cwd.as_ref();
         let availability = classify_availability(def);
         if availability != "ready" {
             bail!("{} is not available ({availability})", def.display_name);
@@ -228,7 +231,7 @@ impl AcpRuntime {
         turn_id: &str,
         cancel: Cancel,
     ) -> Result<Vec<HistoryItem>> {
-        self.prompt_with_progress(session_key, prompt, turn_id, cancel, |_| {})
+        self.prompt_with_progress(session_key, prompt, turn_id, cancel, |_, _| {})
             .await
     }
 
@@ -241,7 +244,7 @@ impl AcpRuntime {
         mut on_progress: F,
     ) -> Result<Vec<HistoryItem>>
     where
-        F: FnMut(&[HistoryItem]) + Send,
+        F: FnMut(&[HistoryItem], Option<&Value>) + Send,
     {
         {
             let sessions = self.inner.sessions.lock().await;
@@ -292,6 +295,9 @@ impl AcpRuntime {
             }),
         );
         let mut mapper = TurnMapper::new(turn_id);
+        let mut last_usage: Option<Value> = None;
+        let mut codex_usage =
+            (adapter_id == "codex").then(|| super::usage::CodexUsageReader::new(&session_id));
         tokio::pin!(prompt_rpc);
         let mut prompt_done = false;
         let outcome = loop {
@@ -322,8 +328,18 @@ impl AcpRuntime {
                                     continue;
                                 }
                             }
-                            let _ = mapper.apply(&update);
-                            on_progress(&mapper.snapshot());
+                            let mapped = mapper.apply(&update);
+                            if let Some(usage) = mapped.usage {
+                                if let Some(normalized) = crate::usage::normalize_usage(&usage) {
+                                    last_usage = Some(normalized);
+                                }
+                            }
+                            if let Some(reader) = codex_usage.as_mut() {
+                                for usage in reader.poll() {
+                                    last_usage = Some(usage);
+                                }
+                            }
+                            on_progress(&mapper.snapshot(), last_usage.as_ref());
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "ACP session/update receiver lagged");
@@ -367,12 +383,18 @@ impl AcpRuntime {
             TurnOutcome::Interrupted => "interrupted",
             TurnOutcome::Failed(_) => "failed",
         };
+        if let Some(reader) = codex_usage.as_mut() {
+            for usage in reader.poll_final() {
+                last_usage = Some(usage);
+            }
+        }
         let mut items = mapper.finish(!matches!(outcome, TurnOutcome::Completed));
         for item in &mut items {
             if item.status.as_deref() != Some("failed") {
                 item.status = Some(status.into());
             }
         }
+        on_progress(&items, last_usage.as_ref());
         match outcome {
             TurnOutcome::Failed(error) => Err(error),
             TurnOutcome::Completed | TurnOutcome::Interrupted => Ok(items),
@@ -449,17 +471,20 @@ impl AcpRuntime {
                 .as_ref()
                 .and_then(|item| item.reasoning_effort.as_deref());
             if current != Some(effort) {
-                if let Some(op) = adapter.apply_reasoning(effort, &state) {
-                    let response =
-                        apply_setting_op(process.as_ref(), &session_id, &cwd, op).await?;
-                    patch_projection(
-                        &mut projection,
-                        adapter.as_ref(),
-                        None,
-                        Some(effort),
-                        &response,
-                    );
-                }
+                let op = adapter.apply_reasoning(effort, &state).unwrap_or_else(|| {
+                    SessionSettingOp::SetConfig {
+                        config_id: reasoning_config_id(&state).to_string(),
+                        value: effort.to_string(),
+                    }
+                });
+                let response = apply_setting_op(process.as_ref(), &session_id, &cwd, op).await?;
+                patch_projection(
+                    &mut projection,
+                    adapter.as_ref(),
+                    None,
+                    Some(effort),
+                    &response,
+                );
             }
         }
         if let Some(live) = self.inner.sessions.lock().await.get_mut(session_key) {
@@ -808,6 +833,42 @@ async fn handle_agent_request(
     Ok(())
 }
 
+fn harness_cwd(cwd: &str) -> Cow<'_, str> {
+    #[cfg(windows)]
+    {
+        if let Some(path) = cwd.strip_prefix(r"\\?\UNC\") {
+            return Cow::Owned(format!(r"\\{path}"));
+        }
+        if let Some(path) = cwd.strip_prefix(r"\\?\") {
+            return Cow::Borrowed(path);
+        }
+    }
+    Cow::Borrowed(cwd)
+}
+
+fn reasoning_config_id(state: &Value) -> &str {
+    let options = state.get("configOptions").unwrap_or(state);
+    options
+        .as_array()
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| {
+                    option.get("category").and_then(Value::as_str) == Some("thought_level")
+                })
+                .or_else(|| {
+                    options.iter().find(|option| {
+                        matches!(
+                            option.get("id").and_then(Value::as_str),
+                            Some("reasoning_effort" | "thought_level" | "thought-level")
+                        )
+                    })
+                })
+                .and_then(|option| option.get("id").and_then(Value::as_str))
+        })
+        .unwrap_or("thought-level")
+}
+
 fn extra_env_for(def: &AcpAgentDef) -> Vec<(&'static str, String)> {
     let mut env = Vec::new();
     let home_key = match def.id.as_str() {
@@ -857,5 +918,34 @@ mod tests {
             agent_server_command(&grok),
             "grok agent --always-approve --no-leader stdio"
         );
+    }
+
+    #[test]
+    fn removes_windows_verbatim_prefixes_from_harness_paths() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                harness_cwd(r"\\?\C:\Users\win10\proj1"),
+                r"C:\Users\win10\proj1"
+            );
+            assert_eq!(
+                harness_cwd(r"\\?\UNC\server\share\proj1"),
+                r"\\server\share\proj1"
+            );
+        }
+        #[cfg(not(windows))]
+        assert_eq!(harness_cwd("/tmp/proj1"), "/tmp/proj1");
+    }
+
+    #[test]
+    fn reasoning_config_id_prefers_advertised_thought_level() {
+        let state = serde_json::json!({
+            "configOptions": [
+                { "id": "thought_level", "category": "thought_level" },
+                { "id": "model", "category": "model" }
+            ]
+        });
+        assert_eq!(reasoning_config_id(&state), "thought_level");
+        assert_eq!(reasoning_config_id(&serde_json::json!({})), "thought-level");
     }
 }

@@ -8,6 +8,7 @@ pub mod prompt;
 pub mod rpc;
 pub mod runtime;
 pub mod terminal;
+pub mod usage;
 
 pub use adapter::{adapter_for, HarnessAdapter};
 pub use catalog::{

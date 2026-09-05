@@ -66,7 +66,13 @@ pub fn history_item(entry: &AgentTranscriptEntry) -> Value {
     item
 }
 
-pub fn turns_from_entries(entries: &[AgentTranscriptEntry], busy: bool) -> Vec<Value> {
+pub fn turns_from_entries(
+    entries: &[AgentTranscriptEntry],
+    busy: bool,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    turn_usages: &std::collections::HashMap<String, Value>,
+) -> Vec<Value> {
     let groups = group_transcript_turns(entries);
     let last_index = groups.len().saturating_sub(1);
     groups
@@ -88,6 +94,25 @@ pub fn turns_from_entries(entries: &[AgentTranscriptEntry], busy: bool) -> Vec<V
             } else {
                 "completed"
             };
+            let turn_id = group
+                .first()
+                .map(|entry| entry.id.trim_end_matches(":user").to_string())
+                .unwrap_or_else(|| "turn".into());
+            let raw_usage = turn_usages.get(&turn_id);
+            let turn_model = raw_usage
+                .and_then(|usage| usage.get("model").and_then(Value::as_str))
+                .or(model);
+            let turn_effort = raw_usage
+                .and_then(|usage| usage.get("reasoningEffort").and_then(Value::as_str))
+                .or(reasoning_effort);
+            let token_usage = raw_usage.and_then(crate::usage::normalize_usage);
+            let price = token_usage.as_ref().and_then(|usage| {
+                crate::usage::estimate_price(
+                    usage,
+                    turn_model,
+                    raw_usage.and_then(|value| value.get("pricingTierKey").and_then(Value::as_str)),
+                )
+            });
             json!({
                 "id": group.first().map(|entry| entry.id.as_str()).unwrap_or("turn"),
                 "startedAt": if started.is_empty() { Value::Null } else { json!(started) },
@@ -95,6 +120,10 @@ pub fn turns_from_entries(entries: &[AgentTranscriptEntry], busy: bool) -> Vec<V
                 "error": Value::Null,
                 "items": group.iter().map(history_item).collect::<Vec<_>>(),
                 "turnNumber": index + 1,
+                "model": turn_model,
+                "reasoningEffort": turn_effort,
+                "tokenUsage": token_usage.as_ref().and_then(crate::usage::public_usage),
+                "priceEstimate": price,
             })
         })
         .collect()
@@ -123,12 +152,19 @@ pub struct SurfaceInput<'a> {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub model_options: Vec<ModelOption>,
+    pub turn_usages: std::collections::HashMap<String, Value>,
 }
 
 pub fn state_payload(input: SurfaceInput<'_>) -> Value {
     let now = crate::types::now_rfc3339();
     let busy = input.status == AgentStatus::Working;
-    let turns = turns_from_entries(input.entries, busy);
+    let turns = turns_from_entries(
+        input.entries,
+        busy,
+        input.model.as_deref(),
+        input.reasoning_effort.as_deref(),
+        &input.turn_usages,
+    );
     let title = thread_title(input.entries, input.harness_label);
     let thread_status = if busy {
         "running"
@@ -260,6 +296,7 @@ async fn state_value(state: &AppState) -> Value {
             .as_ref()
             .map(|item| item.models.clone())
             .unwrap_or_default(),
+        turn_usages: state.journal.turn_usages().unwrap_or_default(),
     })
 }
 
@@ -413,6 +450,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             model_options: Vec::new(),
+            turn_usages: Default::default(),
         });
         assert_eq!(payload["ready"], true);
         assert_eq!(payload["detail"]["thread"]["id"], "sess_1");
@@ -451,6 +489,7 @@ mod tests {
                 supported_reasoning_efforts: Vec::new(),
                 default_reasoning_effort: Some("high".into()),
             }],
+            turn_usages: Default::default(),
         });
         let turns = payload["detail"]["turns"].as_array().unwrap();
         assert_eq!(turns.len(), 1);
@@ -481,9 +520,43 @@ mod tests {
             model: None,
             reasoning_effort: None,
             model_options: Vec::new(),
+            turn_usages: Default::default(),
         });
         assert_eq!(payload["detail"]["thread"]["status"], "running");
         assert_eq!(payload["detail"]["turns"][0]["status"], "running");
         assert_eq!(payload["detail"]["thread"]["activeTurnId"], "u1");
+    }
+
+    #[test]
+    fn projects_turn_token_usage_and_price_estimate() {
+        let entries = [
+            entry("op-1:user", "message", Some("user"), "hi"),
+            entry("op-1:assistant:1", "message", Some("assistant"), "hello"),
+        ];
+        let mut turn_usages = std::collections::HashMap::new();
+        turn_usages.insert(
+            "op-1".into(),
+            json!({"total":{"inputTokens":1000,"outputTokens":20},"last":{"inputTokens":1000,"outputTokens":20},"model":"gpt-5.2"}),
+        );
+        let payload = state_payload(SurfaceInput {
+            agent_id: "ag_1",
+            harness_id: "codex",
+            harness_label: "Codex",
+            cwd: ".",
+            session_id: "sess_1",
+            entries: &entries,
+            status: AgentStatus::Idle,
+            error: None,
+            ready: true,
+            model: Some("gpt-5.2".into()),
+            reasoning_effort: None,
+            model_options: Vec::new(),
+            turn_usages,
+        });
+        let turn = &payload["detail"]["turns"][0];
+        assert_eq!(turn["tokenUsage"]["total"]["inputTokens"], 1000);
+        assert_eq!(turn["tokenUsage"]["total"]["outputTokens"], 20);
+        assert!(turn["priceEstimate"]["totalUsd"].as_f64().unwrap() > 0.0);
+        assert_eq!(turn["model"], "gpt-5.2");
     }
 }
