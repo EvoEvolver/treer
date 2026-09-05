@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
 use treer_protocol::AgentTranscriptEntry;
 
 use crate::types::{now_rfc3339, BoundSession, HistoryItem};
@@ -156,6 +158,23 @@ impl Journal {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    pub fn turn_usages(&self) -> Result<HashMap<String, Value>> {
+        let conn = self.conn.lock().expect("journal mutex");
+        let mut stmt = conn.prepare("SELECT key, value FROM kv WHERE key LIKE 'turn_usage:%'")?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            Ok((key, value))
+        })?;
+        let mut usages = HashMap::new();
+        for row in rows {
+            let (key, value) = row?;
+            let turn_id = key.trim_start_matches("turn_usage:").to_string();
+            usages.insert(turn_id, serde_json::from_str(&value).unwrap_or(Value::Null));
+        }
+        Ok(usages)
     }
 }
 

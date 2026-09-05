@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use serde_json::Value;
-
 use crate::types::{now_rfc3339, GoalState, HistoryItem};
+use serde_json::Value;
 
 #[derive(Debug, Default)]
 pub struct MappedUpdate {
@@ -17,10 +16,10 @@ pub struct MappedUpdate {
 
 pub struct TurnMapper {
     turn_id: String,
-    agent_text: String,
-    agent_created_at: Option<String>,
-    thought_text: String,
-    thought_created_at: Option<String>,
+    agent_segments: Vec<HistoryItem>,
+    thought_segments: Vec<HistoryItem>,
+    active_agent_segment: Option<usize>,
+    active_thought_segment: Option<usize>,
     tools: Vec<HistoryItem>,
     tool_payloads: HashMap<String, Value>,
     plans: Vec<HistoryItem>,
@@ -32,10 +31,10 @@ impl TurnMapper {
     pub fn new(turn_id: impl Into<String>) -> Self {
         Self {
             turn_id: turn_id.into(),
-            agent_text: String::new(),
-            agent_created_at: None,
-            thought_text: String::new(),
-            thought_created_at: None,
+            agent_segments: Vec::new(),
+            thought_segments: Vec::new(),
+            active_agent_segment: None,
+            active_thought_segment: None,
             tools: Vec::new(),
             tool_payloads: HashMap::new(),
             plans: Vec::new(),
@@ -55,48 +54,86 @@ impl TurnMapper {
         match kind {
             "agent_message_chunk" => {
                 if let Some(text) = content_text(body) {
-                    if self.agent_created_at.is_none() {
-                        self.agent_created_at = created_at;
+                    self.active_thought_segment = None;
+                    let segment_index = if let Some(index) = self.active_agent_segment {
+                        index
+                    } else {
+                        let index = self.agent_segments.len();
+                        let sequence = self.next_sequence();
+                        let mut segment = item(
+                            format!("{}:assistant:{}", self.turn_id, index + 1),
+                            "agentMessage",
+                            String::new(),
+                            "running",
+                            &self.turn_id,
+                        );
+                        if let Some(created_at) = created_at {
+                            segment.created_at = Some(created_at);
+                        }
+                        segment.sequence = Some(sequence);
+                        self.agent_segments.push(segment);
+                        self.active_agent_segment = Some(index);
+                        index
+                    };
+                    if let Some(segment) = self.agent_segments.get_mut(segment_index) {
+                        segment.text.push_str(&text);
+                        mapped.deltas.push((
+                            segment.id.clone(),
+                            text,
+                            segment.sequence.unwrap_or_default(),
+                        ));
                     }
-                    self.agent_text.push_str(&text);
-                    self.seq += 1;
-                    let item_id = format!("{}:assistant", self.turn_id);
-                    mapped.deltas.push((item_id, text, self.seq));
                 }
             }
             "agent_thought_chunk" => {
                 if let Some(text) = content_text(body) {
-                    if self.thought_created_at.is_none() {
-                        self.thought_created_at = created_at;
+                    self.active_agent_segment = None;
+                    let segment_index = if let Some(index) = self.active_thought_segment {
+                        index
+                    } else {
+                        let index = self.thought_segments.len();
+                        let sequence = self.next_sequence();
+                        let mut segment = item(
+                            format!("{}:thought:{}", self.turn_id, index + 1),
+                            "reasoning",
+                            String::new(),
+                            "running",
+                            &self.turn_id,
+                        );
+                        if let Some(created_at) = created_at {
+                            segment.created_at = Some(created_at);
+                        }
+                        segment.sequence = Some(sequence);
+                        self.thought_segments.push(segment);
+                        self.active_thought_segment = Some(index);
+                        index
+                    };
+                    if let Some(segment) = self.thought_segments.get_mut(segment_index) {
+                        segment.text.push_str(&text);
+                        mapped.items.push(segment.clone());
                     }
-                    self.thought_text.push_str(&text);
-                    let mut thought = item(
-                        format!("{}:thought", self.turn_id),
-                        "reasoning",
-                        self.thought_text.clone(),
-                        "running",
-                        &self.turn_id,
-                    );
-                    if let Some(created_at) = &self.thought_created_at {
-                        thought.created_at = Some(created_at.clone());
-                    }
-                    mapped.items.push(thought);
                 }
             }
             "tool_call" | "tool_call_update" => {
                 if let Some(tool_id) = body.get("toolCallId").and_then(Value::as_str) {
-                    let existing_created_at = self
+                    let existing_metadata = self
                         .tools
                         .iter()
                         .find(|candidate| candidate.id == tool_id)
-                        .and_then(|candidate| candidate.created_at.clone());
+                        .map(|candidate| (candidate.created_at.clone(), candidate.sequence));
+                    if existing_metadata.is_none() {
+                        self.close_text_segments();
+                    }
                     let payload = merge_tool_payload(self.tool_payloads.get(tool_id), body);
                     self.tool_payloads
                         .insert(tool_id.to_string(), payload.clone());
                     let mut item = tool_item(&self.turn_id, &payload);
+                    let (existing_created_at, existing_sequence) =
+                        existing_metadata.unwrap_or((None, None));
                     if let Some(created_at) = existing_created_at.or(created_at) {
                         item.created_at = Some(created_at);
                     }
+                    item.sequence = existing_sequence.or_else(|| Some(self.next_sequence()));
                     if let Some(existing) = self
                         .tools
                         .iter_mut()
@@ -111,6 +148,10 @@ impl TurnMapper {
             }
             "plan" => {
                 if let Some(mut item) = plan_item(&self.turn_id, body) {
+                    let existing_sequence = self.plans.first().and_then(|current| current.sequence);
+                    if existing_sequence.is_none() {
+                        self.close_text_segments();
+                    }
                     if let Some(created_at) = self
                         .plans
                         .first()
@@ -119,6 +160,7 @@ impl TurnMapper {
                     {
                         item.created_at = Some(created_at);
                     }
+                    item.sequence = existing_sequence.or_else(|| Some(self.next_sequence()));
                     self.plans = vec![item.clone()];
                     mapped.items.push(item);
                     mapped.plan = plan_steps(body);
@@ -126,6 +168,13 @@ impl TurnMapper {
             }
             "compaction_update" | "compaction_summary_chunk" => {
                 if let Some(mut item) = compaction_item(&self.turn_id, body) {
+                    let existing_sequence = self
+                        .compactions
+                        .first()
+                        .and_then(|current| current.sequence);
+                    if existing_sequence.is_none() {
+                        self.close_text_segments();
+                    }
                     if let Some(created_at) = self
                         .compactions
                         .first()
@@ -134,6 +183,7 @@ impl TurnMapper {
                     {
                         item.created_at = Some(created_at);
                     }
+                    item.sequence = existing_sequence.or_else(|| Some(self.next_sequence()));
                     self.compactions = vec![item.clone()];
                     mapped.items.push(item);
                 }
@@ -149,65 +199,70 @@ impl TurnMapper {
                 mapped.goal = goal_from_update(update).or_else(|| goal_from_update(body));
             }
             "usage_update" => {
-                mapped.usage = body
-                    .get("used")
-                    .cloned()
-                    .or_else(|| body.get("usage").cloned());
+                mapped.usage = Some(body.clone());
             }
             _ => {}
         }
         mapped
     }
 
-    pub fn snapshot(&self) -> Vec<HistoryItem> {
-        self.collect_items("running", false)
+    fn next_sequence(&mut self) -> i64 {
+        self.seq += 1;
+        self.seq
     }
 
-    pub fn finish(self, interrupted: bool) -> Vec<HistoryItem> {
+    fn close_text_segments(&mut self) {
+        self.active_agent_segment = None;
+        self.active_thought_segment = None;
+    }
+
+    pub fn finish(mut self, interrupted: bool) -> Vec<HistoryItem> {
         let status = if interrupted {
             "interrupted"
         } else {
             "completed"
         };
-        self.collect_items(status, !interrupted)
+        for segment in &mut self.agent_segments {
+            segment.status = Some(status.into());
+        }
+        for segment in &mut self.thought_segments {
+            segment.status = Some(status.into());
+        }
+        if self.agent_segments.is_empty()
+            && self.thought_segments.is_empty()
+            && self.tools.is_empty()
+            && self.plans.is_empty()
+            && self.compactions.is_empty()
+            && !interrupted
+        {
+            let mut agent = item(
+                format!("{}:assistant:1", self.turn_id),
+                "agentMessage",
+                "(no output)".into(),
+                status,
+                &self.turn_id,
+            );
+            agent.sequence = Some(self.next_sequence());
+            self.agent_segments.push(agent);
+        }
+        let mut items = Vec::new();
+        items.extend(self.thought_segments);
+        items.extend(self.tools);
+        items.extend(self.plans);
+        items.extend(self.compactions);
+        items.extend(self.agent_segments);
+        items.sort_by_key(|item| item.sequence.unwrap_or(i64::MAX));
+        items
     }
 
-    fn collect_items(&self, status: &str, empty_placeholder: bool) -> Vec<HistoryItem> {
+    pub fn snapshot(&self) -> Vec<HistoryItem> {
         let mut items = Vec::new();
-        if !self.thought_text.is_empty() {
-            let mut thought = item(
-                format!("{}:thought", self.turn_id),
-                "reasoning",
-                self.thought_text.clone(),
-                status,
-                &self.turn_id,
-            );
-            if let Some(created_at) = &self.thought_created_at {
-                thought.created_at = Some(created_at.clone());
-            }
-            items.push(thought);
-        }
-        items.extend(self.tools.clone());
-        items.extend(self.plans.clone());
-        items.extend(self.compactions.clone());
-        let text = if self.agent_text.is_empty() && items.is_empty() && empty_placeholder {
-            "(no output)".into()
-        } else {
-            self.agent_text.clone()
-        };
-        if !text.is_empty() {
-            let mut agent = item(
-                format!("{}:assistant", self.turn_id),
-                "agentMessage",
-                text,
-                status,
-                &self.turn_id,
-            );
-            if let Some(created_at) = &self.agent_created_at {
-                agent.created_at = Some(created_at.clone());
-            }
-            items.push(agent);
-        }
+        items.extend(self.thought_segments.iter().cloned());
+        items.extend(self.tools.iter().cloned());
+        items.extend(self.plans.iter().cloned());
+        items.extend(self.compactions.iter().cloned());
+        items.extend(self.agent_segments.iter().cloned());
+        items.sort_by_key(|item| item.sequence.unwrap_or(i64::MAX));
         items
     }
 }
@@ -604,7 +659,89 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_exposes_partial_assistant_text_as_running() {
+    fn preserves_interleaved_text_reasoning_and_tool_order() {
+        let mut mapper = TurnMapper::new("t1");
+        let first_delta = mapper.apply(&json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "Before tools." }
+        }));
+        mapper.apply(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-1",
+            "title": "first command",
+            "kind": "execute",
+            "status": "completed"
+        }));
+        mapper.apply(&json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": { "type": "text", "text": "Checking the result." }
+        }));
+        mapper.apply(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-2",
+            "title": "second command",
+            "kind": "execute",
+            "status": "completed"
+        }));
+        let final_delta = mapper.apply(&json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "After tools." }
+        }));
+
+        assert_ne!(first_delta.deltas[0].0, final_delta.deltas[0].0);
+        let items = mapper.finish(false);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.kind.as_str(), item.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("agentMessage", "Before tools."),
+                ("commandExecution", "first command"),
+                ("reasoning", "Checking the result."),
+                ("commandExecution", "second command"),
+                ("agentMessage", "After tools."),
+            ]
+        );
+        assert_eq!(
+            items.iter().map(|item| item.sequence).collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
+    }
+
+    #[test]
+    fn tool_status_updates_do_not_split_a_text_segment() {
+        let mut mapper = TurnMapper::new("t1");
+        mapper.apply(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-1",
+            "title": "command",
+            "kind": "execute",
+            "status": "in_progress"
+        }));
+        let first_delta = mapper.apply(&json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "Part one. " }
+        }));
+        mapper.apply(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-1",
+            "status": "completed"
+        }));
+        let second_delta = mapper.apply(&json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "Part two." }
+        }));
+
+        assert_eq!(first_delta.deltas[0].0, second_delta.deltas[0].0);
+        let items = mapper.finish(false);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, "commandExecution");
+        assert_eq!(items[1].text, "Part one. Part two.");
+    }
+
+    #[test]
+    fn snapshot_exposes_partial_assistant_text() {
         let mut mapper = TurnMapper::new("t1");
         mapper.apply(&json!({
             "sessionUpdate": "agent_message_chunk",

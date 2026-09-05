@@ -6,6 +6,7 @@ pub mod import_id;
 pub mod journal;
 pub mod transcript;
 pub mod types;
+pub mod usage;
 
 use std::path::Path;
 
