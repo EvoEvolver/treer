@@ -591,6 +591,39 @@ test("from a machine overview, clicking Terminal opens the agent terminal", asyn
   await expect(page.locator("header").getByText("api-server")).toBeVisible()
 })
 
+test("terminal drains a burst of small output frames without stalling", async ({ page }) => {
+  const frameCount = 800
+  let outputBytes = 0
+  let acknowledgedBytes = 0
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, (ws) => {
+    ws.onMessage((message) => {
+      if (typeof message !== "string") return
+      const control = JSON.parse(message) as { type?: string; bytes?: number }
+      if (control.type === "ack") acknowledgedBytes += control.bytes ?? 0
+    })
+    ws.send(JSON.stringify({
+      type: "ready",
+      session_id: "term-burst",
+      stream_epoch: "epoch-burst",
+      revision: 0,
+      gap: false,
+      replay_chunks: 0,
+    }))
+    for (let revision = 1; revision <= frameCount; revision += 1) {
+      const output = Buffer.from(`burst-frame-${revision}\r\n`)
+      outputBytes += output.byteLength
+      ws.send(output)
+      ws.send(JSON.stringify({ type: "cursor", stream_epoch: "epoch-burst", revision }))
+    }
+  })
+
+  await page.goto("/")
+  await page.getByRole("button", { name: /^api-server / }).click()
+
+  await expect(page.locator(".xterm-rows")).toContainText(`burst-frame-${frameCount}`, { timeout: 2_000 })
+  await expect.poll(() => acknowledgedBytes).toBe(outputBytes)
+})
+
 test("create agent dialog can install a git recipe", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
