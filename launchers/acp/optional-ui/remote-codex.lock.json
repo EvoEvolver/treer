@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/dufangshi/remote-codex-thread-ui-rust.git",
-  "commit": "1b85ac8bf8442bd9e4ad440859e0acdeab9ca8f8",
+  "commit": "ef8f4a2e8f7c7a0956785341352665f728954078",
   "package_manager": "pnpm@10.11.1",
   "build_command": ["run", "agent-ui:build"],
   "dist": "apps/agent-ui-web/dist"
