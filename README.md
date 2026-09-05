@@ -569,7 +569,8 @@ treer agent admin profile launch reviewer --machine build-machine \
 Optional repository launchers package more involved runtimes behind the same
 profile contract. The [ACP launcher](launchers/acp/README.md) provides headless
 Grok, Cursor, Codex, Claude, and OpenCode ACP profiles; its Remote Codex browser
-adapter is a separate explicit install and profile.
+adapter is a separate explicit install and profile. Treer's binary installer,
+updater, and release artifacts do not fetch or install repository launchers.
 
 The web Create Agent dialog includes a built-in Terminal option. It starts the
 machine user's interactive shell without injecting a command and is not stored

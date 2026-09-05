@@ -3,6 +3,9 @@
 Launchers package optional Agent runtimes as ordinary Treer launch profiles.
 They may build dependencies, start an Agent-scoped adapter, and register an
 Agent Interface, but they are not Treer Apps or platform components.
+They are not included in Treer's binary installation or update flow. An
+operator fetches launcher source separately, preferably with a shallow sparse
+checkout, only when choosing to install one.
 
 A launcher must preserve these boundaries:
 

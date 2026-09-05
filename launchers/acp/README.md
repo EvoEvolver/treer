@@ -11,9 +11,22 @@ publish a port or create an App, service, virtual host, or ingress.
 
 ## Install
 
-Run this from a managed Agent in a Treer checkout on the machine that will run
-the new Agent. Builds are machine-local, so the installer always launches on
-that same machine. First inspect the available provider launchers:
+Treer's normal installer and updater do not place this launcher on a user's
+machine. From a managed Agent on the machine that will run the new Agent,
+explicitly fetch a shallow sparse checkout:
+
+```bash
+TREER_ACP_SOURCE="${XDG_DATA_HOME:-$HOME/.local/share}/treer/acp-launcher"
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/EvoEvolver/treer.git "$TREER_ACP_SOURCE"
+git -C "$TREER_ACP_SOURCE" sparse-checkout set \
+  launchers/acp crates/treer-protocol
+cd "$TREER_ACP_SOURCE"
+```
+
+The root Cargo metadata is included automatically by Git's cone-mode sparse
+checkout. Builds are machine-local, so `apply.sh` always launches on that same
+machine. First inspect the available provider launchers:
 
 ```bash
 ./launchers/acp/scripts/apply.sh --list
