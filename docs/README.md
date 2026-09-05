@@ -20,7 +20,8 @@ matching the question; follow its source links for implementation detail.
 | [Gits App](../apps/gits/README.md) | Workspace-local Git hosting, deployment, storage, and trust boundary |
 | [Treer Mail App](../apps/mail/README.md) | Mail setup, browser OAuth, legacy migration, backup, and limits |
 | [Treer Telegram App](../apps/telegram/README.md) | Telegram setup, bindings, reply mapping, recovery, and limits |
-| [Root README](../README.md) | Installation, deployment, and operator command examples |
+| [Root README](../README.md) | Product overview, core philosophy, capabilities, and the shortest hosted start |
+| [Operator guide](operator-guide.md) | Local development, enrollment, auth, networking, messaging, and command examples |
 | [Self-hosted Compose](../deploy/README.md) | GHCR images, updater sidecar, and `/admin` control-plane updates |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 | [Treer install skill](../skills/treer-install/SKILL.md) | Recipe-install contract prompted when creating an installer with a git URL |
@@ -61,7 +62,8 @@ Use this order when documents disagree:
 
 1. Executable behavior, shared protocol types, and tests define what ships.
 2. Maintained documents describe current intent and cross-component contracts.
-3. The root README defines supported operator workflows.
+3. The operator guide defines supported operator workflows; the root README is
+   the concise product entry point.
 4. Plans and dated research preserve context at a named revision.
 
 The root [AGENTS.md](../AGENTS.md) is a development index. It deliberately links
@@ -78,7 +80,7 @@ setup; `treer --skill macos-container` prints it. The image Dockerfile is
 
 | Change | Documentation to review |
 | --- | --- |
-| User-visible setup or commands | `README.md`, embedded Treer skill |
+| User-visible setup or commands | Operator guide, embedded Treer skill |
 | Apple container machine Host | `skills/treer-macos-container/SKILL.md`, `deploy/apple-container-machine/Dockerfile` |
 | Self-hosted images or `/admin` update | `deploy/README.md`, release process, security model |
 | Product scope or promise | Product direction |

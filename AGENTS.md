@@ -19,7 +19,8 @@ second manual.
   by `treer --skill macos-container`.
 - The Proxy Voice LLM uses [the voice skill](skills/treer-voice/SKILL.md). It is
   not printed by `treer --skill`.
-- The root [README](README.md) owns setup and operator examples.
+- The root [README](README.md) is the concise product entry point. Detailed
+  setup and operator examples belong in [the operator guide](docs/operator-guide.md).
 - [PLAN.md](PLAN.md) and dated [research](docs/research/) preserve design
   history. Use source, tests, and maintained docs for current behavior.
 
@@ -32,6 +33,7 @@ second manual.
 | Change components, Core Message, or protocols | [docs/architecture.md](docs/architecture.md) |
 | Change auth, isolation, policy, or trust claims | [docs/security.md](docs/security.md) |
 | Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
+| Install, develop, deploy, or operate Treer | [docs/operator-guide.md](docs/operator-guide.md) |
 | Build or operate a workspace App | [apps/README.md](apps/README.md) |
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
 | Install a git recipe with an installer Agent | [skills/treer-install/SKILL.md](skills/treer-install/SKILL.md) |
