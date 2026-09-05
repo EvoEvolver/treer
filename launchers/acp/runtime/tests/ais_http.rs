@@ -30,6 +30,7 @@ async fn start_fake_with(setup: impl FnOnce(&std::path::Path)) -> Running {
         harness: HarnessSpec::Fake,
         bind_session_id: None,
         startup_timeout_ms: 8_000,
+        tower: None,
     })
     .await
     .expect("start fake AIS");
@@ -319,6 +320,7 @@ async fn serves_host_ui_dist_at_root() {
         harness: HarnessSpec::Fake,
         bind_session_id: None,
         startup_timeout_ms: 8_000,
+        tower: None,
     })
     .await
     .unwrap();
@@ -350,6 +352,7 @@ async fn journal_survives_restart() {
         harness: HarnessSpec::Fake,
         bind_session_id: None,
         startup_timeout_ms: 8_000,
+        tower: None,
     };
     let server = serve(config()).await.unwrap();
     let base = format!("http://127.0.0.1:{}", server.port);

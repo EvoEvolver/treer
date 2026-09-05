@@ -1,0 +1,47 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  background: #f4f5f2;
+  color: #18201d;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; }
+header {
+  min-height: 112px; padding: 22px 28px; display: flex; align-items: end;
+  justify-content: space-between; gap: 24px; border-bottom: 1px solid #c8ceca;
+  background: #fbfcfa;
+}
+h1, h2, p { margin: 0; }
+h1 { font-family: ui-monospace, monospace; font-size: 30px; letter-spacing: 0; }
+h2 { font-size: 13px; text-transform: uppercase; color: #53605a; margin-bottom: 12px; }
+.eyebrow { color: #607068; font-size: 12px; margin-bottom: 3px; }
+.stats { font-family: ui-monospace, monospace; font-size: 12px; color: #46534d; }
+main { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1fr) minmax(340px, 1.35fr); min-height: calc(100vh - 112px); }
+section { padding: 20px; border-right: 1px solid #c8ceca; min-width: 0; }
+.findings { grid-column: 1 / -1; border-top: 1px solid #c8ceca; }
+.list { display: grid; gap: 6px; }
+button, .finding {
+  width: 100%; border: 1px solid #c8ceca; border-radius: 4px; padding: 10px;
+  background: #fff; color: inherit; text-align: left; cursor: pointer;
+}
+button:hover, button[aria-current="true"] { border-color: #147a55; background: #edf8f2; }
+.primary { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, monospace; }
+.meta { display: block; margin-top: 5px; color: #68736e; font-size: 11px; }
+.direction { color: #147a55; }
+pre { margin: 0; padding: 14px; overflow: auto; max-height: 62vh; border: 1px solid #c8ceca; background: #fff; font: 12px/1.55 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+#empty { color: #68736e; font-size: 13px; margin-bottom: 10px; }
+.finding { cursor: default; }
+.finding strong { font-size: 13px; }
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+  section, .findings { grid-column: auto; border-right: 0; border-bottom: 1px solid #c8ceca; }
+  header { align-items: start; flex-direction: column; }
+}
+@media (prefers-color-scheme: dark) {
+  :root { background: #151816; color: #e4e9e6; }
+  header, button, .finding, pre { background: #1d221f; }
+  header, section, .findings, button, .finding, pre { border-color: #3a433e; }
+  button:hover, button[aria-current="true"] { border-color: #54bf8f; background: #173126; }
+  h2, .eyebrow, .stats, .meta, #empty { color: #9eaaa4; }
+  .direction { color: #65ca99; }
+}

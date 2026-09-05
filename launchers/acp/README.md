@@ -117,6 +117,29 @@ workspace-wide session-discovery API is added to Core.
 Generated binaries, UI checkouts, dependencies, and assets stay under
 `launchers/acp/.build/` and are ignored by Git.
 
+## Optional TOWER Capture
+
+Set `TOWER_URL` on an ACP profile to capture its bidirectional JSON-RPC stream
+in a TOWER App. `TOWER_TOKEN` supplies the App's optional bearer token.
+
+```sh
+TOWER_URL=http://tower.internal TOWER_TOKEN=... \
+  ./launchers/acp/scripts/treer-agent.sh \
+  --harness codex --base-command codex --server-command codex-acp
+```
+
+Capture is disabled when `TOWER_URL` is absent. Enabled launchers append each
+new frame to `tower-spool.sqlite` in their existing state directory and upload
+ordered batches asynchronously. They do not serialize the complete trace on
+each request. Failed uploads remain in the local spool and retry during the
+same process or after restart. The provider child does not inherit the TOWER
+URL or token.
+
+This first adapter records observable ACP traffic, not hidden chain of thought
+or the provider's direct model API requests. The launcher and App currently run
+with ordinary machine-account authority; they are not a boundary against a
+same-user compromise.
+
 ## Provenance
 
 The ACP runtime and Remote Codex compatibility work were derived from

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TOWER Evidence</title>
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">Evidence archive</p>
+        <h1>TOWER</h1>
+      </div>
+      <div id="stats" class="stats" aria-live="polite"></div>
+    </header>
+    <main>
+      <section class="streams" aria-labelledby="streams-title">
+        <h2 id="streams-title">Trace streams</h2>
+        <div id="stream-list" class="list"></div>
+      </section>
+      <section class="events" aria-labelledby="events-title">
+        <h2 id="events-title">Events</h2>
+        <div id="empty">Select a trace stream.</div>
+        <div id="event-list" class="list"></div>
+      </section>
+      <section class="detail" aria-labelledby="detail-title">
+        <h2 id="detail-title">Evidence</h2>
+        <pre id="detail">Select an event.</pre>
+      </section>
+      <section class="findings" aria-labelledby="findings-title">
+        <h2 id="findings-title">Reviewer findings</h2>
+        <div id="finding-list" class="list"></div>
+      </section>
+    </main>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

@@ -4,7 +4,9 @@ use std::process::Command;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use treer_acp_launcher::{default_state_dir, AisConfig, HarnessSpec, AIS_CAPABILITIES};
+use treer_acp_launcher::{
+    default_state_dir, AisConfig, HarnessSpec, TowerConfig, AIS_CAPABILITIES,
+};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum Harness {
@@ -49,6 +51,15 @@ struct Args {
     state_dir: Option<PathBuf>,
     #[arg(long, help = "Load this existing provider session id")]
     session_id: Option<String>,
+    #[arg(long, env = "TOWER_URL", help = "Optional TOWER App base URL")]
+    tower_url: Option<String>,
+    #[arg(
+        long,
+        env = "TOWER_TOKEN",
+        hide_env_values = true,
+        help = "Optional TOWER bearer token"
+    )]
+    tower_token: Option<String>,
 }
 
 #[tokio::main]
@@ -100,6 +111,14 @@ async fn main() -> Result<()> {
     if let Some(dist) = ui_dist.as_ref() {
         tracing::info!(path = %dist.display(), "serving optional Remote Codex UI dist");
     }
+    if args.tower_token.is_some() && args.tower_url.is_none() {
+        anyhow::bail!("TOWER_TOKEN requires TOWER_URL");
+    }
+    let tower = args.tower_url.map(|url| TowerConfig {
+        url,
+        token: args.tower_token,
+        workspace_id: std::env::var("TREER_WORKSPACE_ID").ok(),
+    });
     let server = treer_acp_launcher::serve(AisConfig {
         agent_id: args.agent_id,
         cwd,
@@ -109,6 +128,7 @@ async fn main() -> Result<()> {
         harness,
         bind_session_id: args.session_id,
         startup_timeout_ms: 20_000,
+        tower,
     })
     .await?;
     let addr = SocketAddr::from(([127, 0, 0, 1], server.port));

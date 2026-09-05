@@ -19,6 +19,7 @@ use super::terminal::AgentTerminals;
 use crate::cancel::Cancel;
 use crate::files::{write_file_with_scope, WriteScope};
 use crate::import_id::session_ids_match;
+use crate::tower::TowerCollector;
 use crate::types::HistoryItem;
 
 struct ActiveTurn {
@@ -50,15 +51,17 @@ struct Inner {
 pub struct AcpRuntime {
     custom_command: Option<String>,
     startup_timeout: Duration,
+    tower: Option<TowerCollector>,
     inner: Arc<Inner>,
 }
 
 impl AcpRuntime {
-    pub fn catalog(custom: Option<String>, timeout_ms: u64) -> Self {
+    pub fn catalog(custom: Option<String>, timeout_ms: u64, tower: Option<TowerCollector>) -> Self {
         let (updates, _) = broadcast::channel(2048);
         Self {
             custom_command: custom,
             startup_timeout: Duration::from_millis(timeout_ms),
+            tower,
             inner: Arc::new(Inner {
                 sessions: Mutex::new(HashMap::new()),
                 updates,
@@ -94,9 +97,14 @@ impl AcpRuntime {
         let adapter = adapter_for(&def.id);
         let extra_env = extra_env_for(def);
         let server_command = agent_server_command(def);
+        let tower = self
+            .tower
+            .as_ref()
+            .map(TowerCollector::start_stream)
+            .transpose()?;
         let (process, updates_rx, requests_rx) = tokio::time::timeout(
             self.startup_timeout,
-            AcpProcess::spawn(&server_command, cwd, &extra_env),
+            AcpProcess::spawn(&server_command, cwd, &extra_env, tower),
         )
         .await
         .map_err(|_| anyhow!("ACP spawn timeout"))??;

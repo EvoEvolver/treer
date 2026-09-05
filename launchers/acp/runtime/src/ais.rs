@@ -27,6 +27,7 @@ use crate::acp::{augment_path, AcpRuntime};
 use crate::cancel::Cancel;
 use crate::files::{list_tree, preview_file, write_file};
 use crate::journal::{history_to_entry, Journal};
+use crate::tower::{TowerCollector, TowerConfig};
 use crate::transcript::transcript_page_from_entries;
 use crate::types::{now_rfc3339, AIS_CAPABILITIES};
 
@@ -57,6 +58,7 @@ pub struct AisConfig {
     pub harness: HarnessSpec,
     pub bind_session_id: Option<String>,
     pub startup_timeout_ms: u64,
+    pub tower: Option<TowerConfig>,
 }
 
 pub struct AisServer {
@@ -122,7 +124,12 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
     let journal_path = config.state_dir.join("journal.sqlite");
     let journal = Arc::new(Journal::open(&journal_path)?);
 
-    let (def, runtime) = harness_runtime(&config)?;
+    let tower = config
+        .tower
+        .clone()
+        .map(|tower| TowerCollector::open(tower, &config.state_dir, &config.agent_id))
+        .transpose()?;
+    let (def, runtime) = harness_runtime(&config, tower)?;
     if crate::acp::classify_availability(&def) != "ready" {
         anyhow::bail!(
             "{} is not available ({})",
@@ -237,13 +244,16 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
     })
 }
 
-fn harness_runtime(config: &AisConfig) -> Result<(crate::acp::AcpAgentDef, AcpRuntime)> {
+fn harness_runtime(
+    config: &AisConfig,
+    tower: Option<TowerCollector>,
+) -> Result<(crate::acp::AcpAgentDef, AcpRuntime)> {
     match &config.harness {
         HarnessSpec::Fake => {
             let script = write_fake_agent(&config.state_dir)?;
             let python = which_python().ok_or_else(|| anyhow!("python3 is required for --fake"))?;
             let command = format!(r#"{python} "{}""#, script.display());
-            let runtime = AcpRuntime::catalog(Some(command), config.startup_timeout_ms);
+            let runtime = AcpRuntime::catalog(Some(command), config.startup_timeout_ms, tower);
             Ok((runtime.agent_def(Some("custom"))?, runtime))
         }
         HarnessSpec::Configured {
@@ -251,7 +261,7 @@ fn harness_runtime(config: &AisConfig) -> Result<(crate::acp::AcpAgentDef, AcpRu
             base_command,
             server_command,
         } => {
-            let runtime = AcpRuntime::catalog(None, config.startup_timeout_ms);
+            let runtime = AcpRuntime::catalog(None, config.startup_timeout_ms, tower);
             let mut def = runtime.agent_def(Some(name))?;
             def.base_command = base_command.clone();
             def.server_command = server_command.clone();
@@ -571,9 +581,10 @@ mod tests {
             },
             bind_session_id: None,
             startup_timeout_ms: 1,
+            tower: None,
         };
 
-        let (def, _) = harness_runtime(&config).expect("configured harness");
+        let (def, _) = harness_runtime(&config, None).expect("configured harness");
         assert_eq!(def.id, "codex");
         assert_eq!(def.base_command, "/profile/bin/codex");
         assert_eq!(def.server_command, "/profile/bin/codex-acp --stdio");

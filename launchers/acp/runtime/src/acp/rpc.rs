@@ -11,6 +11,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
 
+use crate::tower::TowerStream;
+
 pub struct Pending {
     pub tx: oneshot::Sender<Result<Value>>,
 }
@@ -64,6 +66,7 @@ pub struct AcpProcess {
     child: Arc<Mutex<Child>>,
     state: Arc<Mutex<RpcState>>,
     next_id: AtomicI64,
+    tower: Option<TowerStream>,
 }
 
 pub(crate) struct ParsedCommand {
@@ -113,6 +116,7 @@ impl AcpProcess {
         command: &str,
         cwd: &str,
         extra_env: &[(&str, String)],
+        tower: Option<TowerStream>,
     ) -> Result<(
         Self,
         mpsc::UnboundedReceiver<Value>,
@@ -125,7 +129,9 @@ impl AcpProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .env_remove("TOWER_TOKEN")
+            .env_remove("TOWER_URL");
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
@@ -154,8 +160,17 @@ impl AcpProcess {
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
         let (req_tx, req_rx) = mpsc::unbounded_channel();
         let reader_state = state.clone();
+        let reader_tower = tower.clone();
         tokio::spawn(async move {
-            let reason = match read_loop(stdout, reader_state.clone(), updates_tx, req_tx).await {
+            let reason = match read_loop(
+                stdout,
+                reader_state.clone(),
+                updates_tx,
+                req_tx,
+                reader_tower,
+            )
+            .await
+            {
                 Ok(()) => "ACP stdout closed".to_string(),
                 Err(err) => {
                     tracing::warn!(error = %err, "ACP reader exited");
@@ -172,6 +187,7 @@ impl AcpProcess {
                 child,
                 state,
                 next_id: AtomicI64::new(1),
+                tower,
             },
             updates_rx,
             req_rx,
@@ -205,12 +221,9 @@ impl AcpProcess {
         };
         {
             let mut stdin = self.stdin.lock().await;
-            if let Err(err) = write_message(
-                &mut stdin,
-                &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-            )
-            .await
-            {
+            let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+            self.record_outbound(&message);
+            if let Err(err) = write_message(&mut stdin, &message).await {
                 guard.remove().await;
                 return Err(err);
             }
@@ -232,37 +245,37 @@ impl AcpProcess {
 
     pub async fn respond(&self, id: i64, result: Value) -> Result<()> {
         let mut stdin = self.stdin.lock().await;
-        write_message(
-            &mut stdin,
-            &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        )
-        .await
+        let message = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        self.record_outbound(&message);
+        write_message(&mut stdin, &message).await
     }
 
     pub async fn respond_error(&self, id: i64, message: &str) -> Result<()> {
         let mut stdin = self.stdin.lock().await;
-        write_message(
-            &mut stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32000, "message": message }
-            }),
-        )
-        .await
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32000, "message": message }
+        });
+        self.record_outbound(&response);
+        write_message(&mut stdin, &response).await
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<()> {
         let mut stdin = self.stdin.lock().await;
-        write_message(
-            &mut stdin,
-            &json!({ "jsonrpc": "2.0", "method": method, "params": params }),
-        )
-        .await
+        let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        self.record_outbound(&message);
+        write_message(&mut stdin, &message).await
     }
 
     pub async fn exited(&self) -> Result<bool> {
         Ok(self.child.lock().await.try_wait()?.is_some())
+    }
+
+    fn record_outbound(&self, value: &Value) {
+        if let Some(tower) = &self.tower {
+            tower.record("client_to_agent", value);
+        }
     }
 }
 
@@ -279,6 +292,7 @@ async fn read_loop(
     state: Arc<Mutex<RpcState>>,
     updates: mpsc::UnboundedSender<Value>,
     requests: mpsc::UnboundedSender<(i64, String, Value)>,
+    tower: Option<TowerStream>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -313,6 +327,9 @@ async fn read_loop(
             }
             serde_json::from_str::<Value>(trimmed)?
         };
+        if let Some(tower) = &tower {
+            tower.record("agent_to_client", &msg);
+        }
         dispatch(msg, &state, &updates, &requests).await;
     }
     Ok(())
@@ -466,7 +483,7 @@ mod tests {
         )
         .unwrap();
         let (process, _updates, _requests) =
-            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[])
+            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[], None)
                 .await
                 .expect("spawn command with quoted path");
         let result = process.request("initialize", json!({})).await.unwrap();
@@ -492,7 +509,7 @@ mod tests {
         let script = dir.join("hang.py");
         std::fs::write(&script, "import time\ntime.sleep(30)\n").unwrap();
         let (process, _updates, _requests) =
-            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[])
+            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[], None)
                 .await
                 .expect("spawn hanging process");
         let started = std::time::Instant::now();
@@ -516,7 +533,7 @@ mod tests {
         )
         .unwrap();
         let (process, _updates, _requests) =
-            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[])
+            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[], None)
                 .await
                 .expect("spawn exiting process");
 
@@ -560,7 +577,7 @@ mod tests {
         )
         .unwrap();
         let (process, _updates, _requests) =
-            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[])
+            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[], None)
                 .await
                 .expect("spawn exiting process");
 
@@ -582,7 +599,7 @@ mod tests {
         let script = dir.join("hang.py");
         std::fs::write(&script, "import time\ntime.sleep(30)\n").unwrap();
         let (process, _updates, _requests) =
-            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[])
+            AcpProcess::spawn(&python_command(&script), dir.to_str().unwrap(), &[], None)
                 .await
                 .expect("spawn hanging process");
         let process = Arc::new(process);
