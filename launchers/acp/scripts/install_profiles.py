@@ -59,7 +59,7 @@ def main() -> None:
         "--presentation", choices=["headless", "remote-codex-ui"], default="headless"
     )
     parser.add_argument("--repo-cwd")
-    parser.add_argument("--machine", default="self")
+    parser.add_argument("--machine")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--check", action="store_true")
     options = parser.parse_args()
@@ -75,6 +75,8 @@ def main() -> None:
         raise SystemExit("at least one --agent is required; use --list first")
     if not options.repo_cwd:
         raise SystemExit("--repo-cwd is required")
+    if options.launch and not options.machine:
+        raise SystemExit("--machine is required with --launch")
 
     known = {profile["provider"] for profile in profiles}
     unknown = sorted(set(options.agent) - known)

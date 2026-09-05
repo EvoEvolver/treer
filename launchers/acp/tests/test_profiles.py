@@ -59,6 +59,24 @@ class AcpLauncherProfilesTest(unittest.TestCase):
         self.assertRegex(lock["commit"], r"^[0-9a-f]{40}$")
         self.assertNotIn("ref", lock)
 
+    def test_profile_launch_requires_a_resolved_machine(self):
+        result = subprocess.run(
+            [
+                str(ROOT / "scripts/install_profiles.py"),
+                str(ROOT / "profiles.json"),
+                "--agent",
+                "codex",
+                "--repo-cwd",
+                ".",
+                "--launch",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--machine is required with --launch", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

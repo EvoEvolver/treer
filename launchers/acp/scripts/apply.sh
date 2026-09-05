@@ -83,6 +83,12 @@ for agent in $AGENTS; do
 done
 
 WHOAMI="$(treer whoami)"
+MACHINE_SERVER_ID="$(python3 -c 'import json,sys
+server_id = json.loads(sys.argv[1])["machine"].get("server_id", "").strip()
+if not server_id:
+    raise SystemExit("treer whoami did not return machine.server_id")
+print(server_id)
+' "$WHOAMI")"
 REPO_CWD="$(python3 -c 'import json,os,sys
 repo = os.path.realpath(sys.argv[1])
 machine_root = os.path.realpath(json.loads(sys.argv[2])["machine"]["root"])
@@ -143,7 +149,7 @@ for agent in $AGENTS; do
     --agent "$agent" \
     --presentation "$PRESENTATION" \
     --repo-cwd "$REPO_CWD" \
-    --machine self
+    --machine "$MACHINE_SERVER_ID"
   if [ "$LAUNCH" -eq 1 ]; then
     set -- "$@" --launch
   fi
