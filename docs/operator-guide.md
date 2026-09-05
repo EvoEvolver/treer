@@ -958,8 +958,13 @@ unique instance ID and thread binding. Do not run Install recipe again.
 
 ## Checks
 
+During ordinary development, select the focused check for the changed area;
+PostgreSQL-backed checks may be omitted for unrelated changes. For an on-demand
+complete gate or release preparation, run:
+
 ```bash
 just test-db-up
+export TREER_TEST_DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
 just check
 ```
 

@@ -1,6 +1,12 @@
 # Quality And Maintenance
 
-Start the isolated PostgreSQL test service, then run the complete gate:
+For ordinary development, run only the focused checks that cover the changed
+boundary. PostgreSQL-backed tests are optional unless the change directly
+touches Proxy persistence, authentication, membership, Policy, or Core Message.
+Do not start a database solely to satisfy a routine handoff; state which checks
+were run and whether database-backed coverage was omitted.
+
+Run the complete gate on demand or while preparing a release:
 
 ```sh
 just test-db-up
@@ -8,11 +14,11 @@ export TREER_TEST_DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
 just check
 ```
 
-The complete gate is a release and CI requirement, not a prerequisite for every
-local change. When Docker is unavailable, run the focused checks that cover the
-change and record that the PostgreSQL-backed workspace gate was skipped. Do not
-point `TREER_TEST_DATABASE_URL` at a shared or production database just to make
-the local gate pass.
+The complete gate is not a prerequisite for every local change. When its
+database coverage is relevant and Docker is unavailable, record that the
+PostgreSQL-backed workspace gate was skipped. Do not point
+`TREER_TEST_DATABASE_URL` at a shared or production database just to make the
+local gate pass.
 
 Use Slurm for CPU- or memory-heavy builds, Clippy runs, frontend builds, and
 non-database workspace tests when the checkout and toolchain are available on
@@ -22,11 +28,11 @@ cluster-provided database or from a supported container runtime. If neither is
 available on the allocated node, skip the PostgreSQL-backed tests and report
 that limitation instead of treating the partial run as the complete gate.
 
-`just check` verifies documentation links, release tooling, the control-plane
-frontend, updater tests, the isolated ACP launcher, Rust build/format/tests,
-and Clippy with warnings denied. Other Workspace Apps and AIS adapters are
-intentionally outside the release gate; run their focused checks when changing
-them. Focused commands are:
+When explicitly requested, `just check` verifies documentation links, release
+tooling, the control-plane frontend, updater tests, the isolated ACP launcher,
+Rust build/format/tests, and Clippy with warnings denied. Other Workspace Apps
+and AIS adapters are intentionally outside the release gate; run their focused
+checks when changing them. Focused commands are:
 
 ```sh
 just app-test

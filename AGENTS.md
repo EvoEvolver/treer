@@ -62,8 +62,9 @@ second manual.
    product-aware Controller logic.
 3. Update the closest documentation in the same change when behavior, trust
    assumptions, commands, or component ownership changes.
-4. Run `just check` before handing off. It checks documentation, App tests,
-   frontend type/build health, Rust
-   formatting, tests, and Clippy.
+4. Run focused checks that cover the changed boundary before handing off. The
+   PostgreSQL-backed Proxy tests may be omitted for unrelated changes; record
+   what was run and what was skipped. Reserve `just check` for an explicitly
+   requested complete gate or release preparation.
 5. Keep generated artifacts, dependencies, and local research checkouts out of
    commits. Reference repositories belong under the ignored `.references/`.
