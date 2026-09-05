@@ -83,3 +83,14 @@ to Core.
 
 Generated binaries, UI checkouts, dependencies, and assets stay under
 `launchers/acp/.build/` and are ignored by Git.
+
+## Provenance
+
+The ACP runtime and Remote Codex compatibility work were derived from
+[PR #12](https://github.com/EvoEvolver/treer/pull/12), authored by
+`fonsh <dufangshi@gmail.com>` through commit
+`cd8f1d2b6177743a2ea0aa3f3d5507160a561ed1`. Treer integrated that contribution
+as this isolated, profile-driven launcher: the provider runtime remains, while
+the PR's Host, Controller, Proxy, Protocol, and Web coupling is intentionally
+not part of the resulting tree. The PR branch is retained in `main` ancestry so
+its original commits and authorship remain reachable.
