@@ -9,6 +9,38 @@ The default profiles are headless: they register `prompt.submit`,
 `transcript.read`, `state.observe`, and `abort`, with no `ui_path`. They do not
 publish a port or create an App, service, virtual host, or ingress.
 
+## Instructions For Agents
+
+When an operator asks you to set up this launcher, completion means that you
+have created or updated the requested Treer launch profile. Do not merely quote
+this README, clone the source, or build the runtime.
+
+1. Determine the requested provider. Supported values are `grok`, `cursor`,
+   `codex`, `claude`, and `opencode`. Do not install every provider.
+2. Use the headless profile unless the operator explicitly requests Remote
+   Codex UI. UI selection is never implicit.
+3. If this launcher is not already present, perform the shallow sparse checkout
+   shown below. Do not add launchers to Treer's normal installation.
+4. Confirm the provider commands listed in `profiles.json` are installed and
+   authenticated. Report a missing command; do not install provider software
+   without a separate operator request.
+5. Run `apply.sh` with `--no-launch` to save the profile. Add
+   `--ui remote-codex` only when explicitly requested.
+6. Run `treer agent admin profile show <profile-name>` and report the saved
+   command, arguments, cwd, and profile ID. The task is incomplete if this
+   verification fails.
+
+For example, an Agent asked to add the headless Codex profile should execute:
+
+```bash
+./launchers/acp/scripts/apply.sh --agent codex --no-launch
+treer agent admin profile show "Codex ACP"
+```
+
+If the operator also asks to create or test an Agent, omit `--no-launch` and
+verify the resulting Agent separately with `treer agent show`. Profile creation
+must still happen first.
+
 ## Install
 
 Treer's normal installer and updater do not place this launcher on a user's

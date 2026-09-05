@@ -24,3 +24,14 @@ Available launchers:
 
 - [`acp`](acp/README.md) runs one ACP provider session per Treer Agent and
   registers a headless AIS by default. Remote Codex presentation is optional.
+
+## Instructions For Agents
+
+When an operator asks to set up a launcher, read that launcher's README and
+carry the setup through to a saved Treer launch profile. Do not stop after
+describing commands or building artifacts. Install only the launcher and
+provider the operator selected, preserve its documented default presentation,
+and verify the resulting profile with `treer agent admin profile show`.
+
+Creating an Agent from the profile is a separate action. Do it only when the
+operator also asks to launch or test an Agent.
