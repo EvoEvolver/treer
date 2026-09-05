@@ -43,7 +43,9 @@ terminals, launch profiles, managed Apps, network, machine overview, and audit.
 counts expand into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
-`localStorage` (`treer-theme`) and currently offers English only; Usage &
+`localStorage` (`treer-theme`) and currently offers English only. Embedded Agent
+Interface iframes follow that setting through `theme` query, iframe
+`color-scheme`, and a `treer:embed-theme` postMessage. Usage &
 billing is a placeholder until a billing backend exists. Control-plane image
 updates are not in Settings. They live on `/admin` for the platform
 administrator.
@@ -223,10 +225,11 @@ An Agent may register one versioned Agent Interface Server (AIS) with its local
 Controller. AIS is a semantic adapter beside the Agent's native application
 server; it does not replace Host process ownership. Registration is authenticated
 with the Agent workload credential, scoped to that same Agent, verified against
-`GET /v1/manifest`, and cached in the Controller's local runtime directory. A
-hot Controller restart restores a descriptor only when its Agent ID, PID, and
-process start time still match, then revalidates the live manifest before the
-first Proxy snapshot. The cache contains no credentials and is not a trust
+`GET /v1/manifest`, and cached in the Controller's local runtime directory.
+Agents register once at start; repeating register rewrites `registered_at` and
+remounts any embedded UI. A hot Controller restart restores a descriptor only
+when its Agent ID, PID, and process start time still match, then revalidates the
+live manifest before the first Proxy snapshot. The cache contains no credentials and is not a trust
 boundary. The descriptor and capabilities travel with `AgentInfo` snapshots
 and events, while the live endpoint remains on Agent-private loopback. An
 optional `ui_path` exposes an embedded browser interface on that same endpoint;

@@ -2,7 +2,7 @@ export const THEME_STORAGE_KEY = "treer-theme"
 export const THEME_COLOR = { light: "#f7f7f5", dark: "#1c1b18" } as const
 export type Theme = "light" | "dark"
 
-export function isTheme(value: string | null): value is Theme {
+export function isTheme(value: unknown): value is Theme {
   return value === "light" || value === "dark"
 }
 
@@ -23,6 +23,8 @@ export function applyTheme(theme: Theme) {
   if (meta) meta.setAttribute("content", THEME_COLOR[theme])
 }
 
+export const THEME_CHANGE_EVENT = "treer-theme-change"
+
 export function persistTheme(theme: Theme) {
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme)
@@ -30,6 +32,24 @@ export function persistTheme(theme: Theme) {
     // Private mode or quota failures should not block applying the class.
   }
   applyTheme(theme)
+  window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: theme }))
+}
+
+export function subscribeTheme(listener: (theme: Theme) => void) {
+  const onCustom = (event: Event) => {
+    const detail = (event as CustomEvent<unknown>).detail
+    if (isTheme(detail)) listener(detail)
+  }
+  const onStorage = (event: StorageEvent) => {
+    if (event.key !== THEME_STORAGE_KEY) return
+    listener(isTheme(event.newValue) ? event.newValue : "light")
+  }
+  window.addEventListener(THEME_CHANGE_EVENT, onCustom)
+  window.addEventListener("storage", onStorage)
+  return () => {
+    window.removeEventListener(THEME_CHANGE_EVENT, onCustom)
+    window.removeEventListener("storage", onStorage)
+  }
 }
 
 export function applyStoredTheme() {

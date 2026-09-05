@@ -75,11 +75,12 @@ ACP or Remote Codex special case.
 ## State And Recovery
 
 The runtime stores its SQLite journal under
-`<agent-cwd>/.treer/agents/$TREER_AGENT_ID`. The launcher refreshes Interface
-registration every 20 seconds, so a hot Controller restart does not require an
-Agent restart. `--session-id` is supported by the launcher script for an
-explicit custom profile, but no workspace-wide session-discovery API is added
-to Core.
+`<agent-cwd>/.treer/agents/$TREER_AGENT_ID`. Interface registration happens
+once at Agent start. Repeating `treer interface register` rewrites
+`registered_at` and remounts any embedded UI. A hot Controller restart restores
+the cached descriptor when the Agent process is still the same. `--session-id`
+is supported by the launcher script for an explicit custom profile, but no
+workspace-wide session-discovery API is added to Core.
 
 Generated binaries, UI checkouts, dependencies, and assets stay under
 `launchers/acp/.build/` and are ignored by Git.

@@ -81,8 +81,13 @@ function ok(route: Route, body: unknown) {
   return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
 }
 
+let workspaceEvents: { send: (message: string) => void } | null = null
+
 async function mockApi(page: Page) {
-  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, () => {})
+  workspaceEvents = null
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, (ws) => {
+    workspaceEvents = ws
+  })
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, () => {})
   await page.route("**/api/**", async (route: Route) => {
     const url = new URL(route.request().url())
@@ -111,7 +116,7 @@ async function mockInterfaceUiContent(page: Page) {
     await route.fulfill({
       status: 200,
       contentType: "text/html",
-      body: `<!doctype html><html><body><h1 data-testid="agent-app">Agent dashboard for ag-ui</h1></body></html>`,
+      body: `<!doctype html><html><body><h1 data-testid="agent-app">Agent dashboard for ag-ui</h1><script>window.addEventListener("message",(event)=>{if(event.data&&event.data.type==="treer:embed-theme"){document.documentElement.dataset.embedTheme=event.data.theme}})</script></body></html>`,
     })
   })
 }
@@ -228,4 +233,68 @@ test("reload button triggers an iframe reload (key changes)", async ({ page }) =
 
   // The iframe should re-fetch its src
   await expect.poll(() => uiProxyHits, { timeout: 5000 }).toBeGreaterThan(hitsBefore)
+})
+
+test("embedded UI iframe follows the control-plane light and dark theme", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
+
+  const frame = page.locator("iframe[title='dashboard interface']")
+  await expect(frame).toBeVisible()
+  await expect(frame).toHaveAttribute("src", /[?&]theme=light(?:&|$)/)
+  await expect(frame).toHaveCSS("color-scheme", "light")
+  await expect(page.frameLocator("iframe[title='dashboard interface']").locator("html")).toHaveAttribute("data-embed-theme", "light")
+
+  await page.getByRole("button", { name: "User menu" }).click()
+  await page.getByRole("menuitem", { name: "Settings" }).click()
+  const settings = page.getByRole("dialog", { name: "Settings" })
+  await settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" }).click()
+  await settings.getByRole("button", { name: "Dark" }).click()
+
+  await expect(page.locator("html")).toHaveClass(/dark/)
+  await expect(frame).toHaveCSS("color-scheme", "dark")
+  await expect(page.frameLocator("iframe[title='dashboard interface']").locator("html")).toHaveAttribute("data-embed-theme", "dark")
+  await expect(frame).toHaveAttribute("src", /[?&]theme=light(?:&|$)/)
+})
+
+test("a new interface registered_at remounts the iframe", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
+  const frame = page.locator("iframe[title='dashboard interface']")
+  await expect(frame).toBeVisible()
+
+  let uiHits = 0
+  await page.route("**/api/workspaces/*/agents/*/interface/ui/**", async (route) => {
+    uiHits += 1
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><html><body><h1 data-testid="agent-app">Agent dashboard for ag-ui</h1></body></html>`,
+    })
+  })
+
+  expect(workspaceEvents).not.toBeNull()
+  workspaceEvents?.send(JSON.stringify({
+    event: "workspace.snapshot",
+    data: {
+      ...snapshot,
+      revision: 2,
+      agents: [
+        {
+          ...agentWithUi,
+          interface: {
+            ...agentWithUi.interface,
+            registered_at: new Date().toISOString(),
+          },
+        },
+        agentPlain,
+      ],
+    },
+  }))
+
+  await expect(page.getByText("rev 2")).toBeVisible()
+  await expect.poll(() => uiHits, { timeout: 5000 }).toBeGreaterThan(0)
+  await expect(frame).toBeVisible()
 })

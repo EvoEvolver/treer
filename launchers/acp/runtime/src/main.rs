@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -132,12 +131,6 @@ fn maybe_register_interface(port: u16, instance_id: &str, ui_path: Option<&str>)
     let ui_path = ui_path.map(str::to_string);
     tokio::spawn(async move {
         register_interface_once(port, &instance_id, ui_path.as_deref()).await;
-        let mut interval = tokio::time::interval(Duration::from_secs(20));
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            register_interface_once(port, &instance_id, ui_path.as_deref()).await;
-        }
     });
 }
 
