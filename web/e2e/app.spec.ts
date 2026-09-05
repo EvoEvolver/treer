@@ -624,6 +624,38 @@ test("terminal drains a burst of small output frames without stalling", async ({
   await expect.poll(() => acknowledgedBytes).toBe(outputBytes)
 })
 
+test("terminal uses a browser-safe close code when output backlog exceeds its limit", async ({ page }) => {
+  const pageErrors: Error[] = []
+  page.on("pageerror", (error) => pageErrors.push(error))
+  await page.addInitScript(() => {
+    const originalClose = WebSocket.prototype.close
+    const closeCodes: number[] = []
+    Object.defineProperty(window, "__terminalCloseCodes", { value: closeCodes })
+    WebSocket.prototype.close = function close(code?: number, reason?: string) {
+      if (code !== undefined) closeCodes.push(code)
+      if (code === undefined) return originalClose.call(this)
+      return originalClose.call(this, code, reason)
+    }
+  })
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, (ws) => {
+    ws.send(JSON.stringify({
+      type: "ready",
+      session_id: "term-backlog",
+      stream_epoch: "epoch-backlog",
+      revision: 0,
+      gap: false,
+      replay_chunks: 0,
+    }))
+    for (let frame = 0; frame <= 1024; frame += 1) ws.send(Buffer.from("A"))
+  })
+
+  await page.goto("/")
+  await page.getByRole("button", { name: /^api-server / }).click()
+
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __terminalCloseCodes: number[] }).__terminalCloseCodes)).toContain(4001)
+  expect(pageErrors).toEqual([])
+})
+
 test("create agent dialog can install a git recipe", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()

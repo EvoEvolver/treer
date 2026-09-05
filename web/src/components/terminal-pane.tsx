@@ -39,6 +39,7 @@ const MAX_PENDING_INPUT_BYTES = 32_768
 const TERMINAL_FLOW_WINDOW_BYTES = 256 * 1024
 const MAX_PENDING_OUTPUT_BYTES = TERMINAL_FLOW_WINDOW_BYTES * 2
 const MAX_PENDING_OUTPUT_WRITES = 1024
+const TERMINAL_BACKLOG_CLOSE_CODE = 4001
 
 interface PendingTerminalWrite {
   bytes: number
@@ -235,7 +236,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       commitQueue.push(pending)
       if (pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES || commitQueue.length > MAX_PENDING_OUTPUT_WRITES) {
         resetOnReady = true
-        currentSocket.close(1013, "terminal output backlog")
+        if (currentSocket.readyState === WebSocket.OPEN) {
+          currentSocket.close(TERMINAL_BACKLOG_CLOSE_CODE, "terminal output backlog")
+        }
       }
       const flowControlled = flowControlActive
       // xterm batches queued writes into time slices. Feeding it every frame keeps
