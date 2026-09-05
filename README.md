@@ -1,26 +1,120 @@
-# treer
+<p align="center">
+  <img src="web/public/favicon.svg" width="88" height="88" alt="Treer logo" />
+</p>
 
-Treer is a distributed runtime and control plane for coding agents.
+# Treer
 
-Each machine runs a stable Treer Host that owns local agent processes, PTYs, and
-terminal history. A hot-updatable Controller connects that Host to the central
-Proxy, which groups machines into logical workspaces and routes discovery and
-control commands between them. Core also stores durable workspace Messages,
-per-recipient delivery state, and an ordered context DAG. External channels such
-as Mail and Telegram are ordinary workspace Apps over those public contracts.
+**Run every coding agent, on every machine, from one place.**
 
-The Proxy is designed to be internet-facing. Browser users authenticate with
-sessions, while machines enroll with short-lived one-time links and then use a
-workspace-bound machine credential. See [PLAN.md](PLAN.md) for architecture,
-protocol, and delivery milestones.
+Treer is an open, self-hostable control plane for coding agents. Keep Codex,
+Claude, Pi, OpenCode, and plain terminals running on the machines that own your
+code, then connect their Apps and conversations in the same workspace.
+
+[Open Treer](https://app.treer.ai/) ·
+[Product site](https://www.treer.ai/v2) ·
+[Documentation](docs/README.md) ·
+[Security model](docs/security.md)
+
+## Configuration over convention
+
+Treer keeps the platform minimal and the workflow configurable. It standardizes
+only the contracts needed for Agents, humans, machines, and Apps to work
+together: identity, process ownership, routing, and messages. It does not
+prescribe one Agent, prompt format, launch command, communication channel, App
+stack, or deployment model.
+
+Launch profiles are commands you can edit. Apps are ordinary services you can
+replace. Mail, Telegram, and future channels sit outside the core. Start with a
+plain terminal, adopt only the pieces you need, and keep the rest of your
+environment as it is.
+
+## What Treer brings together
+
+| | Capability | What it means |
+| --- | --- | --- |
+| **Agents** | Persistent processes and PTYs | Launch any command-based agent, observe it, prompt it, and return after the browser disconnects. |
+| **Apps** | Workspace software with its own UI and data | Run supervised HTTP Apps beside Agents. Treer supplies identity, routing, and a stable workspace address. |
+| **Communication** | Durable Core Messages | Humans and Agents exchange addressed messages with explicit acknowledgement and ordered context. Mail and Telegram remain replaceable channels. |
+| **Network** | Outbound machine connections and private names | Reach Agents, interfaces, and services across enrolled machines without publishing SSH or local service ports. |
+
+Treer does not ship another agent runtime. It coordinates the tools and
+environments you already use through the browser and CLI. Native iOS and Android
+clients are developed in [`mobile`](mobile/).
+
+## How it works
+
+```mermaid
+flowchart LR
+    Human["Human<br/>Web · CLI · mobile"] <--> Proxy
+    BrowserApps["Browser Apps<br/>Mail · custom UI"] <--> Proxy
+    Proxy["Treer Proxy<br/>identity · policy · routing · messages"]
+
+    Proxy <-->|outbound connection| Controller
+
+    subgraph Machine["Enrolled machine"]
+        Controller["Controller"] <--> Host["Stable Host"]
+        Host --> Agents["Codex · Claude · Pi · OpenCode · terminal"]
+        Agents --> AIS["Agent Interface Server"]
+        Host --> Apps["Workspace Apps"]
+    end
+
+    AgentChannels["Agent-run channels<br/>Telegram · custom adapters"] <--> Controller
+```
+
+The Host owns local processes, PTYs, and replay history. A replaceable Controller
+connects it to the Proxy. The Proxy groups machines into workspaces and provides
+the shared identity, Policy, routing, ingress, traffic accounting, and Core
+Message contracts.
+
+## Start with one machine
+
+1. [Open Treer](https://app.treer.ai/), create or select a workspace, and choose
+   **Add machine**.
+2. Run the public installer shown by the App:
+
+   ```bash
+   curl -fsSL 'https://proxy.treer.ai/install.sh' | sh
+   ```
+
+3. Run the separate connection command containing the short-lived enrollment
+   key:
+
+   ```bash
+   treer-agent-server connect \
+     --key 'enr_v1_...' \
+     --proxy 'https://proxy.treer.ai/'
+   ```
+
+4. Return to the workspace and launch a built-in profile, a plain terminal, or
+   any command that already works in that machine's shell.
+
+> [!IMPORTANT]
+> Agents run with the operating-system authority of the account that starts the
+> Treer Host. Treer is intended for machines you control and collaborators you
+> trust; it is not a mutually untrusted execution sandbox. Use a dedicated
+> account, container, or VM for untrusted code.
+
+The strongest current fit is one developer with several owned machines, a
+trusted research group sharing long-running sessions, or an internal team that
+wants an inspectable control plane. See [Product direction](docs/product.md) for
+the current scope and non-goals.
 
 ## Documentation
 
-Start with [docs/README.md](docs/README.md) for the maintained product,
-architecture, security, and quality map. Repository-development agents should
-use [AGENTS.md](AGENTS.md) as the short navigation layer. Managed agents use the
-separate [embedded Treer skill](skills/treer/SKILL.md) for runtime CLI
-operations.
+| Need | Start here |
+| --- | --- |
+| Understand the product and current fit | [Product direction](docs/product.md) |
+| Understand components and protocols | [Architecture](docs/architecture.md) |
+| Evaluate trust and isolation claims | [Security model](docs/security.md) |
+| Build or operate a workspace App | [Workspace Apps](apps/README.md) |
+| Use Treer from a managed Agent | [Embedded Treer skill](skills/treer/SKILL.md) |
+| Install and operate the control plane | [Deployment guide](deploy/README.md) |
+| Develop this repository | [Repository guide](AGENTS.md) |
+| Run the complete verification gate | [Quality and maintenance](docs/quality.md) |
+
+The full maintained documentation index is [docs/README.md](docs/README.md).
+Historical design work and comparisons live under [docs/research](docs/research/)
+and in [PLAN.md](PLAN.md); maintained docs and source define current behavior.
 
 The dated [source-level project review](docs/research/2026-08-18-project-review.md)
 contains the original technology survey, detailed information-flow diagrams,
