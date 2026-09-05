@@ -347,6 +347,23 @@ test("agent list row menu can rename and delete", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Delete agent" })).toBeVisible()
 })
 
+test("new agent sends an empty workspace to machine setup", async ({ page }) => {
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
+    ...snapshot,
+    servers: [],
+    agents: [],
+  }))
+  await page.goto("/")
+
+  const addMachinePrompt = page.getByRole("button", { name: "Set up a machine before creating an agent" })
+  await expect(addMachinePrompt).toBeEnabled()
+  await addMachinePrompt.click()
+
+  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
+  await expect(page.locator("section[data-tour='workspace-machines']").getByRole("button", { name: "Add", exact: true })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Create agent" })).toHaveCount(0)
+})
+
 test("organization actions open a settings page with inline management", async ({ page }) => {
   await page.goto("/")
   const organizationSettings = page.getByRole("button", { name: "Organization settings" })

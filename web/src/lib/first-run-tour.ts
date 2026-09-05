@@ -274,7 +274,7 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
       popover: {
         title: "Start an agent",
         description:
-          "<p>Once a machine is online, open <strong>Agents</strong> and click <strong>New</strong>. An agent is a process Treer keeps alive on that machine: a shell, a coding agent, or a short-lived installer. This button stays disabled until at least one machine is online.</p>",
+          "<p>Once a machine is online, open <strong>Agents</strong> and click <strong>New</strong>. An agent is a process Treer keeps alive on that machine: a shell, a coding agent, or a short-lived installer. If this workspace has no machines yet, <strong>New</strong> takes you to Machines so you can add one.</p>",
         side: "bottom",
         align: "end",
         onPrevClick: () => {

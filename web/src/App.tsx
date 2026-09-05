@@ -1532,6 +1532,14 @@ function WorkspaceApp() {
     if (!preview) void loadLaunchProfiles().catch(showError)
   }
 
+  function openCreateAgentOrMachineSetup() {
+    if (!preview && snapshot && snapshot.servers.length === 0) {
+      openWorkspaceSettings()
+      return
+    }
+    openCreateAgent()
+  }
+
   async function installAgent(entry: AgentCatalogEntry, name: string) {
     if (!workspaceId || !entry.install || !agentServerId || installingAgentKind) return
     const script = installThenStartScript(entry)
@@ -2088,7 +2096,7 @@ function WorkspaceApp() {
           </TabsContent>
           <TabsContent value="agents" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><span data-tour="create-agent"><Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => openCreateAgent()} disabled={!workspaceId || (!onlineMachines.length && !preview)}><Plus className="size-3.5" />New</Button></span></div>
+              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><span data-tour="create-agent"><Button variant="ghost" size="sm" className="h-7 px-2" aria-label={!preview && snapshot?.servers.length === 0 ? "Set up a machine before creating an agent" : undefined} title={!preview && snapshot?.servers.length === 0 ? "Add a machine in Workspace settings before creating an agent" : undefined} onClick={openCreateAgentOrMachineSetup} disabled={!workspaceId || (!preview && (!snapshot || (snapshot.servers.length > 0 && !onlineMachines.length)))}><Plus className="size-3.5" />New</Button></span></div>
               <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
                 {snapshot?.agents.map((agent) => <AgentItem key={agent.agent_id} agent={agent} machine={snapshot.servers.find((item) => item.server_id === agent.server_id)} selected={mainView === "terminal" && agent.agent_id === selectedAgentId} onClick={() => showAgentTerminal(agent.agent_id)} onRename={() => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onStop={() => void stopAgent(agent.agent_id)} onDelete={() => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} />)}
                 {snapshot && !snapshot.agents.length && <EmptyState icon={<TerminalSquare />} label="No agents in this workspace" />}
