@@ -27,6 +27,7 @@ export async function clearTreerInterface(run = execFileAsync) {
   await run("treer", ["interface", "clear"]).catch(() => {});
 }
 
+/** Periodic register rewrites `registered_at` and remounts embedded UIs. Prefer a single register at start. */
 export function startRegistrationHeartbeat(register, intervalMs = 20000) {
   const timer = setInterval(() => {
     register().catch(() => {});

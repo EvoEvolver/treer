@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react"
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type * as React from "react"
 import { Route, Routes, useLocation, useNavigate, useParams } from "react-router"
 import {
@@ -52,6 +52,8 @@ import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard
 import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
+import { interfaceFrameKey, postEmbedTheme, withEmbedTheme } from "@/lib/embed-ui"
+import { readTheme, subscribeTheme, type Theme } from "@/lib/theme"
 import { cn } from "@/lib/utils"
 import { SettingsDialog } from "@/components/settings"
 import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pane"
@@ -1097,12 +1099,16 @@ function WorkspaceApp() {
   const [connection, setConnection] = useState<ConnectionState>("connecting")
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
   const [interfaceUiRevision, setInterfaceUiRevision] = useState(0)
+  const [theme, setTheme] = useState<Theme>(() => readTheme())
   const [mainView, setMainView] = useState<MainView>("terminal")
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [mobileTerminalOpen, setMobileTerminalOpen] = useState(false)
   const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches)
   const [ctrlArmed, setCtrlArmed] = useState(false)
   const terminalPaneRef = useRef<TerminalPaneHandle>(null)
+  const interfaceFrameRef = useRef<HTMLIFrameElement>(null)
+  const themeRef = useRef(theme)
+  themeRef.current = theme
   const ctrlArmedRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
@@ -1317,9 +1323,18 @@ function WorkspaceApp() {
   }, [organization, workspace])
 
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
-  const interfaceUiUrl = workspaceId && selectedAgent && selectedAgentInterface
-    ? proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`)
-    : null
+  const interfaceUiUrl = useMemo(() => {
+    if (!workspaceId || !selectedAgent || !selectedAgentInterface) return null
+    return withEmbedTheme(
+      proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`),
+      theme,
+    )
+    // Theme is snapshotted when the Agent interface loads or reloads so toggling
+    // Treer appearance does not remount the iframe. Live updates use postMessage
+    // and the iframe color-scheme style. A new registered_at is a new
+    // registration and should rebuild the src.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, selectedAgent?.agent_id, selectedAgentInterface?.instance_id, selectedAgentInterface?.registered_at, interfaceUiRevision])
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
   const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)
@@ -1385,6 +1400,12 @@ function WorkspaceApp() {
     media.addEventListener("change", update)
     return () => media.removeEventListener("change", update)
   }, [])
+
+  useEffect(() => subscribeTheme(setTheme), [])
+
+  useEffect(() => {
+    postEmbedTheme(interfaceFrameRef.current, theme)
+  }, [theme])
 
   useEffect(() => {
     if (isMobile || !mobileTerminalOpen) return
@@ -2132,9 +2153,9 @@ function WorkspaceApp() {
             <p className="mt-2 text-xs leading-5 text-muted-foreground">{machineName(selectedAgentMachine, selectedAgent.server_id)} is not connected to the control plane. It may be stopped, waking from sleep, or fenced as a duplicate.</p>
             {workspaceId && <MachineRecovery workspaceId={workspaceId} onCopy={copy} reason="Copy a recovery command and run it on that machine. restart-controller keeps Agents; start launches a stopped Host." />}
           </div>
-        </div> : mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-white", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-[#0f1215] pt-[env(safe-area-inset-top)]")}>
-          {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Interface"}</span><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div>}
-          <iframe key={`${selectedAgentInterface.instance_id}:${selectedAgentInterface.registered_at}:${interfaceUiRevision}`} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-white" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" />
+        </div> : mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-background", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-background pt-[env(safe-area-inset-top)]")}>
+          {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b bg-background px-3.5"><span className="truncate text-xs font-semibold text-foreground">{selectedAgent?.name ?? "Interface"}</span><button type="button" className="grid size-8 place-items-center rounded-[5px] text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div>}
+          <iframe ref={interfaceFrameRef} key={interfaceFrameKey(selectedAgent?.agent_id ?? "", selectedAgentInterface.instance_id, selectedAgentInterface.registered_at, interfaceUiRevision)} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" onLoad={() => postEmbedTheme(interfaceFrameRef.current, themeRef.current)} />
         </div> : mainView === "terminal" ? mobileTerminalIdle ? null : <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobileTerminalOpen && "fixed inset-0 z-[100] h-[100dvh] max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
             <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button>}</div></div>
