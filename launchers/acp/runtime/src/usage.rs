@@ -82,58 +82,6 @@ impl Tokens {
             .unwrap_or_default(),
         })
     }
-
-    /// Counters may restart with a new Codex process; the first report then
-    /// represents fresh usage rather than a negative increment.
-    pub(crate) fn cumulative_delta(&self, previous: &Self, last: Option<&Self>) -> Self {
-        if self.total_tokens < previous.total_tokens {
-            self.clone()
-        } else {
-            let delta = self.subtract(previous);
-            // A restarted process can already exceed the old counter. A changed
-            // report still cannot bill fewer tokens than its latest request.
-            if self.total_tokens != previous.total_tokens {
-                if let Some(last) = last.filter(|last| last.total_tokens > delta.total_tokens) {
-                    return last.clone();
-                }
-            }
-            delta
-        }
-    }
-
-    pub(crate) fn add(&self, other: &Self) -> Self {
-        Self {
-            total_tokens: self.total_tokens.saturating_add(other.total_tokens),
-            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
-            cached_input_tokens: self
-                .cached_input_tokens
-                .saturating_add(other.cached_input_tokens),
-            cache_write_input_tokens: self
-                .cache_write_input_tokens
-                .saturating_add(other.cache_write_input_tokens),
-            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
-            reasoning_output_tokens: self
-                .reasoning_output_tokens
-                .saturating_add(other.reasoning_output_tokens),
-        }
-    }
-
-    pub(crate) fn subtract(&self, baseline: &Self) -> Self {
-        Self {
-            total_tokens: self.total_tokens.saturating_sub(baseline.total_tokens),
-            input_tokens: self.input_tokens.saturating_sub(baseline.input_tokens),
-            cached_input_tokens: self
-                .cached_input_tokens
-                .saturating_sub(baseline.cached_input_tokens),
-            cache_write_input_tokens: self
-                .cache_write_input_tokens
-                .saturating_sub(baseline.cache_write_input_tokens),
-            output_tokens: self.output_tokens.saturating_sub(baseline.output_tokens),
-            reasoning_output_tokens: self
-                .reasoning_output_tokens
-                .saturating_sub(baseline.reasoning_output_tokens),
-        }
-    }
 }
 
 /// Normalize actual token breakdowns. `used` is context occupancy, never billable usage.
