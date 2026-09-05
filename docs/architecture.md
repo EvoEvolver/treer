@@ -30,6 +30,7 @@ flowchart LR
 | `treer-cli` | Human/operator and managed-Agent commands, including Core Message |
 | `treer-protocol` | Shared public and Controller wire models |
 | `apps` | Ordinary service code, presentation, external APIs, configuration, secrets, and App-owned state |
+| `launchers` | Optional profile-driven Agent runtimes and explicitly selected Agent Interfaces; not Host, Controller, or Core behavior |
 | `deploy/updater` | Self-hosted Compose mutations over `docker.sock`; not part of Proxy |
 
 The Host is intentionally product-agnostic. Shared wire models live in protocol
@@ -245,6 +246,14 @@ Treer Agent and deliberately has no thread list or session switcher. Each
 serves its browser UI and semantic routes from the same private listener; its
 verified descriptor is the single registration for both capabilities and
 presentation.
+
+Optional launchers live under `launchers/` and use the same public profile and
+Agent Interface contracts as an external recipe. The ACP launcher starts as an
+ordinary profile command; its provider catalog, session journal, and optional
+presentation remain inside that launcher. Headless profiles omit `ui_path`.
+Remote Codex presentation is a separately named, explicit profile and does not
+add an ACP Agent kind, provider routes, Host-wide UI state, or provider choices
+to Controller, Proxy, Protocol, or Web.
 
 Launch-profile sidecars in `apps/codex-ais`, `apps/opencode-ais`,
 `apps/dsh-ais`, `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`

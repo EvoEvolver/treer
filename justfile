@@ -25,6 +25,11 @@ check:
     cd web && pnpm build
     cd web && pnpm test:e2e
     python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s launchers/acp/tests -p 'test_*.py' -v
+    cargo test --manifest-path launchers/acp/runtime/Cargo.toml
+    cargo test --manifest-path launchers/acp/runtime/Cargo.toml --features remote-codex-ui
+    cargo clippy --manifest-path launchers/acp/runtime/Cargo.toml --all-targets --all-features -- -D warnings
+    cargo fmt --manifest-path launchers/acp/runtime/Cargo.toml -- --check
     cargo build --workspace
     cargo fmt --all -- --check
     cargo test --workspace
@@ -80,6 +85,12 @@ app-test:
     node --test apps/claude-ais/*.test.mjs
     node --test apps/grok-ais/*.test.mjs
     node --test apps/cursor-ais/*.test.mjs
+
+acp-launcher-test:
+    python3 -m unittest discover -s launchers/acp/tests -p 'test_*.py' -v
+    cargo test --manifest-path launchers/acp/runtime/Cargo.toml
+    cargo test --manifest-path launchers/acp/runtime/Cargo.toml --features remote-codex-ui
+    cargo clippy --manifest-path launchers/acp/runtime/Cargo.toml --all-targets --all-features -- -D warnings
 
 ais-e2e:
     node scripts/ais-e2e.mjs

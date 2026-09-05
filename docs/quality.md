@@ -23,12 +23,14 @@ available on the allocated node, skip the PostgreSQL-backed tests and report
 that limitation instead of treating the partial run as the complete gate.
 
 `just check` verifies documentation links, release tooling, the control-plane
-frontend, updater tests, Rust build/format/tests, and Clippy with warnings
-denied. Workspace Apps and AIS adapters are intentionally outside the release
-gate; run their focused checks when changing them. Focused commands are:
+frontend, updater tests, the isolated ACP launcher, Rust build/format/tests,
+and Clippy with warnings denied. Other Workspace Apps and AIS adapters are
+intentionally outside the release gate; run their focused checks when changing
+them. Focused commands are:
 
 ```sh
 just app-test
+just acp-launcher-test
 just updater-test
 just messaging-e2e
 just web-test

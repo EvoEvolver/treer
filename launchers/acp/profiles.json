@@ -1,0 +1,105 @@
+{
+  "schema": "treer.launcher-profiles/v1",
+  "profiles": [
+    {
+      "id": "grok",
+      "provider": "grok",
+      "presentation": "headless",
+      "name": "Grok ACP",
+      "agent_name": "grok-acp",
+      "description": "One headless Grok Build ACP session with a private Treer Agent Interface.",
+      "requires": ["grok"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "grok", "--base-command", "grok", "--server-command", "grok agent stdio"] }
+    },
+    {
+      "id": "grok-remote-codex-ui",
+      "provider": "grok",
+      "presentation": "remote-codex-ui",
+      "name": "Grok ACP + Remote Codex UI",
+      "agent_name": "grok-acp-ui",
+      "description": "One Grok Build ACP session with the explicitly installed Remote Codex UI adapter.",
+      "requires": ["grok"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "grok", "--base-command", "grok", "--server-command", "grok agent stdio", "--ui", "remote-codex"] }
+    },
+    {
+      "id": "cursor",
+      "provider": "cursor",
+      "presentation": "headless",
+      "name": "Cursor ACP",
+      "agent_name": "cursor-acp",
+      "description": "One headless Cursor Agent ACP session with a private Treer Agent Interface.",
+      "requires": ["cursor-agent"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "cursor", "--base-command", "cursor-agent", "--server-command", "cursor-agent acp"] }
+    },
+    {
+      "id": "cursor-remote-codex-ui",
+      "provider": "cursor",
+      "presentation": "remote-codex-ui",
+      "name": "Cursor ACP + Remote Codex UI",
+      "agent_name": "cursor-acp-ui",
+      "description": "One Cursor Agent ACP session with the explicitly installed Remote Codex UI adapter.",
+      "requires": ["cursor-agent"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "cursor", "--base-command", "cursor-agent", "--server-command", "cursor-agent acp", "--ui", "remote-codex"] }
+    },
+    {
+      "id": "codex",
+      "provider": "codex",
+      "presentation": "headless",
+      "name": "Codex ACP",
+      "agent_name": "codex-acp",
+      "description": "One headless Codex ACP session with a private Treer Agent Interface.",
+      "requires": ["codex", "codex-acp"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "codex", "--base-command", "codex", "--server-command", "codex-acp"] }
+    },
+    {
+      "id": "codex-remote-codex-ui",
+      "provider": "codex",
+      "presentation": "remote-codex-ui",
+      "name": "Codex ACP + Remote Codex UI",
+      "agent_name": "codex-acp-ui",
+      "description": "One Codex ACP session with the explicitly installed Remote Codex UI adapter.",
+      "requires": ["codex", "codex-acp"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "codex", "--base-command", "codex", "--server-command", "codex-acp", "--ui", "remote-codex"] }
+    },
+    {
+      "id": "claude",
+      "provider": "claude",
+      "presentation": "headless",
+      "name": "Claude ACP",
+      "agent_name": "claude-acp",
+      "description": "One headless Claude Agent ACP session with a private Treer Agent Interface.",
+      "requires": ["claude", "claude-agent-acp"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "claude", "--base-command", "claude", "--server-command", "claude-agent-acp"] }
+    },
+    {
+      "id": "claude-remote-codex-ui",
+      "provider": "claude",
+      "presentation": "remote-codex-ui",
+      "name": "Claude ACP + Remote Codex UI",
+      "agent_name": "claude-acp-ui",
+      "description": "One Claude Agent ACP session with the explicitly installed Remote Codex UI adapter.",
+      "requires": ["claude", "claude-agent-acp"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "claude", "--base-command", "claude", "--server-command", "claude-agent-acp", "--ui", "remote-codex"] }
+    },
+    {
+      "id": "opencode",
+      "provider": "opencode",
+      "presentation": "headless",
+      "name": "OpenCode ACP",
+      "agent_name": "opencode-acp",
+      "description": "One headless OpenCode ACP session with a private Treer Agent Interface.",
+      "requires": ["opencode"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "opencode", "--base-command", "opencode", "--server-command", "opencode acp"] }
+    },
+    {
+      "id": "opencode-remote-codex-ui",
+      "provider": "opencode",
+      "presentation": "remote-codex-ui",
+      "name": "OpenCode ACP + Remote Codex UI",
+      "agent_name": "opencode-acp-ui",
+      "description": "One OpenCode ACP session with the explicitly installed Remote Codex UI adapter.",
+      "requires": ["opencode"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "opencode", "--base-command", "opencode", "--server-command", "opencode acp", "--ui", "remote-codex"] }
+    }
+  ]
+}

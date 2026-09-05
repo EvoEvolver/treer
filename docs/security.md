@@ -50,6 +50,14 @@ operations to callers already authorized by Proxy Policy. Interface ports stay
 on Agent-private loopback; the Controller is the external routing and policy
 boundary.
 
+Repository launchers are optional code executed with the Agent's operating-
+system authority. The ACP launcher performs builds only during an explicit
+`apply.sh` operation; ordinary Agent startup does not fetch or update software.
+Its headless profiles expose no browser path. Selecting the Remote Codex UI
+profile explicitly trusts and builds the immutable upstream commit recorded in
+the launcher lock file, then serves it only through the existing private Agent
+Interface tunnel.
+
 The Create Agent dialog's one-click CLI installs execute cataloged third-party
 install scripts or package-manager commands with the machine account's
 authority. Treer does not mirror, pin, attest, or sandbox those upstream

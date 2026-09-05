@@ -50,6 +50,7 @@ second manual.
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
 | `apps` | Ordinary workspace services, channel presentation, configuration, state, and docs |
+| `launchers` | Optional profile-driven Agent runtimes and explicitly selected Agent Interfaces; not platform services |
 | `web` | Standalone React control plane with runtime Proxy URL configuration |
 
 ## Change discipline
