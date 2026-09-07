@@ -35,10 +35,15 @@ Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
 
-_None._
+- [Native macOS networking](research/2026-09-05-macos-network-execution.md):
+  approved implementation and verification gates for parity except Agent
+  network namespaces.
 
 ## Historical material
 
+- The [macOS transparent network investigation](research/2026-09-05-macos-transparent-network.md)
+  records successful Apple Linux machine and native macOS capture probes, real
+  Policy/relay-ledger experiments, the native half-close failure, and Tailscale references.
 - The completed [machine connection UX plan](research/2026-08-28-machine-connection-ux-plan.md)
   records truthful Online/local/fenced/stopped status, sleep/wake reconnect,
   one Host per hostname+workspace, and `proxy-env` internet bypass.

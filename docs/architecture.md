@@ -219,7 +219,41 @@ path for HTTPS while plain HTTP continues through `ALL_PROXY` as SOCKS5h.
 that snapshot, or the reserved local-API address `192.0.2.1`, still take the
 Treer Open/relay path; every other destination is dialed on this machine
 immediately and does not wait on the Proxy socket. Disconnect resets relayed
-streams only.
+streams and Proxy-authorized Direct streams; compatibility-mode internet bypass
+streams remain independent. New transparent requests fail while disconnected,
+and transport epochs prevent queued Open frames from being replayed on reconnect.
+
+The owned [native macOS backend](../native/macos-network/README.md) has an explicit
+`native-experimental` Controller mode. A signed helper readiness check precedes
+startup; per-process registration ACK precedes workload exec. Egress uses the
+same Proxy Open path, while macOS service ingress uses shared localhost ports.
+It has not passed installed-extension acceptance and is not a supported
+transparent backend.
+
+The source Proxy rechecks tracked network authorizations every five seconds.
+Denied relay streams receive Reset on both legs; tracked Direct streams receive
+Reset at the source. Controllers advertise per-stream lifetime tracking in the
+optional Open field and send Reset on full completion. Older Direct sources omit
+that field and retain Open-only checks. Relay lifetimes are also observable from
+the Proxy's stream table. Policy cache TTL and evaluation time add to revocation
+latency; this is periodic revocation, not instantaneous revocation.
+
+Direct usage is negotiated through the optional `report_usage` target flag.
+The Controller counts successful application writes and sends cumulative Usage
+frames on that authorized stream. The owning source Proxy deduplicates against
+the previous totals and persists deltas as non-billable `direct_network` usage.
+The original relay ledger remains machine-scoped; Agent endpoint detail is
+written separately to `agent_traffic_usage_hourly` and served by `/traffic/agents`.
+Both views use the same observed payload, so they must not be summed together.
+The optional Open flag `durable_usage` negotiates a Proxy-issued `usage_ticket`.
+Ticketed Usage frames carry cumulative totals, persist in the Controller outbox,
+and replay after reconnect. `UsageAck` (kind 10) is sent only after receipt
+deduplication and both hourly ledgers commit together. Receipts bind the original
+machine/workspace and cannot open traffic. They survive Proxy restarts; reporting
+without tickets remains the legacy live-stream path. Delayed reports currently
+use the commit-time hour, and uncheckpointed crash tails are not recoverable.
+Final reports mark receipts closed; closed receipts are retained for 90 days
+before cleanup. Open receipts are retained to allow long-lived associations.
 Operator-managed Agent-scoped services use a Unix bridge (`sandbox-exec
 --service-socket`) so the Controller can reach a namespace-local loopback
 listener without publishing a host TCP port. Agents cannot create those
@@ -236,7 +270,10 @@ Browser terminal attach is revisioned. The Host keeps a bounded PTY output ring
 keyed by stream epoch. Reconnects send the client's last cursor; the Host
 returns only later chunks and a gap flag when the ring has slid past that
 cursor. Live Controller lag resyncs from the same Host read instead of dropping
-bytes. When a process exits, the Host releases its child and PTY resources
+bytes. The Proxy owning the browser session learns the stream epoch from the
+delivered Ready frame, including when the Controller is connected to another
+Proxy, so live output carries the same reconnect cursor across replicas.
+When a process exits, the Host releases its child and PTY resources
 immediately and retains only the latest 256 completed process records for
 Controller restart recovery. This is opaque byte replay, not Agent-protocol
 item storage.
@@ -380,3 +417,29 @@ control plane is a follow-up.
 
 See [Self-hosted Compose](../deploy/README.md), [Security](security.md) for
 trust claims, and [Quality](quality.md) for the verification matrix.
+
+### Experimental datagram transport
+
+The owned macOS UDP adapter uses authenticated SOCKS command `0xf0` on the local
+Controller listener, followed by big-endian u16-length datagrams. This is a Treer
+extension, not SOCKS UDP ASSOCIATE. `OpenDatagram` (binary kind 9) goes through the
+same source-Agent ownership check and `network.connect` Policy as TCP. Each Data
+frame carries one whole datagram, including empty payloads. UDP services are
+registered with `protocol: "udp"`; a TCP/UDP service mismatch is rejected. Existing
+Policy rules are transport-independent host/port rules. Upgrade participating
+Proxies and Controllers together before using UDP services; older peers cannot
+handle kind 9 and are never given a TCP fallback.
+
+Direct UDP stays on the source Controller and reports successful datagram payload
+writes. Relayed UDP traverses the existing regional routing and ledger. Each
+association has a 60-second idle timeout and closes on reset. Datagram windows
+charge payload plus 64 bytes per packet, bounding even empty-packet queues; the local adapter
+bounds destinations and pending replies. UDP carried over TCP preserves message
+boundaries but inherits head-of-line blocking. Linux private Agent UDP service
+bridges are not yet implemented and explicitly reject this destination; host UDP
+services are supported. OS datagram size limits still apply. The owned macOS provider implements a shared persistent virtual-address map and
+loopback UDP/TCP DNS responder. Accepted Controller snapshots synchronize through
+the helper, and the privileged provider maintains only its exact-domain files in
+`/etc/resolver`. Synthetic addresses are reversed to names before TCP/UDP routing.
+Retired addresses are never reassigned, protecting shared DNS caches. Signed
+resolver/capture integration is still an acceptance gate.

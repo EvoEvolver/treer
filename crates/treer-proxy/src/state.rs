@@ -115,6 +115,7 @@ struct NetworkStreamLeg {
     role: NetworkStreamRole,
     closed: bool,
     outgoing_traffic: std::sync::Arc<TrafficCounter>,
+    outgoing_agent_traffic: Option<std::sync::Arc<TrafficCounter>>,
 }
 
 struct WorkspaceState {
@@ -189,6 +190,73 @@ impl AppState {
         hours: u16,
     ) -> anyhow::Result<Vec<MachineTrafficRecord>> {
         self.inner.traffic.recent(workspace_id, hours).await
+    }
+
+    pub(crate) fn direct_traffic_meter(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        host: &str,
+        port: u16,
+        agent_id: Option<&str>,
+    ) -> crate::traffic::DirectTrafficMeter {
+        self.inner
+            .traffic
+            .register_direct_stream(workspace_id, server_id, host, port)
+            .with_agent_meter(agent_id.map(|agent| {
+                self.inner.traffic.agent_view().register_direct_stream(
+                    workspace_id,
+                    agent,
+                    host,
+                    port,
+                )
+            }))
+    }
+
+    pub(crate) async fn issue_usage_ticket(
+        &self,
+        workspace: &str,
+        server: &str,
+        agent: Option<&str>,
+        host: &str,
+        port: u16,
+    ) -> anyhow::Result<Option<String>> {
+        self.inner
+            .traffic
+            .issue_usage_ticket(workspace, server, agent, host, port)
+            .await
+    }
+
+    pub(crate) async fn persist_usage_report(
+        &self,
+        workspace: &str,
+        server: &str,
+        connection: Uuid,
+        report: &treer_protocol::NetworkUsageReport,
+    ) -> anyhow::Result<()> {
+        self.require_current_connection(workspace, server, connection)
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+        self.inner
+            .traffic
+            .persist_usage_report(workspace, server, report)
+            .await
+    }
+
+    pub async fn recent_agent_traffic(
+        &self,
+        workspace_id: &str,
+        hours: u16,
+    ) -> anyhow::Result<Vec<treer_protocol::AgentTrafficRecord>> {
+        Ok(self
+            .inner
+            .traffic
+            .agent_view()
+            .recent(workspace_id, hours)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkspaceEvent> {
@@ -1327,12 +1395,6 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, server_id, connection_id)
             .await?;
-        {
-            let mut sessions = self.inner.terminal_sessions.lock().await;
-            if let Some(session) = sessions.get_mut(session_id) {
-                session.stream_epoch = ready.stream_epoch.clone();
-            }
-        }
         let replay_chunks = ready.replay.len().div_ceil(TERMINAL_REPLAY_CHUNK_BYTES);
         let replay_chunks = u32::try_from(replay_chunks).map_err(|_| {
             ProtocolError::new(
@@ -1619,9 +1681,10 @@ impl AppState {
                             }
                         }
                         NetworkBinaryKind::Reset => return Err(decode_network_reset(&frame)),
-                        NetworkBinaryKind::Open
+                        NetworkBinaryKind::Open | NetworkBinaryKind::OpenDatagram
                         | NetworkBinaryKind::Opened
-                        | NetworkBinaryKind::Direct => {
+                        | NetworkBinaryKind::Direct
+                        | NetworkBinaryKind::Usage | NetworkBinaryKind::UsageAck => {
                             return Err(ProtocolError::new("invalid_network_frame", format!("unexpected network stream frame {:?}", frame.kind)));
                         }
                     }
@@ -1668,7 +1731,10 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.require_current_connection(workspace_id, source_server_id, connection_id)
             .await?;
-        if frame.kind != NetworkBinaryKind::Open {
+        if !matches!(
+            frame.kind,
+            NetworkBinaryKind::Open | NetworkBinaryKind::OpenDatagram
+        ) {
             return Err(ProtocolError::new(
                 "invalid_network_frame",
                 "new network stream must begin with an open frame",
@@ -1689,6 +1755,17 @@ impl AppState {
             source_server_id,
             destination_server_id,
         );
+        let agent_traffic = serde_json::from_slice::<NetworkConnectRequest>(&frame.payload)
+            .ok()
+            .and_then(|request| {
+                self.inner.traffic.agent_view().register_agent_stream(
+                    workspace_id,
+                    source_server_id,
+                    destination_server_id,
+                    request.source_agent_id.as_deref(),
+                    request.destination_agent_id.as_deref(),
+                )
+            });
         {
             let mut streams = self.inner.network_streams.lock().await;
             if streams.contains_key(&source) || streams.contains_key(&destination) {
@@ -1704,6 +1781,9 @@ impl AppState {
                     role: NetworkStreamRole::Source,
                     closed: false,
                     outgoing_traffic: traffic.source_to_destination,
+                    outgoing_agent_traffic: agent_traffic
+                        .as_ref()
+                        .map(|c| c.source_to_destination.clone()),
                 },
             );
             streams.insert(
@@ -1713,6 +1793,9 @@ impl AppState {
                     role: NetworkStreamRole::Destination,
                     closed: false,
                     outgoing_traffic: traffic.destination_to_source,
+                    outgoing_agent_traffic: agent_traffic
+                        .as_ref()
+                        .map(|c| c.destination_to_source.clone()),
                 },
             );
         }
@@ -1788,6 +1871,23 @@ impl AppState {
             .await
     }
 
+    pub(crate) async fn has_network_stream(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        stream_id: &str,
+    ) -> bool {
+        self.inner
+            .network_streams
+            .lock()
+            .await
+            .contains_key(&NetworkStreamKey {
+                workspace_id: workspace_id.to_string(),
+                server_id: server_id.to_string(),
+                stream_id: stream_id.to_string(),
+            })
+    }
+
     async fn relay_network_frame_inner(
         &self,
         workspace_id: &str,
@@ -1796,7 +1896,11 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         if matches!(
             frame.kind,
-            NetworkBinaryKind::Open | NetworkBinaryKind::Direct
+            NetworkBinaryKind::Open
+                | NetworkBinaryKind::OpenDatagram
+                | NetworkBinaryKind::Direct
+                | NetworkBinaryKind::Usage
+                | NetworkBinaryKind::UsageAck
         ) {
             return Err(ProtocolError::new(
                 "invalid_network_frame",
@@ -1858,14 +1962,17 @@ impl AppState {
             let peer = stream.peer.clone();
             let traffic =
                 (frame.kind == NetworkBinaryKind::Data).then(|| stream.outgoing_traffic.clone());
+            let agent_traffic = (frame.kind == NetworkBinaryKind::Data)
+                .then(|| stream.outgoing_agent_traffic.clone())
+                .flatten();
             let remove = frame.kind == NetworkBinaryKind::Reset
                 || (stream.closed && streams.get(&peer).is_some_and(|peer| peer.closed));
             if remove {
                 remove_network_stream(&mut streams, &key);
             }
-            (peer, remove, traffic)
+            (peer, remove, traffic, agent_traffic)
         };
-        let (peer, remove, traffic) = route;
+        let (peer, remove, traffic, agent_traffic) = route;
         let payload_bytes = frame.payload.len();
         frame.stream_id.clone_from(&peer.stream_id);
         if self
@@ -1883,6 +1990,9 @@ impl AppState {
             return Err(ProtocolError::new("server_offline", peer.server_id));
         }
         if let Some(traffic) = traffic {
+            traffic.record(payload_bytes);
+        }
+        if let Some(traffic) = agent_traffic {
             traffic.record(payload_bytes);
         }
         Ok(())
@@ -2496,6 +2606,25 @@ impl AppState {
                     "terminal_identity_mismatch",
                     &delivery.session_id,
                 ));
+            }
+            // The browser's session can belong to a different Proxy from the
+            // Controller connection. Learn the epoch at the delivery owner so
+            // subsequent binary output can include its reconnect cursor.
+            if let SocketFrame::Text(text) = &delivery.frame {
+                if let Ok(TerminalServerMessage::Ready {
+                    session_id,
+                    stream_epoch,
+                    ..
+                }) = serde_json::from_str(text)
+                {
+                    if session_id != delivery.session_id {
+                        return Err(ProtocolError::new(
+                            "terminal_identity_mismatch",
+                            &delivery.session_id,
+                        ));
+                    }
+                    session.stream_epoch = stream_epoch;
+                }
             }
             if delivery.revision.is_some_and(|revision| {
                 session
@@ -3470,6 +3599,14 @@ mod tests {
             .expect("register controller");
 
         let source_stream_id = "net_source".to_string();
+        let connect_payload = serde_json::to_vec(&NetworkConnectRequest {
+            source_server_id: "server".into(),
+            source_agent_id: Some("agent-source".into()),
+            destination_agent_id: Some("agent-destination".into()),
+            host: "127.0.0.1".into(),
+            port: 8080,
+        })
+        .unwrap();
         state
             .open_network_stream(
                 "alpha",
@@ -3479,7 +3616,7 @@ mod tests {
                 NetworkBinaryFrame {
                     kind: NetworkBinaryKind::Open,
                     stream_id: source_stream_id.clone(),
-                    payload: b"connect".to_vec(),
+                    payload: connect_payload.clone(),
                 },
             )
             .await
@@ -3489,7 +3626,7 @@ mod tests {
             expect_network(server_rx.recv().await.expect("destination open frame"));
         assert_eq!(destination_open.kind, NetworkBinaryKind::Open);
         assert_ne!(destination_open.stream_id, source_stream_id);
-        assert_eq!(destination_open.payload, b"connect");
+        assert_eq!(destination_open.payload, connect_payload);
         let destination_stream_id = destination_open.stream_id;
         assert_eq!(state.inner.network_streams.lock().await.len(), 2);
 
@@ -3544,6 +3681,34 @@ mod tests {
         let source_data = expect_network(server_rx.recv().await.expect("source data frame"));
         assert_eq!(source_data.stream_id, source_stream_id);
         assert_eq!(source_data.payload, b"response");
+        let detail = state.recent_agent_traffic("alpha", 1).await.unwrap();
+        assert_eq!(detail.len(), 2);
+        assert_eq!(
+            detail
+                .iter()
+                .find(|r| r.source_id == "agent-source")
+                .unwrap()
+                .payload_bytes,
+            7
+        );
+        assert_eq!(
+            detail
+                .iter()
+                .find(|r| r.source_id == "agent-destination")
+                .unwrap()
+                .payload_bytes,
+            8
+        );
+        assert_eq!(
+            state
+                .recent_machine_traffic("alpha", 1)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.payload_bytes)
+                .sum::<u64>(),
+            15
+        );
 
         for (stream_id, expected_peer_id) in [
             (source_stream_id.clone(), destination_stream_id.clone()),
@@ -3673,6 +3838,8 @@ mod tests {
             .expect("register controller");
 
         let target = NetworkDirectTarget {
+            report_usage: false,
+            usage_ticket: None,
             host: "example.com".to_string(),
             port: 443,
         };
@@ -3816,6 +3983,69 @@ mod tests {
                 BROWSER_TRAFFIC_ENDPOINT
             ),
             (8, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_terminal_delivery_learns_epoch_without_local_controller() {
+        let state = AppState::new();
+        let (browser_tx, mut browser_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
+        state.inner.terminal_sessions.lock().await.insert(
+            "remote-session".to_string(),
+            TerminalSession {
+                workspace_id: "alpha".to_string(),
+                server_id: "remote-server".to_string(),
+                process_id: "agent".to_string(),
+                outgoing: browser_tx,
+                last_revision: None,
+                stream_epoch: None,
+            },
+        );
+        let ready = TerminalServerMessage::Ready {
+            session_id: "remote-session".to_string(),
+            stream_epoch: Some("remote-epoch".to_string()),
+            revision: Some(4),
+            gap: false,
+            replay_chunks: Some(0),
+        };
+        let delivery = ClusterSessionDelivery {
+            kind: ClusterSessionKind::Terminal,
+            workspace_id: "alpha".to_string(),
+            server_id: "remote-server".to_string(),
+            session_id: "remote-session".to_string(),
+            revision: Some(4),
+            cursor: false,
+            close: false,
+            frame: SocketFrame::Text(serde_json::to_string(&ready).expect("encode ready")),
+        };
+        state
+            .handle_cluster_session_delivery(delivery.clone())
+            .await
+            .expect("receive ready from Controller's Proxy");
+        browser_rx.try_recv().expect("ready reaches browser");
+        state
+            .handle_cluster_session_delivery(ClusterSessionDelivery {
+                revision: Some(5),
+                cursor: true,
+                frame: SocketFrame::Binary(b"live".to_vec()),
+                ..delivery
+            })
+            .await
+            .expect("receive output from Controller's Proxy");
+        assert_eq!(
+            browser_rx.try_recv().expect("output reaches browser"),
+            SocketFrame::Binary(b"live".to_vec())
+        );
+        let cursor: TerminalServerMessage = serde_json::from_str(&expect_text(
+            browser_rx.try_recv().expect("cursor reaches browser"),
+        ))
+        .expect("decode cursor");
+        assert_eq!(
+            cursor,
+            TerminalServerMessage::Cursor {
+                stream_epoch: "remote-epoch".to_string(),
+                revision: 5,
+            }
         );
     }
 
@@ -4400,7 +4630,10 @@ mod tests {
             Some(SocketFrame::Binary(b"live".to_vec()))
         );
         let cursor: TerminalServerMessage = serde_json::from_str(&expect_text(
-            browser_rx.recv().await.expect("cross-proxy cursor"),
+            tokio::time::timeout(Duration::from_secs(5), browser_rx.recv())
+                .await
+                .expect("cross-proxy cursor arrives before the connection lease expires")
+                .expect("cross-proxy cursor"),
         ))
         .expect("decode cross-proxy cursor");
         assert_eq!(
@@ -4444,7 +4677,7 @@ mod tests {
                 destination_connection,
                 NetworkBinaryFrame {
                     kind: NetworkBinaryKind::Opened,
-                    stream_id: destination_open.stream_id,
+                    stream_id: destination_open.stream_id.clone(),
                     payload: Vec::new(),
                 },
             )
@@ -4453,6 +4686,68 @@ mod tests {
         let opened = expect_network(source_rx.recv().await.expect("source opened"));
         assert_eq!(opened.kind, NetworkBinaryKind::Opened);
         assert_eq!(opened.stream_id, source_stream_id);
+
+        for (sender, server_id, connection_id, stream_id, payload) in [
+            (
+                &state_a,
+                &source_id,
+                source_connection,
+                &source_stream_id,
+                b"request\0\xff".to_vec(),
+            ),
+            (
+                &state_b,
+                &destination_id,
+                destination_connection,
+                &destination_open.stream_id,
+                b"response\0\xfe".to_vec(),
+            ),
+        ] {
+            sender
+                .relay_network_frame(
+                    &workspace_id,
+                    server_id,
+                    connection_id,
+                    NetworkBinaryFrame {
+                        kind: NetworkBinaryKind::Data,
+                        stream_id: stream_id.clone(),
+                        payload: payload.clone(),
+                    },
+                )
+                .await
+                .expect("relay binary payload across proxies");
+            let received = if server_id == &source_id {
+                &mut destination_rx
+            } else {
+                &mut source_rx
+            };
+            let frame = expect_network(
+                tokio::time::timeout(Duration::from_secs(5), received.recv())
+                    .await
+                    .expect("cross-proxy payload arrives")
+                    .expect("payload frame"),
+            );
+            assert_eq!(frame.kind, NetworkBinaryKind::Data);
+            assert_eq!(frame.payload, payload);
+        }
+        assert_eq!(
+            state_a.inner.traffic.pending_for(
+                &workspace_id,
+                TrafficClass::VirtualNetwork,
+                &source_id,
+                &destination_id,
+            ),
+            (9, 1)
+        );
+        assert_eq!(
+            state_a.inner.traffic.pending_for(
+                &workspace_id,
+                TrafficClass::VirtualNetwork,
+                &destination_id,
+                &source_id,
+            ),
+            (10, 1)
+        );
 
         state_b
             .disconnect_server(&workspace_id, &destination_id, destination_connection)

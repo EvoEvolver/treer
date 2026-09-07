@@ -360,13 +360,25 @@ CREATE TABLE IF NOT EXISTS machine_services (
     target_agent_id TEXT,
     target_host TEXT NOT NULL,
     target_port BIGINT NOT NULL CHECK(target_port BETWEEN 1 AND 65535),
-    protocol TEXT NOT NULL CHECK(protocol IN ('tcp', 'http')),
+    protocol TEXT NOT NULL CHECK(protocol IN ('tcp', 'http', 'udp')),
     created_at TEXT NOT NULL,
     created_by TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     updated_by TEXT NOT NULL,
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
 );
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'machine_services'::regclass
+          AND conname = 'machine_services_protocol_check'
+          AND position('udp' in pg_get_constraintdef(oid)) = 0) THEN
+        ALTER TABLE machine_services DROP CONSTRAINT machine_services_protocol_check;
+        ALTER TABLE machine_services ADD CONSTRAINT machine_services_protocol_check
+            CHECK (protocol IN ('tcp', 'http', 'udp'));
+    END IF;
+END $$;
+
 ALTER TABLE machine_services
     ADD COLUMN IF NOT EXISTS target_agent_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS machine_services_workspace_name_lower
@@ -497,10 +509,10 @@ CREATE INDEX IF NOT EXISTS machine_traffic_hourly_workspace_window
 CREATE TABLE IF NOT EXISTS traffic_usage_hourly (
     workspace_id TEXT NOT NULL,
     window_start BIGINT NOT NULL,
-    traffic_class TEXT NOT NULL CHECK(traffic_class IN ('virtual_network', 'service_ingress', 'virtual_host', 'agent_interface')),
-    source_type TEXT NOT NULL CHECK(source_type IN ('client', 'machine')),
+    traffic_class TEXT NOT NULL CHECK(traffic_class IN ('virtual_network', 'service_ingress', 'virtual_host', 'agent_interface', 'direct_network')),
+    source_type TEXT NOT NULL CHECK(source_type IN ('client', 'machine', 'internet')),
     source_id TEXT NOT NULL,
-    destination_type TEXT NOT NULL CHECK(destination_type IN ('client', 'machine')),
+    destination_type TEXT NOT NULL CHECK(destination_type IN ('client', 'machine', 'internet')),
     destination_id TEXT NOT NULL,
     payload_bytes BIGINT NOT NULL DEFAULT 0 CHECK(payload_bytes >= 0),
     payload_frames BIGINT NOT NULL DEFAULT 0 CHECK(payload_frames >= 0),
@@ -515,5 +527,60 @@ CREATE TABLE IF NOT EXISTS traffic_usage_hourly (
 );
 CREATE INDEX IF NOT EXISTS traffic_usage_hourly_workspace_window
     ON traffic_usage_hourly(workspace_id, window_start DESC);
+-- Schema execution is serialized by AuthStore's treer_schema advisory lock.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'traffic_usage_hourly'::regclass
+        AND conname = 'traffic_usage_hourly_traffic_class_check'
+        AND position('direct_network' in pg_get_constraintdef(oid)) = 0) THEN
+        ALTER TABLE traffic_usage_hourly DROP CONSTRAINT traffic_usage_hourly_traffic_class_check;
+        ALTER TABLE traffic_usage_hourly ADD CHECK (traffic_class IN ('virtual_network', 'service_ingress', 'virtual_host', 'agent_interface', 'direct_network'));
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'traffic_usage_hourly'::regclass
+        AND conname = 'traffic_usage_hourly_source_type_check'
+        AND position('internet' in pg_get_constraintdef(oid)) = 0) THEN
+        ALTER TABLE traffic_usage_hourly DROP CONSTRAINT traffic_usage_hourly_source_type_check;
+        ALTER TABLE traffic_usage_hourly ADD CHECK (source_type IN ('client', 'machine', 'internet'));
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'traffic_usage_hourly'::regclass
+        AND conname = 'traffic_usage_hourly_destination_type_check'
+        AND position('internet' in pg_get_constraintdef(oid)) = 0) THEN
+        ALTER TABLE traffic_usage_hourly DROP CONSTRAINT traffic_usage_hourly_destination_type_check;
+        ALTER TABLE traffic_usage_hourly ADD CHECK (destination_type IN ('client', 'machine', 'internet'));
+    END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS agent_traffic_usage_hourly (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id),
+    window_start BIGINT NOT NULL,
+    traffic_class TEXT NOT NULL CHECK(traffic_class IN ('virtual_network', 'direct_network')),
+    source_type TEXT NOT NULL CHECK(source_type IN ('agent', 'machine', 'internet')),
+    source_id TEXT NOT NULL,
+    destination_type TEXT NOT NULL CHECK(destination_type IN ('agent', 'machine', 'internet')),
+    destination_id TEXT NOT NULL,
+    payload_bytes BIGINT NOT NULL DEFAULT 0 CHECK(payload_bytes >= 0),
+    payload_frames BIGINT NOT NULL DEFAULT 0 CHECK(payload_frames >= 0),
+    billable_bytes BIGINT NOT NULL DEFAULT 0 CHECK(billable_bytes >= 0),
+    meter_version INTEGER NOT NULL CHECK(meter_version > 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, window_start, traffic_class, source_type, source_id,
+        destination_type, destination_id, meter_version)
+);
+CREATE TABLE IF NOT EXISTS network_usage_receipts (
+    ticket TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id),
+    server_id TEXT NOT NULL,
+    agent_id TEXT,
+    destination TEXT NOT NULL,
+    sent_bytes BIGINT NOT NULL DEFAULT 0,
+    received_bytes BIGINT NOT NULL DEFAULT 0,
+    sent_chunks BIGINT NOT NULL DEFAULT 0,
+    received_chunks BIGINT NOT NULL DEFAULT 0,
+    created_at BIGINT NOT NULL,
+    closed_at BIGINT
+);
+ALTER TABLE network_usage_receipts ADD COLUMN IF NOT EXISTS closed_at BIGINT;
+CREATE INDEX IF NOT EXISTS network_usage_receipts_created_at ON network_usage_receipts(created_at);
+CREATE INDEX IF NOT EXISTS agent_traffic_usage_hourly_workspace_window
+    ON agent_traffic_usage_hourly(workspace_id, window_start DESC);
 CREATE INDEX IF NOT EXISTS virtual_network_hosts_service
     ON virtual_network_hosts(workspace_id, service_id);

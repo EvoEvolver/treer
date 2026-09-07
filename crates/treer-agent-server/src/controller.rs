@@ -404,12 +404,22 @@ impl ControllerRuntime {
             workload_credential: workload_credential.clone(),
         };
         let env = self.process_environment(Some((&agent_id, &workload_credential)));
-        let launch = sandbox_launch(
-            self.inner.sandbox_executable.as_deref(),
-            &agent_network_proxy_url(&self.inner.network_proxy_url, &agent_id),
-            &agent_id,
-            launch,
-        );
+        let network_proxy = agent_network_proxy_url(&self.inner.network_proxy_url, &agent_id);
+        let launch = if cfg!(target_os = "macos") {
+            native_network_launch(
+                self.inner.sandbox_executable.as_deref(),
+                &network_proxy,
+                &agent_id,
+                launch,
+            )
+        } else {
+            sandbox_launch(
+                self.inner.sandbox_executable.as_deref(),
+                &network_proxy,
+                &agent_id,
+                launch,
+            )
+        };
         let response = self
             .inner
             .host
@@ -2131,6 +2141,35 @@ fn interactive_shell_command_launch(command: &str, args: &[String]) -> AgentLaun
     }
 }
 
+fn native_network_launch(
+    helper: Option<&std::path::Path>,
+    network_proxy_url: &str,
+    agent_id: &str,
+    launch: AgentLaunch,
+) -> AgentLaunch {
+    let Some(helper) = helper else {
+        return launch;
+    };
+    // The signed helper registers its process instance with the extension and
+    // waits for an acknowledgement before exec. No Host wire change is needed.
+    let mut args = vec![
+        "exec".to_string(),
+        "--agent-id".to_string(),
+        agent_id.to_string(),
+        "--network-proxy".to_string(),
+        network_proxy_url.to_string(),
+        "--".to_string(),
+        launch.command,
+    ];
+    args.extend(launch.args);
+    AgentLaunch {
+        command: helper.display().to_string(),
+        args,
+        initial_writes: launch.initial_writes,
+        publish_ports: launch.publish_ports,
+    }
+}
+
 fn sandbox_launch(
     executable: Option<&std::path::Path>,
     network_proxy_url: &str,
@@ -2747,6 +2786,39 @@ mod tests {
             env.get("TREER_NETWORK_PROXY").map(String::as_str),
             Some(proxy)
         );
+    }
+
+    #[test]
+    fn native_network_launch_gates_exec_without_reinterpreting_arguments() {
+        let launch = native_network_launch(
+            Some(std::path::Path::new(
+                "/Applications/TreerNetwork.app/Contents/MacOS/TreerNetwork",
+            )),
+            "socks5h://agent-a:treer@127.0.0.1:8791",
+            "agent-a",
+            AgentLaunch {
+                command: "/bin/zsh".into(),
+                args: vec!["-c".into(), "printf '%s' '$literal ; space'".into()],
+                initial_writes: Vec::new(),
+                publish_ports: vec![8080],
+            },
+        );
+        assert_eq!(
+            launch.args,
+            [
+                "exec",
+                "--agent-id",
+                "agent-a",
+                "--network-proxy",
+                "socks5h://agent-a:treer@127.0.0.1:8791",
+                "--",
+                "/bin/zsh",
+                "-c",
+                "printf '%s' '$literal ; space'",
+            ]
+        );
+        assert_eq!(launch.publish_ports, [8080]);
+        assert!(launch.initial_writes.is_empty());
     }
 
     #[test]

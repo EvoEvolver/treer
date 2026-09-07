@@ -657,6 +657,10 @@ even though Git does not honor `ALL_PROXY`. Other TCP clients can use the same
 stdio bridge as their proxy command: `treer network connect HOST PORT`. Native
 macOS currently uses this compatibility mode; use a Linux container when
 transparent capture is required.
+Developers can build and test the owned native backend without a developer
+account using [the macOS check workflow](../native/macos-network/README.md).
+Its `native-experimental` mode requires a properly signed, activated extension
+and is not the default or a supported replacement for the Linux backend.
 A transparent Agent cannot publish an arbitrary namespace-local listener. Use
 `treer app create` for a supervised HTTP App, or register an Agent Interface
 Server for a semantic Agent UI. AIS uses the sandbox's Unix bridge directly;
@@ -672,7 +676,8 @@ directly to the Controller's loopback listener; it is not a workspace virtual
 host and never traverses the Proxy. This keeps `treer` usable inside transparent
 network namespaces.
 
-Every TCP connection asks the Proxy to resolve the destination and apply network
+In transparent mode, every non-loopback TCP connection (apart from the reserved
+local API route) asks the Proxy to resolve the destination and apply network
 policy. For an ordinary hostname or IP address, the Proxy returns a direct route
 and the source Controller opens the outbound socket locally; application payload
 bytes do not traverse the Proxy. Workspace virtual-host streams are multiplexed
@@ -680,6 +685,29 @@ as binary frames over the Controllers' existing `/agent/connect` WebSockets, so
 target machines need no inbound port. Each relayed stream has an independent
 flow-control window, and terminal and relayed network frames share the same
 authenticated connection.
+
+The central usage ledger meters relayed payloads. New Controller/Proxy pairs also
+report successful Direct TCP writes/UDP datagrams every five seconds and when
+the association closes.
+The existing traffic API and Audit view show these as `direct_network`, meter
+version 2, with zero billable bytes. Their `payload_frames` field counts socket
+writes, not Proxy frames or IP packets. Older Proxies do not request reports;
+older Controllers do not produce them. Proxy-env internet bypass is not counted.
+New peers negotiate durable receipts: pending cumulative reports live under the
+Controller root at `.treer/network-usage`, survive restart, and are removed only
+after a database commit acknowledgement. Reconnect and revocation do not discard
+these pending reports. A sudden crash can still lose bytes since the latest
+five-second checkpoint; delayed deltas appear in their commit-time hour. Finished receipts are retained for 90 days; pending reports must be recovered
+within that window. Legacy Direct reporting remains best effort. Relay counters flush every ten seconds.
+
+`GET /api/workspaces/{workspace_id}/traffic/agents?hours=24` returns Agent
+detail for Controller network relay and Direct streams. Its source/destination
+IDs are qualified by `agent`, `machine` or `internet` endpoint types. The Audit
+view shows sent/received totals per Agent. Detail uses a separate table and must
+not be added to machine totals. It does not backfill historical Agent identities
+or add Agent attribution to browser/ingress traffic without Agent metadata.
+See the [Mac networking investigation](research/2026-09-05-macos-transparent-network.md)
+for platform evidence and remaining parity gates.
 
 Network access is allowed by default. A service is a durable record for either a
 long-running host-network process or a managed runtime's private loopback:
@@ -1007,3 +1035,11 @@ The complete gate checks documentation links, release tooling, the control-plane
 React build, updater tests, and the full Rust workspace. Workspace App and AIS
 adapter tests are focused, opt-in checks; while iterating on messaging, use
 `just app-test` and `just messaging-e2e`.
+
+Experimental native UDP uses the owned helper and matching new Proxy/Controller
+binaries. Register UDP destinations with service `protocol: "udp"`; TCP/HTTP
+services do not accept UDP. Policy remains `network.connect` with the same Agent,
+host and port rules. Direct reports count UDP payload bytes and datagrams, excluding
+local framing. Associations expire after 60 seconds idle. The owned extension supplies exact-domain supplemental DNS configuration and
+restores persistent virtual addresses; signed system integration remains unverified.
+Linux private Agent UDP ingress remains unsupported.

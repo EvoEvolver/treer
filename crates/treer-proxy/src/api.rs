@@ -703,6 +703,10 @@ pub fn router(
             get(list_machine_traffic),
         )
         .route(
+            "/api/workspaces/{workspace_id}/traffic/agents",
+            get(list_agent_traffic),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy",
             any(proxy_virtual_network_host_root),
         )
@@ -2316,6 +2320,24 @@ async fn list_machine_traffic(
         "hours": query.hours,
         "traffic": traffic,
     })))
+}
+
+async fn list_agent_traffic(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<MachineTrafficQuery>,
+) -> Result<Json<Value>, ApiFailure> {
+    if !(1..=24 * 30).contains(&query.hours) {
+        return Err(ApiFailure::bad_request(
+            "invalid_traffic_window",
+            "traffic window must be between 1 and 720 hours",
+        ));
+    }
+    let traffic = state
+        .recent_agent_traffic(&workspace_id, query.hours)
+        .await
+        .map_err(|error| ApiFailure::internal("traffic_query_failed", &format!("{error:#}")))?;
+    Ok(Json(json!({"hours": query.hours, "traffic": traffic})))
 }
 
 async fn hydrate_app_deployment(state: &AppState, app: &mut AppDeployment) {

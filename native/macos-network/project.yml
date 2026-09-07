@@ -1,0 +1,91 @@
+name: TreerNetwork
+options:
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.1.0"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    OTHER_LDFLAGS: $(inherited) -lbsm
+packages:
+  TreerNetwork:
+    path: .
+targets:
+  TreerNetworkPlatformTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/Platform
+      - Platform
+    dependencies:
+      - package: TreerNetwork
+        product: TreerNetworkCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.treer.network.platform-tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Tests/Platform/Bridge.h
+  TreerNetwork:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - Platform
+    dependencies:
+      - package: TreerNetwork
+        product: TreerNetworkCore
+      - target: TreerNetworkExtension
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.treer.network
+        SWIFT_OBJC_BRIDGING_HEADER: Platform/Bridge.h
+    entitlements:
+      path: App/TreerNetwork.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - app-proxy-provider-systemextension
+        com.apple.developer.system-extension.install: true
+    info:
+      path: App/Info.plist
+      properties:
+        LSUIElement: true
+        NSSystemExtensionUsageDescription: Treer routes managed Agent traffic through its network policy and services.
+  TreerNetworkExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - Extension
+      - Platform
+    dependencies:
+      - package: TreerNetwork
+        product: TreerNetworkCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.treer.network.extension
+        SWIFT_OBJC_BRIDGING_HEADER: Platform/Bridge.h
+        SKIP_INSTALL: YES
+    entitlements:
+      path: Extension/TreerNetworkExtension.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - app-proxy-provider-systemextension
+    info:
+      path: Extension/Info.plist
+      properties:
+        NSSystemExtensionUsageDescription: Treer routes managed Agent traffic through its network policy and services.
+        NetworkExtension:
+          NEProviderClasses:
+            com.apple.networkextension.app-proxy: $(PRODUCT_MODULE_NAME).TransparentProxyProvider
+schemes:
+  TreerNetworkPlatformTests:
+    build:
+      targets:
+        TreerNetworkPlatformTests: all
+    test:
+      targets:
+        - TreerNetworkPlatformTests

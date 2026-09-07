@@ -23,6 +23,7 @@ RUN apt-get update && \
         sudo \
         systemd \
         systemd-sysv \
+        util-linux \
         vim-tiny \
         wget && \
     apt-get clean && \

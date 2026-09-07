@@ -236,7 +236,7 @@ export interface PlatformAuditEvent {
 export interface VirtualNetworkHost {
   hostname: string
   service_id: string
-  service_protocol: "tcp" | "http"
+  service_protocol: "tcp" | "http" | "udp"
   destination_server_id: string
   destination_agent_id?: string
   target_host: string
@@ -250,7 +250,7 @@ export interface MachineService {
   target_agent_id?: string
   target_host: string
   target_port: number
-  protocol: "tcp" | "http"
+  protocol: "tcp" | "http" | "udp"
   updated_at: string
   updated_by: string
 }
@@ -268,10 +268,10 @@ export interface ServiceIngress {
 
 export interface MachineTrafficRecord {
   window_start: string
-  traffic_class?: "virtual_network" | "service_ingress" | "virtual_host" | "agent_interface"
-  source_type?: "client" | "machine"
+  traffic_class?: "virtual_network" | "service_ingress" | "virtual_host" | "agent_interface" | "direct_network"
+  source_type?: "client" | "machine" | "internet"
   source_server_id: string
-  destination_type?: "client" | "machine"
+  destination_type?: "client" | "machine" | "internet"
   destination_server_id: string
   payload_bytes: number
   payload_frames: number
@@ -300,6 +300,13 @@ export interface OrganizationAuditEvent {
 
 export interface ApiErrorBody {
   error?: { message?: string }
+}
+
+export interface AgentTrafficRecord extends Omit<MachineTrafficRecord, "source_type" | "destination_type" | "source_server_id" | "destination_server_id"> {
+  source_type: "agent" | "machine" | "internet"
+  source_id: string
+  destination_type: "agent" | "machine" | "internet"
+  destination_id: string
 }
 
 export class ApiError extends Error {

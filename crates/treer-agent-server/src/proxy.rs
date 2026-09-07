@@ -208,6 +208,11 @@ impl ProxyClient {
         )
         .await?;
 
+        // Open frames may only follow this connection's machine registration
+        // and Agent snapshot. Offline requests fail locally instead of being
+        // replayed as new connections after sleep/reconnect.
+        self.network.set_proxy_connected();
+
         let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut events = self.runtime.subscribe();
@@ -438,6 +443,7 @@ impl ProxyClient {
                     match message {
                         ProxyMessage::Registered { .. } => {
                             self.network.clear_virtual_hostnames();
+                            self.network.sync_native_virtual_hostnames().await?;
                             if let Err(error) = self.runtime.reset_virtual_hosts() {
                                 warn!(code = %error.code, message = %error.message, "failed to reset virtual-host snapshot");
                             }
@@ -445,11 +451,13 @@ impl ProxyClient {
                         ProxyMessage::VirtualNetworkHosts { snapshot } => {
                             let revision = snapshot.revision;
                             let count = snapshot.hosts.len();
-                            self.network.set_virtual_hostnames(
-                                snapshot.hosts.iter().map(|host| host.hostname.as_str()),
-                            );
+                            let names: Vec<_> = snapshot.hosts.iter().map(|host| host.hostname.clone()).collect();
                             match self.runtime.replace_virtual_hosts(snapshot) {
-                                Ok(true) => info!(revision, count, "virtual hosts refreshed"),
+                                Ok(true) => {
+                                    self.network.set_virtual_hostnames(names);
+                                    self.network.sync_native_virtual_hostnames().await?;
+                                    info!(revision, count, "virtual hosts refreshed");
+                                }
                                 Ok(false) => tracing::debug!(revision, "ignored stale virtual-host snapshot"),
                                 Err(error) => warn!(code = %error.code, message = %error.message, "rejected virtual-host snapshot"),
                             }

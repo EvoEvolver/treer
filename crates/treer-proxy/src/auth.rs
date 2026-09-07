@@ -6456,6 +6456,7 @@ fn machine_service_from_row(row: sqlx::postgres::PgRow) -> Result<MachineService
         ));
     }
     let protocol = match row.get::<String, _>("protocol").as_str() {
+        "udp" => MachineServiceProtocol::Udp,
         "tcp" => MachineServiceProtocol::Tcp,
         "http" => MachineServiceProtocol::Http,
         value => {
@@ -6539,6 +6540,7 @@ fn validate_agent_service_target_host(value: &str) -> Result<String, AuthFailure
 
 const fn machine_service_protocol_str(protocol: MachineServiceProtocol) -> &'static str {
     match protocol {
+        MachineServiceProtocol::Udp => "udp",
         MachineServiceProtocol::Tcp => "tcp",
         MachineServiceProtocol::Http => "http",
     }
@@ -6656,6 +6658,7 @@ fn resolved_service_ingress_from_row(
         target_host: row.get("target_host"),
         target_port,
         protocol: match row.get::<String, _>("service_protocol").as_str() {
+            "udp" => MachineServiceProtocol::Udp,
             "tcp" => MachineServiceProtocol::Tcp,
             "http" => MachineServiceProtocol::Http,
             value => {
@@ -6722,6 +6725,7 @@ fn virtual_network_host_from_row(
         hostname: row.get("hostname"),
         service_id: row.get("service_id"),
         service_protocol: match row.get::<String, _>("service_protocol").as_str() {
+            "udp" => MachineServiceProtocol::Udp,
             "tcp" => MachineServiceProtocol::Tcp,
             "http" => MachineServiceProtocol::Http,
             value => {
@@ -7537,6 +7541,44 @@ mod tests {
             store.all_workspaces().await.expect("load workspaces").len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn network_schema_upgrades_legacy_service_and_traffic_constraints() {
+        let store = AuthStore::for_test("owner-password").await;
+        sqlx::raw_sql("ALTER TABLE machine_services DROP CONSTRAINT machine_services_protocol_check;
+            ALTER TABLE machine_services ADD CONSTRAINT machine_services_protocol_check CHECK(protocol IN ('tcp','http'));
+            ALTER TABLE traffic_usage_hourly DROP CONSTRAINT traffic_usage_hourly_traffic_class_check;
+            ALTER TABLE traffic_usage_hourly ADD CONSTRAINT traffic_usage_hourly_traffic_class_check CHECK(traffic_class IN ('virtual_network','service_ingress','virtual_host','agent_interface'));
+            ALTER TABLE traffic_usage_hourly DROP CONSTRAINT traffic_usage_hourly_source_type_check;
+            ALTER TABLE traffic_usage_hourly ADD CONSTRAINT traffic_usage_hourly_source_type_check CHECK(source_type IN ('client','machine'));
+            ALTER TABLE traffic_usage_hourly DROP CONSTRAINT traffic_usage_hourly_destination_type_check;
+            ALTER TABLE traffic_usage_hourly ADD CONSTRAINT traffic_usage_hourly_destination_type_check CHECK(destination_type IN ('client','machine'));")
+            .execute(&store.pool).await.unwrap();
+        store.initialize_schema().await.unwrap();
+        store.initialize_schema().await.unwrap();
+        for (table, constraint, value) in [
+            ("machine_services", "machine_services_protocol_check", "udp"),
+            (
+                "traffic_usage_hourly",
+                "traffic_usage_hourly_traffic_class_check",
+                "direct_network",
+            ),
+            (
+                "traffic_usage_hourly",
+                "traffic_usage_hourly_source_type_check",
+                "internet",
+            ),
+            (
+                "traffic_usage_hourly",
+                "traffic_usage_hourly_destination_type_check",
+                "internet",
+            ),
+        ] {
+            let definition: String = sqlx::query_scalar("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid=$1::regclass AND conname=$2")
+                .bind(table).bind(constraint).fetch_one(&store.pool).await.unwrap();
+            assert!(definition.contains(value), "{constraint}: {definition}");
+        }
     }
 
     #[tokio::test]

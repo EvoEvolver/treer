@@ -38,6 +38,7 @@ pub enum ServiceMode {
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkMode {
     Transparent,
+    NativeExperimental,
     ProxyEnv,
 }
 
@@ -45,6 +46,7 @@ impl std::fmt::Display for NetworkMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Transparent => "transparent",
+            Self::NativeExperimental => "native-experimental",
             Self::ProxyEnv => "proxy-env",
         })
     }

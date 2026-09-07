@@ -4,6 +4,9 @@ mod host_client;
 mod interface_cache;
 mod local_api;
 mod network;
+mod network_datagram;
+mod network_meter;
+mod network_usage_outbox;
 mod proxy;
 #[cfg(target_os = "linux")]
 mod sandbox;
@@ -260,11 +263,21 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
     let listen_address = listener.local_addr()?;
     let network = select_network_mode(args.network_mode)?;
     network.announce();
-    let sandbox_executable = transparent_network_executable(network.mode)?;
+    let sandbox_executable = transparent_network_executable(network.mode).await?;
     let network = network::NetworkRuntime::bind_near(listen_address, sandbox_executable.is_some())
         .await
         .context("failed to bind local network proxy")?;
-    let agent_server_url = agent_server_url(listen_address, sandbox_executable.is_some());
+    network
+        .enable_usage_outbox(
+            root.join(".treer/network-usage"),
+            workspace.clone(),
+            server_id.clone(),
+        )
+        .await?;
+    let agent_server_url = agent_server_url(
+        listen_address,
+        cfg!(target_os = "linux") && sandbox_executable.is_some(),
+    );
     let (host, host_events) = HostClient::connect(&args.host_socket).await?;
     let sync = host.sync(std::collections::BTreeMap::new()).await?;
     let host_build = match &sync {
@@ -354,14 +367,46 @@ fn agent_server_url(listen_address: SocketAddr, transparent: bool) -> String {
     format!("http://{host}:{}", listen_address.port())
 }
 
-fn transparent_network_executable(mode: service::NetworkMode) -> Result<Option<PathBuf>> {
+async fn transparent_network_executable(mode: service::NetworkMode) -> Result<Option<PathBuf>> {
     match mode {
         service::NetworkMode::ProxyEnv => Ok(None),
         service::NetworkMode::Transparent if cfg!(target_os = "linux") => std::env::current_exe()
             .context("failed to locate Controller executable for network sandbox")
             .map(Some),
+        service::NetworkMode::NativeExperimental if cfg!(target_os = "macos") => {
+            let helper = std::env::var_os("TREER_MACOS_NETWORK_HELPER")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from("/Applications/TreerNetwork.app/Contents/MacOS/TreerNetwork")
+                });
+            anyhow::ensure!(
+                helper.is_absolute() && helper.is_file(),
+                "native capture requires the built, signed TreerNetwork helper; see native/macos-network/README.md"
+            );
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                tokio::process::Command::new(&helper)
+                    .arg("status")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .context("native capture readiness check timed out")?
+            .context("failed to run native capture readiness check")?;
+            let status: serde_json::Value = serde_json::from_slice(&output.stdout).context(
+                "native capture is not ready; activate the signed TreerNetwork extension first",
+            )?;
+            anyhow::ensure!(
+                output.status.success() && status["version"] == 1 && status["ready"] == true,
+                "native capture did not acknowledge readiness"
+            );
+            Ok(Some(helper))
+        }
         service::NetworkMode::Transparent => anyhow::bail!(
             "transparent network mode is currently supported only on Linux; use a Linux container"
+        ),
+        service::NetworkMode::NativeExperimental => anyhow::bail!(
+            "native-experimental network mode is supported only on macOS"
         ),
     }
 }
@@ -386,8 +431,11 @@ fn select_network_mode(configured: Option<service::NetworkMode>) -> Result<Netwo
     let explicit = std::env::var("TREER_NETWORK_MODE").ok();
     let mode = match explicit.as_deref() {
         Some("transparent") => service::NetworkMode::Transparent,
+        Some("native-experimental") => service::NetworkMode::NativeExperimental,
         Some("proxy-env") => service::NetworkMode::ProxyEnv,
-        Some(_) => anyhow::bail!("TREER_NETWORK_MODE must be transparent or proxy-env"),
+        Some(_) => anyhow::bail!(
+            "TREER_NETWORK_MODE must be transparent, proxy-env, or native-experimental"
+        ),
         None => configured.unwrap_or(if cfg!(target_os = "linux") {
             service::NetworkMode::Transparent
         } else {
@@ -401,10 +449,15 @@ fn select_network_mode(configured: Option<service::NetworkMode>) -> Result<Netwo
     }
     #[cfg(not(target_os = "linux"))]
     {
-        if mode == service::NetworkMode::Transparent {
-            anyhow::bail!(
-                "transparent network mode is currently supported only on Linux; use proxy-env"
-            );
+        match mode {
+            service::NetworkMode::ProxyEnv => {}
+            service::NetworkMode::NativeExperimental if cfg!(target_os = "macos") => {}
+            service::NetworkMode::Transparent => anyhow::bail!(
+                "transparent network mode is currently supported only on Linux; use proxy-env or native-experimental on macOS"
+            ),
+            service::NetworkMode::NativeExperimental => {
+                anyhow::bail!("native-experimental network mode is supported only on macOS")
+            }
         }
         Ok(NetworkModeSelection {
             mode,
@@ -419,6 +472,9 @@ fn select_linux_network_mode(
     explicit: bool,
     probe: impl FnOnce() -> Result<()>,
 ) -> Result<NetworkModeSelection> {
+    if mode == service::NetworkMode::NativeExperimental {
+        anyhow::bail!("native-experimental network mode is supported only on macOS");
+    }
     if mode == service::NetworkMode::ProxyEnv {
         return Ok(NetworkModeSelection {
             mode,

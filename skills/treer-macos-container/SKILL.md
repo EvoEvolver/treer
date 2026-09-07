@@ -174,6 +174,28 @@ exits, but it is intentionally not restarted after a crash or machine reboot.
 
 ## 6. Verify
 
+The machine is a Linux guest and uses Treer's existing transparent backend.
+Verify the kernel and the **guest account** before creating an Agent:
+
+```bash
+container machine run -n treer -- test -r /dev/net/tun
+container machine run -n treer -- test -w /dev/net/tun
+container machine run -n treer -- unshare --user --map-current-user --net --mount --keep-caps --fork ip link
+```
+
+The last command should succeed with a private, initially down `lo` interface.
+`unshare` and `mount` come from the explicitly installed `util-linux` package.
+A successful preflight is not an end-to-end network test. The development
+[capture and service probes](../../scripts/network-lab/README.md) exercise the
+installed sandbox, virtual DNS, TCP, identity, private loopback, and publishing.
+
+If the TUN node is missing or inaccessible, inspect guest kernel `CONFIG_TUN`
+and device ownership first. If `unshare` returns `EPERM`, inspect guest user
+namespace and LSM restrictions. Do not silently fall back to `proxy-env` or
+disable host-wide protections. The tested Apple machine needed neither a
+privileged container nor host network/firewall changes; see the
+[dated investigation](../../docs/research/2026-09-05-macos-transparent-network.md).
+
 From the guest:
 
 ```bash
