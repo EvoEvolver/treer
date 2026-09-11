@@ -13,6 +13,8 @@ mod tui;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::{Command as ProcessCommand, Stdio};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
@@ -159,6 +161,8 @@ struct ServerArgs {
     #[arg(long, env = "TREER_HOST_SOCKET", default_value = ".treer/host.sock")]
     host_socket: PathBuf,
     #[arg(skip)]
+    network_mode: Option<service::NetworkMode>,
+    #[arg(skip)]
     supervision: Option<treer_protocol::MachineSupervision>,
 }
 
@@ -190,6 +194,7 @@ async fn main() -> Result<()> {
             let config = service::ServiceConfig::load(&config)?;
             service::require_install_hostname(&config)?;
             let supervision = Some(config.supervision());
+            let network_mode = args.server.network_mode.or(config.network_mode);
             run_server(ServerArgs {
                 proxy: Url::parse(&config.proxy).context("invalid proxy URL in service config")?,
                 workspace: Some(config.workspace),
@@ -202,6 +207,7 @@ async fn main() -> Result<()> {
                     .parse()
                     .context("invalid listen address in service config")?,
                 host_socket: config.host_socket,
+                network_mode,
                 supervision,
             })
             .await
@@ -251,7 +257,9 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind local API at {}", args.listen))?;
     let listen_address = listener.local_addr()?;
-    let sandbox_executable = transparent_network_executable()?;
+    let network = select_network_mode(args.network_mode)?;
+    network.announce();
+    let sandbox_executable = transparent_network_executable(network.mode)?;
     let network = network::NetworkRuntime::bind_near(listen_address, sandbox_executable.is_some())
         .await
         .context("failed to bind local network proxy")?;
@@ -343,24 +351,117 @@ fn agent_server_url(listen_address: SocketAddr, transparent: bool) -> String {
     format!("http://{host}:{}", listen_address.port())
 }
 
-fn transparent_network_executable() -> Result<Option<PathBuf>> {
-    let mode = std::env::var("TREER_NETWORK_MODE").unwrap_or_else(|_| {
-        if cfg!(target_os = "linux") {
-            "transparent".to_string()
-        } else {
-            "proxy-env".to_string()
-        }
-    });
-    match mode.as_str() {
-        "proxy-env" => Ok(None),
-        "transparent" if cfg!(target_os = "linux") => std::env::current_exe()
+fn transparent_network_executable(mode: service::NetworkMode) -> Result<Option<PathBuf>> {
+    match mode {
+        service::NetworkMode::ProxyEnv => Ok(None),
+        service::NetworkMode::Transparent if cfg!(target_os = "linux") => std::env::current_exe()
             .context("failed to locate Controller executable for network sandbox")
             .map(Some),
-        "transparent" => anyhow::bail!(
+        service::NetworkMode::Transparent => anyhow::bail!(
             "transparent network mode is currently supported only on Linux; use a Linux container"
         ),
-        _ => anyhow::bail!("TREER_NETWORK_MODE must be transparent or proxy-env"),
     }
+}
+
+#[derive(Debug)]
+struct NetworkModeSelection {
+    mode: service::NetworkMode,
+    fallback_reason: Option<String>,
+}
+
+impl NetworkModeSelection {
+    fn announce(&self) {
+        if let Some(reason) = &self.fallback_reason {
+            eprintln!(
+                "treer: warning: transparent networking is unavailable ({reason}); falling back to proxy-env mode"
+            );
+        }
+    }
+}
+
+fn select_network_mode(configured: Option<service::NetworkMode>) -> Result<NetworkModeSelection> {
+    let explicit = std::env::var("TREER_NETWORK_MODE").ok();
+    let mode = match explicit.as_deref() {
+        Some("transparent") => service::NetworkMode::Transparent,
+        Some("proxy-env") => service::NetworkMode::ProxyEnv,
+        Some(_) => anyhow::bail!("TREER_NETWORK_MODE must be transparent or proxy-env"),
+        None => configured.unwrap_or(if cfg!(target_os = "linux") {
+            service::NetworkMode::Transparent
+        } else {
+            service::NetworkMode::ProxyEnv
+        }),
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        select_linux_network_mode(mode, explicit.is_some(), probe_transparent_networking)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if mode == service::NetworkMode::Transparent {
+            anyhow::bail!(
+                "transparent network mode is currently supported only on Linux; use proxy-env"
+            );
+        }
+        Ok(NetworkModeSelection {
+            mode,
+            fallback_reason: None,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn select_linux_network_mode(
+    mode: service::NetworkMode,
+    explicit: bool,
+    probe: impl FnOnce() -> Result<()>,
+) -> Result<NetworkModeSelection> {
+    if mode == service::NetworkMode::ProxyEnv {
+        return Ok(NetworkModeSelection {
+            mode,
+            fallback_reason: None,
+        });
+    }
+    match probe() {
+        Ok(()) => Ok(NetworkModeSelection {
+            mode,
+            fallback_reason: None,
+        }),
+        Err(error) if explicit => Err(error).context(
+            "TREER_NETWORK_MODE=transparent was requested but unprivileged namespaces are unavailable; use proxy-env",
+        ),
+        Err(error) => Ok(NetworkModeSelection {
+            mode: service::NetworkMode::ProxyEnv,
+            fallback_reason: Some(format!("{error:#}")),
+        }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_transparent_networking() -> Result<()> {
+    let output = ProcessCommand::new("unshare")
+        .args([
+            "--user",
+            "--map-current-user",
+            "--net",
+            "--mount",
+            "--keep-caps",
+            "--kill-child",
+            "--fork",
+            "true",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("transparent networking requires unshare(1) from util-linux")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if detail.is_empty() {
+        anyhow::bail!("unshare probe exited with {}", output.status);
+    }
+    anyhow::bail!("unshare probe failed: {detail}")
 }
 
 async fn run_service_command(args: ServiceArgs) -> Result<()> {
@@ -389,7 +490,10 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
                 ServiceCommand::Restart => service::restart(&workspace),
                 ServiceCommand::RestartController => service::restart_controller(&workspace),
                 ServiceCommand::Repair { service_mode } => {
-                    let activation = service::repair_and_wait(&workspace, service_mode).await?;
+                    let network = select_network_mode(config.network_mode)?;
+                    network.announce();
+                    let activation =
+                        service::repair_and_wait(&workspace, service_mode, network.mode).await?;
                     service::wait_for_foreground(activation).await
                 }
                 ServiceCommand::Status => service::status(&workspace),
@@ -423,6 +527,8 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     let proxy = normalize_http_url(args.proxy.clone())?;
     let selection = service::preflight_registration(&enrollment.workspace_id, args.service_mode)?;
     selection.announce();
+    let network = select_network_mode(None)?;
+    network.announce();
     if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
         let installed_proxy = normalize_http_url(
             Url::parse(&config.proxy).context("invalid proxy URL in installed service config")?,
@@ -456,6 +562,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         config.proxy = proxy.to_string();
         config.service_manager = selection.manager;
         config.service_fallback_reason = selection.fallback_reason.clone();
+        config.network_mode = Some(network.mode);
         let activation = service::refresh_registration_and_wait(config)
             .await
             .with_context(|| {
@@ -490,6 +597,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         listen: listen.to_string(),
         host_socket,
         install_hostname,
+        network_mode: Some(network.mode),
         service_manager: selection.manager,
         service_fallback_reason: selection.fallback_reason,
     })
@@ -830,6 +938,43 @@ mod tests {
             non_interactive,
             accept_risk,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unavailable_namespaces_fall_back_to_proxy_env() {
+        let selection = select_linux_network_mode(service::NetworkMode::Transparent, false, || {
+            anyhow::bail!("uid_map denied")
+        })
+        .expect("automatic fallback");
+        assert_eq!(selection.mode, service::NetworkMode::ProxyEnv);
+        assert!(selection
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("uid_map denied")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_transparent_mode_preserves_probe_failure() {
+        let error = select_linux_network_mode(service::NetworkMode::Transparent, true, || {
+            anyhow::bail!("uid_map denied")
+        })
+        .expect_err("explicit transparent mode must fail");
+        let detail = format!("{error:#}");
+        assert!(detail.contains("TREER_NETWORK_MODE=transparent"));
+        assert!(detail.contains("uid_map denied"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proxy_env_mode_skips_the_namespace_probe() {
+        let selection = select_linux_network_mode(service::NetworkMode::ProxyEnv, false, || {
+            panic!("proxy-env must not run unshare")
+        })
+        .expect("proxy-env selection");
+        assert_eq!(selection.mode, service::NetworkMode::ProxyEnv);
+        assert_eq!(selection.fallback_reason, None);
     }
 
     #[test]

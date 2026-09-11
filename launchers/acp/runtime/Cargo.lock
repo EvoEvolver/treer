@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "treer-protocol"
-version = "0.1.11"
+version = "0.1.13"
 dependencies = [
  "chrono",
  "serde",

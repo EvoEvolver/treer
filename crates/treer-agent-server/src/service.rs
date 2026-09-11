@@ -34,6 +34,22 @@ pub enum ServiceMode {
     Foreground,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkMode {
+    Transparent,
+    ProxyEnv,
+}
+
+impl std::fmt::Display for NetworkMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Transparent => "transparent",
+            Self::ProxyEnv => "proxy-env",
+        })
+    }
+}
+
 impl std::fmt::Display for ServiceMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -124,6 +140,8 @@ pub struct ServiceConfig {
     pub listen: String,
     pub host_socket: PathBuf,
     pub install_hostname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_mode: Option<NetworkMode>,
     #[serde(default = "default_service_manager")]
     pub service_manager: ServiceManager,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -634,12 +652,17 @@ pub async fn wait_for_foreground(activation: ServiceActivation) -> Result<()> {
     require_success(status, "foreground treer-agent-host")
 }
 
-pub async fn repair_and_wait(workspace: &str, mode: ServiceMode) -> Result<ServiceActivation> {
+pub async fn repair_and_wait(
+    workspace: &str,
+    mode: ServiceMode,
+    network_mode: NetworkMode,
+) -> Result<ServiceActivation> {
     let (_, mut config) = installed_service(workspace)?;
     let selection = preflight_registration(workspace, mode)?;
     selection.announce();
     config.service_manager = selection.manager;
     config.service_fallback_reason = selection.fallback_reason;
+    config.network_mode = Some(network_mode);
     let activation = refresh_registration_and_wait(config).await?;
     println!("treer: service registration repaired without a new enrollment key");
     Ok(activation)
@@ -2879,6 +2902,7 @@ mod tests {
             listen: address.to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
+            network_mode: None,
             service_manager: default_service_manager(),
             service_fallback_reason: None,
         };
@@ -2963,6 +2987,7 @@ mod tests {
             listen: "127.0.0.1:8790".to_string(),
             host_socket: directory.join("host.sock"),
             install_hostname: current_hostname().expect("hostname"),
+            network_mode: None,
             service_manager: selection.manager,
             service_fallback_reason: selection.fallback_reason,
         };
@@ -3064,6 +3089,7 @@ mod tests {
             listen: "127.0.0.1:8790".to_string(),
             host_socket: directory.join("host socket.sock"),
             install_hostname: current_hostname().expect("hostname"),
+            network_mode: None,
             service_manager: ServiceManager::Nohup,
             service_fallback_reason: None,
         };
@@ -3171,6 +3197,7 @@ mod tests {
         .expect("legacy configuration");
         assert_eq!(config.service_manager, default_service_manager());
         assert_eq!(config.service_fallback_reason, None);
+        assert_eq!(config.network_mode, None);
     }
 
     #[test]
@@ -3217,6 +3244,7 @@ mod tests {
             listen: "127.0.0.1:8790".to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
+            network_mode: None,
             service_manager: default_service_manager(),
             service_fallback_reason: None,
         };
@@ -3250,6 +3278,7 @@ mod tests {
             listen: "127.0.0.1:8790".to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: current_hostname().expect("local hostname"),
+            network_mode: None,
             service_manager: default_service_manager(),
             service_fallback_reason: None,
         };
@@ -3285,6 +3314,7 @@ mod tests {
                 listen: "127.0.0.1:8790".to_string(),
                 host_socket: PathBuf::from(format!("/tmp/{server_id}.sock")),
                 install_hostname: current_hostname().expect("local hostname"),
+                network_mode: None,
                 service_manager: default_service_manager(),
                 service_fallback_reason: None,
             };
@@ -3475,6 +3505,7 @@ mod tests {
             listen: "127.0.0.1:8794".to_string(),
             host_socket: PathBuf::from("/tmp/host.sock"),
             install_hostname: "Mac.home.com".to_string(),
+            network_mode: None,
             service_manager: default_service_manager(),
             service_fallback_reason: None,
         };

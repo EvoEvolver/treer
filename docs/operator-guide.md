@@ -602,7 +602,11 @@ SOCKS5 endpoint, so applications do not need to support proxy environment
 variables. Namespace sockets are created by the parent Controller process and
 passed into the namespace; this keeps the Proxy WebSocket and machine egress
 outside the sandbox. Linux requires `unshare(1)` from `util-linux` and a kernel
-that permits unprivileged user namespaces.
+that permits unprivileged user namespaces. Setup probes the same user, network,
+and mount namespace operation before saving the service configuration. When the
+host policy rejects that probe and `TREER_NETWORK_MODE` was not explicitly set,
+Treer warns and persists `proxy-env` mode instead, so Agent shells still start.
+An explicit `TREER_NETWORK_MODE=transparent` fails setup when the probe fails.
 
 The namespace bind-mounts private resolver configuration with `hosts: files
 dns` and a non-loopback nameserver. This bypasses host NSS plugins such as mDNS
