@@ -520,7 +520,7 @@ test("clicking a machine opens an overview with identity, agents, services, virt
   await expect(page.getByRole("heading", { name: "workstation" })).toBeHidden()
 })
 
-test("machine overview uploads a file to the selected directory", async ({ page }) => {
+test("agent toolbar uploads a file to its machine", async ({ page }) => {
   let requestBody: unknown
   await page.route("**/api/workspaces/ws-1/machines/srv-a/files", async (route) => {
     requestBody = route.request().postDataJSON()
@@ -532,18 +532,21 @@ test("machine overview uploads a file to the selected directory", async ({ page 
   })
 
   await page.goto("/")
-  await openWorkspaceSettings(page)
-  await workstationRow(page).click()
-  await page.getByPlaceholder(".").fill("repo")
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByRole("button", { name: /^api-server / }).click()
+  await page.getByRole("button", { name: "Upload file" }).last().click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByRole("heading", { name: "Upload file" })).toBeVisible()
+  await expect(dialog.getByText("Upload to workstation.")).toBeVisible()
+  await dialog.getByLabel("Destination directory").fill("repo")
+  await dialog.locator('input[type="file"]').setInputFiles({
     name: "hello.txt",
     mimeType: "text/plain",
     buffer: Buffer.from("hello"),
   })
-  await page.getByRole("checkbox").check()
-  await page.getByRole("button", { name: "Upload", exact: true }).click()
+  await dialog.getByRole("checkbox").check()
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click()
 
-  await expect(page.getByText("Uploaded repo/hello.txt (5 B).")).toBeVisible()
+  await expect(dialog.getByText("Uploaded repo/hello.txt (5 B).")).toBeVisible()
   expect(requestBody).toEqual({
     directory: "repo",
     file_name: "hello.txt",
@@ -552,13 +555,13 @@ test("machine overview uploads a file to the selected directory", async ({ page 
   })
 })
 
-test("mobile machine overview fits the viewport", async ({ page }) => {
+test("mobile upload dialog fits the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await openWorkspaceSettings(page)
-  await workstationRow(page).click()
+  await page.getByRole("button", { name: /^api-server / }).click()
+  await page.getByRole("button", { name: "Upload file" }).last().click()
 
-  await expect(page.getByRole("heading", { name: "Upload file" })).toBeVisible()
+  await expect(page.getByRole("dialog").getByRole("heading", { name: "Upload file" })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 

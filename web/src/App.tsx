@@ -1136,6 +1136,14 @@ function WorkspaceApp() {
   const [deletingProfile, setDeletingProfile] = useState<AgentLaunchProfile | null>(null)
   const [installOpen, setInstallOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [uploadDirectory, setUploadDirectory] = useState(".")
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [overwriteUpload, setOverwriteUpload] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [uploadInputKey, setUploadInputKey] = useState(0)
+  const [uploadMessage, setUploadMessage] = useState("")
+  const [uploadError, setUploadError] = useState("")
   const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
   const [createOrganizationName, setCreateOrganizationName] = useState("")
@@ -1909,6 +1917,47 @@ function WorkspaceApp() {
 
   function openRename(target: NonNullable<RenameTarget>) { setRenameTarget(target); setRenameName(target.name) }
 
+  function openUpload() {
+    closeMobileSurface()
+    setUploadDirectory(".")
+    setUploadFile(null)
+    setOverwriteUpload(false)
+    setUploadMessage("")
+    setUploadError("")
+    setUploadInputKey((value) => value + 1)
+    setUploadOpen(true)
+  }
+
+  async function uploadToAgentMachine(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId || !selectedAgent || !uploadFile) return
+    if (uploadFile.size > 16 * 1024 * 1024) {
+      setUploadError("Files must be 16 MiB or smaller.")
+      return
+    }
+    setUploading(true)
+    setUploadMessage("")
+    setUploadError("")
+    try {
+      const result = await api<MachineFileUpload>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(selectedAgent.server_id)}/files`, {
+        method: "POST",
+        body: JSON.stringify({
+          directory: uploadDirectory,
+          file_name: uploadFile.name,
+          content_base64: arrayBufferToBase64(await uploadFile.arrayBuffer()),
+          overwrite: overwriteUpload,
+        }),
+      })
+      setUploadMessage(`Uploaded ${result.path} (${formatBytes(result.bytes_written)}).`)
+      setUploadFile(null)
+      setUploadInputKey((value) => value + 1)
+    } catch (reason) {
+      setUploadError(reason instanceof Error ? reason.message : "Upload failed")
+    } finally {
+      setUploading(false)
+    }
+  }
+
   async function submitRename(event: FormEvent) {
     event.preventDefault()
     if (!workspaceId || !renameTarget) return
@@ -2154,6 +2203,7 @@ function WorkspaceApp() {
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
+            <IconButton label="Upload file" disabled={!selectedAgent || !selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton>
             <IconButton label={selectedAgentInterface ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={() => void stopAgent()}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
@@ -2166,11 +2216,11 @@ function WorkspaceApp() {
             {workspaceId && <MachineRecovery workspaceId={workspaceId} onCopy={copy} reason="Copy a recovery command and run it on that machine. restart-controller keeps Agents; start launches a stopped Host." />}
           </div>
         </div> : mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-background", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-background pt-[env(safe-area-inset-top)]")}>
-          {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b bg-background px-3.5"><span className="truncate text-xs font-semibold text-foreground">{selectedAgent?.name ?? "Interface"}</span><button type="button" className="grid size-8 place-items-center rounded-[5px] text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div>}
+          {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b bg-background px-3.5"><span className="truncate text-xs font-semibold text-foreground">{selectedAgent?.name ?? "Interface"}</span><div className="flex shrink-0 items-center gap-1"><IconButton label="Upload file" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div></div>}
           <iframe ref={interfaceFrameRef} key={interfaceFrameKey(selectedAgent?.agent_id ?? "", selectedAgentInterface.instance_id, selectedAgentInterface.registered_at, interfaceUiRevision)} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" onLoad={() => postEmbedTheme(interfaceFrameRef.current, themeRef.current)} />
         </div> : mainView === "terminal" ? mobileTerminalIdle ? null : <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobileTerminalOpen && "fixed inset-0 z-[100] h-[100dvh] max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
-            <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button>}</div></div>
+            <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <><IconButton label="Upload file" className="text-zinc-400 hover:bg-white/10 hover:text-zinc-100" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button></>}</div></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane ref={terminalPaneRef} key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} transformInput={transformTerminalInput} /></div>
             {mobileTerminalOpen && <div className="border-t border-zinc-800 bg-[#191d20] px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
               <div className="grid grid-cols-6 gap-1.5">
@@ -2282,6 +2332,8 @@ function WorkspaceApp() {
 
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 
+    <Dialog open={uploadOpen} onOpenChange={(open) => !uploading && setUploadOpen(open)}><DialogContent><form onSubmit={uploadToAgentMachine} className="space-y-4"><DialogHeader><DialogTitle>Upload file</DialogTitle><DialogDescription>Upload to {machineName(selectedAgentMachine, selectedAgent?.server_id)}. The destination directory is relative to the Machine root.</DialogDescription></DialogHeader><Field label="Destination directory"><Input aria-label="Destination directory" className="font-mono" value={uploadDirectory} onChange={(event) => setUploadDirectory(event.target.value)} placeholder="." required disabled={uploading} /></Field><Field label="File"><Input key={uploadInputKey} aria-label="File" type="file" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} disabled={uploading} /></Field><label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-foreground" checked={overwriteUpload} onChange={(event) => setOverwriteUpload(event.target.checked)} disabled={uploading} />Replace an existing file with the same name</label><p className="text-[10px] text-muted-foreground">Maximum 16 MiB</p>{uploadMessage && <p className="text-xs text-emerald-700">{uploadMessage}</p>}{uploadError && <p className="text-xs text-red-600">{uploadError}</p>}<DialogFooter><Button type="button" variant="outline" onClick={() => setUploadOpen(false)} disabled={uploading}>Close</Button><Button type="submit" disabled={!uploadFile || uploading || !selectedAgentMachineOnline}><Upload />{uploading ? "Uploading" : "Upload"}</Button></DialogFooter></form></DialogContent></Dialog>
+
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget?.name} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>Delete workspace</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? "Checking the workspace machine inventory..." : workspaceMachineCount > 0 ? `Delete all ${workspaceMachineCount} ${workspaceMachineCount === 1 ? "machine" : "machines"} from ${workspace?.name ?? "this workspace"} first.` : `Delete ${workspace?.name}? It will disappear from active views while historical traffic and messages are retained. This cannot be undone.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>Cancel</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>Delete workspace</Button></DialogFooter></DialogContent></Dialog>
 
@@ -2303,13 +2355,6 @@ function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {
 
 function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
-  const [uploadDirectory, setUploadDirectory] = useState(".")
-  const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [overwriteUpload, setOverwriteUpload] = useState(false)
-  const [uploading, setUploading] = useState(false)
-  const [uploadInputKey, setUploadInputKey] = useState(0)
-  const [uploadMessage, setUploadMessage] = useState("")
-  const [uploadError, setUploadError] = useState("")
   const outBytes = traffic.filter((t) => (t.source_type ?? "machine") === "machine" && t.source_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
   const inBytes = traffic.filter((t) => (t.destination_type ?? "machine") === "machine" && t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
   const peers = Array.from(new Set(
@@ -2324,36 +2369,6 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
       setLocalHealth((current) => ({ ...current, [serviceId]: "healthy" }))
     } catch {
       setLocalHealth((current) => ({ ...current, [serviceId]: "unreachable" }))
-    }
-  }
-
-  async function upload(event: FormEvent) {
-    event.preventDefault()
-    if (!workspaceId || !machine || !uploadFile) return
-    if (uploadFile.size > 16 * 1024 * 1024) {
-      setUploadError("Files must be 16 MiB or smaller.")
-      return
-    }
-    setUploading(true)
-    setUploadMessage("")
-    setUploadError("")
-    try {
-      const result = await api<MachineFileUpload>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}/files`, {
-        method: "POST",
-        body: JSON.stringify({
-          directory: uploadDirectory,
-          file_name: uploadFile.name,
-          content_base64: arrayBufferToBase64(await uploadFile.arrayBuffer()),
-          overwrite: overwriteUpload,
-        }),
-      })
-      setUploadMessage(`Uploaded ${result.path} (${formatBytes(result.bytes_written)}).`)
-      setUploadFile(null)
-      setUploadInputKey((value) => value + 1)
-    } catch (reason) {
-      setUploadError(reason instanceof Error ? reason.message : "Upload failed")
-    } finally {
-      setUploading(false)
     }
   }
 
@@ -2401,18 +2416,6 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
         {peers.length > 0 && <div className="flex flex-wrap gap-1.5 pt-2">{peers.map((peer) => <span key={peer.server_id} className="rounded-full bg-accent px-2 py-1 text-[10px] font-medium">{machineName(peer)}</span>)}</div>}
       </section>
     </div>
-
-    <section className="mt-10">
-      <div className="mb-3 flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">Upload file</h2><span className="text-[10px] text-muted-foreground">Maximum 16 MiB</span></div>
-      <form onSubmit={upload} className="grid gap-3 border-y py-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
-        <Field label="Destination directory"><Input className="font-mono" value={uploadDirectory} onChange={(event) => setUploadDirectory(event.target.value)} placeholder="." required disabled={uploading} /></Field>
-        <Field label="File"><Input key={uploadInputKey} type="file" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} disabled={uploading} /></Field>
-        <Button type="submit" disabled={!uploadFile || uploading || machine.status !== "online"}><Upload />{uploading ? "Uploading" : "Upload"}</Button>
-        <label className="flex items-center gap-2 text-xs text-muted-foreground sm:col-span-3"><input type="checkbox" className="size-4 accent-foreground" checked={overwriteUpload} onChange={(event) => setOverwriteUpload(event.target.checked)} disabled={uploading} />Replace an existing file with the same name</label>
-        {uploadMessage && <p className="text-xs text-emerald-700 sm:col-span-3">{uploadMessage}</p>}
-        {uploadError && <p className="text-xs text-red-600 sm:col-span-3">{uploadError}</p>}
-      </form>
-    </section>
 
     <section className="mt-10">
       <h2 className="mb-3 text-sm font-semibold">Agents on this machine</h2>
