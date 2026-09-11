@@ -47,8 +47,9 @@ import {
   X,
   CircleCheck,
   Download,
+  Upload,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
 import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
@@ -755,6 +756,15 @@ function formatBytes(value: number) {
   return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${unit}`
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer)
+  const chunks: string[] = []
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + 32_768)))
+  }
+  return window.btoa(chunks.join(""))
+}
+
 const auditActionLabels: Record<string, string> = {
   "organization.created": "created the organization",
   "organization.renamed": "renamed the organization",
@@ -765,6 +775,8 @@ const auditActionLabels: Record<string, string> = {
   "member.removed": "removed a member",
   "machine.renamed": "renamed a machine",
   "machine.deleted": "deleted a machine",
+  "machine.exec": "ran a machine command",
+  "machine.file.uploaded": "uploaded a machine file",
   "agent.created": "created an agent",
   "agent.renamed": "renamed an agent",
   "agent.stopped": "stopped an agent",
@@ -2291,6 +2303,13 @@ function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {
 
 function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
+  const [uploadDirectory, setUploadDirectory] = useState(".")
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [overwriteUpload, setOverwriteUpload] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [uploadInputKey, setUploadInputKey] = useState(0)
+  const [uploadMessage, setUploadMessage] = useState("")
+  const [uploadError, setUploadError] = useState("")
   const outBytes = traffic.filter((t) => (t.source_type ?? "machine") === "machine" && t.source_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
   const inBytes = traffic.filter((t) => (t.destination_type ?? "machine") === "machine" && t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + (t.billable_bytes ?? t.payload_bytes), 0)
   const peers = Array.from(new Set(
@@ -2305,6 +2324,36 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
       setLocalHealth((current) => ({ ...current, [serviceId]: "healthy" }))
     } catch {
       setLocalHealth((current) => ({ ...current, [serviceId]: "unreachable" }))
+    }
+  }
+
+  async function upload(event: FormEvent) {
+    event.preventDefault()
+    if (!workspaceId || !machine || !uploadFile) return
+    if (uploadFile.size > 16 * 1024 * 1024) {
+      setUploadError("Files must be 16 MiB or smaller.")
+      return
+    }
+    setUploading(true)
+    setUploadMessage("")
+    setUploadError("")
+    try {
+      const result = await api<MachineFileUpload>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}/files`, {
+        method: "POST",
+        body: JSON.stringify({
+          directory: uploadDirectory,
+          file_name: uploadFile.name,
+          content_base64: arrayBufferToBase64(await uploadFile.arrayBuffer()),
+          overwrite: overwriteUpload,
+        }),
+      })
+      setUploadMessage(`Uploaded ${result.path} (${formatBytes(result.bytes_written)}).`)
+      setUploadFile(null)
+      setUploadInputKey((value) => value + 1)
+    } catch (reason) {
+      setUploadError(reason instanceof Error ? reason.message : "Upload failed")
+    } finally {
+      setUploading(false)
     }
   }
 
@@ -2352,6 +2401,18 @@ function MachineOverviewView({ machine, agents, services, virtualHosts, traffic,
         {peers.length > 0 && <div className="flex flex-wrap gap-1.5 pt-2">{peers.map((peer) => <span key={peer.server_id} className="rounded-full bg-accent px-2 py-1 text-[10px] font-medium">{machineName(peer)}</span>)}</div>}
       </section>
     </div>
+
+    <section className="mt-10">
+      <div className="mb-3 flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">Upload file</h2><span className="text-[10px] text-muted-foreground">Maximum 16 MiB</span></div>
+      <form onSubmit={upload} className="grid gap-3 border-y py-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+        <Field label="Destination directory"><Input className="font-mono" value={uploadDirectory} onChange={(event) => setUploadDirectory(event.target.value)} placeholder="." required disabled={uploading} /></Field>
+        <Field label="File"><Input key={uploadInputKey} type="file" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} disabled={uploading} /></Field>
+        <Button type="submit" disabled={!uploadFile || uploading || machine.status !== "online"}><Upload />{uploading ? "Uploading" : "Upload"}</Button>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground sm:col-span-3"><input type="checkbox" className="size-4 accent-foreground" checked={overwriteUpload} onChange={(event) => setOverwriteUpload(event.target.checked)} disabled={uploading} />Replace an existing file with the same name</label>
+        {uploadMessage && <p className="text-xs text-emerald-700 sm:col-span-3">{uploadMessage}</p>}
+        {uploadError && <p className="text-xs text-red-600 sm:col-span-3">{uploadError}</p>}
+      </form>
+    </section>
 
     <section className="mt-10">
       <h2 className="mb-3 text-sm font-semibold">Agents on this machine</h2>

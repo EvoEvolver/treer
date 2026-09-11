@@ -6,12 +6,14 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::DefaultBodyLimit;
 use axum::extract::{Extension, Form, OriginalUri, Path, Query, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, Version};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
@@ -26,14 +28,15 @@ use treer_protocol::{
     CreateAgentLaunchProfileRequest, CreateAgentRequest, CreateAppDeploymentRequest,
     CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
     GetMessageResponse, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
-    ListMessagesQuery, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineService,
-    MessagePrincipal, MessagePrincipalKind, PromptAgentRequest, ProtocolError,
+    ListMessagesQuery, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineExecRequest,
+    MachineService, MessagePrincipal, MessagePrincipalKind, PromptAgentRequest, ProtocolError,
     ReceiveMessagesRequest, RenameRequest, ResolveAppRecipientsRequest,
     ResolveAppRecipientsResponse, SendMessageRequest, ServerStatus, ServiceIngress,
     ServiceIngressAccess, TerminalClientMessage, TerminalCursor, TerminalServerMessage,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    VirtualNetworkHostsSnapshot, WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest,
-    WorkspaceEvent, WorkspaceSnapshot, AGENT_ID_HEADER,
+    UploadMachineFileRequest, UploadMachineFileResponse, VirtualNetworkHostsSnapshot,
+    WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceSnapshot,
+    AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -54,12 +57,12 @@ use crate::policy::{
     ACTION_AGENT_UPDATE, ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_LIST,
     ACTION_LAUNCH_PROFILE_CREATE, ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST,
     ACTION_LAUNCH_PROFILE_READ, ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE,
-    ACTION_MACHINE_DELETE, ACTION_MACHINE_UPDATE, ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT,
-    ACTION_MESSAGE_READ, ACTION_MESSAGE_RECEIVE, ACTION_MESSAGE_SEND, ACTION_SERVICE_LIST,
-    ACTION_SERVICE_PROBE, ACTION_VIRTUAL_HOST_LIST, RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE,
-    RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE, RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE,
-    RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT, RESOURCE_MESSAGE_MAILBOX,
-    RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
+    ACTION_MACHINE_DELETE, ACTION_MACHINE_EXEC, ACTION_MACHINE_FILE_WRITE, ACTION_MACHINE_UPDATE,
+    ACTION_MESSAGE_ACK, ACTION_MESSAGE_IMPORT, ACTION_MESSAGE_READ, ACTION_MESSAGE_RECEIVE,
+    ACTION_MESSAGE_SEND, ACTION_SERVICE_LIST, ACTION_SERVICE_PROBE, ACTION_VIRTUAL_HOST_LIST,
+    RESOURCE_AGENT, RESOURCE_AGENT_LAUNCH_PROFILE, RESOURCE_HUMAN_DIRECTORY, RESOURCE_MACHINE,
+    RESOURCE_MACHINE_SERVICE, RESOURCE_MESSAGE, RESOURCE_MESSAGE_DELIVERY, RESOURCE_MESSAGE_IMPORT,
+    RESOURCE_MESSAGE_MAILBOX, RESOURCE_SERVICE_INGRESS, RESOURCE_VIRTUAL_HOST,
 };
 use crate::state::{AppState, SocketFrame, TERMINAL_BROWSER_QUEUE_CAPACITY};
 use crate::traffic::TrafficClass;
@@ -68,6 +71,9 @@ use crate::voice::{VoiceAsrConfig, VoiceServices};
 use crate::voice_llm::{self, VoiceCommandError, VoiceLlmConfig};
 
 const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;
+const MAX_MACHINE_FILE_BYTES: usize = 16 * 1024 * 1024;
+const MACHINE_FILE_CHUNK_BYTES: usize = 192 * 1024;
+const MAX_MACHINE_UPLOAD_BODY_BYTES: usize = 23 * 1024 * 1024;
 
 fn control_audit_actor<'a>(
     session: Option<&'a CurrentSession>,
@@ -407,6 +413,14 @@ pub fn router(
             axum::routing::patch(rename_server).delete(delete_server),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/exec",
+            post(exec_machine),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/files",
+            post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/services",
             get(agent_list_machine_services).post(agent_network_publication_forbidden),
         )
@@ -691,6 +705,14 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/servers/{server_id}",
             axum::routing::patch(rename_server).delete(delete_server),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/exec",
+            post(exec_machine),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/files",
+            post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents",
@@ -4429,6 +4451,190 @@ async fn get_agent(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn exec_machine(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Json(request): Json<MachineExecRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    state.resolve_server(&workspace_id, &server_id).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_MACHINE_EXEC,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
+    let audit_cwd = request.cwd.clone();
+    let audit_timeout_ms = request.timeout_ms;
+    let data = state
+        .send_command(&workspace_id, &server_id, AgentCommand::Exec { request })
+        .await?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "machine.exec",
+            resource_kind: "machine",
+            resource_id: &server_id,
+            resource_name: None,
+            payload: json!({
+                "cwd": audit_cwd,
+                "timeout_ms": audit_timeout_ms,
+                "exit_code": data.get("exit_code"),
+                "timed_out": data.get("timed_out"),
+                "truncated": data.get("truncated"),
+            }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, %server_id, "failed to record machine exec audit event");
+    }
+    Ok(Json(data))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_machine_file(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Json(request): Json<UploadMachineFileRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    state.resolve_server(&workspace_id, &server_id).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_MACHINE_FILE_WRITE,
+        PolicyResource::new(RESOURCE_MACHINE, &server_id),
+    )
+    .await?;
+    if request.content_base64.len() > MAX_MACHINE_FILE_BYTES.div_ceil(3) * 4 + 4 {
+        return Err(ApiFailure::bad_request(
+            "machine_file_too_large",
+            &format!("uploaded files may contain at most {MAX_MACHINE_FILE_BYTES} bytes"),
+        ));
+    }
+    let contents = base64::engine::general_purpose::STANDARD
+        .decode(&request.content_base64)
+        .map_err(|_| {
+            ApiFailure::bad_request("invalid_machine_file", "file content is not valid base64")
+        })?;
+    if contents.len() > MAX_MACHINE_FILE_BYTES {
+        return Err(ApiFailure::bad_request(
+            "machine_file_too_large",
+            &format!("uploaded files may contain at most {MAX_MACHINE_FILE_BYTES} bytes"),
+        ));
+    }
+    let upload_id = format!("upl_{}", Uuid::new_v4().simple());
+    state
+        .send_command(
+            &workspace_id,
+            &server_id,
+            AgentCommand::UploadBegin {
+                upload_id: upload_id.clone(),
+                directory: request.directory.clone(),
+                file_name: request.file_name.clone(),
+                overwrite: request.overwrite,
+            },
+        )
+        .await?;
+    let upload_result = async {
+        for chunk in contents.chunks(MACHINE_FILE_CHUNK_BYTES) {
+            state
+                .send_command(
+                    &workspace_id,
+                    &server_id,
+                    AgentCommand::UploadChunk {
+                        upload_id: upload_id.clone(),
+                        content_base64: base64::engine::general_purpose::STANDARD.encode(chunk),
+                    },
+                )
+                .await?;
+        }
+        let value = state
+            .send_command(
+                &workspace_id,
+                &server_id,
+                AgentCommand::UploadCommit {
+                    upload_id: upload_id.clone(),
+                },
+            )
+            .await?;
+        serde_json::from_value::<UploadMachineFileResponse>(value).map_err(|error| {
+            ProtocolError::new(
+                "invalid_machine_upload_response",
+                format!("Controller returned an invalid upload response: {error}"),
+            )
+        })
+    }
+    .await;
+    let uploaded = match upload_result {
+        Ok(uploaded) => uploaded,
+        Err(error) => {
+            let _ = state
+                .send_command(
+                    &workspace_id,
+                    &server_id,
+                    AgentCommand::UploadAbort {
+                        upload_id: upload_id.clone(),
+                    },
+                )
+                .await;
+            return Err(error.into());
+        }
+    };
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "machine.file.uploaded",
+            resource_kind: "machine",
+            resource_id: &server_id,
+            resource_name: None,
+            payload: json!({
+                "path": uploaded.path,
+                "bytes_written": uploaded.bytes_written,
+                "overwrite": request.overwrite,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, %server_id, "failed to record machine upload audit event");
+    }
+    Ok(Json(serde_json::to_value(uploaded)?))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn rename_server(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -5499,13 +5705,20 @@ impl From<ProtocolError> for ApiFailure {
             "workspace_exists" | "agent_ambiguous" | "server_ambiguous" | "recipient_ambiguous" => {
                 StatusCode::CONFLICT
             }
+            "machine_file_exists" => StatusCode::CONFLICT,
             "policy_denied" | "policy_subject_mismatch" => StatusCode::FORBIDDEN,
             "server_offline" | "no_online_server" | "ssh_unsupported" | "scp_unsupported" => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
-            "invalid_agent_identity" | "invalid_name" | "invalid_request" => {
-                StatusCode::BAD_REQUEST
-            }
+            "invalid_agent_identity"
+            | "invalid_name"
+            | "invalid_request"
+            | "invalid_machine_exec"
+            | "invalid_machine_exec_timeout"
+            | "invalid_machine_path"
+            | "invalid_machine_file_name"
+            | "invalid_machine_upload"
+            | "machine_upload_chunk_too_large" => StatusCode::BAD_REQUEST,
             _ => StatusCode::BAD_GATEWAY,
         };
         Self { status, error }

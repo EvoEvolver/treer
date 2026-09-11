@@ -67,6 +67,12 @@ export interface Machine {
   labels?: Record<string, string>
 }
 
+export interface MachineFileUpload {
+  server_id: string
+  path: string
+  bytes_written: number
+}
+
 export interface Agent {
   agent_id: string
   server_id: string

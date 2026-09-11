@@ -38,7 +38,8 @@ crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
 
 The React app in `web/` is the browser control plane. Workspace views cover
-terminals, launch profiles, managed Apps, network, machine overview, and audit.
+terminals, launch profiles, managed Apps, network, machine overview, bounded
+file upload, and audit.
 `/admin` is the platform-administrator inventory: user, machine, and Agent
 counts expand into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
@@ -134,8 +135,9 @@ rules into action-indexed immutable structures and caches them briefly. Updates
 use optimistic revisions and PostgreSQL notification. Multi-recipient sends and
 multi-delivery acknowledgements evaluate one pinned revision.
 
-Policy covers Agent discovery/control, launch profiles, machine/service/network
-mutation, workload identity, and Message send/read/receive/ack/import. A
+Policy covers Agent discovery/control, launch profiles, machine exec and file
+write, machine/service/network mutation, workload identity, and Message
+send/read/receive/ack/import. A
 workspace without a Policy document currently defaults to allow; this is an
 explicit product limitation.
 
@@ -148,6 +150,15 @@ so the full path stays inside `sockaddr_un` limits on macOS, where the default
 runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy; ordinary virtual-network payload travels
 between Controllers after Proxy authorization.
+
+Machine exec and file upload reuse the authenticated Proxy-to-Controller
+command path. Exec is a non-interactive argv vector with a 30-second ceiling
+and bounded stdout/stderr. Upload accepts at most 16 MiB from the browser,
+crosses distributed Proxy routing in 192 KiB chunks, stages a temporary file in
+the requested directory, and renames it into place only after every chunk
+arrives. Directories are canonicalized beneath the enrolled Host root and file
+names cannot contain path separators. These operations run in the Controller,
+so a Controller hot update enables them without replacing the stable Host.
 
 Automatic mode starts the Host as a detached `nohup` process on Linux and
 macOS. Treer records the PID and process start identity and redirects output to
@@ -295,7 +306,8 @@ installer.
 
 Covered organization, workspace, and membership mutations write their audit
 event in the same PostgreSQL transaction. Successful Agent create, rename, stop,
-and delete operations, App lifecycle operations, and machine rename and delete operations append runtime
+and delete operations, App lifecycle operations, machine exec and file upload,
+and machine rename and delete operations append runtime
 audit events after the Controller result; an audit write failure is logged
 without turning a completed runtime mutation into a retryable API failure.
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use axum::extract::ws::{Message as BrowserMessage, WebSocket};
-use axum::extract::{Path, Query, State, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,16 +18,19 @@ use treer_protocol::{
     AcknowledgeMessagesRequest, ApiError, BuildInfo, CreateAgentLaunchProfileRequest,
     CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
     CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, ImportMessagesRequest,
-    InputAgentRequest, LaunchAgentProfileRequest, ListMessagesQuery, PromptAgentRequest,
-    ProtocolError, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
-    SendMessageRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
-    UpdateMachineServiceRequest, UpdateServiceIngressRequest, WorkloadIdentityTokenRequest,
-    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    InputAgentRequest, LaunchAgentProfileRequest, ListMessagesQuery, MachineExecRequest,
+    PromptAgentRequest, ProtocolError, ReceiveMessagesRequest, RegisterAgentInterfaceRequest,
+    RenameRequest, SendMessageRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
+    UpdateMachineServiceRequest, UpdateServiceIngressRequest, UploadMachineFileRequest,
+    WorkloadIdentityTokenRequest, AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER,
+    WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
 
 use crate::controller::ControllerRuntime;
+
+const MAX_MACHINE_UPLOAD_BODY_BYTES: usize = 23 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct LocalApiState {
@@ -165,6 +168,11 @@ pub fn router(state: LocalApiState) -> Router {
             "/api/machines/{server_id}",
             axum::routing::patch(rename_machine).delete(delete_machine),
         )
+        .route("/api/machines/{server_id}/exec", post(exec_machine))
+        .route(
+            "/api/machines/{server_id}/files",
+            post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
+        )
         .route("/api/local/agents", get(list_local_agents))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
@@ -248,6 +256,46 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/messages/import", post(import_core_messages))
         .route("/api/messages/{message_id}", get(get_core_message))
         .with_state(state)
+}
+
+async fn exec_machine(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(server_id): Path<String>,
+    Json(request): Json<MachineExecRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("machines/{server_id}/exec"),
+                &body,
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn upload_machine_file(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(server_id): Path<String>,
+    Json(request): Json<UploadMachineFileRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("machines/{server_id}/files"),
+                &body,
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
 }
 
 async fn health(State(state): State<LocalApiState>) -> Json<Value> {

@@ -584,6 +584,55 @@ impl ProxyClient {
                     .probe(host, port, target_agent_id, timeout_ms)
                     .await,
             ),
+            AgentCommand::Exec { request } => self
+                .runtime
+                .exec_machine(request)
+                .await
+                .map(|response| CommandResult::success(command_id.clone(), response))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::UploadBegin {
+                upload_id,
+                directory,
+                file_name,
+                overwrite,
+            } => self
+                .runtime
+                .begin_upload(&upload_id, &directory, &file_name, overwrite)
+                .map(|()| {
+                    CommandResult::success(
+                        command_id.clone(),
+                        serde_json::json!({ "accepted": true }),
+                    )
+                })
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::UploadChunk {
+                upload_id,
+                content_base64,
+            } => self
+                .runtime
+                .append_upload_chunk(&upload_id, &content_base64)
+                .map(|bytes_written| {
+                    CommandResult::success(
+                        command_id.clone(),
+                        serde_json::json!({ "bytes_written": bytes_written }),
+                    )
+                })
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::UploadCommit { upload_id } => self
+                .runtime
+                .commit_upload(&upload_id)
+                .map(|response| CommandResult::success(command_id.clone(), response))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::UploadAbort { upload_id } => self
+                .runtime
+                .abort_upload(&upload_id)
+                .map(|aborted| {
+                    CommandResult::success(
+                        command_id.clone(),
+                        serde_json::json!({ "aborted": aborted }),
+                    )
+                })
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::ShutdownMachine => {
                 schedule_machine_shutdown(self.server.workspace_id.clone());
                 CommandResult::success(command_id.clone(), serde_json::json!({ "accepted": true }))

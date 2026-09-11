@@ -22,12 +22,12 @@ use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::{
     AcknowledgeMessagesRequest, AgentInfo, AgentStatus, ApiError, CreateAgentLaunchProfileRequest,
     CreateAgentRequest, CreateAppDeploymentRequest, GetMessageResponse, ImportMessagesRequest,
-    InputAgentRequest, LaunchAgentProfileRequest, LegacyMailMessage, MessageExternalSource,
-    ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
-    ServerInfo, TerminalClientMessage, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
-    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
-    AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER,
-    WORKLOAD_CREDENTIAL_HEADER,
+    InputAgentRequest, LaunchAgentProfileRequest, LegacyMailMessage, MachineExecRequest,
+    MessageExternalSource, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
+    SendMessageRequest, ServerInfo, TerminalClientMessage, TerminalServerMessage,
+    UpdateAgentLaunchProfileRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
+    WorkspaceSnapshot, AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL,
+    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -63,6 +63,17 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Run a bounded command on a workspace machine and return its output")]
+    Exec {
+        #[arg(long)]
+        machine: String,
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        #[arg(long, default_value_t = 30_000, value_name = "MS")]
+        timeout: u64,
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
     #[command(about = "Control and communicate with workspace agents")]
     Agent {
         #[command(subcommand)]
@@ -670,6 +681,27 @@ async fn run_cli() -> anyhow::Result<()> {
         &args.workspace,
     );
     let value = match command {
+        Command::Exec {
+            machine,
+            cwd,
+            timeout,
+            mut command,
+        } => {
+            let server_id = resolve_service_machine(&client, Some(&machine)).await?;
+            let executable = command.remove(0);
+            client
+                .value(
+                    Method::POST,
+                    &format!("api/machines/{}/exec", path_segment(&server_id)),
+                    Some(serde_json::to_value(MachineExecRequest {
+                        cwd,
+                        command: executable,
+                        args: command,
+                        timeout_ms: timeout,
+                    })?),
+                )
+                .await?
+        }
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::App { command } => run_app_command(&client, command).await?,
         Command::Member { command } => match command {
@@ -2035,6 +2067,36 @@ mod tests {
             Some(Command::Machine {
                 command: MachineCommand::Delete { target }
             }) if target == "srv_test"
+        ));
+    }
+
+    #[test]
+    fn machine_exec_command_preserves_argv() {
+        let args = Args::try_parse_from([
+            "treer",
+            "exec",
+            "--machine",
+            "builder",
+            "--cwd",
+            "repo",
+            "--timeout",
+            "1500",
+            "--",
+            "sh",
+            "-lc",
+            "printf 'ok'",
+        ])
+        .expect("machine exec should parse");
+        assert!(matches!(
+            args.command,
+            Some(Command::Exec {
+                machine,
+                cwd,
+                timeout: 1500,
+                command,
+            }) if machine == "builder"
+                && cwd == "repo"
+                && command == ["sh", "-lc", "printf 'ok'"]
         ));
     }
 

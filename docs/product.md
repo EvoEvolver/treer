@@ -22,7 +22,8 @@ In concrete terms:
 
 1. A user installs a small persistent service on a machine they control.
 2. A short-lived, single-use link enrolls that machine into one workspace.
-3. Workspace members can save reusable command-based launch profiles and use
+3. Workspace members can upload a bounded file into an enrolled machine root,
+   run a short non-interactive command, save reusable command-based launch profiles, and use
    them to create, observe, prompt, and stop Agents through the web application,
    CLI, or native iOS/Android clients. The browser still includes a full-screen
    mobile terminal with touch controls and a full-screen Agent UI iframe. The

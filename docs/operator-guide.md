@@ -780,6 +780,8 @@ treer agent show reviewer
 treer agent admin rename reviewer code-reviewer
 treer machine rename self build-machine
 treer machine delete srv_obsolete
+treer exec --machine build-machine --cwd repo -- git status --short
+treer exec --machine build-machine --cwd . --timeout 10000 -- sh -lc 'make test'
 treer agent attach reviewer
 treer agent admin delete obsolete-helper
 treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
@@ -787,6 +789,18 @@ treer agent read reviewer --lines 80
 treer agent transcript reviewer --page 0
 treer agent send-keys reviewer ctrl-c
 ```
+
+`treer exec` runs one non-interactive argv vector directly on the selected
+machine and returns JSON containing stdout, stderr, exit code, duration,
+timeout, and truncation state. Its working directory is relative to the Host
+root. It defaults to a 30-second timeout, caps each output stream at 64 KiB, and
+does not load shell syntax unless the executable is an explicit shell.
+
+The machine details page also uploads one file of up to 16 MiB into an existing
+directory beneath the Host root. Proxy sends the content to the Controller in
+bounded chunks and the Controller stages it in the destination directory before
+renaming it into place. Replacing an existing file requires an explicit UI
+choice.
 
 An Agent may register a `treer.agent-interface/v1` server on its private
 loopback. The Controller verifies its manifest and automatically sends semantic

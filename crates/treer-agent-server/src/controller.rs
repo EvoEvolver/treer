@@ -1,11 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::broadcast;
 use tracing::warn;
 use treer_host_protocol::{
@@ -14,7 +19,8 @@ use treer_host_protocol::{
 };
 use treer_protocol::{
     AgentInfo, AgentInterfaceDescriptor, AgentStatus, AgentTranscriptResponse, CreateAgentRequest,
-    ProtocolError, ReadAgentOutputResponse, RegisterAgentInterfaceRequest, TerminalCursor,
+    MachineExecRequest, MachineExecResponse, ProtocolError, ReadAgentOutputResponse,
+    RegisterAgentInterfaceRequest, TerminalCursor, UploadMachineFileResponse,
     VirtualNetworkHostsSnapshot, AGENT_INTERFACE_PROTOCOL_V1,
 };
 #[cfg(test)]
@@ -32,6 +38,9 @@ const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const AGENT_COMMAND_DELAY: Duration = Duration::from_millis(500);
 const CLAUDE_TRUST_CONFIRM_DELAY: Duration = Duration::from_millis(1_500);
 const AGENT_INTERFACE_FAILURE_LIMIT: u8 = 5;
+const MACHINE_EXEC_TIMEOUT_MAX_MS: u64 = 30_000;
+const MACHINE_EXEC_STREAM_LIMIT_BYTES: usize = 64 * 1024;
+const MACHINE_UPLOAD_CHUNK_MAX_BYTES: usize = 192 * 1024;
 
 fn validate_interface_ui_path(value: &str) -> Result<String, ProtocolError> {
     let value = value.trim();
@@ -103,6 +112,7 @@ pub struct ControllerConfig {
     pub treer_binary: Option<PathBuf>,
     pub sandbox_executable: Option<PathBuf>,
     pub interface_cache_path: PathBuf,
+    pub root: PathBuf,
 }
 
 struct ControllerInner {
@@ -113,13 +123,24 @@ struct ControllerInner {
     network_proxy_url: String,
     treer_binary: Option<PathBuf>,
     sandbox_executable: Option<PathBuf>,
+    root: PathBuf,
     interface_cache: InterfaceCache,
+    uploads: Mutex<HashMap<String, PendingUpload>>,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
     terminal_events: broadcast::Sender<TerminalOutput>,
     process_events: broadcast::Sender<HostProcessInfo>,
     virtual_hosts: RwLock<Option<VirtualNetworkHostsSnapshot>>,
     proxy_link: RwLock<ProxyLinkStatus>,
+}
+
+struct PendingUpload {
+    file: File,
+    temp_path: PathBuf,
+    final_path: PathBuf,
+    display_path: String,
+    overwrite: bool,
+    bytes_written: u64,
 }
 
 struct ControllerAgent {
@@ -174,7 +195,9 @@ impl ControllerRuntime {
                 network_proxy_url: config.network_proxy_url,
                 treer_binary: config.treer_binary,
                 sandbox_executable: config.sandbox_executable,
+                root: config.root,
                 interface_cache: InterfaceCache::load(config.interface_cache_path),
+                uploads: Mutex::new(HashMap::new()),
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
                 terminal_events,
@@ -426,6 +449,268 @@ impl ControllerRuntime {
         self.process_response(response, AgentStatus::Working)
     }
 
+    pub async fn exec_machine(
+        &self,
+        request: MachineExecRequest,
+    ) -> Result<MachineExecResponse, ProtocolError> {
+        if request.command.trim().is_empty() {
+            return Err(ProtocolError::new(
+                "invalid_machine_exec",
+                "command must not be empty",
+            ));
+        }
+        if request.timeout_ms == 0 || request.timeout_ms > MACHINE_EXEC_TIMEOUT_MAX_MS {
+            return Err(ProtocolError::new(
+                "invalid_machine_exec_timeout",
+                format!("timeout_ms must be between 1 and {MACHINE_EXEC_TIMEOUT_MAX_MS}"),
+            ));
+        }
+        let cwd = self.resolve_machine_directory(&request.cwd)?;
+        let display_cwd = machine_relative_path(&self.inner.root, &cwd);
+        let started = Instant::now();
+        let mut command = tokio::process::Command::new(&request.command);
+        command
+            .args(&request.args)
+            .current_dir(&cwd)
+            .env_clear()
+            .envs(self.machine_exec_environment())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(|error| {
+            ProtocolError::new(
+                "machine_exec_spawn_failed",
+                format!("failed to start {}: {error}", request.command),
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ProtocolError::new("machine_exec_failed", "stdout pipe was not created")
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            ProtocolError::new("machine_exec_failed", "stderr pipe was not created")
+        })?;
+        let mut stdout_task = tokio::spawn(read_bounded(stdout, MACHINE_EXEC_STREAM_LIMIT_BYTES));
+        let mut stderr_task = tokio::spawn(read_bounded(stderr, MACHINE_EXEC_STREAM_LIMIT_BYTES));
+        let wait =
+            tokio::time::timeout(Duration::from_millis(request.timeout_ms), child.wait()).await;
+        let (status, timed_out) = match wait {
+            Ok(result) => (
+                result.map_err(|error| {
+                    ProtocolError::new("machine_exec_failed", error.to_string())
+                })?,
+                false,
+            ),
+            Err(_) => {
+                child.kill().await.map_err(|error| {
+                    ProtocolError::new("machine_exec_kill_failed", error.to_string())
+                })?;
+                (
+                    child.wait().await.map_err(|error| {
+                        ProtocolError::new("machine_exec_failed", error.to_string())
+                    })?,
+                    true,
+                )
+            }
+        };
+        let (stdout, stdout_truncated) = finish_bounded_read(&mut stdout_task).await;
+        let (stderr, stderr_truncated) = finish_bounded_read(&mut stderr_task).await;
+        Ok(MachineExecResponse {
+            server_id: self.inner.server_id.clone(),
+            cwd: display_cwd,
+            command: request.command,
+            args: request.args,
+            exit_code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            truncated: stdout_truncated || stderr_truncated,
+            timed_out,
+            duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        })
+    }
+
+    pub fn begin_upload(
+        &self,
+        upload_id: &str,
+        directory: &str,
+        file_name: &str,
+        overwrite: bool,
+    ) -> Result<(), ProtocolError> {
+        validate_upload_id(upload_id)?;
+        validate_upload_file_name(file_name)?;
+        let directory = self.resolve_machine_directory(directory)?;
+        let final_path = directory.join(file_name);
+        if final_path.exists() && !overwrite {
+            return Err(ProtocolError::new(
+                "machine_file_exists",
+                format!(
+                    "{} already exists",
+                    machine_relative_path(&self.inner.root, &final_path)
+                ),
+            ));
+        }
+        let mut uploads = self
+            .inner
+            .uploads
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?;
+        if uploads.contains_key(upload_id) {
+            return Err(ProtocolError::new(
+                "machine_upload_exists",
+                "upload ID is already active",
+            ));
+        }
+        let temp_path = directory.join(format!(".treer-upload-{upload_id}.tmp"));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| {
+                ProtocolError::new(
+                    "machine_upload_failed",
+                    format!("failed to create upload staging file: {error}"),
+                )
+            })?;
+        let pending = PendingUpload {
+            file,
+            temp_path,
+            display_path: machine_relative_path(&self.inner.root, &final_path),
+            final_path,
+            overwrite,
+            bytes_written: 0,
+        };
+        uploads.insert(upload_id.to_string(), pending);
+        Ok(())
+    }
+
+    pub fn append_upload_chunk(
+        &self,
+        upload_id: &str,
+        content_base64: &str,
+    ) -> Result<u64, ProtocolError> {
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(content_base64)
+            .map_err(|_| {
+                ProtocolError::new("invalid_machine_upload", "chunk is not valid base64")
+            })?;
+        if content.len() > MACHINE_UPLOAD_CHUNK_MAX_BYTES {
+            return Err(ProtocolError::new(
+                "machine_upload_chunk_too_large",
+                format!("upload chunks may contain at most {MACHINE_UPLOAD_CHUNK_MAX_BYTES} bytes"),
+            ));
+        }
+        let mut uploads = self
+            .inner
+            .uploads
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?;
+        let upload = uploads.get_mut(upload_id).ok_or_else(|| {
+            ProtocolError::new("machine_upload_not_found", "upload is not active")
+        })?;
+        upload.file.write_all(&content).map_err(|error| {
+            ProtocolError::new(
+                "machine_upload_failed",
+                format!("failed to write chunk: {error}"),
+            )
+        })?;
+        upload.bytes_written = upload.bytes_written.saturating_add(content.len() as u64);
+        Ok(upload.bytes_written)
+    }
+
+    pub fn commit_upload(
+        &self,
+        upload_id: &str,
+    ) -> Result<UploadMachineFileResponse, ProtocolError> {
+        let mut upload = self.take_upload(upload_id)?;
+        upload.file.flush().map_err(|error| {
+            ProtocolError::new(
+                "machine_upload_failed",
+                format!("failed to flush upload: {error}"),
+            )
+        })?;
+        drop(upload.file);
+        if upload.final_path.exists() && !upload.overwrite {
+            let _ = std::fs::remove_file(&upload.temp_path);
+            return Err(ProtocolError::new(
+                "machine_file_exists",
+                format!("{} already exists", upload.display_path),
+            ));
+        }
+        #[cfg(windows)]
+        if upload.overwrite && upload.final_path.exists() {
+            std::fs::remove_file(&upload.final_path).map_err(|error| {
+                ProtocolError::new(
+                    "machine_upload_failed",
+                    format!("failed to replace existing file: {error}"),
+                )
+            })?;
+        }
+        if let Err(error) = std::fs::rename(&upload.temp_path, &upload.final_path) {
+            let _ = std::fs::remove_file(&upload.temp_path);
+            return Err(ProtocolError::new(
+                "machine_upload_failed",
+                format!("failed to install uploaded file: {error}"),
+            ));
+        }
+        Ok(UploadMachineFileResponse {
+            server_id: self.inner.server_id.clone(),
+            path: upload.display_path,
+            bytes_written: upload.bytes_written,
+        })
+    }
+
+    pub fn abort_upload(&self, upload_id: &str) -> Result<bool, ProtocolError> {
+        let mut uploads = self
+            .inner
+            .uploads
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?;
+        let Some(upload) = uploads.remove(upload_id) else {
+            return Ok(false);
+        };
+        drop(upload.file);
+        let _ = std::fs::remove_file(upload.temp_path);
+        Ok(true)
+    }
+
+    fn take_upload(&self, upload_id: &str) -> Result<PendingUpload, ProtocolError> {
+        self.inner
+            .uploads
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?
+            .remove(upload_id)
+            .ok_or_else(|| ProtocolError::new("machine_upload_not_found", "upload is not active"))
+    }
+
+    fn resolve_machine_directory(&self, requested: &str) -> Result<PathBuf, ProtocolError> {
+        let requested = if requested.trim().is_empty() {
+            "."
+        } else {
+            requested
+        };
+        let requested = Path::new(requested);
+        if requested.is_absolute() {
+            return Err(ProtocolError::new(
+                "invalid_machine_path",
+                "directory must be relative to the machine root",
+            ));
+        }
+        let directory =
+            std::fs::canonicalize(self.inner.root.join(requested)).map_err(|error| {
+                ProtocolError::new(
+                    "invalid_machine_path",
+                    format!("directory is unavailable: {error}"),
+                )
+            })?;
+        if !directory.starts_with(&self.inner.root) || !directory.is_dir() {
+            return Err(ProtocolError::new(
+                "invalid_machine_path",
+                "directory resolves outside the machine root or is not a directory",
+            ));
+        }
+        Ok(directory)
+    }
+
     fn process_environment(&self, agent: Option<(&str, &str)>) -> BTreeMap<String, String> {
         let network_proxy_url = agent.map_or_else(
             || self.inner.network_proxy_url.clone(),
@@ -460,6 +745,33 @@ impl ControllerRuntime {
             "PATH".to_string(),
             join_agent_path(self.inner.treer_binary.as_deref()),
         );
+        env
+    }
+
+    fn machine_exec_environment(&self) -> BTreeMap<String, String> {
+        let mut env = self.process_environment(None);
+        for name in [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            "TERM",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_RUNTIME_DIR",
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                env.insert(name.to_string(), value);
+            }
+        }
         env
     }
 
@@ -1254,6 +1566,74 @@ impl ControllerRuntime {
     }
 }
 
+async fn read_bounded<R>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut retained = Vec::with_capacity(limit.min(8192));
+    let mut buffer = [0_u8; 8192];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+        truncated |= read > remaining;
+    }
+    Ok((retained, truncated))
+}
+
+async fn finish_bounded_read(
+    task: &mut tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+) -> (Vec<u8>, bool) {
+    match tokio::time::timeout(Duration::from_secs(2), &mut *task).await {
+        Ok(Ok(Ok(result))) => result,
+        _ => {
+            task.abort();
+            (Vec::new(), true)
+        }
+    }
+}
+
+fn validate_upload_id(upload_id: &str) -> Result<(), ProtocolError> {
+    if upload_id.is_empty()
+        || upload_id.len() > 80
+        || !upload_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(ProtocolError::new(
+            "invalid_machine_upload",
+            "upload ID is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_upload_file_name(file_name: &str) -> Result<(), ProtocolError> {
+    let mut components = Path::new(file_name).components();
+    let valid = matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && !file_name.contains(['/', '\\'])
+        && !file_name.chars().any(char::is_control);
+    if !valid {
+        return Err(ProtocolError::new(
+            "invalid_machine_file_name",
+            "file_name must be one file name without path separators",
+        ));
+    }
+    Ok(())
+}
+
+fn machine_relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 #[cfg(test)]
 fn new_workload_credential() -> String {
     format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
@@ -1800,6 +2180,32 @@ mod tests {
             detect_status("Working (esc to interrupt)\nAllow command?"),
             Some(AgentStatus::Blocked)
         );
+    }
+
+    #[test]
+    fn upload_names_reject_path_traversal() {
+        assert!(validate_upload_file_name("notes.txt").is_ok());
+        for name in [
+            "",
+            ".",
+            "..",
+            "../notes.txt",
+            "dir/notes.txt",
+            "dir\\notes.txt",
+        ] {
+            assert!(
+                validate_upload_file_name(name).is_err(),
+                "accepted {name:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_drains_and_marks_truncation() {
+        let input = &b"abcdefgh"[..];
+        let (output, truncated) = read_bounded(input, 4).await.expect("read bytes");
+        assert_eq!(output, b"abcd");
+        assert!(truncated);
     }
 
     #[test]

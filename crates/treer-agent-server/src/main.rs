@@ -285,6 +285,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
             treer_binary: sibling_treer_binary(),
             sandbox_executable,
             interface_cache_path: args.host_socket.with_extension("interfaces.json"),
+            root: root.clone(),
         },
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;

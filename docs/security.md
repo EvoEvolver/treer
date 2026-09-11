@@ -27,6 +27,10 @@ workspace members. It is not a safe multi-tenant execution sandbox.
 - Organization and workspace management plus successful lifecycle mutations
   produce append-only audit events without prompts, terminal data, commands, or
   secrets.
+- Machine exec and file upload require current workspace access and distinct
+  `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
+  beneath the enrolled Host root, and audit records omit command arguments,
+  output, and file content.
 
 ## Unsupported Claims
 
@@ -35,6 +39,11 @@ end-to-end encrypted from the Proxy, per-user provider credential isolation, or
 a filesystem sandbox. The current coding-agent launch modes can execute with
 the machine account's authority. Same-account processes may inspect files,
 process metadata, local configuration, or credentials available to each other.
+Machine exec and file upload are likewise not restricted administration APIs:
+they run or write with the Controller account's filesystem permissions. Host
+root containment prevents accidental path targeting outside the enrolled tree,
+not access that the same account can obtain through commands, symlinks, or other
+same-account processes.
 
 Apps do not create a security boundary. Managed Apps currently run through the
 same Host and sandbox backend as command Agents, under the installing machine

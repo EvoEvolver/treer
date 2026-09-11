@@ -35,6 +35,7 @@ treer agent --help
 treer agent admin --help
 treer agent admin profile --help
 treer machine --help
+treer exec --help
 treer message --help
 treer network --help
 treer interface --help
@@ -295,6 +296,28 @@ that machine:
 ```bash
 treer machine delete <server-id>
 ```
+
+## Run a bounded machine command
+
+Use `treer exec` for a short, non-interactive command when creating a persistent
+Agent would add no value. Select the machine explicitly and keep the working
+directory relative to that machine's Host root:
+
+```bash
+treer exec --machine build-machine --cwd packages/api -- git status --short
+treer exec --machine build-machine --cwd . --timeout 10000 -- sh -lc 'make test'
+```
+
+The command is an argv vector; Treer does not interpret shell syntax. Use an
+explicit shell as in the second example when pipes, redirects, or expansion are
+required. The timeout is milliseconds, defaults to 30000, and cannot exceed
+30000. The JSON response contains stdout, stderr, exit code, duration, timeout,
+and truncation state. Each output stream retains at most 64 KiB.
+
+This executes with the selected machine account's authority. It is subject to
+the `machine.exec` Policy action, but it is not an Agent sandbox and receives no
+Agent workload credential. Inspect the machine first and do not run destructive
+commands unless the user explicitly requested them.
 
 
 ## Create and coordinate a peer

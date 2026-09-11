@@ -1005,6 +1005,52 @@ pub struct RenameRequest {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineExecRequest {
+    #[serde(default)]
+    pub cwd: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_machine_exec_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineExecResponse {
+    pub server_id: String,
+    pub cwd: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    pub timed_out: bool,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadMachineFileRequest {
+    #[serde(default)]
+    pub directory: String,
+    pub file_name: String,
+    pub content_base64: String,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadMachineFileResponse {
+    pub server_id: String,
+    pub path: String,
+    pub bytes_written: u64,
+}
+
+const fn default_machine_exec_timeout_ms() -> u64 {
+    30_000
+}
+
 const fn default_cols() -> u16 {
     120
 }
@@ -1077,6 +1123,25 @@ pub enum AgentCommand {
         timeout_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_agent_id: Option<String>,
+    },
+    Exec {
+        request: MachineExecRequest,
+    },
+    UploadBegin {
+        upload_id: String,
+        directory: String,
+        file_name: String,
+        overwrite: bool,
+    },
+    UploadChunk {
+        upload_id: String,
+        content_base64: String,
+    },
+    UploadCommit {
+        upload_id: String,
+    },
+    UploadAbort {
+        upload_id: String,
     },
     ShutdownMachine,
 }
@@ -2571,6 +2636,35 @@ mod tests {
             serde_json::from_value::<AgentTranscriptResponse>(encoded)
                 .expect("deserialize transcript page"),
             transcript
+        );
+    }
+
+    #[test]
+    fn machine_exec_and_upload_commands_round_trip() {
+        let exec = AgentCommand::Exec {
+            request: MachineExecRequest {
+                cwd: "repo".to_string(),
+                command: "git".to_string(),
+                args: vec!["status".to_string(), "--short".to_string()],
+                timeout_ms: 5_000,
+            },
+        };
+        let encoded = serde_json::to_value(&exec).expect("serialize machine exec");
+        assert_eq!(encoded["action"], "exec");
+        assert_eq!(
+            serde_json::from_value::<AgentCommand>(encoded).expect("deserialize machine exec"),
+            exec
+        );
+
+        let upload = AgentCommand::UploadChunk {
+            upload_id: "upl_test".to_string(),
+            content_base64: "aGVsbG8=".to_string(),
+        };
+        let encoded = serde_json::to_value(&upload).expect("serialize upload chunk");
+        assert_eq!(encoded["action"], "upload_chunk");
+        assert_eq!(
+            serde_json::from_value::<AgentCommand>(encoded).expect("deserialize upload chunk"),
+            upload
         );
     }
 }

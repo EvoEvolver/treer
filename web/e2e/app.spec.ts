@@ -520,6 +520,48 @@ test("clicking a machine opens an overview with identity, agents, services, virt
   await expect(page.getByRole("heading", { name: "workstation" })).toBeHidden()
 })
 
+test("machine overview uploads a file to the selected directory", async ({ page }) => {
+  let requestBody: unknown
+  await page.route("**/api/workspaces/ws-1/machines/srv-a/files", async (route) => {
+    requestBody = route.request().postDataJSON()
+    await ok(route, {
+      server_id: "srv-a",
+      path: "repo/hello.txt",
+      bytes_written: 5,
+    })
+  })
+
+  await page.goto("/")
+  await openWorkspaceSettings(page)
+  await workstationRow(page).click()
+  await page.getByPlaceholder(".").fill("repo")
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "hello.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("hello"),
+  })
+  await page.getByRole("checkbox").check()
+  await page.getByRole("button", { name: "Upload", exact: true }).click()
+
+  await expect(page.getByText("Uploaded repo/hello.txt (5 B).")).toBeVisible()
+  expect(requestBody).toEqual({
+    directory: "repo",
+    file_name: "hello.txt",
+    content_base64: "aGVsbG8=",
+    overwrite: true,
+  })
+})
+
+test("mobile machine overview fits the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await openWorkspaceSettings(page)
+  await workstationRow(page).click()
+
+  await expect(page.getByRole("heading", { name: "Upload file" })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
 test("workspace members can see machine traffic without audit permission", async ({ page }) => {
   await page.route(/\/api\/organizations$/, (route) => ok(route, {
     organizations: [{ ...organization, role: "member" }],
