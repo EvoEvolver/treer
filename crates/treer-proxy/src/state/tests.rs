@@ -1,4 +1,3 @@
-
 use super::*;
 use treer_protocol::AgentStatus;
 

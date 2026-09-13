@@ -11,7 +11,7 @@ Claude, Pi, OpenCode, and plain terminals running on the machines that own your
 code, then connect their Apps and conversations in the same workspace.
 
 [Open Treer](https://app.treer.ai/) ·
-[Product site](https://www.treer.ai/v2) ·
+[Product site](https://www.treer.ai/) ·
 [Documentation](docs/README.md) ·
 [Security model](docs/security.md)
 
