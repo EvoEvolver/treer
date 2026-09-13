@@ -7,21 +7,20 @@ pub(crate) async fn list_agent_launch_profiles(
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let subject = control_policy_subject(
+    let context = AgentRequestContext::new(
         &state,
+        &policy,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
     )
     .await?;
-    authorize_control(
-        &policy,
-        &workspace_id,
-        subject.as_ref(),
-        ACTION_LAUNCH_PROFILE_LIST,
-        PolicyResource::new(RESOURCE_AGENT_LAUNCH_PROFILE, "*"),
-    )
-    .await?;
+    context
+        .authorize(
+            ACTION_LAUNCH_PROFILE_LIST,
+            PolicyResource::new(RESOURCE_AGENT_LAUNCH_PROFILE, "*"),
+        )
+        .await?;
     Ok(Json(json!({
         "profiles": auth.list_agent_launch_profiles(&workspace_id).await?
     })))
@@ -35,24 +34,23 @@ pub(crate) async fn get_agent_launch_profile(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let profile = auth
-        .resolve_agent_launch_profile(&workspace_id, &target)
-        .await?;
-    let subject = control_policy_subject(
+    let context = AgentRequestContext::new(
         &state,
+        &policy,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
     )
     .await?;
-    authorize_control(
-        &policy,
-        &workspace_id,
-        subject.as_ref(),
-        ACTION_LAUNCH_PROFILE_READ,
-        launch_profile_policy_resource(&profile.profile_id, &profile.name),
-    )
-    .await?;
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    context
+        .authorize(
+            ACTION_LAUNCH_PROFILE_READ,
+            launch_profile_policy_resource(&profile.profile_id, &profile.name),
+        )
+        .await?;
     Ok(Json(serde_json::to_value(profile)?))
 }
 
@@ -67,23 +65,22 @@ pub(crate) async fn create_agent_launch_profile(
     Path(workspace_id): Path<String>,
     Json(request): Json<CreateAgentLaunchProfileRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let subject = control_policy_subject(
+    let context = AgentRequestContext::new(
         &state,
+        &policy,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
     )
     .await?;
-    authorize_control(
-        &policy,
-        &workspace_id,
-        subject.as_ref(),
-        ACTION_LAUNCH_PROFILE_CREATE,
-        launch_profile_policy_resource("new", request.name.trim()),
-    )
-    .await?;
-    let actor_label = profile_actor_label(session.as_deref(), subject.as_ref());
-    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    context
+        .authorize(
+            ACTION_LAUNCH_PROFILE_CREATE,
+            launch_profile_policy_resource("new", request.name.trim()),
+        )
+        .await?;
+    let actor_label = profile_actor_label(session.as_deref(), context.policy_subject());
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), context.policy_subject());
     let profile = auth
         .create_agent_launch_profile(
             &workspace_id,
@@ -109,26 +106,25 @@ pub(crate) async fn update_agent_launch_profile(
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<UpdateAgentLaunchProfileRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let profile = auth
-        .resolve_agent_launch_profile(&workspace_id, &target)
-        .await?;
-    let subject = control_policy_subject(
+    let context = AgentRequestContext::new(
         &state,
+        &policy,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
     )
     .await?;
-    authorize_control(
-        &policy,
-        &workspace_id,
-        subject.as_ref(),
-        ACTION_LAUNCH_PROFILE_UPDATE,
-        launch_profile_policy_resource(&profile.profile_id, &profile.name),
-    )
-    .await?;
-    let actor_label = profile_actor_label(session.as_deref(), subject.as_ref());
-    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    context
+        .authorize(
+            ACTION_LAUNCH_PROFILE_UPDATE,
+            launch_profile_policy_resource(&profile.profile_id, &profile.name),
+        )
+        .await?;
+    let actor_label = profile_actor_label(session.as_deref(), context.policy_subject());
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), context.policy_subject());
     let profile = auth
         .update_agent_launch_profile(
             &workspace_id,
@@ -154,26 +150,25 @@ pub(crate) async fn delete_agent_launch_profile(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let profile = auth
-        .resolve_agent_launch_profile(&workspace_id, &target)
-        .await?;
-    let subject = control_policy_subject(
+    let context = AgentRequestContext::new(
         &state,
+        &policy,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
     )
     .await?;
-    authorize_control(
-        &policy,
-        &workspace_id,
-        subject.as_ref(),
-        ACTION_LAUNCH_PROFILE_DELETE,
-        launch_profile_policy_resource(&profile.profile_id, &profile.name),
-    )
-    .await?;
-    let actor_label = profile_actor_label(session.as_deref(), subject.as_ref());
-    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    context
+        .authorize(
+            ACTION_LAUNCH_PROFILE_DELETE,
+            launch_profile_policy_resource(&profile.profile_id, &profile.name),
+        )
+        .await?;
+    let actor_label = profile_actor_label(session.as_deref(), context.policy_subject());
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), context.policy_subject());
     let profile = auth
         .delete_agent_launch_profile(
             &workspace_id,
@@ -199,33 +194,32 @@ pub(crate) async fn launch_agent_profile(
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<LaunchAgentProfileRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let profile = auth
-        .resolve_agent_launch_profile(&workspace_id, &target)
-        .await?;
-    let subject = control_policy_subject(
+    let context = AgentRequestContext::new(
         &state,
+        &policy,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
     )
     .await?;
-    authorize_control(
-        &policy,
-        &workspace_id,
-        subject.as_ref(),
-        ACTION_LAUNCH_PROFILE_USE,
-        launch_profile_policy_resource(&profile.profile_id, &profile.name),
-    )
-    .await?;
+    let profile = auth
+        .resolve_agent_launch_profile(&workspace_id, &target)
+        .await?;
+    context
+        .authorize(
+            ACTION_LAUNCH_PROFILE_USE,
+            launch_profile_policy_resource(&profile.profile_id, &profile.name),
+        )
+        .await?;
     let profile_id = profile.profile_id.clone();
     let agent_request = agent_request_from_launch_profile(&profile, request)?;
     let data = execute_agent_create(
-        &state,
+        context.state(),
         &auth,
-        &policy,
+        context.policy(),
         session.as_deref(),
-        subject.as_ref(),
-        &workspace_id,
+        context.policy_subject(),
+        context.workspace_id(),
         agent_request,
         Some(&profile_id),
     )

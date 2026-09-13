@@ -1,11 +1,13 @@
 use super::*;
 
+mod context;
 mod interface;
 mod lifecycle;
 mod policy;
 mod profiles;
 mod terminal;
 
+pub(super) use context::*;
 pub(super) use interface::*;
 pub(super) use lifecycle::*;
 pub(super) use policy::*;
