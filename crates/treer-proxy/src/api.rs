@@ -371,17 +371,8 @@ pub fn router(
     voice: VoiceServices,
 ) -> Router {
     routes::router(
-        state,
-        bootstrap,
-        auth_store,
-        policy,
-        identity,
-        browser,
-        ingress,
-        messages,
-        rollout,
-        updater,
-        voice,
+        state, bootstrap, auth_store, policy, identity, browser, ingress, messages, rollout,
+        updater, voice,
     )
 }
 
@@ -414,7 +405,6 @@ async fn verify_workload_identity(
     )
         .into_response()
 }
-
 
 #[cfg(test)]
 #[path = "api/tests.rs"]

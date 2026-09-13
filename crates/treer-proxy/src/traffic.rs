@@ -166,7 +166,6 @@ struct TrafficDelta {
 }
 
 impl TrafficRecorder {
-
     pub(crate) fn agent_view(&self) -> Self {
         if self.inner.agent_detail {
             return self.clone();
@@ -425,7 +424,6 @@ impl TrafficRecorder {
         Ok(records)
     }
 
-
     fn merge_pending(
         &self,
         workspace_id: &str,
@@ -473,7 +471,6 @@ impl TrafficRecorder {
         }
         Ok(())
     }
-
 
     fn take_pending(&self) -> Vec<TrafficDelta> {
         self.counters()
