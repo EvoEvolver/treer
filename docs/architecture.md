@@ -252,8 +252,9 @@ deduplication and both hourly ledgers commit together. Receipts bind the origina
 machine/workspace and cannot open traffic. They survive Proxy restarts; reporting
 without tickets remains the legacy live-stream path. Delayed reports currently
 use the commit-time hour, and uncheckpointed crash tails are not recoverable.
-Final reports mark receipts closed; closed receipts are retained for 90 days
-before cleanup. Open receipts are retained to allow long-lived associations.
+Final reports mark receipts closed. Closed receipts and unfinished open receipts
+are retained for at most 90 days; a route that fails before delivery discards
+its unused receipt immediately.
 Operator-managed Agent-scoped services use a Unix bridge (`sandbox-exec
 --service-socket`) so the Controller can reach a namespace-local loopback
 listener without publishing a host TCP port. Agents cannot create those

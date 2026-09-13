@@ -3207,6 +3207,21 @@ mod tests {
     }
 
     #[test]
+    fn native_experimental_network_mode_round_trips_in_service_config() {
+        let encoded = serde_json::to_string(&NetworkMode::NativeExperimental)
+            .expect("serialize native network mode");
+        assert_eq!(encoded, "\"native-experimental\"");
+        assert_eq!(
+            serde_json::from_str::<NetworkMode>(&encoded).expect("deserialize native network mode"),
+            NetworkMode::NativeExperimental
+        );
+        assert_eq!(
+            NetworkMode::NativeExperimental.to_string(),
+            "native-experimental"
+        );
+    }
+
+    #[test]
     fn update_platforms_match_release_artifact_names() {
         assert_eq!(
             artifact_platform("linux", "x86_64").unwrap(),

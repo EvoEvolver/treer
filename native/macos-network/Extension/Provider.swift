@@ -5,6 +5,7 @@ import OSLog
 import TreerNetworkCore
 
 final class TransparentProxyProvider: NETransparentProxyProvider {
+    private static let maxActiveRelays = 1024
     private let lock = NSLock()
     private let registry = ProcessRegistry()
     private var relays: [UUID: TCPRelay] = [:]
@@ -44,6 +45,8 @@ final class TransparentProxyProvider: NETransparentProxyProvider {
             try configureDNS(port: port)
         } catch {
             await server.stop()
+            removeResolvers()
+            dnsServer = nil
             throw error
         }
         let settings = NETransparentProxyNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
@@ -51,7 +54,12 @@ final class TransparentProxyProvider: NETransparentProxyProvider {
             remoteNetwork: nil, remotePrefix: 0, localNetwork: nil, localPrefix: 0,
             protocol: .any, direction: .outbound)]
         do { try await setTunnelNetworkSettings(settings) }
-        catch { await server.stop(); throw error }
+        catch {
+            await server.stop()
+            removeResolvers()
+            dnsServer = nil
+            throw error
+        }
         setReady(true)
         maintenance = Task { [weak self] in
             while !Task.isCancelled {
@@ -264,14 +272,14 @@ final class TransparentProxyProvider: NETransparentProxyProvider {
 
     private func add(_ relay: TCPRelay, id: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard ready else { return false }
+        guard ready, relays.count < Self.maxActiveRelays else { return false }
         relays[id] = relay
         return true
     }
     private func remove(_ id: UUID) { lock.lock(); relays.removeValue(forKey: id); lock.unlock() }
     private func addDatagram(_ relay: UDPFlowRelay, id: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard ready, datagramRelays.count < 1024 else { return false }
+        guard ready, datagramRelays.count < Self.maxActiveRelays else { return false }
         datagramRelays[id] = relay
         return true
     }

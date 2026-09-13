@@ -186,6 +186,29 @@ impl TrafficRecorder {
         Ok(Some(ticket))
     }
 
+    pub(crate) async fn abandon_usage_ticket(
+        &self,
+        workspace: &str,
+        server: &str,
+        ticket: &str,
+    ) -> anyhow::Result<()> {
+        let Some(pool) = &self.inner.pool else {
+            return Ok(());
+        };
+        sqlx::query(
+            "DELETE FROM network_usage_receipts \
+             WHERE ticket=$1 AND workspace_id=$2 AND server_id=$3 \
+             AND closed_at IS NULL AND sent_bytes=0 AND received_bytes=0 \
+             AND sent_chunks=0 AND received_chunks=0",
+        )
+        .bind(ticket)
+        .bind(workspace)
+        .bind(server)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     /// Commit deduplication state and both machine/Agent ledgers in one
     /// transaction. Only then may the Proxy acknowledge a replayable report.
     pub(crate) async fn persist_usage_report(
@@ -674,10 +697,13 @@ impl TrafficRecorder {
         if self.inner.agent_detail {
             return Ok(());
         }
-        sqlx::query("DELETE FROM network_usage_receipts WHERE closed_at < $1")
-            .bind(cutoff)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "DELETE FROM network_usage_receipts \
+             WHERE closed_at < $1 OR (closed_at IS NULL AND created_at < $1)",
+        )
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
         sqlx::query("DELETE FROM machine_traffic_hourly WHERE window_start < $1")
             .bind(cutoff)
             .execute(pool)
@@ -1058,6 +1084,91 @@ mod tests {
                 .sum::<u64>(),
             138
         );
+    }
+
+    #[tokio::test]
+    async fn unused_and_expired_open_usage_receipts_are_reclaimed() {
+        let store = AuthStore::for_test("admin-password").await;
+        store.seed_test_workspace("receipt-cleanup").await;
+        let pool = store.pool();
+        let recorder = TrafficRecorder::new(pool.clone());
+        let unused = recorder
+            .issue_usage_ticket(
+                "receipt-cleanup",
+                "machine-a",
+                Some("agent-a"),
+                "unused.test",
+                443,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        recorder
+            .abandon_usage_ticket("receipt-cleanup", "machine-b", &unused)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM network_usage_receipts WHERE ticket=$1"
+            )
+            .bind(&unused)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1,
+            "another machine cannot abandon the ticket"
+        );
+        recorder
+            .abandon_usage_ticket("receipt-cleanup", "machine-a", &unused)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM network_usage_receipts WHERE ticket=$1"
+            )
+            .bind(&unused)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+
+        let expired = recorder
+            .issue_usage_ticket(
+                "receipt-cleanup",
+                "machine-a",
+                Some("agent-a"),
+                "expired.test",
+                443,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let fresh = recorder
+            .issue_usage_ticket(
+                "receipt-cleanup",
+                "machine-a",
+                Some("agent-a"),
+                "fresh.test",
+                443,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE network_usage_receipts SET created_at=0 WHERE ticket=$1")
+            .bind(&expired)
+            .execute(&pool)
+            .await
+            .unwrap();
+        recorder.delete_expired().await.unwrap();
+        let remaining = sqlx::query_scalar::<_, String>(
+            "SELECT ticket FROM network_usage_receipts WHERE workspace_id=$1",
+        )
+        .bind("receipt-cleanup")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, vec![fresh]);
     }
 
     #[tokio::test]

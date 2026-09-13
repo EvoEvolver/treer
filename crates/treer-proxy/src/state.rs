@@ -227,6 +227,18 @@ impl AppState {
             .await
     }
 
+    pub(crate) async fn abandon_usage_ticket(
+        &self,
+        workspace: &str,
+        server: &str,
+        ticket: &str,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .traffic
+            .abandon_usage_ticket(workspace, server, ticket)
+            .await
+    }
+
     pub(crate) async fn persist_usage_report(
         &self,
         workspace: &str,

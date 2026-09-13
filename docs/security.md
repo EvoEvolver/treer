@@ -123,7 +123,9 @@ transmission, and removed only after the Proxy commits deduplication state and
 both machine/Agent ledgers in one database transaction. Reports can arrive after
 revocation or reconnect; receipts authorize accounting only, never a new socket.
 Duplicate and older reports add nothing; mixed decreasing/increasing counters are
-rejected. Legacy peers retain best-effort, live-stream reporting.
+rejected. Undelivered, unused receipts are discarded and remaining open receipts
+expire with the 90-day traffic retention window. Legacy peers retain best-effort,
+live-stream reporting.
 
 Direct counters remain machine-reported observations with zero billable bytes.
 Abrupt crashes can lose bytes since the latest five-second checkpoint; delayed

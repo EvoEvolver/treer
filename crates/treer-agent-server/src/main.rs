@@ -405,9 +405,9 @@ async fn transparent_network_executable(mode: service::NetworkMode) -> Result<Op
         service::NetworkMode::Transparent => anyhow::bail!(
             "transparent network mode is currently supported only on Linux; use a Linux container"
         ),
-        service::NetworkMode::NativeExperimental => anyhow::bail!(
-            "native-experimental network mode is supported only on macOS"
-        ),
+        service::NetworkMode::NativeExperimental => {
+            anyhow::bail!("native-experimental network mode is supported only on macOS")
+        }
     }
 }
 

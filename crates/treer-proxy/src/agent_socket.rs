@@ -754,21 +754,34 @@ async fn route_network_open(
         None
     };
     match route {
-        ResolvedNetworkRoute::Direct { host, port } => state
-            .send_direct_network_route(
-                workspace_id,
-                source_server_id,
-                connection_id,
-                stream_id.clone(),
-                NetworkDirectTarget {
-                    host,
-                    port,
-                    report_usage: request.track_lifetime,
-                    usage_ticket,
-                },
-            )
-            .await
-            .map_err(|error| (stream_id, error)),
+        ResolvedNetworkRoute::Direct { host, port } => {
+            let ticket_to_abandon = usage_ticket.clone();
+            let result = state
+                .send_direct_network_route(
+                    workspace_id,
+                    source_server_id,
+                    connection_id,
+                    stream_id.clone(),
+                    NetworkDirectTarget {
+                        host,
+                        port,
+                        report_usage: request.track_lifetime,
+                        usage_ticket,
+                    },
+                )
+                .await;
+            if result.is_err() {
+                if let Some(ticket) = ticket_to_abandon {
+                    if let Err(error) = state
+                        .abandon_usage_ticket(workspace_id, source_server_id, &ticket)
+                        .await
+                    {
+                        tracing::warn!(%error, %ticket, "failed to abandon unused network usage ticket");
+                    }
+                }
+            }
+            result.map_err(|error| (stream_id, error))
+        }
         ResolvedNetworkRoute::Relay {
             destination_server_id,
             destination_agent_id,
