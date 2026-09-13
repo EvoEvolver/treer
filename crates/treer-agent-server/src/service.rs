@@ -38,6 +38,7 @@ pub enum ServiceMode {
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkMode {
     Transparent,
+    NativeExperimental,
     ProxyEnv,
 }
 
@@ -45,6 +46,7 @@ impl std::fmt::Display for NetworkMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Transparent => "transparent",
+            Self::NativeExperimental => "native-experimental",
             Self::ProxyEnv => "proxy-env",
         })
     }
@@ -3202,6 +3204,21 @@ mod tests {
         assert_eq!(config.service_manager, default_service_manager());
         assert_eq!(config.service_fallback_reason, None);
         assert_eq!(config.network_mode, None);
+    }
+
+    #[test]
+    fn native_experimental_network_mode_round_trips_in_service_config() {
+        let encoded = serde_json::to_string(&NetworkMode::NativeExperimental)
+            .expect("serialize native network mode");
+        assert_eq!(encoded, "\"native-experimental\"");
+        assert_eq!(
+            serde_json::from_str::<NetworkMode>(&encoded).expect("deserialize native network mode"),
+            NetworkMode::NativeExperimental
+        );
+        assert_eq!(
+            NetworkMode::NativeExperimental.to_string(),
+            "native-experimental"
+        );
     }
 
     #[test]

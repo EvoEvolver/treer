@@ -159,11 +159,13 @@ branch.
 - To stop channel traffic, stop the App processes. Do not turn off Core Message
   routes while a bridge still has an unacknowledged external delivery. Feature
   flags do not delete Message rows or App state.
-- Before the first stable release, a Controller protocol bump may deliberately
-  require a coordinated Proxy rollout and machine re-enrollment. Record that
-  boundary in the release notes and reset Canary as one unit. Once stable
-  releases begin, keep the current and previous Controller protocols usable
-  during machine rollout.
+- Keep the legacy Controller protocol field on a version understood by the
+  previous Proxy while advertising additive `supported_protocols` and
+  capabilities. Roll out Proxy support before selecting a new protocol version.
+  Capability-gated commands must fail as `unsupported_command` on older
+  Controllers instead of disconnecting the machine. A deliberate incompatible
+  protocol reset still requires a coordinated Canary rollout and an explicit
+  release note.
 - Roll back the App with `wrangler rollback --env production <version-id>`.
 - Roll back the Proxy to its prior Railway deployment. Database contraction is
   a separate release and is never part of an automatic code rollback.

@@ -93,6 +93,49 @@ destinations are dialed on the machine and never wait on the Proxy. Linux
 `transparent` mode still captures all Agent TCP through the TUN. Do not describe
 macOS `proxy-env` as a forced proxy for GitHub or other public sites.
 
+The opt-in [native Mac network lab](../scripts/network-lab/README.md) demonstrates
+PID capture into this existing virtual-host Policy/relay path. Its cooperative
+registration gate, shared DNS cache, upstream helper half-close behavior, and
+fail-open helper shutdown do not provide Linux namespace isolation or a new
+supported transparent mode. See the [measured limits](research/2026-09-05-macos-transparent-network.md).
+
+The owned [native backend](../native/macos-network/README.md) adds kernel audit
+token and process-birth validation, registration acknowledgement before exec,
+and a corrected directional TCP copier. Roots and observed descendants are
+checkpointed in provider-private storage and restored only for live process
+instances from the same system boot. The UDP adapter routes each target through
+Controller/Proxy authorization. It remains experimental: detached children before
+their first observed flow, protection during extension death, system virtual DNS
+and installed UDP capture still have open delivery gates. Unsigned builds and kernel identity
+unit tests do not establish an installed capture boundary.
+
+Tracked network connections are periodically reauthorized, including Direct
+connections from Controllers that report their complete lifetime. A denial or
+reauthorization timeout closes the tracked connection. Five-second polling and
+the Policy cache mean revocation is not instantaneous. Older Direct Controllers
+continue to have Open-only authorization. Proxy-env internet bypass traffic is
+outside this mechanism.
+
+New Controllers negotiate durable Direct usage receipts. Each receipt is issued
+only after Policy authorization and binds reports to the original workspace,
+machine, Agent and destination. Cumulative reports are checkpointed locally before
+transmission, and removed only after the Proxy commits deduplication state and
+both machine/Agent ledgers in one database transaction. Reports can arrive after
+revocation or reconnect; receipts authorize accounting only, never a new socket.
+Duplicate and older reports add nothing; mixed decreasing/increasing counters are
+rejected. Undelivered, unused receipts are discarded and remaining open receipts
+expire with the 90-day traffic retention window. Legacy peers retain best-effort,
+live-stream reporting.
+
+Direct counters remain machine-reported observations with zero billable bytes.
+Abrupt crashes can lose bytes since the latest five-second checkpoint; delayed
+reports are bucketed at commit time. Disk/storage failures remain visible failures,
+not proof of complete accounting. Agent detail describes the same traffic and is
+not additional billable traffic. An Apple Developer account does not by itself
+supply complete detached-child tracking: Apple's optional Endpoint Security
+[entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.endpoint-security.client)
+requires a separate request. That backend is not implemented or claimed here.
+
 ## Credentials
 
 | Credential | Scope and limit |

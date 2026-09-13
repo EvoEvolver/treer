@@ -1,0 +1,4 @@
+# Signed native capture helper; does not install a TLS interception certificate.
+mitmproxy_rs==0.12.11
+mitmproxy-macos==0.12.11
+dnslib==0.9.26

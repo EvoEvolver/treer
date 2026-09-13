@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_MIN_VERSION: u32 = 4;
+pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
+pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
+pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
+pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
+pub const CONTROLLER_CAPABILITIES: &[&str] = &[
+    CAPABILITY_AGENT_ABORT,
+    CAPABILITY_AGENT_STARTUP,
+    CAPABILITY_MACHINE_EXEC,
+    CAPABILITY_MACHINE_UPLOAD,
+];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
@@ -1195,6 +1206,30 @@ pub enum AgentCommand {
     ShutdownMachine,
 }
 
+impl AgentCommand {
+    pub fn required_capability(&self) -> Option<&'static str> {
+        match self {
+            Self::Abort { .. } => Some(CAPABILITY_AGENT_ABORT),
+            Self::StartupSet { .. } | Self::StartupGet { .. } | Self::StartupClear { .. } => {
+                Some(CAPABILITY_AGENT_STARTUP)
+            }
+            Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
+            Self::UploadBegin { .. }
+            | Self::UploadChunk { .. }
+            | Self::UploadCommit { .. }
+            | Self::UploadAbort { .. } => Some(CAPABILITY_MACHINE_UPLOAD),
+            Self::Create { .. }
+            | Self::Prompt { .. }
+            | Self::Input { .. }
+            | Self::Read { .. }
+            | Self::Transcript { .. }
+            | Self::Stop { .. }
+            | Self::ProbeNetwork { .. }
+            | Self::ShutdownMachine => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandEnvelope {
     pub command_id: String,
@@ -1334,6 +1369,10 @@ pub enum NetworkBinaryKind {
     HalfClose = 5,
     Reset = 6,
     Direct = 7,
+    Usage = 8,
+    /// Opens a datagram association; each Data frame is exactly one datagram.
+    OpenDatagram = 9,
+    UsageAck = 10,
 }
 
 impl TryFrom<u8> for NetworkBinaryKind {
@@ -1348,6 +1387,9 @@ impl TryFrom<u8> for NetworkBinaryKind {
             5 => Ok(Self::HalfClose),
             6 => Ok(Self::Reset),
             7 => Ok(Self::Direct),
+            8 => Ok(Self::Usage),
+            9 => Ok(Self::OpenDatagram),
+            10 => Ok(Self::UsageAck),
             _ => Err(ProtocolError::new(
                 "invalid_network_frame",
                 format!("unknown network binary frame kind {value}"),
@@ -1465,6 +1507,13 @@ pub struct NetworkOpenRequest {
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_agent_id: Option<String>,
+    /// The source sends Reset after full completion, including Direct routes.
+    /// Older Controllers omit this and cannot provide Direct lifetime tracking.
+    #[serde(default)]
+    pub track_lifetime: bool,
+    /// Negotiates persisted usage reports and commit acknowledgements.
+    #[serde(default)]
+    pub durable_usage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1482,6 +1531,31 @@ pub struct NetworkConnectRequest {
 pub struct NetworkDirectTarget {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub report_usage: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_ticket: Option<String>,
+}
+
+/// Cumulative application bytes successfully written to TCP sockets or UDP
+/// datagrams. Chunks count successful writes/datagrams, not IP packets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkUsageTotals {
+    pub sent_bytes: u64,
+    pub received_bytes: u64,
+    pub sent_chunks: u64,
+    pub received_chunks: u64,
+}
+
+/// A Proxy-issued, durable authorization receipt binds late/replayed usage to
+/// its original workspace, machine, Agent and destination. It does not permit
+/// reopening a connection after Policy revocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkUsageReport {
+    pub ticket: String,
+    pub totals: NetworkUsageTotals,
+    #[serde(default)]
+    pub finished: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1489,6 +1563,7 @@ pub struct NetworkDirectTarget {
 pub enum MachineServiceProtocol {
     Tcp,
     Http,
+    Udp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1621,6 +1696,37 @@ pub struct MachineTrafficRecord {
     pub meter_version: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTrafficRecord {
+    pub window_start: DateTime<Utc>,
+    pub traffic_class: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub destination_type: String,
+    pub destination_id: String,
+    pub payload_bytes: u64,
+    pub payload_frames: u64,
+    pub billable_bytes: u64,
+    pub meter_version: u16,
+}
+
+impl From<MachineTrafficRecord> for AgentTrafficRecord {
+    fn from(value: MachineTrafficRecord) -> Self {
+        Self {
+            window_start: value.window_start,
+            traffic_class: value.traffic_class,
+            source_type: value.source_type,
+            source_id: value.source_server_id,
+            destination_type: value.destination_type,
+            destination_id: value.destination_server_id,
+            payload_bytes: value.payload_bytes,
+            payload_frames: value.payload_frames,
+            billable_bytes: value.billable_bytes,
+            meter_version: value.meter_version,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrganizationAuditEvent {
     pub sequence: i64,
@@ -1682,7 +1788,13 @@ impl CommandResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentServerMessage {
     Register {
+        /// Legacy single-version field. New peers negotiate from
+        /// `supported_protocols`; old peers continue to read this value.
         protocol: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        supported_protocols: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
         controller_instance_id: String,
         server: ServerInfo,
     },
@@ -1719,6 +1831,8 @@ pub enum AgentServerMessage {
 pub enum ProxyMessage {
     Registered {
         protocol: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
         workspace_revision: u64,
     },
     VirtualNetworkHosts {
@@ -2095,6 +2209,49 @@ mod tests {
     }
 
     #[test]
+    fn commands_added_after_protocol_v4_require_advertised_capabilities() {
+        assert_eq!(
+            AgentCommand::Abort {
+                agent_id: "ag_1".to_string()
+            }
+            .required_capability(),
+            Some(CAPABILITY_AGENT_ABORT)
+        );
+        assert_eq!(
+            AgentCommand::StartupGet {
+                agent_id: "ag_1".to_string()
+            }
+            .required_capability(),
+            Some(CAPABILITY_AGENT_STARTUP)
+        );
+        assert_eq!(
+            AgentCommand::Stop {
+                agent_id: "ag_1".to_string()
+            }
+            .required_capability(),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_registration_response_defaults_to_no_capabilities() {
+        let message: ProxyMessage = serde_json::from_value(serde_json::json!({
+            "type": "registered",
+            "protocol": PROTOCOL_VERSION,
+            "workspace_revision": 7
+        }))
+        .expect("decode legacy registration response");
+        assert!(matches!(
+            message,
+            ProxyMessage::Registered {
+                protocol: PROTOCOL_VERSION,
+                capabilities,
+                workspace_revision: 7
+            } if capabilities.is_empty()
+        ));
+    }
+
+    #[test]
     fn abort_command_wire_shape_is_stable() {
         let message = ProxyMessage::Command {
             envelope: CommandEnvelope {
@@ -2395,6 +2552,8 @@ mod tests {
     #[test]
     fn network_direct_target_round_trips() {
         let target = NetworkDirectTarget {
+            report_usage: false,
+            usage_ticket: None,
             host: "example.com".to_string(),
             port: 443,
         };
@@ -2412,6 +2571,33 @@ mod tests {
                 .expect("decode direct target"),
             target
         );
+    }
+
+    #[test]
+    fn network_datagram_and_usage_ack_keep_explicit_wire_kinds_and_legacy_defaults() {
+        for (kind, byte) in [
+            (NetworkBinaryKind::OpenDatagram, 9),
+            (NetworkBinaryKind::UsageAck, 10),
+        ] {
+            let frame = NetworkBinaryFrame {
+                kind,
+                stream_id: "stream".into(),
+                payload: vec![],
+            };
+            let wire = frame.encode().unwrap();
+            assert_eq!(wire[4], byte);
+            assert_eq!(NetworkBinaryFrame::decode(&wire).unwrap(), frame);
+        }
+        let target: NetworkDirectTarget =
+            serde_json::from_str(r#"{"host":"example.test","port":443}"#).unwrap();
+        assert!(!target.report_usage);
+        assert!(target.usage_ticket.is_none());
+        let open: NetworkOpenRequest = serde_json::from_str(
+            r#"{"destination":"example.test","host":"example.test","port":443}"#,
+        )
+        .unwrap();
+        assert!(!open.track_lifetime);
+        assert!(!open.durable_usage);
     }
 
     #[test]

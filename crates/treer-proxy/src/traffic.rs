@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use tracing::warn;
-use treer_protocol::MachineTrafficRecord;
+use treer_protocol::{MachineTrafficRecord, NetworkUsageReport, NetworkUsageTotals, ProtocolError};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -23,6 +23,7 @@ pub(crate) enum TrafficClass {
     ServiceIngress,
     VirtualHost,
     AgentInterface,
+    DirectNetwork,
 }
 
 impl TrafficClass {
@@ -32,6 +33,7 @@ impl TrafficClass {
             Self::ServiceIngress => "service_ingress",
             Self::VirtualHost => "virtual_host",
             Self::AgentInterface => "agent_interface",
+            Self::DirectNetwork => "direct_network",
         }
     }
 }
@@ -55,6 +57,11 @@ pub(crate) struct TrafficCounter {
 }
 
 impl TrafficCounter {
+    fn record_observed(&self, bytes: u64, chunks: u64) {
+        self.payload_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.payload_frames.fetch_add(chunks, Ordering::Relaxed);
+        // Controller-reported internet writes are observation, not relay billing.
+    }
     pub(crate) fn record(&self, payload_bytes: usize) {
         self.payload_bytes.fetch_add(
             u64::try_from(payload_bytes).unwrap_or(u64::MAX),
@@ -65,6 +72,66 @@ impl TrafficCounter {
             u64::try_from(payload_bytes).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
+    }
+}
+
+pub(crate) struct DirectTrafficMeter {
+    counters: StreamTrafficCounters,
+    agent_counters: Option<StreamTrafficCounters>,
+    previous: NetworkUsageTotals,
+}
+
+impl DirectTrafficMeter {
+    pub(crate) fn with_agent_meter(mut self, meter: Option<Self>) -> Self {
+        self.agent_counters = meter.map(|meter| meter.counters);
+        self
+    }
+    pub(crate) fn record(&mut self, totals: NetworkUsageTotals) -> Result<(), ProtocolError> {
+        let previous = self.previous;
+        if totals.sent_bytes < previous.sent_bytes
+            || totals.received_bytes < previous.received_bytes
+            || totals.sent_chunks < previous.sent_chunks
+            || totals.received_chunks < previous.received_chunks
+        {
+            return Err(ProtocolError::new(
+                "invalid_network_usage",
+                "cumulative network usage cannot decrease",
+            ));
+        }
+        if [
+            totals.sent_bytes,
+            totals.received_bytes,
+            totals.sent_chunks,
+            totals.received_chunks,
+        ]
+        .iter()
+        .any(|value| *value > i64::MAX as u64)
+        {
+            return Err(ProtocolError::new(
+                "invalid_network_usage",
+                "network usage exceeds supported counters",
+            ));
+        }
+        self.counters.source_to_destination.record_observed(
+            totals.sent_bytes - previous.sent_bytes,
+            totals.sent_chunks - previous.sent_chunks,
+        );
+        self.counters.destination_to_source.record_observed(
+            totals.received_bytes - previous.received_bytes,
+            totals.received_chunks - previous.received_chunks,
+        );
+        self.previous = totals;
+        if let Some(counters) = &self.agent_counters {
+            counters.source_to_destination.record_observed(
+                totals.sent_bytes - previous.sent_bytes,
+                totals.sent_chunks - previous.sent_chunks,
+            );
+            counters.destination_to_source.record_observed(
+                totals.received_bytes - previous.received_bytes,
+                totals.received_chunks - previous.received_chunks,
+            );
+        }
+        Ok(())
     }
 }
 
@@ -82,6 +149,8 @@ pub(crate) struct TrafficRecorder {
 #[derive(Default)]
 struct TrafficRecorderInner {
     pool: Option<PgPool>,
+    agent_detail: bool,
+    agents: OnceLock<TrafficRecorder>,
     counters: Mutex<HashMap<TrafficKey, Arc<TrafficCounter>>>,
     flush_gate: tokio::sync::Mutex<()>,
 }
@@ -94,12 +163,257 @@ struct TrafficDelta {
 }
 
 impl TrafficRecorder {
+    pub(crate) async fn issue_usage_ticket(
+        &self,
+        workspace: &str,
+        server: &str,
+        agent: Option<&str>,
+        host: &str,
+        port: u16,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(pool) = &self.inner.pool else {
+            return Ok(None);
+        };
+        let ticket = uuid::Uuid::new_v4().to_string();
+        let destination = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        sqlx::query("INSERT INTO network_usage_receipts (ticket,workspace_id,server_id,agent_id,destination,created_at) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind(&ticket).bind(workspace).bind(server).bind(agent).bind(destination)
+            .bind(Utc::now().timestamp()).execute(pool).await?;
+        Ok(Some(ticket))
+    }
+
+    pub(crate) async fn abandon_usage_ticket(
+        &self,
+        workspace: &str,
+        server: &str,
+        ticket: &str,
+    ) -> anyhow::Result<()> {
+        let Some(pool) = &self.inner.pool else {
+            return Ok(());
+        };
+        sqlx::query(
+            "DELETE FROM network_usage_receipts \
+             WHERE ticket=$1 AND workspace_id=$2 AND server_id=$3 \
+             AND closed_at IS NULL AND sent_bytes=0 AND received_bytes=0 \
+             AND sent_chunks=0 AND received_chunks=0",
+        )
+        .bind(ticket)
+        .bind(workspace)
+        .bind(server)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Commit deduplication state and both machine/Agent ledgers in one
+    /// transaction. Only then may the Proxy acknowledge a replayable report.
+    pub(crate) async fn persist_usage_report(
+        &self,
+        workspace: &str,
+        server: &str,
+        report: &NetworkUsageReport,
+    ) -> anyhow::Result<()> {
+        let pool = self
+            .inner
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("usage receipt storage unavailable"))?;
+        let values = [
+            report.totals.sent_bytes,
+            report.totals.received_bytes,
+            report.totals.sent_chunks,
+            report.totals.received_chunks,
+        ];
+        anyhow::ensure!(
+            values.iter().all(|n| *n <= i64::MAX as u64),
+            "usage counters exceed supported range"
+        );
+        let mut transaction = pool.begin().await?;
+        let row = sqlx::query("SELECT agent_id,destination,sent_bytes,received_bytes,sent_chunks,received_chunks FROM network_usage_receipts WHERE ticket=$1 AND workspace_id=$2 AND server_id=$3 FOR UPDATE")
+            .bind(&report.ticket).bind(workspace).bind(server).fetch_optional(&mut *transaction).await?
+            .ok_or_else(|| anyhow::anyhow!("usage ticket does not belong to this machine/workspace"))?;
+        let previous = [
+            row.get::<i64, _>("sent_bytes"),
+            row.get("received_bytes"),
+            row.get("sent_chunks"),
+            row.get("received_chunks"),
+        ];
+        if report.finished {
+            sqlx::query("UPDATE network_usage_receipts SET closed_at=COALESCE(closed_at,$2) WHERE ticket=$1")
+                .bind(&report.ticket).bind(Utc::now().timestamp()).execute(&mut *transaction).await?;
+        }
+        // Delayed retries may arrive after a newer cumulative report. They add
+        // nothing; mixed increasing/decreasing directions are invalid.
+        if values
+            .iter()
+            .zip(previous)
+            .all(|(new, old)| *new <= old as u64)
+        {
+            transaction.commit().await?;
+            return Ok(());
+        }
+        anyhow::ensure!(
+            values
+                .iter()
+                .zip(previous)
+                .all(|(new, old)| *new >= old as u64),
+            "usage report moves counters backwards"
+        );
+        let deltas: Vec<_> = values
+            .iter()
+            .zip(previous)
+            .map(|(new, old)| *new as i64 - old)
+            .collect();
+        let destination: String = row.get("destination");
+        let agent: Option<String> = row.get("agent_id");
+        let now = Utc::now();
+        let window = now.timestamp().div_euclid(3600) * 3600;
+        for (table, source_type, source_id) in [
+            ("traffic_usage_hourly", "machine", Some(server)),
+            ("agent_traffic_usage_hourly", "agent", agent.as_deref()),
+        ] {
+            let Some(source_id) = source_id else { continue };
+            for (from_type, from_id, to_type, to_id, bytes, chunks) in [
+                (
+                    source_type,
+                    source_id,
+                    "internet",
+                    destination.as_str(),
+                    deltas[0],
+                    deltas[2],
+                ),
+                (
+                    "internet",
+                    destination.as_str(),
+                    source_type,
+                    source_id,
+                    deltas[1],
+                    deltas[3],
+                ),
+            ] {
+                if bytes == 0 && chunks == 0 {
+                    continue;
+                }
+                // Table identifiers are static above, never supplied by a peer.
+                let query = format!("INSERT INTO {table} (workspace_id,window_start,traffic_class,source_type,source_id,destination_type,destination_id,payload_bytes,payload_frames,billable_bytes,meter_version,updated_at) VALUES ($1,$2,'direct_network',$3,$4,$5,$6,$7,$8,0,2,$9) ON CONFLICT (workspace_id,window_start,traffic_class,source_type,source_id,destination_type,destination_id,meter_version) DO UPDATE SET payload_bytes={table}.payload_bytes+EXCLUDED.payload_bytes,payload_frames={table}.payload_frames+EXCLUDED.payload_frames,updated_at=EXCLUDED.updated_at");
+                sqlx::query(&query)
+                    .bind(workspace)
+                    .bind(window)
+                    .bind(from_type)
+                    .bind(from_id)
+                    .bind(to_type)
+                    .bind(to_id)
+                    .bind(bytes)
+                    .bind(chunks)
+                    .bind(now.to_rfc3339())
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        sqlx::query("UPDATE network_usage_receipts SET sent_bytes=$2,received_bytes=$3,sent_chunks=$4,received_chunks=$5 WHERE ticket=$1")
+            .bind(&report.ticket).bind(values[0] as i64).bind(values[1] as i64)
+            .bind(values[2] as i64).bind(values[3] as i64).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) fn agent_view(&self) -> Self {
+        if self.inner.agent_detail {
+            return self.clone();
+        }
+        self.inner
+            .agents
+            .get_or_init(|| Self {
+                inner: Arc::new(TrafficRecorderInner {
+                    pool: self.inner.pool.clone(),
+                    agent_detail: true,
+                    ..TrafficRecorderInner::default()
+                }),
+            })
+            .clone()
+    }
+
+    fn sql(&self, sql: &str) -> String {
+        if self.inner.agent_detail {
+            sql.replace("traffic_usage_hourly", "agent_traffic_usage_hourly")
+                .replace(
+                    "FROM machine_traffic_hourly WHERE",
+                    "FROM machine_traffic_hourly WHERE FALSE AND",
+                )
+        } else {
+            sql.to_string()
+        }
+    }
+
+    pub(crate) fn register_agent_stream(
+        &self,
+        workspace: &str,
+        source_server: &str,
+        destination_server: &str,
+        source_agent: Option<&str>,
+        destination_agent: Option<&str>,
+    ) -> Option<StreamTrafficCounters> {
+        if source_agent.is_none() && destination_agent.is_none() {
+            return None;
+        }
+        Some(self.register_stream(
+            workspace,
+            TrafficClass::VirtualNetwork,
+            if source_agent.is_some() {
+                "agent"
+            } else {
+                ENDPOINT_MACHINE
+            },
+            source_agent.unwrap_or(source_server),
+            if destination_agent.is_some() {
+                "agent"
+            } else {
+                ENDPOINT_MACHINE
+            },
+            destination_agent.unwrap_or(destination_server),
+        ))
+    }
+    pub(crate) fn register_direct_stream(
+        &self,
+        workspace_id: &str,
+        source_server_id: &str,
+        host: &str,
+        port: u16,
+    ) -> DirectTrafficMeter {
+        let destination = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        DirectTrafficMeter {
+            counters: self.register_stream(
+                workspace_id,
+                TrafficClass::DirectNetwork,
+                if self.inner.agent_detail {
+                    "agent"
+                } else {
+                    ENDPOINT_MACHINE
+                },
+                source_server_id,
+                "internet",
+                &destination,
+            ),
+            previous: NetworkUsageTotals::default(),
+            agent_counters: None,
+        }
+    }
     pub(crate) fn new(pool: PgPool) -> Self {
         Self {
             inner: Arc::new(TrafficRecorderInner {
                 pool: Some(pool),
                 counters: Mutex::new(HashMap::new()),
                 flush_gate: tokio::sync::Mutex::new(()),
+                agent_detail: false,
+                agents: OnceLock::new(),
             }),
         }
     }
@@ -170,6 +484,9 @@ impl TrafficRecorder {
     }
 
     pub(crate) fn spawn_flush_task(&self) {
+        if !self.inner.agent_detail {
+            self.agent_view().spawn_flush_task();
+        }
         let recorder = self.clone();
         tokio::spawn(async move {
             let mut flush = tokio::time::interval(FLUSH_INTERVAL);
@@ -204,7 +521,7 @@ impl TrafficRecorder {
         let now = Utc::now().timestamp();
         let cutoff = traffic_window_start(now, hours);
         let mut records = if let Some(pool) = &self.inner.pool {
-            let rows = sqlx::query(
+            let statement = self.sql(
                 "SELECT window_start, traffic_class, source_type, source_id, destination_type, \
                  destination_id, CAST(SUM(payload_bytes) AS BIGINT) AS payload_bytes, \
                  CAST(SUM(payload_frames) AS BIGINT) AS payload_frames, \
@@ -220,11 +537,12 @@ impl TrafficRecorder {
                  ) AS usage GROUP BY window_start, traffic_class, source_type, source_id, \
                  destination_type, destination_id, meter_version \
                  ORDER BY window_start DESC, source_id, destination_id",
-            )
-            .bind(workspace_id)
-            .bind(cutoff)
-            .fetch_all(pool)
-            .await?;
+            );
+            let rows = sqlx::query(&statement)
+                .bind(workspace_id)
+                .bind(cutoff)
+                .fetch_all(pool)
+                .await?;
             rows.into_iter()
                 .map(|row| {
                     let timestamp = row.get::<i64, _>("window_start");
@@ -273,15 +591,15 @@ impl TrafficRecorder {
         }
         let window_start = hour_start(Utc::now().timestamp());
         let updated_at = Utc::now().to_rfc3339();
-        let mut transaction = pool.begin().await?;
         let result = async {
+            let mut transaction = pool.begin().await?;
             for chunk in deltas.chunks(MAX_ROWS_PER_INSERT) {
-                let mut query = QueryBuilder::<Postgres>::new(
+                let mut query = QueryBuilder::<Postgres>::new(self.sql(
                     "INSERT INTO traffic_usage_hourly(\
                      workspace_id, window_start, traffic_class, source_type, source_id, \
                      destination_type, destination_id, payload_bytes, payload_frames, \
                      billable_bytes, meter_version, updated_at) ",
-                );
+                ));
                 query.push_values(chunk, |mut row, delta| {
                     row.push_bind(&delta.key.workspace_id)
                         .push_bind(window_start)
@@ -296,14 +614,14 @@ impl TrafficRecorder {
                         .push_bind(i32::from(delta.key.meter_version))
                         .push_bind(&updated_at);
                 });
-                query.push(
+                query.push(self.sql(
                     " ON CONFLICT(workspace_id, window_start, traffic_class, source_type, source_id, \
                      destination_type, destination_id, meter_version) DO UPDATE SET \
                      payload_bytes = traffic_usage_hourly.payload_bytes + EXCLUDED.payload_bytes, \
                      payload_frames = traffic_usage_hourly.payload_frames + EXCLUDED.payload_frames, \
                      billable_bytes = traffic_usage_hourly.billable_bytes + EXCLUDED.billable_bytes, \
                      updated_at = EXCLUDED.updated_at",
-                );
+                ));
                 query.build().execute(&mut *transaction).await?;
             }
             transaction.commit().await
@@ -372,10 +690,20 @@ impl TrafficRecorder {
         let cutoff = Utc::now()
             .timestamp()
             .saturating_sub(i64::try_from(RETENTION.as_secs()).unwrap_or(i64::MAX));
-        sqlx::query("DELETE FROM traffic_usage_hourly WHERE window_start < $1")
+        sqlx::query(&self.sql("DELETE FROM traffic_usage_hourly WHERE window_start < $1"))
             .bind(cutoff)
             .execute(pool)
             .await?;
+        if self.inner.agent_detail {
+            return Ok(());
+        }
+        sqlx::query(
+            "DELETE FROM network_usage_receipts \
+             WHERE closed_at < $1 OR (closed_at IS NULL AND created_at < $1)",
+        )
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
         sqlx::query("DELETE FROM machine_traffic_hourly WHERE window_start < $1")
             .bind(cutoff)
             .execute(pool)
@@ -489,7 +817,11 @@ fn counter_for(
             source_server_id: source_server_id.to_string(),
             destination_type: destination_type.to_string(),
             destination_server_id: destination_server_id.to_string(),
-            meter_version: METER_VERSION,
+            meter_version: if traffic_class == TrafficClass::DirectNetwork {
+                2
+            } else {
+                METER_VERSION
+            },
         })
         .or_default()
         .clone()
@@ -516,6 +848,378 @@ fn database_counter(row: &sqlx::postgres::PgRow, column: &str) -> anyhow::Result
 mod tests {
     use super::*;
     use crate::auth::AuthStore;
+
+    #[tokio::test]
+    async fn agent_usage_persists_separately_without_doubling_machine_usage() {
+        let store = AuthStore::for_test("admin-password").await;
+        store.seed_test_workspace("agent-traffic").await;
+        let recorder = TrafficRecorder::new(store.pool());
+        let detail = recorder.agent_view();
+        let agent = detail
+            .register_agent_stream(
+                "agent-traffic",
+                "source",
+                "destination",
+                Some("agent-a"),
+                Some("agent-b"),
+            )
+            .unwrap();
+        agent.source_to_destination.record(12);
+        agent.destination_to_source.record(18);
+        detail.flush_pending().await.unwrap();
+        let records = detail.recent("agent-traffic", 1).await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records.iter().map(|r| r.payload_bytes).sum::<u64>(), 30);
+        assert!(records
+            .iter()
+            .all(|r| r.source_type == "agent" && r.destination_type == "agent"));
+        assert!(recorder
+            .recent("agent-traffic", 1)
+            .await
+            .unwrap()
+            .is_empty());
+        let mut direct = recorder
+            .register_direct_stream("agent-traffic", "source", "example.test", 443)
+            .with_agent_meter(Some(detail.register_direct_stream(
+                "agent-traffic",
+                "agent-a",
+                "example.test",
+                443,
+            )));
+        direct
+            .record(NetworkUsageTotals {
+                sent_bytes: 5,
+                received_bytes: 7,
+                sent_chunks: 1,
+                received_chunks: 1,
+            })
+            .unwrap();
+        recorder.flush_pending().await.unwrap();
+        detail.flush_pending().await.unwrap();
+        assert_eq!(
+            recorder
+                .recent("agent-traffic", 1)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.payload_bytes)
+                .sum::<u64>(),
+            12
+        );
+        let records = detail.recent("agent-traffic", 1).await.unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.traffic_class == "direct_network")
+                .map(|r| r.payload_bytes)
+                .sum::<u64>(),
+            12
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_usage_is_cumulative_deduplicated_and_not_billable() {
+        let recorder = TrafficRecorder::default();
+        let mut stream =
+            recorder.register_direct_stream("workspace", "source", "example.test", 443);
+        let first = NetworkUsageTotals {
+            sent_bytes: 12,
+            received_bytes: 18,
+            sent_chunks: 1,
+            received_chunks: 2,
+        };
+        stream.record(first).unwrap();
+        stream.record(first).unwrap();
+        assert!(stream
+            .record(NetworkUsageTotals {
+                sent_bytes: 11,
+                ..first
+            })
+            .is_err());
+        stream
+            .record(NetworkUsageTotals {
+                sent_bytes: 20,
+                sent_chunks: 3,
+                ..first
+            })
+            .unwrap();
+        let records = recorder.recent("workspace", 1).await.unwrap();
+        assert_eq!(records.len(), 2);
+        let sent = records.iter().find(|r| r.source_type == "machine").unwrap();
+        let received = records
+            .iter()
+            .find(|r| r.source_type == "internet")
+            .unwrap();
+        assert_eq!((sent.payload_bytes, sent.payload_frames), (20, 3));
+        assert_eq!((received.payload_bytes, received.payload_frames), (18, 2));
+        for record in records {
+            assert_eq!(record.traffic_class, "direct_network");
+            assert_eq!(record.meter_version, 2);
+            assert_eq!(record.billable_bytes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_direct_receipts_deduplicate_across_proxy_restart_and_bind_identity() {
+        let store = AuthStore::for_test("admin-password").await;
+        store.seed_test_workspace("durable-usage").await;
+        let pool = store.pool();
+        let first_proxy = TrafficRecorder::new(pool.clone());
+        let ticket = first_proxy
+            .issue_usage_ticket(
+                "durable-usage",
+                "machine-a",
+                Some("agent-a"),
+                "example.test",
+                443,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let first = NetworkUsageReport {
+            finished: false,
+            ticket,
+            totals: NetworkUsageTotals {
+                sent_bytes: 12,
+                received_bytes: 18,
+                sent_chunks: 1,
+                received_chunks: 1,
+            },
+        };
+        first_proxy
+            .persist_usage_report("durable-usage", "machine-a", &first)
+            .await
+            .unwrap();
+        drop(first_proxy);
+        let restarted = TrafficRecorder::new(pool.clone());
+        restarted
+            .persist_usage_report("durable-usage", "machine-a", &first)
+            .await
+            .unwrap();
+        let mut latest = first.clone();
+        latest.totals.sent_bytes = 20;
+        latest.totals.sent_chunks = 2;
+        restarted
+            .persist_usage_report("durable-usage", "machine-a", &latest)
+            .await
+            .unwrap();
+        // Lost acknowledgements and out-of-order replay add no extra bytes.
+        restarted
+            .persist_usage_report("durable-usage", "machine-a", &first)
+            .await
+            .unwrap();
+        assert!(restarted
+            .persist_usage_report("durable-usage", "machine-b", &latest)
+            .await
+            .is_err());
+        assert!(restarted
+            .persist_usage_report("other-workspace", "machine-a", &latest)
+            .await
+            .is_err());
+        let mut invalid = latest.clone();
+        invalid.totals.sent_bytes = 21;
+        invalid.totals.received_bytes = 1;
+        assert!(restarted
+            .persist_usage_report("durable-usage", "machine-a", &invalid)
+            .await
+            .is_err());
+        for recorder in [restarted.clone(), restarted.agent_view()] {
+            let rows = recorder.recent("durable-usage", 1).await.unwrap();
+            assert_eq!(rows.iter().map(|row| row.payload_bytes).sum::<u64>(), 38);
+            assert!(rows.iter().all(|row| row.billable_bytes == 0));
+        }
+        sqlx::query("ALTER TABLE agent_traffic_usage_hourly ADD CONSTRAINT test_usage_failure CHECK(payload_bytes < 100)")
+            .execute(&pool).await.unwrap();
+        let mut retry = latest.clone();
+        retry.totals.sent_bytes = 120;
+        retry.finished = true;
+        assert!(restarted
+            .persist_usage_report("durable-usage", "machine-a", &retry)
+            .await
+            .is_err());
+        // The machine upsert happens before Agent detail; failure of the latter
+        // must roll back both the former and receipt deduplication state.
+        assert_eq!(
+            restarted
+                .recent("durable-usage", 1)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.payload_bytes)
+                .sum::<u64>(),
+            38
+        );
+        let closed: Option<i64> =
+            sqlx::query_scalar("SELECT closed_at FROM network_usage_receipts WHERE ticket=$1")
+                .bind(&retry.ticket)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            closed.is_none(),
+            "failed ledger transaction cannot close its receipt"
+        );
+        sqlx::query("ALTER TABLE agent_traffic_usage_hourly DROP CONSTRAINT test_usage_failure")
+            .execute(&pool)
+            .await
+            .unwrap();
+        restarted
+            .persist_usage_report("durable-usage", "machine-a", &retry)
+            .await
+            .unwrap();
+        let closed: Option<i64> =
+            sqlx::query_scalar("SELECT closed_at FROM network_usage_receipts WHERE ticket=$1")
+                .bind(&retry.ticket)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(closed.is_some());
+        assert_eq!(
+            restarted
+                .recent("durable-usage", 1)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.payload_bytes)
+                .sum::<u64>(),
+            138
+        );
+    }
+
+    #[tokio::test]
+    async fn unused_and_expired_open_usage_receipts_are_reclaimed() {
+        let store = AuthStore::for_test("admin-password").await;
+        store.seed_test_workspace("receipt-cleanup").await;
+        let pool = store.pool();
+        let recorder = TrafficRecorder::new(pool.clone());
+        let unused = recorder
+            .issue_usage_ticket(
+                "receipt-cleanup",
+                "machine-a",
+                Some("agent-a"),
+                "unused.test",
+                443,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        recorder
+            .abandon_usage_ticket("receipt-cleanup", "machine-b", &unused)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM network_usage_receipts WHERE ticket=$1"
+            )
+            .bind(&unused)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1,
+            "another machine cannot abandon the ticket"
+        );
+        recorder
+            .abandon_usage_ticket("receipt-cleanup", "machine-a", &unused)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM network_usage_receipts WHERE ticket=$1"
+            )
+            .bind(&unused)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+
+        let expired = recorder
+            .issue_usage_ticket(
+                "receipt-cleanup",
+                "machine-a",
+                Some("agent-a"),
+                "expired.test",
+                443,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let fresh = recorder
+            .issue_usage_ticket(
+                "receipt-cleanup",
+                "machine-a",
+                Some("agent-a"),
+                "fresh.test",
+                443,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE network_usage_receipts SET created_at=0 WHERE ticket=$1")
+            .bind(&expired)
+            .execute(&pool)
+            .await
+            .unwrap();
+        recorder.delete_expired().await.unwrap();
+        let remaining = sqlx::query_scalar::<_, String>(
+            "SELECT ticket FROM network_usage_receipts WHERE workspace_id=$1",
+        )
+        .bind("receipt-cleanup")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, vec![fresh]);
+    }
+
+    #[tokio::test]
+    async fn direct_usage_persists_deltas_and_restores_failed_flush() {
+        let store = AuthStore::for_test("admin-password").await;
+        store.seed_test_workspace("direct-traffic").await;
+        let pool = store.pool();
+        let recorder = TrafficRecorder::new(pool.clone());
+        let mut stream =
+            recorder.register_direct_stream("direct-traffic", "source", "example.test", 443);
+        let first = NetworkUsageTotals {
+            sent_bytes: 12,
+            received_bytes: 18,
+            sent_chunks: 1,
+            received_chunks: 1,
+        };
+        stream.record(first).unwrap();
+        recorder.flush_pending().await.unwrap();
+        stream.record(first).unwrap();
+        stream
+            .record(NetworkUsageTotals {
+                sent_bytes: 20,
+                sent_chunks: 2,
+                ..first
+            })
+            .unwrap();
+        recorder.flush_pending().await.unwrap();
+        let records = recorder.recent("direct-traffic", 1).await.unwrap();
+        assert_eq!(records.iter().map(|r| r.payload_bytes).sum::<u64>(), 38);
+        assert!(records
+            .iter()
+            .all(|r| r.billable_bytes == 0 && r.meter_version == 2));
+        stream
+            .record(NetworkUsageTotals {
+                sent_bytes: 25,
+                sent_chunks: 3,
+                ..first
+            })
+            .unwrap();
+        pool.close().await;
+        assert!(recorder.flush_pending().await.is_err());
+        assert_eq!(
+            stream
+                .counters
+                .source_to_destination
+                .payload_bytes
+                .load(Ordering::Relaxed),
+            5,
+            "failure to begin a transaction must restore drained counters"
+        );
+    }
 
     #[test]
     fn stream_counters_preserve_machine_direction() {

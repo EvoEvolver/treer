@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -16,7 +18,7 @@ use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
     NetworkBinaryFrame, ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame,
     TerminalBinaryKind, TerminalCursor, ValidateAgentStartupRequest, ValidateAgentStartupResponse,
-    PROTOCOL_VERSION,
+    CONTROLLER_CAPABILITIES, PROTOCOL_MIN_VERSION, PROTOCOL_VERSION,
 };
 use url::Url;
 
@@ -38,6 +40,82 @@ struct PendingClose {
     deadline: Instant,
     final_revision: u64,
     exit_code: Option<i32>,
+}
+
+enum DecodedProxyMessage {
+    Known(Box<ProxyMessage>),
+    Unknown { message_type: String },
+    UnsupportedCommand { command_id: String, action: String },
+}
+
+#[derive(Deserialize)]
+struct ProxyMessageHeader {
+    #[serde(rename = "type")]
+    message_type: String,
+}
+
+#[derive(Deserialize)]
+struct RawCommandMessage {
+    envelope: RawCommandEnvelope,
+}
+
+#[derive(Deserialize)]
+struct RawCommandEnvelope {
+    command_id: String,
+    workspace_id: String,
+    command: Value,
+}
+
+fn decode_proxy_message(text: &str) -> anyhow::Result<DecodedProxyMessage> {
+    let value: Value = serde_json::from_str(text).context("failed to decode proxy message JSON")?;
+    let header: ProxyMessageHeader =
+        serde_json::from_value(value.clone()).context("proxy message is missing a valid type")?;
+    if header.message_type == "command" {
+        let raw: RawCommandMessage =
+            serde_json::from_value(value).context("failed to decode proxy command envelope")?;
+        let action = raw
+            .envelope
+            .command
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let command = match serde_json::from_value(raw.envelope.command) {
+            Ok(command) => command,
+            Err(_) => {
+                return Ok(DecodedProxyMessage::UnsupportedCommand {
+                    command_id: raw.envelope.command_id,
+                    action,
+                })
+            }
+        };
+        return Ok(DecodedProxyMessage::Known(Box::new(
+            ProxyMessage::Command {
+                envelope: CommandEnvelope {
+                    command_id: raw.envelope.command_id,
+                    workspace_id: raw.envelope.workspace_id,
+                    command,
+                },
+            },
+        )));
+    }
+    if !matches!(
+        header.message_type.as_str(),
+        "registered"
+            | "virtual_network_hosts"
+            | "terminal_attach"
+            | "terminal_resize"
+            | "terminal_detach"
+            | "error"
+    ) {
+        return Ok(DecodedProxyMessage::Unknown {
+            message_type: header.message_type,
+        });
+    }
+    serde_json::from_value(value)
+        .map(Box::new)
+        .map(DecodedProxyMessage::Known)
+        .context("failed to decode proxy message")
 }
 
 #[derive(Clone)]
@@ -173,6 +251,11 @@ impl ProxyClient {
             &mut outgoing,
             &AgentServerMessage::Register {
                 protocol: PROTOCOL_VERSION,
+                supported_protocols: (PROTOCOL_MIN_VERSION..=PROTOCOL_VERSION).collect(),
+                capabilities: CONTROLLER_CAPABILITIES
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
                 controller_instance_id: self.controller_instance_id.clone(),
                 server: self.advertised_server(),
             },
@@ -207,6 +290,11 @@ impl ProxyClient {
             },
         )
         .await?;
+
+        // Open frames may only follow this connection's machine registration
+        // and Agent snapshot. Offline requests fail locally instead of being
+        // replayed as new connections after sleep/reconnect.
+        self.network.set_proxy_connected();
 
         let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -433,11 +521,33 @@ impl ProxyClient {
                         }
                         continue;
                     };
-                    let message: ProxyMessage = serde_json::from_str(&text)
-                        .context("failed to decode proxy message")?;
+                    let message = match decode_proxy_message(&text)? {
+                        DecodedProxyMessage::Known(message) => *message,
+                        DecodedProxyMessage::Unknown { message_type } => {
+                            warn!(%message_type, "ignoring unsupported proxy message");
+                            continue;
+                        }
+                        DecodedProxyMessage::UnsupportedCommand { command_id, action } => {
+                            let result = CommandResult::failure(
+                                command_id,
+                                ProtocolError::new(
+                                    "unsupported_command",
+                                    format!("Controller does not support command {action}"),
+                                ),
+                            );
+                            send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
+                            continue;
+                        }
+                    };
                     match message {
-                        ProxyMessage::Registered { .. } => {
+                        ProxyMessage::Registered { protocol, .. } => {
+                            if !(PROTOCOL_MIN_VERSION..=PROTOCOL_VERSION).contains(&protocol) {
+                                return Err(anyhow!(
+                                    "proxy selected unsupported protocol {protocol}; Controller supports {PROTOCOL_MIN_VERSION}..={PROTOCOL_VERSION}"
+                                ));
+                            }
                             self.network.clear_virtual_hostnames();
+                            self.network.sync_native_virtual_hostnames().await?;
                             if let Err(error) = self.runtime.reset_virtual_hosts() {
                                 warn!(code = %error.code, message = %error.message, "failed to reset virtual-host snapshot");
                             }
@@ -445,11 +555,13 @@ impl ProxyClient {
                         ProxyMessage::VirtualNetworkHosts { snapshot } => {
                             let revision = snapshot.revision;
                             let count = snapshot.hosts.len();
-                            self.network.set_virtual_hostnames(
-                                snapshot.hosts.iter().map(|host| host.hostname.as_str()),
-                            );
+                            let names: Vec<_> = snapshot.hosts.iter().map(|host| host.hostname.clone()).collect();
                             match self.runtime.replace_virtual_hosts(snapshot) {
-                                Ok(true) => info!(revision, count, "virtual hosts refreshed"),
+                                Ok(true) => {
+                                    self.network.set_virtual_hostnames(names);
+                                    self.network.sync_native_virtual_hostnames().await?;
+                                    info!(revision, count, "virtual hosts refreshed");
+                                }
                                 Ok(false) => tracing::debug!(revision, "ignored stale virtual-host snapshot"),
                                 Err(error) => warn!(code = %error.code, message = %error.message, "rejected virtual-host snapshot"),
                             }
@@ -873,6 +985,50 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn unknown_proxy_messages_are_ignored_without_dropping_the_connection() {
+        let decoded = decode_proxy_message(r#"{"type":"future_control","payload":{}}"#)
+            .expect("decode unknown message");
+        assert!(matches!(
+            decoded,
+            DecodedProxyMessage::Unknown { message_type } if message_type == "future_control"
+        ));
+    }
+
+    #[test]
+    fn unknown_commands_return_a_correlated_unsupported_result() {
+        let decoded = decode_proxy_message(
+            r#"{"type":"command","envelope":{"command_id":"cmd_future","workspace_id":"default","command":{"action":"future_action","value":1}}}"#,
+        )
+        .expect("decode future command");
+        assert!(matches!(
+            decoded,
+            DecodedProxyMessage::UnsupportedCommand { command_id, action }
+                if command_id == "cmd_future" && action == "future_action"
+        ));
+    }
+
+    #[test]
+    fn known_commands_keep_the_existing_wire_shape() {
+        let decoded = decode_proxy_message(
+            r#"{"type":"command","envelope":{"command_id":"cmd_stop","workspace_id":"default","command":{"action":"stop","agent_id":"ag_1"}}}"#,
+        )
+        .expect("decode stop command");
+        let DecodedProxyMessage::Known(message) = decoded else {
+            panic!("expected known command");
+        };
+        assert!(matches!(
+            *message,
+            ProxyMessage::Command {
+                envelope: CommandEnvelope {
+                    command_id,
+                    command: AgentCommand::Stop { agent_id },
+                    ..
+                }
+            } if command_id == "cmd_stop" && agent_id == "ag_1"
+        ));
+    }
 
     #[test]
     fn server_advertises_remote_shutdown_support() {

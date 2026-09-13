@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use treer_protocol::{
     AgentServerMessage, NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest,
     NetworkDirectTarget, NetworkOpenRequest, ProtocolError, ProxyMessage, TerminalBinaryFrame,
-    TerminalBinaryKind, VirtualNetworkHost, PROTOCOL_VERSION,
+    TerminalBinaryKind, VirtualNetworkHost, PROTOCOL_MIN_VERSION, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
 
@@ -28,6 +28,47 @@ struct PendingTerminalReady {
 
 const WS_PING_INTERVAL: Duration = Duration::from_secs(20);
 const WS_DEAD_INTERVAL: Duration = Duration::from_secs(60);
+const NETWORK_POLICY_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_TRACKED_NETWORK_STREAMS: usize = 4096;
+
+struct ActiveNetworkPolicy {
+    request: PolicyRequest,
+    direct: bool,
+    usage: Option<crate::traffic::DirectTrafficMeter>,
+}
+
+async fn reauthorize_network_policies(
+    policy: &PolicyEngine,
+    requests: Vec<(String, PolicyRequest)>,
+) -> Vec<(String, ProtocolError)> {
+    let checks = futures_util::stream::iter(requests.clone().into_iter().map(|(id, request)| {
+        let policy = policy.clone();
+        async move {
+            policy
+                .authorize(&request)
+                .await
+                .err()
+                .map(|error| (id, error))
+        }
+    }))
+    .buffer_unordered(16)
+    .collect::<Vec<_>>();
+    match tokio::time::timeout(NETWORK_POLICY_INTERVAL, checks).await {
+        Ok(results) => results.into_iter().flatten().collect(),
+        Err(_) => requests
+            .into_iter()
+            .map(|(id, _)| {
+                (
+                    id,
+                    ProtocolError::new(
+                        "policy_unavailable",
+                        "active network authorization timed out",
+                    ),
+                )
+            })
+            .collect(),
+    }
+}
 
 fn websocket_peer_is_dead(last_activity: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_activity) >= WS_DEAD_INTERVAL
@@ -73,12 +114,45 @@ async fn handle(
 
     let mut identity: Option<(String, String)> = None;
     let mut pending_terminal_ready: HashMap<String, PendingTerminalReady> = HashMap::new();
+    let mut network_policies: HashMap<String, ActiveNetworkPolicy> = HashMap::new();
+    let mut policy_interval = tokio::time::interval(NETWORK_POLICY_INTERVAL);
+    policy_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    policy_interval.tick().await;
     let mut last_activity = Instant::now();
     let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
     ping_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     ping_interval.tick().await;
     loop {
         let message = tokio::select! {
+            _ = policy_interval.tick() => {
+                if let Some((workspace_id, server_id)) = identity.as_ref() {
+                    let mut requests = Vec::new();
+                    let mut finished = Vec::new();
+                    for (id, active) in &network_policies {
+                        if active.direct || state.has_network_stream(workspace_id, server_id, id).await {
+                            requests.push((id.clone(), active.request.clone()));
+                        } else {
+                            finished.push(id.clone());
+                        }
+                    }
+                    for id in finished { network_policies.remove(&id); }
+                    for (id, error) in reauthorize_network_policies(&policy, requests).await {
+                        if let Some(active) = network_policies.remove(&id) {
+                            // Stop the source before contacting a possibly
+                            // unavailable remote region to tear down its leg.
+                            send_network_reset(&outgoing_tx, &id, error.clone());
+                            if !active.direct {
+                                let _ = state.relay_network_frame(workspace_id, server_id, connection_id,
+                                    NetworkBinaryFrame {
+                                        kind: NetworkBinaryKind::Reset, stream_id: id.clone(),
+                                        payload: serde_json::to_vec(&error).unwrap_or_default(),
+                                    }).await;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             message = socket_rx.next() => {
                 let Some(message) = message else {
                     break;
@@ -115,8 +189,97 @@ async fn handle(
                             continue;
                         };
                         let stream_id = frame.stream_id.clone();
-                        let result = if frame.kind == NetworkBinaryKind::Open {
-                            route_network_open(
+                        if frame.kind == NetworkBinaryKind::UsageAck {
+                            send_network_reset(
+                                &outgoing_tx,
+                                &stream_id,
+                                ProtocolError::new(
+                                    "invalid_network_frame",
+                                    "usage acknowledgements are Proxy-only",
+                                ),
+                            );
+                            continue;
+                        }
+                        if frame.kind == NetworkBinaryKind::Usage {
+                            if let Ok(report) = serde_json::from_slice::<
+                                treer_protocol::NetworkUsageReport,
+                            >(&frame.payload)
+                            {
+                                match state
+                                    .persist_usage_report(
+                                        workspace_id,
+                                        server_id,
+                                        connection_id,
+                                        &report,
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        let ack = NetworkBinaryFrame {
+                                            kind: NetworkBinaryKind::UsageAck,
+                                            stream_id,
+                                            payload: frame.payload,
+                                        };
+                                        if let Ok(encoded) = ack.encode() {
+                                            let _ = outgoing_tx.send(SocketFrame::Binary(encoded));
+                                        }
+                                    }
+                                    Err(error) => {
+                                        // No acknowledgement on storage failure. The source's
+                                        // durable queue retries after reconnect/Proxy recovery.
+                                        warn!(%error, "could not commit Direct usage report");
+                                    }
+                                }
+                                continue;
+                            }
+                            let result = match network_policies
+                                .get_mut(&stream_id)
+                                .and_then(|active| active.usage.as_mut())
+                            {
+                                Some(meter) => serde_json::from_slice(&frame.payload)
+                                    .map_err(|_| {
+                                        ProtocolError::new(
+                                            "invalid_network_usage",
+                                            "invalid usage report",
+                                        )
+                                    })
+                                    .and_then(|totals| meter.record(totals)),
+                                None => Err(ProtocolError::new(
+                                    "invalid_network_usage",
+                                    "no authorized Direct stream for usage report",
+                                )),
+                            };
+                            if let Err(error) = result {
+                                network_policies.remove(&stream_id);
+                                send_network_reset(&outgoing_tx, &stream_id, error);
+                            }
+                            continue;
+                        }
+                        if frame.kind == NetworkBinaryKind::Reset {
+                            if let Some(active) = network_policies.remove(&stream_id) {
+                                if active.direct {
+                                    continue;
+                                }
+                            }
+                        }
+                        let result = if matches!(
+                            frame.kind,
+                            NetworkBinaryKind::Open | NetworkBinaryKind::OpenDatagram
+                        ) {
+                            if network_policies.contains_key(&stream_id)
+                                || network_policies.len() >= MAX_TRACKED_NETWORK_STREAMS
+                            {
+                                send_network_reset(
+                                    &outgoing_tx,
+                                    &stream_id,
+                                    ProtocolError::new(
+                                        "network_stream_limit",
+                                        "network stream ID is active or stream limit reached",
+                                    ),
+                                );
+                                continue;
+                            }
+                            match route_network_open(
                                 &state,
                                 &auth,
                                 &policy,
@@ -126,6 +289,14 @@ async fn handle(
                                 frame,
                             )
                             .await
+                            {
+                                Ok(Some(active)) => {
+                                    network_policies.insert(stream_id, active);
+                                    Ok(())
+                                }
+                                Ok(None) => Ok(()),
+                                Err(error) => Err(error),
+                            }
                         } else {
                             state
                                 .relay_network_frame(workspace_id, server_id, connection_id, frame)
@@ -213,21 +384,23 @@ async fn handle(
         match parsed {
             AgentServerMessage::Register {
                 protocol,
+                supported_protocols,
+                capabilities,
                 controller_instance_id,
                 mut server,
             } => {
-                if protocol != PROTOCOL_VERSION {
+                let Some(protocol) = negotiate_protocol(protocol, &supported_protocols) else {
                     send_error(
                         &outgoing_tx,
                         ProtocolError::new(
                             "protocol_mismatch",
                             format!(
-                                "agent server uses protocol {protocol}, proxy uses {PROTOCOL_VERSION}"
+                                "agent server supports {supported_protocols:?} (legacy {protocol}), proxy supports {PROTOCOL_MIN_VERSION}..={PROTOCOL_VERSION}"
                             ),
                         ),
                     );
                     break;
-                }
+                };
                 if !machine.allows_server(&server.workspace_id, &server.server_id) {
                     send_error(
                         &outgoing_tx,
@@ -262,10 +435,11 @@ async fn handle(
                     continue;
                 }
                 match state
-                    .register_server_instance(
+                    .register_server_instance_with_capabilities(
                         server,
                         connection_id,
                         controller_instance_id.clone(),
+                        capabilities,
                         outgoing_tx.clone(),
                     )
                     .await
@@ -279,7 +453,8 @@ async fn handle(
                         );
                         identity = Some((workspace_id.clone(), server_id));
                         let response = ProxyMessage::Registered {
-                            protocol: PROTOCOL_VERSION,
+                            protocol,
+                            capabilities: Vec::new(),
                             workspace_revision,
                         };
                         send_message(&outgoing_tx, &response);
@@ -474,6 +649,19 @@ fn valid_controller_instance_id(value: &str) -> bool {
         && value[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn negotiate_protocol(legacy: u32, supported: &[u32]) -> Option<u32> {
+    let candidates = if supported.is_empty() {
+        std::slice::from_ref(&legacy)
+    } else {
+        supported
+    };
+    candidates
+        .iter()
+        .copied()
+        .filter(|version| (PROTOCOL_MIN_VERSION..=PROTOCOL_VERSION).contains(version))
+        .max()
+}
+
 async fn route_network_open(
     state: &AppState,
     auth: &AuthStore,
@@ -482,7 +670,7 @@ async fn route_network_open(
     source_server_id: &str,
     connection_id: Uuid,
     mut frame: NetworkBinaryFrame,
-) -> Result<(), (String, ProtocolError)> {
+) -> Result<Option<ActiveNetworkPolicy>, (String, ProtocolError)> {
     let stream_id = frame.stream_id.clone();
     let request: NetworkOpenRequest = serde_json::from_slice(&frame.payload).map_err(|error| {
         (
@@ -506,6 +694,18 @@ async fn route_network_open(
             .await
             .map_err(|error| (stream_id.clone(), error.into_parts().1))?
     };
+    if virtual_host.as_ref().is_some_and(|host| {
+        (host.service_protocol == treer_protocol::MachineServiceProtocol::Udp)
+            != (frame.kind == NetworkBinaryKind::OpenDatagram)
+    }) {
+        return Err((
+            stream_id,
+            ProtocolError::new(
+                "service_protocol_mismatch",
+                "network transport does not match the registered service protocol",
+            ),
+        ));
+    }
     let route = resolve_network_route(&request, virtual_host);
     let destination_target = route.destination_server_id(source_server_id);
     let destination = state
@@ -540,17 +740,65 @@ async fn route_network_open(
         .authorize(&policy_request)
         .await
         .map_err(|error| (stream_id.clone(), error))?;
-    match route {
-        ResolvedNetworkRoute::Direct { host, port } => state
-            .send_direct_network_route(
+    let direct = matches!(&route, ResolvedNetworkRoute::Direct { .. });
+    let track = request.track_lifetime || !direct;
+    let usage = (direct && request.track_lifetime).then(|| {
+        state.direct_traffic_meter(
+            workspace_id,
+            source_server_id,
+            route.host(),
+            route.port(),
+            request.source_agent_id.as_deref(),
+        )
+    });
+    let usage_ticket = if direct && request.track_lifetime && request.durable_usage {
+        state
+            .issue_usage_ticket(
                 workspace_id,
                 source_server_id,
-                connection_id,
-                stream_id.clone(),
-                NetworkDirectTarget { host, port },
+                request.source_agent_id.as_deref(),
+                route.host(),
+                route.port(),
             )
             .await
-            .map_err(|error| (stream_id, error)),
+            .map_err(|error| {
+                (
+                    stream_id.clone(),
+                    ProtocolError::new("usage_storage_unavailable", error.to_string()),
+                )
+            })?
+    } else {
+        None
+    };
+    match route {
+        ResolvedNetworkRoute::Direct { host, port } => {
+            let ticket_to_abandon = usage_ticket.clone();
+            let result = state
+                .send_direct_network_route(
+                    workspace_id,
+                    source_server_id,
+                    connection_id,
+                    stream_id.clone(),
+                    NetworkDirectTarget {
+                        host,
+                        port,
+                        report_usage: request.track_lifetime,
+                        usage_ticket,
+                    },
+                )
+                .await;
+            if result.is_err() {
+                if let Some(ticket) = ticket_to_abandon {
+                    if let Err(error) = state
+                        .abandon_usage_ticket(workspace_id, source_server_id, &ticket)
+                        .await
+                    {
+                        tracing::warn!(%error, %ticket, "failed to abandon unused network usage ticket");
+                    }
+                }
+            }
+            result.map_err(|error| (stream_id, error))
+        }
         ResolvedNetworkRoute::Relay {
             destination_server_id,
             destination_agent_id,
@@ -581,7 +829,12 @@ async fn route_network_open(
                 .await
                 .map_err(|error| (stream_id, error))
         }
-    }
+    }?;
+    Ok(track.then_some(ActiveNetworkPolicy {
+        request: policy_request,
+        direct,
+        usage,
+    }))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -689,6 +942,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn protocol_negotiation_accepts_legacy_and_selects_highest_overlap() {
+        assert_eq!(
+            negotiate_protocol(PROTOCOL_VERSION, &[]),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            negotiate_protocol(
+                PROTOCOL_MIN_VERSION,
+                &[PROTOCOL_MIN_VERSION, PROTOCOL_VERSION]
+            ),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(negotiate_protocol(PROTOCOL_VERSION - 1, &[]), None);
+        assert_eq!(
+            negotiate_protocol(PROTOCOL_VERSION, &[PROTOCOL_VERSION + 1]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn active_network_policy_rechecks_the_original_agent_and_endpoint() {
+        use crate::policy::{
+            PolicyDecision, PolicyDenial, PolicyEvaluation, PolicyEvaluator, PolicyFuture,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct Revocable(Arc<AtomicBool>);
+        impl PolicyEvaluator for Revocable {
+            fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a> {
+                Box::pin(async move {
+                    assert_eq!(request.action, "network.connect");
+                    if self.0.load(Ordering::SeqCst) {
+                        Ok(PolicyEvaluation::Decide(PolicyDecision::Deny(
+                            PolicyDenial::new("policy_denied", "revoked"),
+                        )))
+                    } else {
+                        Ok(PolicyEvaluation::Decide(PolicyDecision::Allow))
+                    }
+                })
+            }
+        }
+        let revoked = Arc::new(AtomicBool::new(false));
+        let policy = PolicyEngine::new(
+            PolicyDecision::Deny(PolicyDenial::new("default_deny", "deny")),
+            vec![Arc::new(Revocable(revoked.clone()))],
+        );
+        let request = PolicyRequest::network_connect(
+            "workspace",
+            "source",
+            Some("agent"),
+            "destination",
+            None,
+            "target.internal",
+            443,
+        );
+        let requests = vec![("stream".into(), request)];
+        assert!(reauthorize_network_policies(&policy, requests.clone())
+            .await
+            .is_empty());
+        revoked.store(true, Ordering::SeqCst);
+        let denied = reauthorize_network_policies(&policy, requests).await;
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].0, "stream");
+        assert_eq!(denied[0].1.code, "policy_denied");
+    }
+
+    #[test]
+    fn older_network_open_does_not_promise_direct_lifetime_tracking() {
+        let legacy: NetworkOpenRequest = serde_json::from_str(
+            r#"{"destination":"example.test","host":"example.test","port":443}"#,
+        )
+        .unwrap();
+        assert!(!legacy.track_lifetime);
+        let mut current = legacy;
+        current.track_lifetime = true;
+        assert_eq!(
+            serde_json::from_slice::<NetworkOpenRequest>(&serde_json::to_vec(&current).unwrap())
+                .unwrap(),
+            current
+        );
+    }
+
+    #[test]
     fn silent_sockets_are_dead_after_the_idle_interval() {
         let now = Instant::now();
         assert!(!websocket_peer_is_dead(now, now));
@@ -702,6 +1040,8 @@ mod tests {
     #[test]
     fn virtual_host_replaces_destination_host_and_optional_port() {
         let request = NetworkOpenRequest {
+            track_lifetime: false,
+            durable_usage: false,
             destination: "api".to_string(),
             host: "127.0.0.1".to_string(),
             port: 80,
