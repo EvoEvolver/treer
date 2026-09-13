@@ -1293,7 +1293,7 @@ function WorkspaceApp() {
       socket.onopen = () => { if (!disposed && workspaceIdRef.current === workspaceId) setConnection("live") }
       socket.onmessage = (event) => {
         if (disposed || workspaceIdRef.current !== workspaceId) return
-        const message = JSON.parse(event.data) as { event: string; data?: Snapshot | Workspace }
+        const message = JSON.parse(event.data) as { event: string; revision?: number; data?: Snapshot | Workspace | Agent }
         if (message.event === "workspace.snapshot" && message.data) {
           const next = visibleWorkspaceSnapshot(message.data as Snapshot)
           if (next.workspace.workspace_id !== workspaceId) return
@@ -1303,6 +1303,22 @@ function WorkspaceApp() {
           const updated = message.data as Workspace
           setWorkspaces((items) => replaceWorkspace(items, updated))
           setSnapshot((current) => current?.workspace.workspace_id === updated.workspace_id ? { ...current, workspace: updated } : current)
+        } else if (message.event === "agent.updated" && message.data) {
+          const updated = message.data as Agent
+          if (updated.kind === "app") return
+          setSnapshot((current) => {
+            if (!current || current.workspace.workspace_id !== workspaceId) return current
+            const agents = current.agents.some((agent) => agent.agent_id === updated.agent_id)
+              ? current.agents.map((agent) => agent.agent_id === updated.agent_id ? updated : agent)
+              : [...current.agents, updated]
+            return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents }
+          })
+        } else if (message.event === "agent.deleted" && message.data) {
+          const removed = message.data as Agent
+          setSnapshot((current) => {
+            if (!current || current.workspace.workspace_id !== workspaceId) return current
+            return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents: current.agents.filter((agent) => agent.agent_id !== removed.agent_id) }
+          })
         } else if (message.event === "workspace.deleted" && message.data) {
           const removed = message.data as Workspace
           setWorkspaces((items) => items.filter((item) => item.workspace_id !== removed.workspace_id))
