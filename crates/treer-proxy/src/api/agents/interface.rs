@@ -1,4 +1,17 @@
 use super::*;
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AgentOutputQuery {
+    pub lines: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AgentTranscriptQuery {
+    pub page: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
 pub(crate) async fn prompt_agent(
     State(state): State<AppState>,
     Extension(policy): Extension<PolicyEngine>,
@@ -69,7 +82,7 @@ pub(crate) async fn read_agent(
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
-    Query(query): Query<HashMap<String, String>>,
+    Query(query): Query<AgentOutputQuery>,
 ) -> Result<Json<Value>, ApiFailure> {
     let context = AgentRequestContext::new(
         &state,
@@ -83,7 +96,6 @@ pub(crate) async fn read_agent(
     context
         .authorize_agent(&agent, ACTION_AGENT_OUTPUT_READ)
         .await?;
-    let lines = query.get("lines").and_then(|value| value.parse().ok());
     let data = context
         .state()
         .send_command(
@@ -91,7 +103,7 @@ pub(crate) async fn read_agent(
             &agent.server_id,
             AgentCommand::Read {
                 agent_id: agent.agent_id,
-                lines,
+                lines: query.lines,
             },
         )
         .await?;
@@ -104,7 +116,7 @@ pub(crate) async fn read_agent_transcript(
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
-    Query(query): Query<HashMap<String, String>>,
+    Query(query): Query<AgentTranscriptQuery>,
 ) -> Result<Json<Value>, ApiFailure> {
     let context = AgentRequestContext::new(
         &state,
@@ -118,11 +130,7 @@ pub(crate) async fn read_agent_transcript(
     context
         .authorize_agent(&agent, ACTION_AGENT_OUTPUT_READ)
         .await?;
-    let cursor = query
-        .get("page")
-        .cloned()
-        .or_else(|| query.get("cursor").cloned());
-    let limit = query.get("limit").and_then(|value| value.parse().ok());
+    let cursor = query.page.or(query.cursor);
     let data = context
         .state()
         .send_command(
@@ -131,7 +139,7 @@ pub(crate) async fn read_agent_transcript(
             AgentCommand::Transcript {
                 agent_id: agent.agent_id,
                 cursor,
-                limit,
+                limit: query.limit,
             },
         )
         .await?;
