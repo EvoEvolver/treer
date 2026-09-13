@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -18,10 +18,11 @@ use treer_host_protocol::{
     HostSpawnRequest, HostWrite,
 };
 use treer_protocol::{
-    AgentInfo, AgentInterfaceDescriptor, AgentStartupSpec, AgentStatus, AgentTranscriptResponse,
-    CreateAgentRequest, MachineExecRequest, MachineExecResponse, ProtocolError,
-    ReadAgentOutputResponse, RegisterAgentInterfaceRequest, SetAgentStartupRequest, TerminalCursor,
-    UploadMachineFileResponse, VirtualNetworkHostsSnapshot, AGENT_INTERFACE_PROTOCOL_V1,
+    AgentInfo, AgentInterfaceDescriptor, AgentPrompt, AgentPromptQueueResponse, AgentStartupSpec,
+    AgentStatus, AgentTranscriptResponse, CreateAgentRequest, MachineExecRequest,
+    MachineExecResponse, ProtocolError, ReadAgentOutputResponse, RegisterAgentInterfaceRequest,
+    SetAgentStartupRequest, TerminalCursor, UploadMachineFileResponse, VirtualNetworkHostsSnapshot,
+    AGENT_INTERFACE_PROTOCOL_V1,
 };
 #[cfg(test)]
 use uuid::Uuid;
@@ -49,6 +50,9 @@ const AGENT_INTERFACE_FAILURE_LIMIT: u8 = 5;
 const MACHINE_EXEC_TIMEOUT_MAX_MS: u64 = 30_000;
 const MACHINE_EXEC_STREAM_LIMIT_BYTES: usize = 64 * 1024;
 const MACHINE_UPLOAD_CHUNK_MAX_BYTES: usize = 192 * 1024;
+const BRIDGE_PROMPT_QUEUE_LIMIT: usize = 256;
+const BRIDGE_PROMPT_READ_LIMIT: usize = 100;
+const BRIDGE_PROMPT_MAX_BYTES: usize = 64 * 1024;
 
 fn validate_interface_ui_path(value: &str) -> Result<String, ProtocolError> {
     let value = value.trim();
@@ -158,6 +162,7 @@ struct ControllerAgent {
     info: AgentInfo,
     workload_credential: String,
     text: String,
+    prompt_queue: VecDeque<AgentPrompt>,
     bracketed_paste: bool,
     last_output: Instant,
     last_metadata_event: Instant,
@@ -1016,6 +1021,42 @@ impl ControllerRuntime {
                 "agent prompt cannot be empty",
             ));
         }
+        let agent = self.get(agent_id)?;
+        let is_bridge = agent
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?
+            .info
+            .kind
+            == "bridge";
+        if is_bridge {
+            if text.len() > BRIDGE_PROMPT_MAX_BYTES {
+                return Err(ProtocolError::new(
+                    "agent_prompt_too_large",
+                    "bridge agent prompt exceeds 64 KiB",
+                ));
+            }
+            let info = {
+                let mut agent = agent
+                    .lock()
+                    .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+                if agent.prompt_queue.len() >= BRIDGE_PROMPT_QUEUE_LIMIT {
+                    return Err(ProtocolError::new(
+                        "agent_prompt_queue_full",
+                        "bridge agent prompt queue is full",
+                    ));
+                }
+                agent.prompt_queue.push_back(AgentPrompt {
+                    prompt_id: operation_id.to_string(),
+                    text: text.to_string(),
+                    created_at: Utc::now(),
+                });
+                agent.info.status = AgentStatus::Working;
+                agent.info.updated_at = Utc::now();
+                agent.info.clone()
+            };
+            let _ = self.inner.events.send(info.clone());
+            return Ok(info);
+        }
         if let Some(interface) = self.interface_for(agent_id, "prompt.submit")? {
             crate::agent_interface::submit_prompt(
                 agent_id,
@@ -1440,12 +1481,53 @@ impl ControllerRuntime {
         let agent = agent
             .lock()
             .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+        if agent.info.kind == "bridge" {
+            return Err(ProtocolError::new(
+                "agent_output_unavailable",
+                "bridge agent output is not readable",
+            ));
+        }
         let text = select_lines(recent_text(&agent.text, OUTPUT_LIMIT_BYTES), lines);
         Ok(ReadAgentOutputResponse {
             agent_id: agent_id.to_string(),
             revision: agent.info.output_revision,
             text,
             truncated: agent.text.len() >= OUTPUT_LIMIT_BYTES,
+        })
+    }
+
+    pub fn read_prompt_queue(
+        &self,
+        agent_id: &str,
+        limit: Option<usize>,
+    ) -> Result<AgentPromptQueueResponse, ProtocolError> {
+        let agent = self.get(agent_id)?;
+        let (prompts, remaining, info) = {
+            let mut agent = agent
+                .lock()
+                .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+            if agent.info.kind != "bridge" {
+                return Err(ProtocolError::new(
+                    "agent_prompt_queue_unavailable",
+                    "prompt queue is available only for bridge agents",
+                ));
+            }
+            let count = limit
+                .unwrap_or(BRIDGE_PROMPT_READ_LIMIT)
+                .min(BRIDGE_PROMPT_READ_LIMIT);
+            let prompts: Vec<_> = agent.prompt_queue.drain(..count).collect();
+            let remaining = agent.prompt_queue.len();
+            if remaining == 0 && agent.info.status == AgentStatus::Working {
+                agent.info.status = AgentStatus::Idle;
+                agent.info.updated_at = Utc::now();
+            }
+            (prompts, remaining, agent.info.clone())
+        };
+        let _ = self.inner.events.send(info);
+        Ok(AgentPromptQueueResponse {
+            agent_id: agent_id.to_string(),
+            prompts,
+            remaining,
         })
     }
 
@@ -1596,6 +1678,7 @@ impl ControllerRuntime {
             info: info.clone(),
             workload_credential: metadata.workload_credential,
             text,
+            prompt_queue: VecDeque::new(),
             bracketed_paste: process.bracketed_paste,
             last_output: Instant::now(),
             last_metadata_event: Instant::now(),

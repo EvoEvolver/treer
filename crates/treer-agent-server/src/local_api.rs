@@ -263,6 +263,10 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
         .route(
+            "/api/agents/{agent_id}/prompt-queue",
+            get(read_agent_prompt_queue),
+        )
+        .route(
             "/api/agents/{agent_id}/transcript",
             get(read_agent_transcript),
         )

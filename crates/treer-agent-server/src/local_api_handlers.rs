@@ -1,4 +1,10 @@
 use super::*;
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct PromptQueueQuery {
+    pub limit: Option<usize>,
+}
+
 pub(super) async fn exec_machine(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
@@ -545,6 +551,28 @@ pub(super) async fn get_agent(
             .get_as(&format!("agents/{agent_id}"), source_agent.as_ref())
             .await?,
     ))
+}
+
+pub(super) async fn read_agent_prompt_queue(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    Query(query): Query<PromptQueueQuery>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = required_validated_source_agent(&state, &headers)?;
+    if source_agent.agent_id != agent_id {
+        return Err(LocalApiError::bad_request_protocol(ProtocolError::new(
+            "agent_identity_mismatch",
+            "an agent may read only its own bridge prompt queue",
+        )));
+    }
+    let response = state
+        .runtime
+        .read_prompt_queue(&agent_id, query.limit)
+        .map_err(LocalApiError::bad_request_protocol)?;
+    Ok(Json(serde_json::to_value(response).map_err(|error| {
+        LocalApiError::bad_request(error.to_string())
+    })?))
 }
 
 pub(super) async fn create_agent(

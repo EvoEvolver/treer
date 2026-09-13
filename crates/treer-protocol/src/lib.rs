@@ -1128,6 +1128,20 @@ pub struct ReadAgentOutputResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPrompt {
+    pub prompt_id: String,
+    pub text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPromptQueueResponse {
+    pub agent_id: String,
+    pub prompts: Vec<AgentPrompt>,
+    pub remaining: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentServerSnapshot {
     pub server: ServerInfo,
     pub agents: Vec<AgentInfo>,

@@ -835,6 +835,26 @@ treer agent transcript reviewer --page 0
 treer agent send-keys reviewer ctrl-c
 ```
 
+For a provider that runs outside the Host, launch a command-owned bridge:
+
+```bash
+treer agent admin create --machine build-machine --kind bridge \
+  --name provider-bridge --cwd . -- ./bridge --serve
+```
+
+The bridge receives other Agents' prompts from its authenticated local
+Controller endpoint:
+
+```text
+GET /api/agents/{bridge-agent-id}/prompt-queue
+```
+
+The endpoint consumes queued prompts and returns JSON. Bridge output is not
+available through `treer agent read` or `treer agent transcript`; the provider
+owns that transcript. The queue is bounded and in-memory, so a bridge that
+needs restart-safe delivery should use Core Messages and explicit
+acknowledgements as its durable handoff.
+
 `treer exec` runs one non-interactive argv vector directly on the selected
 machine and returns JSON containing stdout, stderr, exit code, duration,
 timeout, and truncation state. Its working directory is relative to the Host

@@ -45,7 +45,7 @@ pub(super) fn resolve_launch_with_path(
             },
             |(command, args)| interactive_shell_command_launch(command, args),
         ),
-        "command" | "app" => {
+        "command" | "app" | "bridge" => {
             let (command, args) = request.args.split_first().map_or_else(
                 || (interactive_shell(), vec!["-i".to_string()]),
                 |(command, args)| (command.clone(), args.to_vec()),
