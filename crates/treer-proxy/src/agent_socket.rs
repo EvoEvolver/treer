@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use treer_protocol::{
     AgentServerMessage, NetworkBinaryFrame, NetworkBinaryKind, NetworkConnectRequest,
     NetworkDirectTarget, NetworkOpenRequest, ProtocolError, ProxyMessage, TerminalBinaryFrame,
-    TerminalBinaryKind, VirtualNetworkHost, PROTOCOL_VERSION,
+    TerminalBinaryKind, VirtualNetworkHost, PROTOCOL_MIN_VERSION, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
 
@@ -384,21 +384,23 @@ async fn handle(
         match parsed {
             AgentServerMessage::Register {
                 protocol,
+                supported_protocols,
+                capabilities,
                 controller_instance_id,
                 mut server,
             } => {
-                if protocol != PROTOCOL_VERSION {
+                let Some(protocol) = negotiate_protocol(protocol, &supported_protocols) else {
                     send_error(
                         &outgoing_tx,
                         ProtocolError::new(
                             "protocol_mismatch",
                             format!(
-                                "agent server uses protocol {protocol}, proxy uses {PROTOCOL_VERSION}"
+                                "agent server supports {supported_protocols:?} (legacy {protocol}), proxy supports {PROTOCOL_MIN_VERSION}..={PROTOCOL_VERSION}"
                             ),
                         ),
                     );
                     break;
-                }
+                };
                 if !machine.allows_server(&server.workspace_id, &server.server_id) {
                     send_error(
                         &outgoing_tx,
@@ -433,10 +435,11 @@ async fn handle(
                     continue;
                 }
                 match state
-                    .register_server_instance(
+                    .register_server_instance_with_capabilities(
                         server,
                         connection_id,
                         controller_instance_id.clone(),
+                        capabilities,
                         outgoing_tx.clone(),
                     )
                     .await
@@ -450,7 +453,8 @@ async fn handle(
                         );
                         identity = Some((workspace_id.clone(), server_id));
                         let response = ProxyMessage::Registered {
-                            protocol: PROTOCOL_VERSION,
+                            protocol,
+                            capabilities: Vec::new(),
                             workspace_revision,
                         };
                         send_message(&outgoing_tx, &response);
@@ -643,6 +647,19 @@ fn valid_controller_instance_id(value: &str) -> bool {
     value.len() == 36
         && value.starts_with("ctl_")
         && value[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn negotiate_protocol(legacy: u32, supported: &[u32]) -> Option<u32> {
+    let candidates = if supported.is_empty() {
+        std::slice::from_ref(&legacy)
+    } else {
+        supported
+    };
+    candidates
+        .iter()
+        .copied()
+        .filter(|version| (PROTOCOL_MIN_VERSION..=PROTOCOL_VERSION).contains(version))
+        .max()
 }
 
 async fn route_network_open(
@@ -923,6 +940,26 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+
+    #[test]
+    fn protocol_negotiation_accepts_legacy_and_selects_highest_overlap() {
+        assert_eq!(
+            negotiate_protocol(PROTOCOL_VERSION, &[]),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            negotiate_protocol(
+                PROTOCOL_MIN_VERSION,
+                &[PROTOCOL_MIN_VERSION, PROTOCOL_VERSION]
+            ),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(negotiate_protocol(PROTOCOL_VERSION - 1, &[]), None);
+        assert_eq!(
+            negotiate_protocol(PROTOCOL_VERSION, &[PROTOCOL_VERSION + 1]),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn active_network_policy_rechecks_the_original_agent_and_endpoint() {

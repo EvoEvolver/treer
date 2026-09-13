@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_MIN_VERSION: u32 = 4;
+pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
+pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
+pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
+pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
+pub const CONTROLLER_CAPABILITIES: &[&str] = &[
+    CAPABILITY_AGENT_ABORT,
+    CAPABILITY_AGENT_STARTUP,
+    CAPABILITY_MACHINE_EXEC,
+    CAPABILITY_MACHINE_UPLOAD,
+];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
@@ -1195,6 +1206,30 @@ pub enum AgentCommand {
     ShutdownMachine,
 }
 
+impl AgentCommand {
+    pub fn required_capability(&self) -> Option<&'static str> {
+        match self {
+            Self::Abort { .. } => Some(CAPABILITY_AGENT_ABORT),
+            Self::StartupSet { .. } | Self::StartupGet { .. } | Self::StartupClear { .. } => {
+                Some(CAPABILITY_AGENT_STARTUP)
+            }
+            Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
+            Self::UploadBegin { .. }
+            | Self::UploadChunk { .. }
+            | Self::UploadCommit { .. }
+            | Self::UploadAbort { .. } => Some(CAPABILITY_MACHINE_UPLOAD),
+            Self::Create { .. }
+            | Self::Prompt { .. }
+            | Self::Input { .. }
+            | Self::Read { .. }
+            | Self::Transcript { .. }
+            | Self::Stop { .. }
+            | Self::ProbeNetwork { .. }
+            | Self::ShutdownMachine => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandEnvelope {
     pub command_id: String,
@@ -1753,7 +1788,13 @@ impl CommandResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentServerMessage {
     Register {
+        /// Legacy single-version field. New peers negotiate from
+        /// `supported_protocols`; old peers continue to read this value.
         protocol: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        supported_protocols: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
         controller_instance_id: String,
         server: ServerInfo,
     },
@@ -1790,6 +1831,8 @@ pub enum AgentServerMessage {
 pub enum ProxyMessage {
     Registered {
         protocol: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
         workspace_revision: u64,
     },
     VirtualNetworkHosts {
@@ -2163,6 +2206,49 @@ mod tests {
         let json = serde_json::to_value(message).expect("serialize command");
         assert_eq!(json["type"], "command");
         assert_eq!(json["envelope"]["command"]["action"], "stop");
+    }
+
+    #[test]
+    fn commands_added_after_protocol_v4_require_advertised_capabilities() {
+        assert_eq!(
+            AgentCommand::Abort {
+                agent_id: "ag_1".to_string()
+            }
+            .required_capability(),
+            Some(CAPABILITY_AGENT_ABORT)
+        );
+        assert_eq!(
+            AgentCommand::StartupGet {
+                agent_id: "ag_1".to_string()
+            }
+            .required_capability(),
+            Some(CAPABILITY_AGENT_STARTUP)
+        );
+        assert_eq!(
+            AgentCommand::Stop {
+                agent_id: "ag_1".to_string()
+            }
+            .required_capability(),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_registration_response_defaults_to_no_capabilities() {
+        let message: ProxyMessage = serde_json::from_value(serde_json::json!({
+            "type": "registered",
+            "protocol": PROTOCOL_VERSION,
+            "workspace_revision": 7
+        }))
+        .expect("decode legacy registration response");
+        assert!(matches!(
+            message,
+            ProxyMessage::Registered {
+                protocol: PROTOCOL_VERSION,
+                capabilities,
+                workspace_revision: 7
+            } if capabilities.is_empty()
+        ));
     }
 
     #[test]

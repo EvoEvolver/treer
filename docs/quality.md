@@ -70,7 +70,7 @@ node scripts/check-docs.mjs
 
 | Change | Minimum focused evidence |
 | --- | --- |
-| Shared protocol | Round-trip tests plus affected endpoints |
+| Shared protocol | Round-trip tests, legacy registration negotiation, unknown-command connection survival, plus affected endpoints |
 | Proxy auth or membership | Authorization, revocation, and cross-workspace tests |
 | Core Message | DAG/visibility, delivery, idempotency, ack, Policy, outbox body exclusion, and migration tests |
 | Mail or Telegram | App unit tests, external API fixture, restart/migration, and frontend build when applicable |

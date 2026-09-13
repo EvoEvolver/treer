@@ -37,6 +37,12 @@ The Host is intentionally product-agnostic. Shared wire models live in protocol
 crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
 
+Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
+HTTP and WebSocket handlers by use case, `auth/` groups durable account and
+resource operations, and `state/` groups live connection, command, terminal,
+network, and cluster behavior. The parent modules retain composition and shared
+types; this is an in-process organization boundary, not a deployment boundary.
+
 The React app in `web/` is the browser control plane. Workspace views cover
 terminals, launch profiles, managed Apps, network, machine overview, bounded
 file upload, and audit.
@@ -159,6 +165,15 @@ the requested directory, and renames it into place only after every chunk
 arrives. Directories are canonicalized beneath the enrolled Host root and file
 names cannot contain path separators. These operations run in the Controller,
 so a Controller hot update enables them without replacing the stable Host.
+
+Controller registration carries a legacy protocol value, an additive list of
+supported protocol versions, and explicit command capabilities. The Proxy
+selects the highest common version and rejects capability-gated commands before
+they reach an older Controller. A Controller ignores unknown top-level Proxy
+messages and returns a correlated `unsupported_command` result for an unknown
+command action; either case keeps the machine connection alive during rolling
+upgrades. New command variants must declare a capability unless they are part
+of the protocol-v4 baseline.
 
 Automatic mode starts the Host as a detached `nohup` process on Linux and
 macOS. Treer records the PID and process start identity and redirects output to
