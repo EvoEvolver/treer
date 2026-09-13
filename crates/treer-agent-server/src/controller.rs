@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -18,16 +18,17 @@ use treer_host_protocol::{
     HostSpawnRequest, HostWrite,
 };
 use treer_protocol::{
-    AgentInfo, AgentInterfaceDescriptor, AgentStatus, AgentTranscriptResponse, CreateAgentRequest,
-    MachineExecRequest, MachineExecResponse, ProtocolError, ReadAgentOutputResponse,
-    RegisterAgentInterfaceRequest, TerminalCursor, UploadMachineFileResponse,
-    VirtualNetworkHostsSnapshot, AGENT_INTERFACE_PROTOCOL_V1,
+    AgentInfo, AgentInterfaceDescriptor, AgentStartupSpec, AgentStatus, AgentTranscriptResponse,
+    CreateAgentRequest, MachineExecRequest, MachineExecResponse, ProtocolError,
+    ReadAgentOutputResponse, RegisterAgentInterfaceRequest, SetAgentStartupRequest, TerminalCursor,
+    UploadMachineFileResponse, VirtualNetworkHostsSnapshot, AGENT_INTERFACE_PROTOCOL_V1,
 };
 #[cfg(test)]
 use uuid::Uuid;
 
 use crate::host_client::{HostClient, HostEvents};
 use crate::interface_cache::{CachedAgentInterface, InterfaceCache};
+use crate::startup_store::{StartupStore, StoredAgentStartup};
 
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const OUTPUT_TRIM_SLACK_BYTES: usize = 64 * 1024;
@@ -112,6 +113,7 @@ pub struct ControllerConfig {
     pub treer_binary: Option<PathBuf>,
     pub sandbox_executable: Option<PathBuf>,
     pub interface_cache_path: PathBuf,
+    pub startup_store_path: PathBuf,
     pub root: PathBuf,
 }
 
@@ -124,7 +126,9 @@ struct ControllerInner {
     treer_binary: Option<PathBuf>,
     sandbox_executable: Option<PathBuf>,
     root: PathBuf,
+    host_epoch: String,
     interface_cache: InterfaceCache,
+    startup_store: StartupStore,
     uploads: Mutex<HashMap<String, PendingUpload>>,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
@@ -175,7 +179,10 @@ impl ControllerRuntime {
         config: ControllerConfig,
     ) -> Result<(Self, tokio::sync::watch::Receiver<bool>), ProtocolError> {
         let HostResponse::Synced {
-            processes, replay, ..
+            host_epoch,
+            processes,
+            replay,
+            ..
         } = sync
         else {
             return Err(ProtocolError::new(
@@ -196,7 +203,14 @@ impl ControllerRuntime {
                 treer_binary: config.treer_binary,
                 sandbox_executable: config.sandbox_executable,
                 root: config.root,
+                host_epoch,
                 interface_cache: InterfaceCache::load(config.interface_cache_path),
+                startup_store: StartupStore::load(config.startup_store_path).map_err(|error| {
+                    ProtocolError::new(
+                        "startup_store_error",
+                        format!("failed to load Agent startup store: {error}"),
+                    )
+                })?,
                 uploads: Mutex::new(HashMap::new()),
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
@@ -447,6 +461,180 @@ impl ControllerRuntime {
             .await
             .map_err(|error| protocol_error("host_error", error))?;
         self.process_response(response, AgentStatus::Working)
+    }
+
+    pub fn set_startup(
+        &self,
+        agent_id: &str,
+        request: SetAgentStartupRequest,
+    ) -> Result<AgentStartupSpec, ProtocolError> {
+        if request.command.trim().is_empty() {
+            return Err(ProtocolError::new(
+                "invalid_agent_startup",
+                "startup command cannot be empty",
+            ));
+        }
+        self.resolve_machine_directory(&request.cwd)?;
+        let publish_ports = validate_publish_ports(&request.publish_ports)?;
+        let agent = self.get(agent_id)?;
+        let (info, workload_credential) = agent
+            .lock()
+            .map(|agent| (agent.info.clone(), agent.workload_credential.clone()))
+            .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+        if info.status.is_terminal() {
+            return Err(ProtocolError::new(
+                "agent_not_running",
+                "only a running Agent can register its startup command",
+            ));
+        }
+        let generation = self
+            .inner
+            .startup_store
+            .get(agent_id)
+            .map_or(1, |entry| entry.spec.generation.saturating_add(1));
+        let spec = AgentStartupSpec {
+            agent_id: agent_id.to_string(),
+            server_id: self.inner.server_id.clone(),
+            kind: info.kind,
+            name: info.name,
+            cwd: if request.cwd.trim().is_empty() {
+                ".".to_string()
+            } else {
+                request.cwd
+            },
+            command: request.command,
+            args: request.args,
+            publish_ports,
+            enabled: true,
+            generation,
+        };
+        self.inner
+            .startup_store
+            .upsert(StoredAgentStartup {
+                spec: spec.clone(),
+                workspace_id: self.inner.workspace_id.clone(),
+                workload_credential,
+                last_host_epoch: self.inner.host_epoch.clone(),
+            })
+            .map_err(startup_store_error)?;
+        Ok(spec)
+    }
+
+    pub fn get_startup(&self, agent_id: &str) -> Result<AgentStartupSpec, ProtocolError> {
+        self.inner
+            .startup_store
+            .get(agent_id)
+            .filter(|entry| {
+                entry.workspace_id == self.inner.workspace_id
+                    && entry.spec.server_id == self.inner.server_id
+            })
+            .map(|entry| entry.spec)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    "agent_startup_not_found",
+                    "Agent has not registered a startup command",
+                )
+            })
+    }
+
+    pub fn clear_startup(&self, agent_id: &str) -> Result<bool, ProtocolError> {
+        self.inner
+            .startup_store
+            .remove(agent_id)
+            .map_err(startup_store_error)
+    }
+
+    pub async fn restore_startup_agents(
+        &self,
+        active_agent_ids: &[String],
+    ) -> Vec<(String, Result<AgentInfo, ProtocolError>)> {
+        let active: HashSet<_> = active_agent_ids.iter().map(String::as_str).collect();
+        let entries = self.inner.startup_store.entries();
+        let mut results = Vec::new();
+        for mut entry in entries {
+            let agent_id = entry.spec.agent_id.clone();
+            if entry.workspace_id != self.inner.workspace_id
+                || entry.spec.server_id != self.inner.server_id
+                || !entry.spec.enabled
+                || entry.last_host_epoch == self.inner.host_epoch
+                || !active.contains(agent_id.as_str())
+            {
+                continue;
+            }
+            let result = match self.spawn_startup(&entry).await {
+                Ok(info) => {
+                    entry.last_host_epoch.clone_from(&self.inner.host_epoch);
+                    self.inner
+                        .startup_store
+                        .upsert(entry)
+                        .map(|()| info)
+                        .map_err(startup_store_error)
+                }
+                Err(error) => Err(error),
+            };
+            results.push((agent_id, result));
+        }
+        results
+    }
+
+    pub fn startup_candidate_ids(&self) -> Vec<String> {
+        self.inner.startup_store.candidate_ids(
+            &self.inner.workspace_id,
+            &self.inner.server_id,
+            &self.inner.host_epoch,
+        )
+    }
+
+    async fn spawn_startup(&self, entry: &StoredAgentStartup) -> Result<AgentInfo, ProtocolError> {
+        let agent_id = &entry.spec.agent_id;
+        let metadata = AgentMetadata {
+            agent_id: agent_id.clone(),
+            workspace_id: self.inner.workspace_id.clone(),
+            server_id: self.inner.server_id.clone(),
+            kind: entry.spec.kind.clone(),
+            name: entry.spec.name.clone(),
+            cwd: entry.spec.cwd.clone(),
+            workload_credential: entry.workload_credential.clone(),
+        };
+        let launch = sandbox_launch(
+            self.inner.sandbox_executable.as_deref(),
+            &agent_network_proxy_url(&self.inner.network_proxy_url, agent_id),
+            agent_id,
+            AgentLaunch {
+                command: entry.spec.command.clone(),
+                args: entry.spec.args.clone(),
+                initial_writes: vec![],
+                publish_ports: entry.spec.publish_ports.clone(),
+            },
+        );
+        let response = self
+            .inner
+            .host
+            .request(
+                HostCommand::Spawn {
+                    request: HostSpawnRequest {
+                        process_id: agent_id.clone(),
+                        command: launch.command,
+                        args: launch.args,
+                        cwd: entry.spec.cwd.clone(),
+                        env: self.process_environment(Some((agent_id, &entry.workload_credential))),
+                        cols: 120,
+                        rows: 36,
+                        metadata: serde_json::to_string(&metadata)
+                            .map_err(|error| protocol_error("metadata_error", error))?,
+                    },
+                },
+                Some(format!("startup:{}:{agent_id}", self.inner.host_epoch)),
+            )
+            .await
+            .map_err(|error| protocol_error("host_error", error))?;
+        let HostResponse::Process { process } = response else {
+            return Err(ProtocolError::new(
+                "host_protocol_error",
+                "startup spawn returned an unexpected response",
+            ));
+        };
+        self.upsert_process(process, None)
     }
 
     pub async fn exec_machine(
@@ -1305,6 +1493,14 @@ impl ControllerRuntime {
         operation_id: &str,
         agent_id: &str,
     ) -> Result<AgentInfo, ProtocolError> {
+        if let Some(mut entry) = self.inner.startup_store.get(agent_id) {
+            entry.spec.enabled = false;
+            entry.spec.generation = entry.spec.generation.saturating_add(1);
+            self.inner
+                .startup_store
+                .upsert(entry)
+                .map_err(startup_store_error)?;
+        }
         let response = self
             .inner
             .host
@@ -2099,6 +2295,10 @@ fn recent_text(text: &str, limit: usize) -> &str {
 
 fn protocol_error(code: &str, error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(code, error.to_string())
+}
+
+fn startup_store_error(error: impl std::fmt::Display) -> ProtocolError {
+    protocol_error("startup_store_error", error)
 }
 
 fn agent_network_proxy_url(base: &str, agent_id: &str) -> String {

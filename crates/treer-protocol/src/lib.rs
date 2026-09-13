@@ -700,6 +700,45 @@ pub struct CreateAgentRequest {
     pub recipe: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetAgentStartupRequest {
+    #[serde(default)]
+    pub cwd: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish_ports: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStartupSpec {
+    pub agent_id: String,
+    pub server_id: String,
+    pub kind: String,
+    pub name: String,
+    pub cwd: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish_ports: Vec<u16>,
+    pub enabled: bool,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateAgentStartupRequest {
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateAgentStartupResponse {
+    #[serde(default)]
+    pub active_agent_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppDesiredState {
@@ -1115,6 +1154,16 @@ pub enum AgentCommand {
         agent_id: String,
     },
     Abort {
+        agent_id: String,
+    },
+    StartupSet {
+        agent_id: String,
+        request: SetAgentStartupRequest,
+    },
+    StartupGet {
+        agent_id: String,
+    },
+    StartupClear {
         agent_id: String,
     },
     ProbeNetwork {
@@ -2665,6 +2714,22 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<AgentCommand>(encoded).expect("deserialize upload chunk"),
             upload
+        );
+
+        let startup = AgentCommand::StartupSet {
+            agent_id: "agent-one".to_string(),
+            request: SetAgentStartupRequest {
+                cwd: "repo".to_string(),
+                command: "sh".to_string(),
+                args: vec!["-lc".to_string(), "exec ./agent".to_string()],
+                publish_ports: vec![4180],
+            },
+        };
+        let encoded = serde_json::to_value(&startup).expect("serialize Agent startup");
+        assert_eq!(encoded["action"], "startup_set");
+        assert_eq!(
+            serde_json::from_value::<AgentCommand>(encoded).expect("deserialize Agent startup"),
+            startup
         );
     }
 }

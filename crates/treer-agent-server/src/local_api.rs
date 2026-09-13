@@ -20,10 +20,10 @@ use treer_protocol::{
     CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, ImportMessagesRequest,
     InputAgentRequest, LaunchAgentProfileRequest, ListMessagesQuery, MachineExecRequest,
     PromptAgentRequest, ProtocolError, ReceiveMessagesRequest, RegisterAgentInterfaceRequest,
-    RenameRequest, SendMessageRequest, TerminalServerMessage, UpdateAgentLaunchProfileRequest,
-    UpdateMachineServiceRequest, UpdateServiceIngressRequest, UploadMachineFileRequest,
-    WorkloadIdentityTokenRequest, AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER,
-    WORKLOAD_CREDENTIAL_HEADER,
+    RenameRequest, SendMessageRequest, SetAgentStartupRequest, TerminalServerMessage,
+    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    UploadMachineFileRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
+    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -148,6 +148,16 @@ impl LocalApiState {
             .await
     }
 
+    async fn put_as(
+        &self,
+        suffix: &str,
+        body: &Value,
+        source_agent: Option<&ValidatedAgent>,
+    ) -> Result<Value, LocalApiError> {
+        self.request(reqwest::Method::PUT, suffix, Some(body), source_agent)
+            .await
+    }
+
     async fn delete_as(
         &self,
         suffix: &str,
@@ -217,6 +227,12 @@ pub fn router(state: LocalApiState) -> Router {
             get(get_agent_interface)
                 .put(register_agent_interface)
                 .delete(clear_agent_interface),
+        )
+        .route(
+            "/api/agent/startup",
+            get(get_agent_startup)
+                .put(set_agent_startup)
+                .delete(clear_agent_startup),
         )
         .route(
             "/api/virtual-hosts",
@@ -815,6 +831,49 @@ async fn create_agent(
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
                 source_agent.as_ref(),
             )
+            .await?,
+    ))
+}
+
+async fn get_agent_startup(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(&format!("agents/{}/startup", agent.agent_id), Some(&agent))
+            .await?,
+    ))
+}
+
+async fn set_agent_startup(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<SetAgentStartupRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .put_as(
+                &format!("agents/{}/startup", agent.agent_id),
+                &body,
+                Some(&agent),
+            )
+            .await?,
+    ))
+}
+
+async fn clear_agent_startup(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(&format!("agents/{}/startup", agent.agent_id), Some(&agent))
             .await?,
     ))
 }

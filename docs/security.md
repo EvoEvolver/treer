@@ -31,6 +31,10 @@ workspace members. It is not a safe multi-tenant execution sandbox.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
+- An Agent may register, read, or clear only its own Host-restart startup spec.
+  The Proxy applies distinct `agent.startup.read` and `agent.startup.manage`
+  actions, and a restored process is launched only while its durable Agent
+  credential remains active and bound to the same machine.
 
 ## Unsupported Claims
 
@@ -44,6 +48,13 @@ they run or write with the Controller account's filesystem permissions. Host
 root containment prevents accidental path targeting outside the enrolled tree,
 not access that the same account can obtain through commands, symlinks, or other
 same-account processes.
+
+Agent startup specs are an explicit persistence capability, not a sandbox or a
+reliable operating-system boot service. The machine-local private state file
+contains the startup argv and plaintext workload credential. Do not place
+secrets directly in argv; use files or a secret provider already protected for
+the machine account. Anyone with that account's authority can modify the same
+state or execute an equivalent command.
 
 Apps do not create a security boundary. Managed Apps currently run through the
 same Host and sandbox backend as command Agents, under the installing machine

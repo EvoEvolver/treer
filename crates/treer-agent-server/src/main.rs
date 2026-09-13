@@ -8,6 +8,7 @@ mod proxy;
 #[cfg(target_os = "linux")]
 mod sandbox;
 mod service;
+mod startup_store;
 mod tui;
 
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -285,6 +286,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
             treer_binary: sibling_treer_binary(),
             sandbox_executable,
             interface_cache_path: args.host_socket.with_extension("interfaces.json"),
+            startup_store_path: service::startup_state_path(&server_id)?,
             root: root.clone(),
         },
     )

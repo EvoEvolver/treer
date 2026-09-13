@@ -1469,6 +1469,10 @@ fn state_dir() -> Result<PathBuf> {
         .unwrap_or_else(|| home.join(".local/state/treer")))
 }
 
+pub fn startup_state_path(server_id: &str) -> Result<PathBuf> {
+    Ok(state_dir()?.join(format!("{server_id}-agent-startup.json")))
+}
+
 fn runtime_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("TREER_RUNTIME_DIR") {
         return Ok(PathBuf::from(path));

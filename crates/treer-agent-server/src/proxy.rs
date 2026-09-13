@@ -15,7 +15,8 @@ use tracing::{info, warn};
 use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
     NetworkBinaryFrame, ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame,
-    TerminalBinaryKind, TerminalCursor, PROTOCOL_VERSION,
+    TerminalBinaryKind, TerminalCursor, ValidateAgentStartupRequest, ValidateAgentStartupResponse,
+    PROTOCOL_VERSION,
 };
 use url::Url;
 
@@ -177,6 +178,25 @@ impl ProxyClient {
             },
         )
         .await?;
+        let candidates = self.runtime.startup_candidate_ids();
+        if !candidates.is_empty() {
+            match self.validate_startup_agents(candidates).await {
+                Ok(active) => {
+                    for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
+                        match result {
+                            Ok(_) => info!(%agent_id, "restored Agent startup command"),
+                            Err(error) => warn!(
+                                %agent_id,
+                                code = %error.code,
+                                message = %error.message,
+                                "failed to restore Agent startup command"
+                            ),
+                        }
+                    }
+                }
+                Err(error) => warn!(%error, "Agent startup validation failed; deferring restore"),
+            }
+        }
         send(
             &mut outgoing,
             &AgentServerMessage::Snapshot {
@@ -507,6 +527,41 @@ impl ProxyClient {
         }
     }
 
+    async fn validate_startup_agents(&self, agent_ids: Vec<String>) -> anyhow::Result<Vec<String>> {
+        let mut url = self.proxy_ws.clone();
+        url.set_scheme(match url.scheme() {
+            "ws" => "http",
+            "wss" => "https",
+            scheme => return Err(anyhow!("unsupported Proxy websocket scheme {scheme}")),
+        })
+        .map_err(|_| anyhow!("invalid Proxy websocket URL"))?;
+        url.set_path(&format!(
+            "/agent/workspaces/{}/machines/{}/startup/validate",
+            self.server.workspace_id, self.server.server_id
+        ));
+        url.set_query(None);
+        let mut request = reqwest::Client::new()
+            .post(url)
+            .json(&ValidateAgentStartupRequest { agent_ids });
+        if let Some(token) = &self.machine_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .context("startup validation request failed")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("startup validation returned {status}: {body}"));
+        }
+        Ok(response
+            .json::<ValidateAgentStartupResponse>()
+            .await
+            .context("invalid startup validation response")?
+            .active_agent_ids)
+    }
+
     async fn execute(&self, envelope: CommandEnvelope) -> CommandResult {
         if envelope.workspace_id != self.server.workspace_id {
             return CommandResult::failure(
@@ -573,6 +628,26 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::StartupSet { agent_id, request } => self
+                .runtime
+                .set_startup(&agent_id, request)
+                .map(|spec| CommandResult::success(command_id.clone(), spec))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::StartupGet { agent_id } => self
+                .runtime
+                .get_startup(&agent_id)
+                .map(|spec| CommandResult::success(command_id.clone(), spec))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::StartupClear { agent_id } => self
+                .runtime
+                .clear_startup(&agent_id)
+                .map(|cleared| {
+                    CommandResult::success(
+                        command_id.clone(),
+                        serde_json::json!({ "agent_id": agent_id, "cleared": cleared }),
+                    )
+                })
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::ProbeNetwork {
                 host,
                 port,

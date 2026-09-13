@@ -3997,6 +3997,33 @@ impl AuthStore {
         }))
     }
 
+    pub async fn active_agent_ids(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        agent_ids: &[String],
+    ) -> Result<Vec<String>, AuthFailure> {
+        if agent_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.disabled {
+            return Ok(agent_ids.to_vec());
+        }
+        sqlx::query_scalar::<_, String>(
+            "SELECT c.agent_id FROM agent_credentials c \
+             JOIN workspaces w ON w.workspace_id = c.workspace_id \
+             WHERE c.workspace_id = $1 AND c.server_id = $2 \
+             AND c.agent_id = ANY($3) AND c.revoked_at IS NULL AND w.deleted_at IS NULL \
+             ORDER BY c.agent_id",
+        )
+        .bind(workspace_id)
+        .bind(server_id)
+        .bind(agent_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)
+    }
+
     pub async fn machine_is_active(
         &self,
         workspace_id: &str,
@@ -8717,6 +8744,7 @@ mod tests {
     #[tokio::test]
     async fn machine_enrollment_is_single_use_and_binds_identity() {
         let store = AuthStore::for_test("owner-password").await;
+        store.seed_test_workspace("workspace-a").await;
         let enrollment = store
             .create_machine_enrollment("workspace-a", "admin")
             .await
@@ -8753,6 +8781,17 @@ mod tests {
             .create_agent_credential("workspace-a", &claim.server_id, "agent-a")
             .await
             .expect("create Agent credential");
+        assert_eq!(
+            store
+                .active_agent_ids(
+                    "workspace-a",
+                    &claim.server_id,
+                    &["agent-a".to_string(), "agent-missing".to_string()],
+                )
+                .await
+                .expect("validate startup identities"),
+            ["agent-a"]
+        );
         headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
         headers.insert(
             WORKLOAD_CREDENTIAL_HEADER,
@@ -8779,6 +8818,16 @@ mod tests {
             HeaderValue::from_static("wlc_invalid"),
         );
         assert!(store.authenticate_agent(&machine, &headers).await.is_err());
+
+        store
+            .delete_agent("workspace-a", "agent-a")
+            .await
+            .expect("revoke Agent");
+        assert!(store
+            .active_agent_ids("workspace-a", &claim.server_id, &["agent-a".to_string()])
+            .await
+            .expect("validate revoked startup identity")
+            .is_empty());
     }
 
     #[tokio::test]

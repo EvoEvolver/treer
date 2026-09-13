@@ -82,6 +82,18 @@ treer agent admin rename self coordinator
 treer machine rename self build-machine
 ```
 
+Register an explicit command when this Agent should return after a full Treer
+Host restart:
+
+```bash
+treer agent startup set --cwd . -- ./scripts/start-agent.sh
+treer agent startup show
+treer agent startup clear
+```
+
+This is self-only persistence. It does not restart the Agent after a normal
+exit, and `treer agent admin stop` disables it. Do not put secrets in argv.
+
 Names are workspace-visible labels; agent IDs and server IDs do not change.
 
 List organization members addressable from the workspace without exposing

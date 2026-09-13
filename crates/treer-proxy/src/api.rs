@@ -32,9 +32,10 @@ use treer_protocol::{
     MachineService, MessagePrincipal, MessagePrincipalKind, PromptAgentRequest, ProtocolError,
     ReceiveMessagesRequest, RenameRequest, ResolveAppRecipientsRequest,
     ResolveAppRecipientsResponse, SendMessageRequest, ServerStatus, ServiceIngress,
-    ServiceIngressAccess, TerminalClientMessage, TerminalCursor, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    UploadMachineFileRequest, UploadMachineFileResponse, VirtualNetworkHostsSnapshot,
+    ServiceIngressAccess, SetAgentStartupRequest, TerminalClientMessage, TerminalCursor,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, UploadMachineFileRequest, UploadMachineFileResponse,
+    ValidateAgentStartupRequest, ValidateAgentStartupResponse, VirtualNetworkHostsSnapshot,
     WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceSnapshot,
     AGENT_ID_HEADER,
 };
@@ -53,8 +54,9 @@ use crate::message_store::{MessageStore, MessageStoreError};
 use crate::policy::{
     PolicyEngine, PolicyRequest, PolicyResource, PolicySubject, ACTION_AGENT_ABORT,
     ACTION_AGENT_CREATE, ACTION_AGENT_DELETE, ACTION_AGENT_DISCOVER, ACTION_AGENT_INPUT,
-    ACTION_AGENT_METADATA_READ, ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT, ACTION_AGENT_STOP,
-    ACTION_AGENT_UPDATE, ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_LIST,
+    ACTION_AGENT_METADATA_READ, ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT,
+    ACTION_AGENT_STARTUP_MANAGE, ACTION_AGENT_STARTUP_READ, ACTION_AGENT_STOP, ACTION_AGENT_UPDATE,
+    ACTION_HUMAN_LIST, ACTION_IDENTITY_TOKEN_ISSUE, ACTION_INGRESS_LIST,
     ACTION_LAUNCH_PROFILE_CREATE, ACTION_LAUNCH_PROFILE_DELETE, ACTION_LAUNCH_PROFILE_LIST,
     ACTION_LAUNCH_PROFILE_READ, ACTION_LAUNCH_PROFILE_UPDATE, ACTION_LAUNCH_PROFILE_USE,
     ACTION_MACHINE_DELETE, ACTION_MACHINE_EXEC, ACTION_MACHINE_FILE_WRITE, ACTION_MACHINE_UPDATE,
@@ -407,6 +409,16 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}",
             get(get_agent).patch(rename_agent).delete(delete_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/startup",
+            get(get_agent_startup)
+                .put(set_agent_startup)
+                .delete(clear_agent_startup),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/startup/validate",
+            post(validate_agent_startup),
         )
         .route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
@@ -4450,6 +4462,168 @@ async fn get_agent(
     Ok(Json(serde_json::to_value(agent)?))
 }
 
+fn require_self_agent(subject: &PolicySubject, agent_id: &str) -> Result<(), ApiFailure> {
+    match subject {
+        PolicySubject::Agent {
+            agent_id: source, ..
+        } if source == agent_id => Ok(()),
+        _ => Err(ProtocolError::new(
+            "agent_identity_mismatch",
+            "an Agent may manage only its own startup command",
+        )
+        .into()),
+    }
+}
+
+async fn get_agent_startup(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, agent_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    require_self_agent(&subject, &agent_id)?;
+    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_AGENT_STARTUP_READ,
+        agent_policy_resource(&agent),
+    )
+    .await?;
+    Ok(Json(
+        state
+            .send_command(
+                &workspace_id,
+                &agent.server_id,
+                AgentCommand::StartupGet { agent_id },
+            )
+            .await?,
+    ))
+}
+
+async fn set_agent_startup(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, agent_id)): Path<(String, String)>,
+    Json(request): Json<SetAgentStartupRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    require_self_agent(&subject, &agent_id)?;
+    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_AGENT_STARTUP_MANAGE,
+        agent_policy_resource(&agent),
+    )
+    .await?;
+    let data = state
+        .send_command(
+            &workspace_id,
+            &agent.server_id,
+            AgentCommand::StartupSet {
+                agent_id: agent_id.clone(),
+                request,
+            },
+        )
+        .await?;
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind: "agent",
+            actor_id: Some(&agent_id),
+            action: "agent.startup.set",
+            resource_kind: "agent",
+            resource_id: &agent_id,
+            resource_name: Some(&agent.name),
+            payload: json!({ "server_id": &agent.server_id }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, %agent_id, "failed to record Agent startup audit event");
+    }
+    Ok(Json(data))
+}
+
+async fn clear_agent_startup(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, agent_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    require_self_agent(&subject, &agent_id)?;
+    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        Some(&subject),
+        ACTION_AGENT_STARTUP_MANAGE,
+        agent_policy_resource(&agent),
+    )
+    .await?;
+    let data = state
+        .send_command(
+            &workspace_id,
+            &agent.server_id,
+            AgentCommand::StartupClear {
+                agent_id: agent_id.clone(),
+            },
+        )
+        .await?;
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind: "agent",
+            actor_id: Some(&agent_id),
+            action: "agent.startup.cleared",
+            resource_kind: "agent",
+            resource_id: &agent_id,
+            resource_name: Some(&agent.name),
+            payload: json!({ "server_id": &agent.server_id }),
+        })
+        .await
+    {
+        tracing::warn!(?error, %workspace_id, %agent_id, "failed to record Agent startup audit event");
+    }
+    Ok(Json(data))
+}
+
+async fn validate_agent_startup(
+    Extension(auth): Extension<AuthStore>,
+    Extension(machine): Extension<MachineSession>,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Json(request): Json<ValidateAgentStartupRequest>,
+) -> Result<Json<ValidateAgentStartupResponse>, ApiFailure> {
+    if !machine.allows_server(&workspace_id, &server_id) {
+        return Err(ProtocolError::new(
+            "machine_identity_mismatch",
+            "startup validation targets another machine",
+        )
+        .into());
+    }
+    if request.agent_ids.len() > 256 {
+        return Err(ApiFailure::bad_request(
+            "invalid_agent_startup_validation",
+            "at most 256 Agent IDs may be validated at once",
+        ));
+    }
+    Ok(Json(ValidateAgentStartupResponse {
+        active_agent_ids: auth
+            .active_agent_ids(&workspace_id, &server_id, &request.agent_ids)
+            .await?,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn exec_machine(
     State(state): State<AppState>,
@@ -4870,6 +5044,24 @@ async fn delete_agent(
                 },
             )
             .await?;
+    }
+    if let Err(error) = state
+        .send_command(
+            &workspace_id,
+            &agent.server_id,
+            AgentCommand::StartupClear {
+                agent_id: agent.agent_id.clone(),
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            code = %error.code,
+            message = %error.message,
+            %workspace_id,
+            agent_id = %agent.agent_id,
+            "failed to clear local Agent startup state during deletion"
+        );
     }
     auth.delete_agent(&workspace_id, &agent.agent_id).await?;
     auth.refresh_virtual_network_hosts()
@@ -5706,7 +5898,10 @@ impl From<ProtocolError> for ApiFailure {
                 StatusCode::CONFLICT
             }
             "machine_file_exists" => StatusCode::CONFLICT,
-            "policy_denied" | "policy_subject_mismatch" => StatusCode::FORBIDDEN,
+            "agent_startup_not_found" => StatusCode::NOT_FOUND,
+            "policy_denied" | "policy_subject_mismatch" | "agent_identity_mismatch" => {
+                StatusCode::FORBIDDEN
+            }
             "server_offline" | "no_online_server" | "ssh_unsupported" | "scp_unsupported" => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -5719,6 +5914,7 @@ impl From<ProtocolError> for ApiFailure {
             | "invalid_machine_file_name"
             | "invalid_machine_upload"
             | "machine_upload_chunk_too_large" => StatusCode::BAD_REQUEST,
+            "invalid_agent_startup" | "invalid_agent_startup_validation" => StatusCode::BAD_REQUEST,
             _ => StatusCode::BAD_GATEWAY,
         };
         Self { status, error }

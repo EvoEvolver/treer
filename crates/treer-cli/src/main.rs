@@ -24,10 +24,10 @@ use treer_protocol::{
     CreateAgentRequest, CreateAppDeploymentRequest, GetMessageResponse, ImportMessagesRequest,
     InputAgentRequest, LaunchAgentProfileRequest, LegacyMailMessage, MachineExecRequest,
     MessageExternalSource, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
-    SendMessageRequest, ServerInfo, TerminalClientMessage, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
-    WorkspaceSnapshot, AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL,
-    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    SendMessageRequest, ServerInfo, SetAgentStartupRequest, TerminalClientMessage,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, WorkloadIdentityTokenRequest,
+    WorkloadIdentityTokenResponse, WorkspaceSnapshot, AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1,
+    INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 
@@ -285,11 +285,37 @@ enum AgentCommand {
         #[arg(long, value_name = "MS")]
         timeout: Option<u64>,
     },
+    #[command(about = "Manage this Agent's command for recovery after a Host restart")]
+    Startup {
+        #[command(subcommand)]
+        command: AgentStartupCommand,
+    },
     #[command(about = "Manage Agent lifecycle and launch profiles")]
     Admin {
         #[command(subcommand)]
         command: AgentAdminCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentStartupCommand {
+    #[command(about = "Register this Agent's Host-restart command")]
+    Set {
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        #[arg(
+            long = "publish",
+            value_name = "PORT",
+            help = "Publish a Linux network-sandbox TCP port on 127.0.0.1"
+        )]
+        publish_ports: Vec<u16>,
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    #[command(about = "Show this Agent's registered Host-restart command")]
+    Show,
+    #[command(about = "Disable and remove this Agent's Host-restart command")]
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]
@@ -910,6 +936,33 @@ async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow:
                 client.wait_for(&target, &until, timeout, None).await?,
             )?)
         }
+        AgentCommand::Startup { command } => match command {
+            AgentStartupCommand::Set {
+                cwd,
+                publish_ports,
+                mut command,
+            } => {
+                let executable = command.remove(0);
+                client
+                    .value(
+                        Method::PUT,
+                        "api/agent/startup",
+                        Some(serde_json::to_value(SetAgentStartupRequest {
+                            cwd,
+                            command: executable,
+                            args: command,
+                            publish_ports,
+                        })?),
+                    )
+                    .await
+            }
+            AgentStartupCommand::Show => client.value(Method::GET, "api/agent/startup", None).await,
+            AgentStartupCommand::Clear => {
+                client
+                    .value(Method::DELETE, "api/agent/startup", None)
+                    .await
+            }
+        },
         AgentCommand::Admin { command } => run_agent_admin_command(client, command).await,
     }
 }
@@ -2539,6 +2592,39 @@ mod tests {
                     }
                 }
             }) if url == "https://github.com/example/recipe.git"
+        ));
+    }
+
+    #[test]
+    fn agent_startup_command_preserves_argv() {
+        let args = Args::try_parse_from([
+            "treer",
+            "agent",
+            "startup",
+            "set",
+            "--cwd",
+            "repo",
+            "--publish",
+            "4180",
+            "--",
+            "sh",
+            "-lc",
+            "exec ./agent --serve",
+        ])
+        .expect("Agent startup command should parse");
+        assert!(matches!(
+            args.command,
+            Some(Command::Agent {
+                command: AgentCommand::Startup {
+                    command: AgentStartupCommand::Set {
+                        cwd,
+                        publish_ports,
+                        command,
+                    }
+                }
+            }) if cwd == "repo"
+                && publish_ports == [4180]
+                && command == ["sh", "-lc", "exec ./agent --serve"]
         ));
     }
 

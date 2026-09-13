@@ -163,9 +163,19 @@ so a Controller hot update enables them without replacing the stable Host.
 Automatic mode starts the Host as a detached `nohup` process on Linux and
 macOS. Treer records the PID and process start identity and redirects output to
 its state directory so lifecycle commands can reject reused PIDs and manage the
-correct Host. This intentionally does not provide start-at-boot or Host crash
-restart. A per-user systemd service or LaunchAgent remains an explicit operator
-choice, and attached foreground mode remains available for diagnostics. An
+correct Host. An ordinary managed Agent may register one local startup spec
+through `treer agent startup set`. The Controller stores its argv, working
+directory, sandbox port publications, and workload credential in a private
+machine-scoped state file. A new Host epoch restores each enabled spec at most
+once, and only after the Proxy confirms that the Agent credential is still
+active and bound to that machine. Controller-only restarts do not relaunch an
+Agent, and a naturally exited Agent does not enter a restart loop. Explicit
+Agent stop disables its startup spec. Deletion revokes recovery immediately and
+also removes the machine-local record when the Controller is reachable.
+
+Startup specs do not provide start-at-boot or Host crash restart. A per-user
+systemd service or LaunchAgent remains an explicit operator choice, and attached
+foreground mode remains available for diagnostics. An
 Apple container machine is a Linux guest: install it with `treer --skill
 macos-container` and do not reuse a Mac `server_id` inside the guest. The
 persisted service-manager choice and fallback reason keep later lifecycle

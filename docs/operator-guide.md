@@ -350,6 +350,22 @@ process failure; run `service start` after either event. Connecting the same
 hostname into the same workspace reuses the existing machine identity instead
 of creating a second Host registration.
 
+An Agent can opt itself into recovery after a full Treer Host restart:
+
+```bash
+treer agent startup set --cwd . -- ./scripts/start-agent.sh
+treer agent startup show
+treer agent startup clear
+```
+
+The command is restored once when the Controller observes a new Host epoch. It
+is not restarted after an ordinary process exit. `treer agent admin stop`
+disables the registration. Agent deletion revokes recovery even if its machine
+is offline; an unreachable machine may retain an inert local record. The Proxy
+must be reachable to authorize registration and to validate the Agent before
+recovery. This does not start Treer after an operating-system reboot; configure
+systemd, LaunchAgent, or the container init system for the Host itself.
+
 ## Users, administrators, and invitations
 
 The platform administrator is not a Treer user and does not belong to an
