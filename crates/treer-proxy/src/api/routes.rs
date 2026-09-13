@@ -1,4 +1,6 @@
 use super::*;
+
+#[allow(clippy::too_many_arguments)]
 pub fn router(
     state: AppState,
     bootstrap: BootstrapConfig,
