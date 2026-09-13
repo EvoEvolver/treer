@@ -170,8 +170,9 @@ machine-scoped state file. A new Host epoch restores each enabled spec at most
 once, and only after the Proxy confirms that the Agent credential is still
 active and bound to that machine. Controller-only restarts do not relaunch an
 Agent, and a naturally exited Agent does not enter a restart loop. Explicit
-Agent stop disables its startup spec. Deletion revokes recovery immediately and
-also removes the machine-local record when the Controller is reachable.
+Agent stop disables its startup spec. Deletion revokes recovery immediately;
+the machine-local record may remain inert so a newer Proxy remains compatible
+with older Controllers during rolling upgrades.
 
 Startup specs do not provide start-at-boot or Host crash restart. A per-user
 systemd service or LaunchAgent remains an explicit operator choice, and attached

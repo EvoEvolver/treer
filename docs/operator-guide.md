@@ -361,10 +361,11 @@ treer agent startup clear
 The command is restored once when the Controller observes a new Host epoch. It
 is not restarted after an ordinary process exit. `treer agent admin stop`
 disables the registration. Agent deletion revokes recovery even if its machine
-is offline; an unreachable machine may retain an inert local record. The Proxy
-must be reachable to authorize registration and to validate the Agent before
-recovery. This does not start Treer after an operating-system reboot; configure
-systemd, LaunchAgent, or the container init system for the Host itself.
+is offline; the machine may retain an inert local record for rolling-upgrade
+compatibility. The Proxy must be reachable to authorize registration and to
+validate the Agent before recovery. This does not start Treer after an
+operating-system reboot; configure systemd, LaunchAgent, or the container init
+system for the Host itself.
 
 ## Users, administrators, and invitations
 

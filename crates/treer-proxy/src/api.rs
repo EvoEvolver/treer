@@ -5045,24 +5045,9 @@ async fn delete_agent(
             )
             .await?;
     }
-    if let Err(error) = state
-        .send_command(
-            &workspace_id,
-            &agent.server_id,
-            AgentCommand::StartupClear {
-                agent_id: agent.agent_id.clone(),
-            },
-        )
-        .await
-    {
-        tracing::warn!(
-            code = %error.code,
-            message = %error.message,
-            %workspace_id,
-            agent_id = %agent.agent_id,
-            "failed to clear local Agent startup state during deletion"
-        );
-    }
+    // Credential revocation below is authoritative for recovery. Do not send a
+    // startup command here: older Controllers reject unknown command variants
+    // and would disconnect the entire machine during a rolling upgrade.
     auth.delete_agent(&workspace_id, &agent.agent_id).await?;
     auth.refresh_virtual_network_hosts()
         .await
