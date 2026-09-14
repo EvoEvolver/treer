@@ -155,11 +155,26 @@ pub(super) async fn update_app_access(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(config): Extension<IngressConfig>,
+    Extension(provider_store): Extension<crate::policy_provider_store::PolicyProviderStore>,
     Extension(session): Extension<CurrentSession>,
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<UpdateAppAccessRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
     let mut app = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    if request.access == ServiceIngressAccess::Public
+        && provider_store
+            .get(&workspace_id)
+            .await
+            .map_err(|error| {
+                ApiFailure::internal("policy_provider_store_failed", &error.to_string())
+            })?
+            .is_some_and(|provider| provider.app_id == app.app_id)
+    {
+        return Err(ApiFailure::bad_request(
+            "policy_provider_must_be_private",
+            "the active Policy Provider App must require a workspace session",
+        ));
+    }
     let ingress = auth
         .set_app_ingress_access(
             &app,

@@ -88,6 +88,21 @@ pub(super) async fn issue_identity_token(
     ))
 }
 
+pub(super) async fn invalidate_policy_provider(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<PolicyProviderInvalidationRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("policy-provider/invalidate", &body, Some(&agent))
+            .await?,
+    ))
+}
+
 pub(super) async fn list_humans(
     State(state): State<LocalApiState>,
     headers: HeaderMap,

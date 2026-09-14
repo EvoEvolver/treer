@@ -433,6 +433,22 @@ CREATE INDEX IF NOT EXISTS app_deployments_runtime_agent
     ON app_deployments(workspace_id, runtime_agent_id)
     WHERE runtime_agent_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS workspace_policy_providers (
+    workspace_id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    failure_mode TEXT NOT NULL DEFAULT 'fail_closed'
+        CHECK(failure_mode IN ('fail_closed', 'fail_open')),
+    max_stale_seconds BIGINT NOT NULL DEFAULT 300
+        CHECK(max_stale_seconds BETWEEN 0 AND 86400),
+    revision_hint BIGINT NOT NULL DEFAULT 0 CHECK(revision_hint >= 0),
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY(app_id) REFERENCES app_deployments(app_id) ON DELETE CASCADE,
+    FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS service_ingresses (
     ingress_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

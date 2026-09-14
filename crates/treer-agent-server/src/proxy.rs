@@ -771,6 +771,15 @@ impl ProxyClient {
                     .probe(host, port, target_agent_id, timeout_ms)
                     .await,
             ),
+            AgentCommand::FetchServiceHttp {
+                port,
+                path,
+                max_bytes,
+                timeout_ms,
+            } => fetch_service_json(port, &path, max_bytes, timeout_ms)
+                .await
+                .map(|value| CommandResult::success(command_id.clone(), value))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::Exec { request } => self
                 .runtime
                 .exec_machine(request)
@@ -835,6 +844,73 @@ impl ProxyClient {
         }
         result
     }
+}
+
+async fn fetch_service_json(
+    port: u16,
+    path: &str,
+    max_bytes: u32,
+    timeout_ms: u64,
+) -> Result<Value, ProtocolError> {
+    if port == 0
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.len() > 2_048
+        || path.contains('#')
+    {
+        return Err(ProtocolError::new(
+            "invalid_service_http_request",
+            "service HTTP fetch requires a bounded origin-relative path",
+        ));
+    }
+    if max_bytes == 0 || max_bytes > 1024 * 1024 || !(100..=10_000).contains(&timeout_ms) {
+        return Err(ProtocolError::new(
+            "invalid_service_http_request",
+            "service HTTP fetch limits are invalid",
+        ));
+    }
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|error| ProtocolError::new("service_http_failed", error.to_string()))?;
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| ProtocolError::new("service_http_unavailable", error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(ProtocolError::new(
+            "service_http_status",
+            format!("service returned HTTP {}", response.status()),
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > u64::from(max_bytes))
+    {
+        return Err(ProtocolError::new(
+            "service_http_response_too_large",
+            "service JSON response exceeds its declared limit",
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| ProtocolError::new("service_http_failed", error.to_string()))?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes as usize {
+            return Err(ProtocolError::new(
+                "service_http_response_too_large",
+                "service JSON response exceeds its declared limit",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|error| ProtocolError::new("invalid_service_json", error.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -983,6 +1059,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::get, Json, Router};
     use std::net::Ipv4Addr;
     use tokio::net::TcpListener;
 
@@ -1113,5 +1190,32 @@ mod tests {
             .probe(Ipv4Addr::LOCALHOST.to_string(), port, None, 500)
             .await;
         assert_eq!(healthy["healthy"], true);
+    }
+
+    #[tokio::test]
+    async fn service_http_fetch_is_loopback_bounded_json() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind policy service");
+        let port = listener.local_addr().expect("service address").port();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/manifest",
+                    get(|| async { Json(serde_json::json!({"protocol": "test/v1"})) }),
+                ),
+            )
+            .await
+            .expect("serve policy fixture");
+        });
+        let value = fetch_service_json(port, "/v1/manifest", 4_096, 1_000)
+            .await
+            .expect("fetch JSON");
+        assert_eq!(value["protocol"], "test/v1");
+        let error = fetch_service_json(port, "//external.test/path", 4_096, 1_000)
+            .await
+            .expect_err("reject authority-relative path");
+        assert_eq!(error.code, "invalid_service_http_request");
     }
 }

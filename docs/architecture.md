@@ -155,10 +155,17 @@ principals.
 
 ## Policy
 
-One versioned JSONB Policy document exists per workspace. The Proxy compiles
-rules into action-indexed immutable structures and caches them briefly. Updates
-use optimistic revisions and PostgreSQL notification. Multi-recipient sends and
-multi-delivery acknowledgements evaluate one pinned revision.
+Workspace owners may select a private Managed App implementing
+`treer.policy-provider/v1`. The Proxy validates its manifest and initial bundle,
+then compiles action-indexed immutable structures and evaluates locally. Bundle
+fetches use a capability-gated, bounded Controller command that can address only
+the Managed App's machine-local loopback port. Revision invalidation is a typed
+App-to-Controller-to-Proxy route with runtime binding checks. Details and failure
+semantics are in the [Policy Provider protocol](policy-provider.md).
+
+Without a Provider, the legacy versioned JSONB Policy document remains the next
+evaluator. Multi-recipient sends and multi-delivery acknowledgements evaluate
+one pinned revision.
 
 Policy covers Agent discovery/control, launch profiles, machine exec and file
 write, machine/service/network mutation, workload identity, and Message

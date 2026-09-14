@@ -49,7 +49,7 @@ import {
   Download,
   Upload,
 } from "lucide-react"
-import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
+import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type PolicyProviderStatus, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
 import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
@@ -976,6 +976,7 @@ type WorkspaceSettingsViewProps = {
   machineCount?: number
   profiles: AgentLaunchProfile[]
   profilesLoading: boolean
+  apps: AppDeployment[]
   canDelete: boolean
   preview: boolean
   onNameChange: (value: string) => void
@@ -994,13 +995,19 @@ type WorkspaceSettingsViewProps = {
   onClose: () => void
 }
 
-function WorkspaceSettingsView({ workspace, organization, name, machines, machineCount, profiles, profilesLoading, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
+function WorkspaceSettingsView({ workspace, organization, name, machines, machineCount, profiles, profilesLoading, apps, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
   const [access, setAccess] = useState<WorkspaceAccess>()
   const [organizationMembers, setOrganizationMembers] = useState<Member[]>([])
   const [organizationGroups, setOrganizationGroups] = useState<OrganizationGroup[]>([])
   const [selectedUserId, setSelectedUserId] = useState("")
   const [selectedGroupId, setSelectedGroupId] = useState("")
   const [accessError, setAccessError] = useState<string | null>(null)
+  const [policyProvider, setPolicyProvider] = useState<PolicyProviderStatus>()
+  const [policyAppId, setPolicyAppId] = useState("")
+  const [policyFailureMode, setPolicyFailureMode] = useState<"fail_closed" | "fail_open">("fail_closed")
+  const [policyStaleSeconds, setPolicyStaleSeconds] = useState("300")
+  const [policyBusy, setPolicyBusy] = useState(false)
+  const [policyError, setPolicyError] = useState<string | null>(null)
   useEffect(() => {
     if (preview || !workspace || !organization) return
     Promise.all([
@@ -1013,6 +1020,50 @@ function WorkspaceSettingsView({ workspace, organization, name, machines, machin
       setOrganizationGroups(groupData.groups)
     }).catch((reason) => setAccessError(reason instanceof Error ? reason.message : "Unable to load workspace access"))
   }, [preview, workspace?.workspace_id, organization?.organization_id])
+  useEffect(() => {
+    if (preview || !workspace) return
+    api<PolicyProviderStatus>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`)
+      .then((status) => {
+        setPolicyProvider(status)
+        setPolicyAppId(status.provider?.app_id ?? "")
+        setPolicyFailureMode(status.provider?.failure_mode ?? "fail_closed")
+        setPolicyStaleSeconds(String(status.provider?.max_stale_seconds ?? 300))
+        setPolicyError(null)
+      })
+      .catch((reason) => setPolicyError(reason instanceof Error ? reason.message : "Unable to load Policy Provider"))
+  }, [preview, workspace?.workspace_id])
+  async function savePolicyProvider() {
+    if (!workspace || !policyAppId) return
+    const maxStaleSeconds = Number(policyStaleSeconds)
+    if (!Number.isInteger(maxStaleSeconds) || maxStaleSeconds < 0 || maxStaleSeconds > 86400) {
+      setPolicyError("Stale cache window must be between 0 and 86400 seconds")
+      return
+    }
+    setPolicyBusy(true); setPolicyError(null)
+    try {
+      const status = await api<PolicyProviderStatus>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`, { method: "PUT", body: JSON.stringify({ app_id: policyAppId, failure_mode: policyFailureMode, max_stale_seconds: maxStaleSeconds }) })
+      setPolicyProvider(status)
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : "Unable to configure Policy Provider") }
+    finally { setPolicyBusy(false) }
+  }
+  async function removePolicyProvider() {
+    if (!workspace) return
+    setPolicyBusy(true); setPolicyError(null)
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`, { method: "DELETE" })
+      setPolicyProvider({ cache: {} }); setPolicyAppId("")
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : "Unable to remove Policy Provider") }
+    finally { setPolicyBusy(false) }
+  }
+  async function policyLifecycle(action: "start" | "stop" | "restart") {
+    if (!workspace || !policyProvider?.app) return
+    setPolicyBusy(true); setPolicyError(null)
+    try {
+      const data = await api<{ app: AppDeployment }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/apps/${encodeURIComponent(policyProvider.app.app_id)}/${action}`, { method: "POST", body: "{}" })
+      setPolicyProvider((current) => current ? { ...current, app: data.app } : current)
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : `Unable to ${action} Policy App`) }
+    finally { setPolicyBusy(false) }
+  }
   async function onAccessMode(mode: WorkspaceAccess["access_mode"]) {
     if (!workspace) return
     try {
@@ -1085,6 +1136,23 @@ function WorkspaceSettingsView({ workspace, organization, name, machines, machin
             <div><h3 className="mb-2 text-xs font-semibold">People</h3><div className="border-y">{access.members.map((grant) => <div key={grant.user_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.preferred_name}</span><span className="block truncate text-[10px] text-muted-foreground">{grant.email}</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onUserGrant(grant.user_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="owner">Owner</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{grant.role}</span>}{isOwner ? <IconButton label={`Remove ${grant.preferred_name}`} onClick={() => void onUserGrant(grant.user_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.members.length && <div className="py-3 text-xs text-muted-foreground">No direct members.</div>}</div>{isOwner && availableMembers.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedUserId} onValueChange={setSelectedUserId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="Select organization member" /></SelectTrigger><SelectContent>{availableMembers.map((member) => <SelectItem key={member.user_id} value={member.user_id}>{member.preferred_name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedUserId} onClick={() => void onUserGrant(selectedUserId, "member")}><Plus />Add</Button></div>}</div>
             <div><h3 className="mb-2 text-xs font-semibold">Groups</h3><div className="border-y">{access.groups.map((grant) => <div key={grant.group_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.name}</span><span className="block text-[10px] text-muted-foreground">{grant.member_count} members</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onGroupGrant(grant.group_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="owner">Owner</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{grant.role}</span>}{isOwner ? <IconButton label={`Remove ${grant.name}`} onClick={() => void onGroupGrant(grant.group_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.groups.length && <div className="py-3 text-xs text-muted-foreground">No groups.</div>}</div>{isOwner && availableGroups.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedGroupId} onValueChange={setSelectedGroupId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="Select organization group" /></SelectTrigger><SelectContent>{availableGroups.map((group) => <SelectItem key={group.group_id} value={group.group_id}>{group.name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedGroupId} onClick={() => void onGroupGrant(selectedGroupId, "member")}><Plus />Add</Button></div>}</div>
           </>}
+        </div>
+      </div>
+    </section>
+
+    <section className="border-b py-6">
+      <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div><div className="flex items-center gap-2"><h2 className="text-sm font-semibold">Policy Provider</h2>{policyProvider?.provider && <Status value={policyProvider.app?.status ?? "unavailable"} />}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Workspace authorization supplied by a Managed App.</p></div>
+        <div className="space-y-4">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px_140px]">
+            <Field label="Policy App"><Select value={policyAppId || undefined} onValueChange={setPolicyAppId} disabled={!isOwner || policyBusy}><SelectTrigger aria-label="Policy App"><SelectValue placeholder="Not configured" /></SelectTrigger><SelectContent>{apps.filter((app) => app.status === "running" || app.app_id === policyProvider?.provider?.app_id).map((app) => <SelectItem key={app.app_id} value={app.app_id}>{app.name}</SelectItem>)}</SelectContent></Select></Field>
+            <Field label="Provider failure"><Select value={policyFailureMode} onValueChange={(value: "fail_closed" | "fail_open") => setPolicyFailureMode(value)} disabled={!isOwner || policyBusy}><SelectTrigger aria-label="Policy Provider failure mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fail_closed">Deny after stale window</SelectItem><SelectItem value="fail_open">Allow after stale window</SelectItem></SelectContent></Select></Field>
+            <Field label="Stale seconds"><Input aria-label="Policy Provider stale seconds" type="number" min={0} max={86400} value={policyStaleSeconds} onChange={(event) => setPolicyStaleSeconds(event.target.value)} disabled={!isOwner || policyBusy} /></Field>
+          </div>
+          <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => void savePolicyProvider()} disabled={!isOwner || !policyAppId || policyBusy}>{policyBusy && <RotateCw className="animate-spin" />}Apply</Button>{policyProvider?.app && policyProvider.app.status !== "running" && <Button size="sm" variant="outline" onClick={() => void policyLifecycle("start")} disabled={!isOwner || policyBusy}><Play />Start</Button>}{policyProvider?.app?.status === "running" && <><Button size="sm" variant="outline" onClick={() => void policyLifecycle("restart")} disabled={!isOwner || policyBusy}><RotateCw />Restart</Button><Button size="sm" variant="outline" onClick={() => void policyLifecycle("stop")} disabled={!isOwner || policyBusy}><Square />Stop</Button></>}{policyProvider?.provider && <Button size="sm" variant="outline" onClick={() => void removePolicyProvider()} disabled={!isOwner || policyBusy}>Remove</Button>}{policyProvider?.app?.public_url && <Button size="sm" variant="outline" asChild><a href={policyProvider.app.public_url} target="_blank" rel="noreferrer"><ExternalLink />Open Policy App</a></Button>}</div>
+          {policyProvider?.provider && <div className="grid gap-2 border-y py-3 text-[11px] text-muted-foreground sm:grid-cols-3"><span>Announced <strong className="text-foreground">rev {policyProvider.provider.revision_hint}</strong></span><span>Cached <strong className="text-foreground">{policyProvider.cache.revision === undefined ? "none" : `rev ${policyProvider.cache.revision}`}</strong></span><span>Age <strong className="text-foreground">{policyProvider.cache.age_seconds === undefined ? "-" : `${policyProvider.cache.age_seconds}s`}</strong></span></div>}
+          {(policyError || policyProvider?.cache.last_error) && <p className="text-xs text-destructive">{policyError ?? policyProvider?.cache.last_error}</p>}
+          {!apps.length && <p className="text-xs text-muted-foreground">Deploy a compatible Policy App first.</p>}
         </div>
       </div>
     </section>
@@ -2282,7 +2350,7 @@ function WorkspaceApp() {
               </div>
             </div>}
           </div>
-        </div> : mainView === "workspace" ? <WorkspaceSettingsView workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
+        </div> : mainView === "workspace" ? <WorkspaceSettingsView workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
       </section>
     </main>
 

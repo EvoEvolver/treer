@@ -4,12 +4,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use serde::Serialize;
+use tokio::sync::{Mutex, RwLock};
 use treer_protocol::{
-    PolicyEffect, PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, PolicyResourceSelector,
-    PolicySubjectSelector, ProtocolError, WorkspacePolicy, WorkspacePolicyRule,
+    AgentCommand, PolicyEffect, PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef,
+    PolicyProviderBundle, PolicyProviderFailureMode, PolicyResourceSelector, PolicySubjectSelector,
+    ProtocolError, WorkspacePolicy, WorkspacePolicyRule, POLICY_PROVIDER_PROTOCOL_V1,
 };
 use treer_proxy::policy_store::WorkspacePolicyStore;
+
+use crate::auth::AuthStore;
+use crate::policy_provider_store::PolicyProviderStore;
+use crate::state::AppState;
 
 pub const ACTION_NETWORK_CONNECT: &str = "network.connect";
 pub const ACTION_AGENT_DISCOVER: &str = "agent.discover";
@@ -235,6 +241,7 @@ pub trait PolicyEvaluator: Send + Sync {
 pub struct PolicyEngine {
     evaluators: Arc<[Arc<dyn PolicyEvaluator>]>,
     default_decision: PolicyDecision,
+    provider: Option<Arc<ProviderPolicyEvaluator>>,
 }
 
 impl PolicyEngine {
@@ -249,6 +256,24 @@ impl PolicyEngine {
         )
     }
 
+    pub fn durable_with_provider(
+        store: WorkspacePolicyStore,
+        provider_store: PolicyProviderStore,
+        auth: AuthStore,
+        state: AppState,
+    ) -> Self {
+        let provider = Arc::new(ProviderPolicyEvaluator::new(provider_store, auth, state));
+        Self {
+            evaluators: vec![
+                provider.clone() as Arc<dyn PolicyEvaluator>,
+                Arc::new(DurablePolicyEvaluator::new(store)),
+            ]
+            .into(),
+            default_decision: PolicyDecision::Allow,
+            provider: Some(provider),
+        }
+    }
+
     pub fn new(
         default_decision: PolicyDecision,
         evaluators: Vec<Arc<dyn PolicyEvaluator>>,
@@ -256,6 +281,20 @@ impl PolicyEngine {
         Self {
             evaluators: evaluators.into(),
             default_decision,
+            provider: None,
+        }
+    }
+
+    pub async fn invalidate_provider(&self, workspace_id: &str) {
+        if let Some(provider) = &self.provider {
+            provider.invalidate(workspace_id).await;
+        }
+    }
+
+    pub async fn provider_cache_status(&self, workspace_id: &str) -> PolicyProviderCacheStatus {
+        match &self.provider {
+            Some(provider) => provider.cache_status(workspace_id).await,
+            None => PolicyProviderCacheStatus::default(),
         }
     }
 
@@ -357,12 +396,311 @@ impl PolicyEngine {
 }
 
 const POLICY_CACHE_TTL: Duration = Duration::from_secs(5);
+const POLICY_PROVIDER_BUNDLE_MAX_BYTES: u32 = 300 * 1024;
+const POLICY_PROVIDER_FETCH_TIMEOUT_MS: u64 = 3_000;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PolicyProviderCacheStatus {
+    pub revision: Option<u64>,
+    pub age_seconds: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+struct CachedProviderPolicy {
+    app_id: String,
+    checked_at: Instant,
+    loaded_at: Option<Instant>,
+    policy: Option<Arc<CompiledWorkspacePolicy>>,
+    last_error: Option<String>,
+}
+
+struct ProviderPolicyEvaluator {
+    store: PolicyProviderStore,
+    auth: AuthStore,
+    state: AppState,
+    cache: RwLock<HashMap<String, CachedProviderPolicy>>,
+    fetch_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl ProviderPolicyEvaluator {
+    fn new(store: PolicyProviderStore, auth: AuthStore, state: AppState) -> Self {
+        Self {
+            store,
+            auth,
+            state,
+            cache: RwLock::new(HashMap::new()),
+            fetch_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn invalidate(&self, workspace_id: &str) {
+        self.cache.write().await.remove(workspace_id);
+    }
+
+    async fn cache_status(&self, workspace_id: &str) -> PolicyProviderCacheStatus {
+        self.cache
+            .read()
+            .await
+            .get(workspace_id)
+            .map(|cached| PolicyProviderCacheStatus {
+                revision: cached.policy.as_ref().map(|policy| policy.revision),
+                age_seconds: cached.loaded_at.map(|loaded| loaded.elapsed().as_secs()),
+                last_error: cached.last_error.clone(),
+            })
+            .unwrap_or_default()
+    }
+
+    async fn fetch_lock(&self, workspace_id: &str) -> Arc<Mutex<()>> {
+        self.fetch_locks
+            .lock()
+            .await
+            .entry(workspace_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn compiled(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<Arc<CompiledWorkspacePolicy>>, ProtocolError> {
+        if let Some(cached) = self.cache.read().await.get(workspace_id) {
+            if cached.checked_at.elapsed() < POLICY_CACHE_TTL {
+                return cached_provider_result(cached);
+            }
+        }
+        let fetch_lock = self.fetch_lock(workspace_id).await;
+        let _guard = fetch_lock.lock().await;
+        if let Some(cached) = self.cache.read().await.get(workspace_id) {
+            if cached.checked_at.elapsed() < POLICY_CACHE_TTL {
+                return cached_provider_result(cached);
+            }
+        }
+
+        let provider = self.store.get(workspace_id).await.map_err(|error| {
+            ProtocolError::new("policy_provider_store_failed", error.to_string())
+        })?;
+        let Some(provider) = provider else {
+            self.cache.write().await.insert(
+                workspace_id.to_string(),
+                CachedProviderPolicy {
+                    app_id: String::new(),
+                    checked_at: Instant::now(),
+                    loaded_at: None,
+                    policy: None,
+                    last_error: None,
+                },
+            );
+            return Ok(None);
+        };
+
+        let previous = self.cache.write().await.remove(workspace_id);
+        let fetched = self.fetch_bundle(&provider.app_id, workspace_id).await;
+        match fetched {
+            Ok(bundle) if bundle.revision >= provider.revision_hint => {
+                let policy = Arc::new(CompiledWorkspacePolicy::compile(WorkspacePolicy {
+                    workspace_id: workspace_id.to_string(),
+                    revision: bundle.revision,
+                    mode: bundle.mode,
+                    document: bundle.document,
+                    updated_at: bundle.generated_at,
+                    updated_by: PolicyPrincipalRef {
+                        kind: PolicyPrincipalKind::Service,
+                        id: provider.service_id,
+                    },
+                }));
+                self.cache.write().await.insert(
+                    workspace_id.to_string(),
+                    CachedProviderPolicy {
+                        app_id: provider.app_id,
+                        checked_at: Instant::now(),
+                        loaded_at: Some(Instant::now()),
+                        policy: Some(policy.clone()),
+                        last_error: None,
+                    },
+                );
+                Ok(Some(policy))
+            }
+            Ok(bundle) => {
+                let error = format!(
+                    "Policy App returned revision {} below announced revision {}",
+                    bundle.revision, provider.revision_hint
+                );
+                self.provider_failure(workspace_id, provider, previous, error)
+                    .await
+            }
+            Err(error) => {
+                self.provider_failure(workspace_id, provider, previous, error.message)
+                    .await
+            }
+        }
+    }
+
+    async fn fetch_bundle(
+        &self,
+        app_id: &str,
+        workspace_id: &str,
+    ) -> Result<PolicyProviderBundle, ProtocolError> {
+        let app = self
+            .auth
+            .resolve_app_deployment(workspace_id, app_id)
+            .await
+            .map_err(|error| error.into_parts().1)?;
+        let query = {
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query.append_pair("workspace_id", workspace_id);
+            query.finish()
+        };
+        let value = self
+            .state
+            .send_command(
+                workspace_id,
+                &app.server_id,
+                AgentCommand::FetchServiceHttp {
+                    port: app.port,
+                    path: format!("/v1/policy/bundle?{query}"),
+                    max_bytes: POLICY_PROVIDER_BUNDLE_MAX_BYTES,
+                    timeout_ms: POLICY_PROVIDER_FETCH_TIMEOUT_MS,
+                },
+            )
+            .await?;
+        let bundle: PolicyProviderBundle = serde_json::from_value(value).map_err(|error| {
+            ProtocolError::new("invalid_policy_provider_bundle", error.to_string())
+        })?;
+        if bundle.protocol != POLICY_PROVIDER_PROTOCOL_V1 {
+            return Err(ProtocolError::new(
+                "unsupported_policy_provider_protocol",
+                format!("Policy App uses unsupported protocol {}", bundle.protocol),
+            ));
+        }
+        if bundle.workspace_id != workspace_id {
+            return Err(ProtocolError::new(
+                "policy_provider_workspace_mismatch",
+                "Policy App returned a bundle for another workspace",
+            ));
+        }
+        treer_proxy::policy_store::validate_document(&bundle.document)
+            .map_err(|error| ProtocolError::new(error.code(), error.to_string()))?;
+        Ok(bundle)
+    }
+
+    async fn provider_failure(
+        &self,
+        workspace_id: &str,
+        provider: treer_protocol::WorkspacePolicyProvider,
+        previous: Option<CachedProviderPolicy>,
+        error: String,
+    ) -> Result<Option<Arc<CompiledWorkspacePolicy>>, ProtocolError> {
+        let stale = previous.and_then(|cached| {
+            (cached.app_id == provider.app_id
+                && cached
+                    .loaded_at
+                    .is_some_and(|loaded| loaded.elapsed().as_secs() <= provider.max_stale_seconds))
+            .then_some(cached)
+        });
+        if let Some(mut cached) = stale {
+            cached.checked_at = Instant::now();
+            cached.last_error = Some(error);
+            let policy = cached.policy.clone();
+            self.cache
+                .write()
+                .await
+                .insert(workspace_id.to_string(), cached);
+            return Ok(policy);
+        }
+        if provider.failure_mode == PolicyProviderFailureMode::FailOpen {
+            let policy = Arc::new(CompiledWorkspacePolicy::allow(provider.revision_hint));
+            self.cache.write().await.insert(
+                workspace_id.to_string(),
+                CachedProviderPolicy {
+                    app_id: provider.app_id,
+                    checked_at: Instant::now(),
+                    loaded_at: None,
+                    policy: Some(policy.clone()),
+                    last_error: Some(error),
+                },
+            );
+            return Ok(Some(policy));
+        }
+        self.cache.write().await.insert(
+            workspace_id.to_string(),
+            CachedProviderPolicy {
+                app_id: provider.app_id,
+                checked_at: Instant::now(),
+                loaded_at: None,
+                policy: None,
+                last_error: Some(error.clone()),
+            },
+        );
+        Err(ProtocolError::new("policy_provider_unavailable", error))
+    }
+}
+
+fn cached_provider_result(
+    cached: &CachedProviderPolicy,
+) -> Result<Option<Arc<CompiledWorkspacePolicy>>, ProtocolError> {
+    if cached.app_id.is_empty() || cached.policy.is_some() {
+        Ok(cached.policy.clone())
+    } else {
+        Err(ProtocolError::new(
+            "policy_provider_unavailable",
+            cached
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "Policy App is unavailable".to_string()),
+        ))
+    }
+}
+
+impl PolicyEvaluator for ProviderPolicyEvaluator {
+    fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a> {
+        Box::pin(async move {
+            let Some(policy) = self.compiled(&request.workspace_id).await? else {
+                return Ok(PolicyEvaluation::Abstain);
+            };
+            Ok(PolicyEvaluation::Decide(policy.evaluate(request)))
+        })
+    }
+
+    fn evaluate_batch<'a>(&'a self, requests: &'a [PolicyRequest]) -> PolicyBatchFuture<'a> {
+        Box::pin(async move {
+            let Some(first) = requests.first() else {
+                return Ok(PolicyBatchEvaluation {
+                    evaluations: Vec::new(),
+                    revision: None,
+                });
+            };
+            if requests
+                .iter()
+                .any(|request| request.workspace_id != first.workspace_id)
+            {
+                return Err(ProtocolError::new(
+                    "policy_batch_workspace_mismatch",
+                    "a policy batch must belong to one workspace",
+                ));
+            }
+            let Some(policy) = self.compiled(&first.workspace_id).await? else {
+                return Ok(PolicyBatchEvaluation {
+                    evaluations: vec![PolicyEvaluation::Abstain; requests.len()],
+                    revision: None,
+                });
+            };
+            Ok(PolicyBatchEvaluation {
+                evaluations: requests
+                    .iter()
+                    .map(|request| PolicyEvaluation::Decide(policy.evaluate(request)))
+                    .collect(),
+                revision: Some(policy.revision),
+            })
+        })
+    }
+}
 
 struct CachedWorkspacePolicy {
     loaded_at: Instant,
     policy: Option<Arc<CompiledWorkspacePolicy>>,
 }
 
+#[derive(Debug)]
 struct CompiledWorkspacePolicy {
     revision: u64,
     mode: PolicyMode,
@@ -456,6 +794,16 @@ impl PolicyEvaluator for DurablePolicyEvaluator {
 }
 
 impl CompiledWorkspacePolicy {
+    fn allow(revision: u64) -> Self {
+        Self {
+            revision,
+            mode: PolicyMode::Monitor,
+            defaults: BTreeMap::new(),
+            groups: HashMap::new(),
+            rules_by_action: HashMap::new(),
+        }
+    }
+
     fn compile(policy: WorkspacePolicy) -> Self {
         let mut rules_by_action: HashMap<String, Vec<WorkspacePolicyRule>> = HashMap::new();
         for rule in policy.document.rules {
@@ -784,6 +1132,30 @@ mod tests {
             request.resource.attributes["destination_server_id"],
             "machine-b"
         );
+    }
+
+    #[test]
+    fn configured_provider_failure_does_not_abstain_into_legacy_allow() {
+        let failed = CachedProviderPolicy {
+            app_id: "app_policy".to_string(),
+            checked_at: Instant::now(),
+            loaded_at: None,
+            policy: None,
+            last_error: Some("offline".to_string()),
+        };
+        let error = cached_provider_result(&failed).expect_err("configured failure must deny");
+        assert_eq!(error.code, "policy_provider_unavailable");
+
+        let absent = CachedProviderPolicy {
+            app_id: String::new(),
+            checked_at: Instant::now(),
+            loaded_at: None,
+            policy: None,
+            last_error: None,
+        };
+        assert!(cached_provider_result(&absent)
+            .expect("missing provider abstains")
+            .is_none());
     }
 
     #[test]

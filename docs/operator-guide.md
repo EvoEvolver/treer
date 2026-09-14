@@ -786,10 +786,13 @@ remains installed and can still be started manually. Offline machines and older
 Controllers are deleted without waiting; their revoked credential prevents a
 later reconnect.
 
-Authorization is a separate Proxy subsystem. The current policy engine defaults
-to allow and evaluates ordered asynchronous policy evaluators using
-subject/action/resource context. Future agent, terminal, file, shell, and
-network rules can share that boundary without changing virtual-host resolution.
+Authorization is a separate Proxy subsystem. A workspace owner can select a
+private Managed App as its Policy Provider from Workspace settings. The bundled
+Policy App provides mode, JSON rule editing, atomic publication, cache sync
+status, and a decision simulator; deployment and state paths are documented in
+[`apps/policy`](../apps/policy/README.md). The Proxy validates and caches its
+versioned bundle, then evaluates subject/action/resource requests locally.
+Without a Provider or legacy policy document, the current default remains allow.
 Agent proxy URLs carry the agent ID through SOCKS5 authentication, so network
 policy requests already identify their originating agent; local machine shells
 fall back to a machine-level subject.

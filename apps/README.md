@@ -42,6 +42,8 @@ to expose their registered `ui_path`.
   with prefix-deduplicated ACP traces and evidence-linked reviewer findings.
 - [`paper`](paper/README.md) is a small filesystem-backed collaborative LaTeX
   editor with Yjs, inline review macros, and server-side PDF compilation.
+- [`policy`](policy/README.md) is a versioned workspace Policy Provider with a
+  browser editor, publication status, cache invalidation, and decision simulator.
 - [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
 - [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
   [`dsh-ais`](dsh-ais/README.md), [`claude-ais`](claude-ais/README.md),

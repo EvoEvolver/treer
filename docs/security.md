@@ -214,14 +214,21 @@ through the atomic App lifecycle.
 Workspace members may change an existing Managed App's owned ingress between
 `workspace` and `public` access from the App settings UI. This endpoint resolves
 the ingress from the App record and does not accept a service, hostname, or
-arbitrary ingress identifier from the caller.
+arbitrary ingress identifier from the caller. An App selected as the active
+Policy Provider cannot be switched to public access.
 
 ## Policy And Rollout
 
 Policy is authoritative only after authentication establishes an immutable
-subject and resource scope. A missing workspace Policy currently defaults to
-allow. Monitor mode records decisions without denying; enforce mode applies the
-decision. The Core Message feature flag is deployment sequencing, not a
+subject and resource scope. A workspace owner may delegate rules to a selected
+Managed App, but the Proxy retains authentication, scoping, runtime binding,
+Provider selection, and the typed cache-invalidation recovery path. Provider
+fetches are bounded loopback requests through the Controller, not arbitrary
+Proxy egress. A valid stale bundle is used only for the configured window;
+`fail_closed` is the default and `fail_open` is an explicit owner choice. A
+missing Provider and missing legacy workspace Policy currently defaults to
+allow. Monitor mode computes denials without enforcing them; decision audit is
+still absent. The Core Message feature flag is deployment sequencing, not a
 security control.
 
 ## Hardening Order

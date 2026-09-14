@@ -11,6 +11,7 @@ matching the question; follow its source links for implementation detail.
 | [Capability roadmap](roadmap.md) | Real scenarios, capability planes, dependencies, and sequencing |
 | [Architecture](architecture.md) | Components, ownership rules, protocols, state, and information flows |
 | [Security model](security.md) | Trust tier, supported claims, credentials, isolation, and known gaps |
+| [Policy Provider protocol](policy-provider.md) | App-supplied policy bundle contract, caching, failure behavior, and management APIs |
 | [Quality and maintenance](quality.md) | Verification, documentation rules, current gaps, and review triggers |
 | [Canary environment](canary.md) | Canary deployment, two-machine tests, and environment operations |
 | [Release process](releases.md) | Immutable release manifests, Cloudflare App deployment, and Production promotion |

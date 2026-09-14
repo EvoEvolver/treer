@@ -8,6 +8,7 @@ mod event_bus;
 mod identity;
 mod message_store;
 pub mod policy;
+mod policy_provider_store;
 mod state;
 mod traffic;
 mod updater;
@@ -274,7 +275,13 @@ async fn main() -> anyhow::Result<()> {
         .start(state.clone())
         .await
         .context("failed to start NATS cluster consumers")?;
-    let policy = policy::PolicyEngine::durable(WorkspacePolicyStore::new(auth.pool()));
+    let provider_store = policy_provider_store::PolicyProviderStore::new(auth.pool());
+    let policy = policy::PolicyEngine::durable_with_provider(
+        WorkspacePolicyStore::new(auth.pool()),
+        provider_store.clone(),
+        auth.clone(),
+        state.clone(),
+    );
     let identity = identity::IdentityIssuer::load(&auth, &proxy_public_url)
         .await
         .context("failed to initialize workload identity issuer")?;

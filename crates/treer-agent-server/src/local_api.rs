@@ -19,11 +19,11 @@ use treer_protocol::{
     CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
     CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, ImportMessagesRequest,
     InputAgentRequest, LaunchAgentProfileRequest, ListMessagesQuery, MachineExecRequest,
-    PromptAgentRequest, ProtocolError, ReceiveMessagesRequest, RegisterAgentInterfaceRequest,
-    RenameRequest, SendMessageRequest, SetAgentStartupRequest, TerminalServerMessage,
-    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
-    UploadMachineFileRequest, WorkloadIdentityTokenRequest, AGENT_ID_HEADER,
-    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    PolicyProviderInvalidationRequest, PromptAgentRequest, ProtocolError, ReceiveMessagesRequest,
+    RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest, SetAgentStartupRequest,
+    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
+    UpdateServiceIngressRequest, UploadMachineFileRequest, WorkloadIdentityTokenRequest,
+    AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -177,6 +177,10 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/health", get(health))
         .route("/api/discovery", get(discovery))
         .route("/api/identity/token", post(issue_identity_token))
+        .route(
+            "/api/policy-provider/invalidate",
+            post(invalidate_policy_provider),
+        )
         .route("/api/humans", get(list_humans))
         .route(
             "/api/machines/{server_id}",

@@ -149,10 +149,25 @@ pub(super) async fn list_service_ingresses(
 pub(super) async fn create_service_ingress(
     Extension(auth): Extension<AuthStore>,
     Extension(config): Extension<IngressConfig>,
+    Extension(provider_store): Extension<crate::policy_provider_store::PolicyProviderStore>,
     Extension(session): Extension<CurrentSession>,
     Path(workspace_id): Path<String>,
     Json(request): Json<CreateServiceIngressRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
+    if request.access == ServiceIngressAccess::Public
+        && provider_store
+            .get(&workspace_id)
+            .await
+            .map_err(|error| {
+                ApiFailure::internal("policy_provider_store_failed", &error.to_string())
+            })?
+            .is_some_and(|provider| provider.service_id == request.service_id)
+    {
+        return Err(ApiFailure::bad_request(
+            "policy_provider_must_be_private",
+            "the active Policy Provider service cannot have public ingress",
+        ));
+    }
     let ingress = auth
         .create_service_ingress(
             &workspace_id,
@@ -169,10 +184,29 @@ pub(super) async fn create_service_ingress(
 pub(super) async fn update_service_ingress(
     Extension(auth): Extension<AuthStore>,
     Extension(config): Extension<IngressConfig>,
+    Extension(provider_store): Extension<crate::policy_provider_store::PolicyProviderStore>,
     Extension(session): Extension<CurrentSession>,
     Path((workspace_id, ingress_id)): Path<(String, String)>,
     Json(request): Json<UpdateServiceIngressRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
+    if request.access == Some(ServiceIngressAccess::Public) {
+        let current = auth
+            .resolve_service_ingress(&workspace_id, &ingress_id)
+            .await?;
+        if provider_store
+            .get(&workspace_id)
+            .await
+            .map_err(|error| {
+                ApiFailure::internal("policy_provider_store_failed", &error.to_string())
+            })?
+            .is_some_and(|provider| provider.service_id == current.ingress.service_id)
+        {
+            return Err(ApiFailure::bad_request(
+                "policy_provider_must_be_private",
+                "the active Policy Provider service cannot have public ingress",
+            ));
+        }
+    }
     let ingress = auth
         .update_service_ingress(&workspace_id, &ingress_id, &session.user_id, request)
         .await?;

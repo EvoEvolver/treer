@@ -6,6 +6,7 @@ pub fn router(
     bootstrap: BootstrapConfig,
     auth_store: AuthStore,
     policy: PolicyEngine,
+    provider_store: crate::policy_provider_store::PolicyProviderStore,
     identity: IdentityIssuer,
     browser: BrowserAccess,
     ingress: IngressConfig,
@@ -62,6 +63,10 @@ pub fn router(
         .route(
             "/agent/workspaces/{workspace_id}/apps/{app_id}/restart",
             post(restart_app_deployment),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/policy-provider/invalidate",
+            post(invalidate_policy_provider),
         )
         .route(
             "/agent/workspaces/{workspace_id}/launch-profiles",
@@ -342,6 +347,12 @@ pub fn router(
             post(restart_app_deployment),
         )
         .route(
+            "/api/workspaces/{workspace_id}/policy-provider",
+            get(get_policy_provider)
+                .put(set_policy_provider)
+                .delete(clear_policy_provider),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/services",
             get(list_machine_services).post(create_machine_service),
         )
@@ -551,6 +562,7 @@ pub fn router(
         .layer(Extension(policy))
         .layer(Extension(identity))
         .layer(Extension(workload_identity))
+        .layer(Extension(provider_store))
         .layer(Extension(service_ingress))
         .layer(Extension(auth_store))
         .layer(Extension(browser))

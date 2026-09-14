@@ -37,11 +37,12 @@ At `239f9c6`, Treer provides:
   kept outside Core;
 - a shared domain-event envelope, an in-process event adapter, optional
   JetStream publishing, and multi-Proxy command and stream routing;
-- an extensible policy evaluator whose production default currently allows all
-  evaluated actions.
+- an extensible policy evaluator, versioned App-supplied Policy Provider bundle,
+  local compiled cache, and owner-facing Provider management UI; the final
+  fallback still allows actions when neither Provider nor legacy Policy exists.
 
 Important gaps remain: work is still terminal- and Message-oriented rather than
-task-oriented; restrictive policy defaults and policy-management UX are absent;
+task-oriented; restrictive policy defaults and decision audit are absent;
 the generic domain-event publisher has no transactional outbox outside the
 Message subsystem; App processes are not isolated from hostile same-UID code;
 automatic App state migration and signed distribution are absent; Message

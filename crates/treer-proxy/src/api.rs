@@ -339,6 +339,7 @@ mod events;
 mod machines;
 mod messages;
 mod network;
+mod policy_provider;
 mod routes;
 mod voice;
 mod workspaces;
@@ -353,6 +354,7 @@ use machines::*;
 use messages::*;
 use network::*;
 pub(crate) use network::{spawn_network_metadata_refresh, virtual_network_hosts_snapshot};
+use policy_provider::*;
 use voice::*;
 use workspaces::*;
 
@@ -370,9 +372,20 @@ pub fn router(
     updater: UpdaterClient,
     voice: VoiceServices,
 ) -> Router {
+    let provider_store = crate::policy_provider_store::PolicyProviderStore::new(auth_store.pool());
     routes::router(
-        state, bootstrap, auth_store, policy, identity, browser, ingress, messages, rollout,
-        updater, voice,
+        state,
+        bootstrap,
+        auth_store,
+        policy,
+        provider_store,
+        identity,
+        browser,
+        ingress,
+        messages,
+        rollout,
+        updater,
+        voice,
     )
 }
 
