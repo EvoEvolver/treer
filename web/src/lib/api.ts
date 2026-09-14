@@ -145,6 +145,13 @@ export interface WorkspacePolicyProvider {
 export interface PolicyProviderStatus {
   provider?: WorkspacePolicyProvider
   app?: AppDeployment
+  fallback?: {
+    kind: "treer_default" | "workspace_policy"
+    name: string
+    mode: "monitor" | "enforce"
+    effect?: "allow"
+    revision?: number
+  }
   cache: {
     revision?: number
     age_seconds?: number

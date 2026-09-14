@@ -977,6 +977,7 @@ type WorkspaceSettingsViewProps = {
   profiles: AgentLaunchProfile[]
   profilesLoading: boolean
   apps: AppDeployment[]
+  onPolicyAppInstalled: (app: AppDeployment) => void
   canDelete: boolean
   preview: boolean
   onNameChange: (value: string) => void
@@ -995,7 +996,7 @@ type WorkspaceSettingsViewProps = {
   onClose: () => void
 }
 
-function WorkspaceSettingsView({ workspace, organization, name, machines, machineCount, profiles, profilesLoading, apps, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
+function WorkspaceSettingsView({ workspace, organization, name, machines, machineCount, profiles, profilesLoading, apps, onPolicyAppInstalled, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
   const [access, setAccess] = useState<WorkspaceAccess>()
   const [organizationMembers, setOrganizationMembers] = useState<Member[]>([])
   const [organizationGroups, setOrganizationGroups] = useState<OrganizationGroup[]>([])
@@ -1006,6 +1007,7 @@ function WorkspaceSettingsView({ workspace, organization, name, machines, machin
   const [policyAppId, setPolicyAppId] = useState("")
   const [policyFailureMode, setPolicyFailureMode] = useState<"fail_closed" | "fail_open">("fail_closed")
   const [policyStaleSeconds, setPolicyStaleSeconds] = useState("300")
+  const [policyInstallMachineId, setPolicyInstallMachineId] = useState("")
   const [policyBusy, setPolicyBusy] = useState(false)
   const [policyError, setPolicyError] = useState<string | null>(null)
   useEffect(() => {
@@ -1032,6 +1034,10 @@ function WorkspaceSettingsView({ workspace, organization, name, machines, machin
       })
       .catch((reason) => setPolicyError(reason instanceof Error ? reason.message : "Unable to load Policy Provider"))
   }, [preview, workspace?.workspace_id])
+  useEffect(() => {
+    if (machines.some((machine) => machine.server_id === policyInstallMachineId && machine.status === "online")) return
+    setPolicyInstallMachineId(machines.find((machine) => machine.status === "online")?.server_id ?? "")
+  }, [machines, policyInstallMachineId])
   async function savePolicyProvider() {
     if (!workspace || !policyAppId) return
     const maxStaleSeconds = Number(policyStaleSeconds)
@@ -1051,8 +1057,20 @@ function WorkspaceSettingsView({ workspace, organization, name, machines, machin
     setPolicyBusy(true); setPolicyError(null)
     try {
       await api(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`, { method: "DELETE" })
-      setPolicyProvider({ cache: {} }); setPolicyAppId("")
+      const status = await api<PolicyProviderStatus>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`)
+      setPolicyProvider(status); setPolicyAppId("")
     } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : "Unable to remove Policy Provider") }
+    finally { setPolicyBusy(false) }
+  }
+  async function installDefaultPolicyApp() {
+    if (!workspace || !policyInstallMachineId) return
+    setPolicyBusy(true); setPolicyError(null)
+    try {
+      const status = await api<PolicyProviderStatus>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider/default-app`, { method: "POST", body: JSON.stringify({ server_id: policyInstallMachineId }) })
+      setPolicyProvider(status)
+      setPolicyAppId(status.provider?.app_id ?? "")
+      if (status.app) onPolicyAppInstalled(status.app)
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : "Unable to install the default Policy App") }
     finally { setPolicyBusy(false) }
   }
   async function policyLifecycle(action: "start" | "stop" | "restart") {
@@ -1144,15 +1162,17 @@ function WorkspaceSettingsView({ workspace, organization, name, machines, machin
       <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
         <div><div className="flex items-center gap-2"><h2 className="text-sm font-semibold">Policy Provider</h2>{policyProvider?.provider && <Status value={policyProvider.app?.status ?? "unavailable"} />}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Workspace authorization supplied by a Managed App.</p></div>
         <div className="space-y-4">
+          {!policyProvider?.provider && policyProvider?.fallback && <div className="flex flex-wrap items-center justify-between gap-3 border-y py-3"><div className="flex min-w-0 items-center gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-md bg-[#e3eee8] text-[#176b52]"><ShieldCheck className="size-4" /></span><div className="min-w-0"><p className="truncate text-xs font-semibold text-foreground">{policyProvider.fallback.name}</p><p className="mt-0.5 text-[11px] text-muted-foreground">Active · {policyProvider.fallback.mode}{policyProvider.fallback.effect ? ` · ${policyProvider.fallback.effect}` : ` · revision ${policyProvider.fallback.revision}`}</p></div></div><Status value="running" /></div>}
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px_140px]">
             <Field label="Policy App"><Select value={policyAppId || undefined} onValueChange={setPolicyAppId} disabled={!isOwner || policyBusy}><SelectTrigger aria-label="Policy App"><SelectValue placeholder="Not configured" /></SelectTrigger><SelectContent>{apps.filter((app) => app.status === "running" || app.app_id === policyProvider?.provider?.app_id).map((app) => <SelectItem key={app.app_id} value={app.app_id}>{app.name}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="Provider failure"><Select value={policyFailureMode} onValueChange={(value: "fail_closed" | "fail_open") => setPolicyFailureMode(value)} disabled={!isOwner || policyBusy}><SelectTrigger aria-label="Policy Provider failure mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fail_closed">Deny after stale window</SelectItem><SelectItem value="fail_open">Allow after stale window</SelectItem></SelectContent></Select></Field>
             <Field label="Stale seconds"><Input aria-label="Policy Provider stale seconds" type="number" min={0} max={86400} value={policyStaleSeconds} onChange={(event) => setPolicyStaleSeconds(event.target.value)} disabled={!isOwner || policyBusy} /></Field>
           </div>
+          {!policyProvider?.provider && isOwner && <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><Field label="Install default App on"><Select value={policyInstallMachineId || undefined} onValueChange={setPolicyInstallMachineId} disabled={policyBusy}><SelectTrigger aria-label="Default Policy App machine"><SelectValue placeholder="No online machine" /></SelectTrigger><SelectContent>{machines.filter((machine) => machine.status === "online").map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Button variant="outline" onClick={() => void installDefaultPolicyApp()} disabled={!policyInstallMachineId || policyBusy}>{policyBusy ? <RotateCw className="animate-spin" /> : <Download />}Install Default Policy App</Button></div>}
           <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => void savePolicyProvider()} disabled={!isOwner || !policyAppId || policyBusy}>{policyBusy && <RotateCw className="animate-spin" />}Apply</Button>{policyProvider?.app && policyProvider.app.status !== "running" && <Button size="sm" variant="outline" onClick={() => void policyLifecycle("start")} disabled={!isOwner || policyBusy}><Play />Start</Button>}{policyProvider?.app?.status === "running" && <><Button size="sm" variant="outline" onClick={() => void policyLifecycle("restart")} disabled={!isOwner || policyBusy}><RotateCw />Restart</Button><Button size="sm" variant="outline" onClick={() => void policyLifecycle("stop")} disabled={!isOwner || policyBusy}><Square />Stop</Button></>}{policyProvider?.provider && <Button size="sm" variant="outline" onClick={() => void removePolicyProvider()} disabled={!isOwner || policyBusy}>Remove</Button>}{policyProvider?.app?.public_url && <Button size="sm" variant="outline" asChild><a href={policyProvider.app.public_url} target="_blank" rel="noreferrer"><ExternalLink />Open Policy App</a></Button>}</div>
           {policyProvider?.provider && <div className="grid gap-2 border-y py-3 text-[11px] text-muted-foreground sm:grid-cols-3"><span>Announced <strong className="text-foreground">rev {policyProvider.provider.revision_hint}</strong></span><span>Cached <strong className="text-foreground">{policyProvider.cache.revision === undefined ? "none" : `rev ${policyProvider.cache.revision}`}</strong></span><span>Age <strong className="text-foreground">{policyProvider.cache.age_seconds === undefined ? "-" : `${policyProvider.cache.age_seconds}s`}</strong></span></div>}
           {(policyError || policyProvider?.cache.last_error) && <p className="text-xs text-destructive">{policyError ?? policyProvider?.cache.last_error}</p>}
-          {!apps.length && <p className="text-xs text-muted-foreground">Deploy a compatible Policy App first.</p>}
+          {!apps.length && !machines.some((machine) => machine.status === "online") && <p className="text-xs text-muted-foreground">Connect a machine to install the default Policy App.</p>}
         </div>
       </div>
     </section>
@@ -2350,7 +2370,7 @@ function WorkspaceApp() {
               </div>
             </div>}
           </div>
-        </div> : mainView === "workspace" ? <WorkspaceSettingsView workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
+        </div> : mainView === "workspace" ? <WorkspaceSettingsView workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
       </section>
     </main>
 

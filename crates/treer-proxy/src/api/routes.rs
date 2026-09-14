@@ -353,6 +353,10 @@ pub fn router(
                 .delete(clear_policy_provider),
         )
         .route(
+            "/api/workspaces/{workspace_id}/policy-provider/default-app",
+            post(install_default_policy_app),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/services",
             get(list_machine_services).post(create_machine_service),
         )

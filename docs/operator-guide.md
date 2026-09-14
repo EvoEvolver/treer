@@ -787,12 +787,15 @@ Controllers are deleted without waiting; their revoked credential prevents a
 later reconnect.
 
 Authorization is a separate Proxy subsystem. A workspace owner can select a
-private Managed App as its Policy Provider from Workspace settings. The bundled
-Policy App provides mode, JSON rule editing, atomic publication, cache sync
-status, and a decision simulator; deployment and state paths are documented in
-[`apps/policy`](../apps/policy/README.md). The Proxy validates and caches its
-versioned bundle, then evaluates subject/action/resource requests locally.
-Without a Provider or legacy policy document, the current default remains allow.
+private Managed App as its Policy Provider from Workspace settings. Without a
+selected Provider, the UI shows the effective stored policy or the explicit
+`Treer Default` monitor/allow baseline. Owners can choose an online machine and
+install the bundled default Policy App without a source checkout or network
+download on that machine. The App provides mode, JSON rule editing, atomic
+publication, cache sync status, and a decision simulator; deployment and state
+paths are documented in [`apps/policy`](../apps/policy/README.md). The Proxy
+validates and caches its versioned bundle, then evaluates
+subject/action/resource requests locally.
 Agent proxy URLs carry the agent ID through SOCKS5 authentication, so network
 policy requests already identify their originating agent; local machine shells
 fall back to a machine-level subject.

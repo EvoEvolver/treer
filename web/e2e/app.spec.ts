@@ -132,6 +132,20 @@ const managedApp = {
   updated_by: "u1",
 }
 
+const defaultPolicyApp = {
+  ...managedApp,
+  app_id: "app-policy",
+  name: "Treer Policy",
+  command: "python3",
+  args: ["treer-policy.py", "--port", "8787"],
+  port: 8787,
+  hostname: "policy.internal",
+  service_id: "svc-policy",
+  public_url: "https://treer-policy.canary.apps.treer.ai/",
+  runtime_agent_id: "appw-policy",
+  restart_count: 0,
+}
+
 const recipeProfile = {
   profile_id: "alp-recipe",
   workspace_id: "ws-1",
@@ -184,6 +198,7 @@ function ok(route: Route, body: unknown) {
 async function mockApi(page: Page) {
   let currentUser = { ...user }
   let currentApp: typeof managedApp = { ...managedApp }
+  let policyInstalled = false
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, () => {})
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, () => {})
   await page.route("**/api/**", async (route: Route) => {
@@ -236,6 +251,26 @@ async function mockApi(page: Page) {
     if (path === "/workspaces/ws-2/traffic") return ok(route, { traffic: [] })
     if (path === "/workspaces/ws-1/launch-profiles") return ok(route, { profiles: [recipeProfile, codexProfile, longScriptProfile] })
     if (path === "/workspaces/ws-2/launch-profiles") return ok(route, { profiles: [] })
+    if (path === "/workspaces/ws-1/policy-provider/default-app" && route.request().method() === "POST") {
+      policyInstalled = true
+      return ok(route, {
+        provider: { workspace_id: "ws-1", app_id: defaultPolicyApp.app_id, service_id: defaultPolicyApp.service_id, failure_mode: "fail_closed", max_stale_seconds: 300, revision_hint: 1, updated_at: NOW, updated_by: user.user_id },
+        app: defaultPolicyApp,
+        cache: {},
+      })
+    }
+    if (path === "/workspaces/ws-1/policy-provider" && route.request().method() === "GET") return ok(route, policyInstalled ? {
+      provider: { workspace_id: "ws-1", app_id: defaultPolicyApp.app_id, service_id: defaultPolicyApp.service_id, failure_mode: "fail_closed", max_stale_seconds: 300, revision_hint: 1, updated_at: NOW, updated_by: user.user_id },
+      app: defaultPolicyApp,
+      cache: {},
+    } : {
+      fallback: { kind: "treer_default", name: "Treer Default", mode: "monitor", effect: "allow" },
+      cache: {},
+    })
+    if (path === "/workspaces/ws-2/policy-provider" && route.request().method() === "GET") return ok(route, {
+      fallback: { kind: "treer_default", name: "Treer Default", mode: "monitor", effect: "allow" },
+      cache: {},
+    })
     if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [currentApp] })
     if (path === "/workspaces/ws-1/apps/app-1/access" && route.request().method() === "PATCH") {
       const body = route.request().postDataJSON() as { access: "public" | "workspace" }
@@ -414,6 +449,29 @@ test("workspace settings contain Machines and launch profiles without a separate
   await expect(page.getByText("Codex Agent UI", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "New profile" })).toBeVisible()
   await expect(appsTab(page)).toBeVisible()
+})
+
+test("workspace settings show the default policy and install its bundled App", async ({ page }) => {
+  await page.goto("/")
+  await openWorkspaceSettings(page)
+
+  await expect(page.getByText("Treer Default", { exact: true })).toBeVisible()
+  await expect(page.getByText("Active · monitor · allow", { exact: true })).toBeVisible()
+  await expect(page.getByRole("combobox", { name: "Default Policy App machine" })).toHaveText("workstation")
+
+  const installRequest = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/ws-1/policy-provider/default-app"))
+  await page.getByRole("button", { name: "Install Default Policy App" }).click()
+  expect((await installRequest).postDataJSON()).toEqual({ server_id: "srv-a" })
+  await expect(page.getByRole("combobox", { name: "Policy App", exact: true })).toHaveText("Treer Policy")
+  await expect(page.getByRole("link", { name: "Open Policy App" })).toBeVisible()
+})
+
+test("default policy controls fit a mobile workspace view", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await openWorkspaceSettings(page)
+  await expect(page.getByRole("button", { name: "Install Default Policy App" })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
 test("workspace controls open a settings page with inline rename", async ({ page }) => {

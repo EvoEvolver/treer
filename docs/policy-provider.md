@@ -29,6 +29,23 @@ fields. The embedded `WorkspacePolicyDocument` retains its strict
 Provider protocol version. Existing subject, action, and resource strings stay
 owned by the Proxy.
 
+## Default Policy
+
+A workspace always has an explicit effective policy. If no Provider App is
+selected, an existing stored Workspace Policy remains active; otherwise Treer's
+built-in `Treer Default` baseline allows operations in monitor mode. This keeps
+new and upgraded workspaces backward compatible without presenting an empty or
+undefined authorization state.
+
+Workspace owners can install the bundled default Policy App from Workspace
+settings after an online machine is available. The Proxy carries the official
+App files in its release, uploads them through the bounded machine-file
+protocol, creates a private Managed App on an unused port in `8787-8899`, starts
+it, validates its v1 manifest and initial bundle, and then selects it. The
+installation does not download code from the internet or require a Treer source
+checkout on the machine. A partial prior installation can be retried; Treer
+updates and restarts the matching official App while preserving its policy data.
+
 ## Cache And Failure
 
 The Proxy compiles each immutable bundle and evaluates it locally. It checks
@@ -55,6 +72,10 @@ Authenticated workspace members may inspect
 Managed App service mapping, manifest, and initial bundle before changing the
 binding. Treer prevents an active Policy Provider App from being switched to
 public ingress.
+
+`POST /api/workspaces/{workspace_id}/policy-provider/default-app` is also
+owner-only and accepts the target `server_id`. It is an explicit recovery and
+bootstrap path, so it does not depend on delegated Policy being available.
 
 The bundled [Policy App](../apps/policy/README.md) implements the protocol and a
 browser UI, but it has no privileged implementation status. Another Managed App

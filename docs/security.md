@@ -227,8 +227,12 @@ fetches are bounded loopback requests through the Controller, not arbitrary
 Proxy egress. A valid stale bundle is used only for the configured window;
 `fail_closed` is the default and `fail_open` is an explicit owner choice. A
 missing Provider and missing legacy workspace Policy currently defaults to
-allow. Monitor mode computes denials without enforcing them; decision audit is
-still absent. The Core Message feature flag is deployment sequencing, not a
+the visible `Treer Default` monitor/allow baseline. The owner-only default App
+installer is a recovery path: it uses bounded machine uploads, private Managed
+App creation, protocol validation, and automatic Provider binding without
+consulting delegated Policy. It never downloads executable content on the
+machine. Monitor mode computes denials without enforcing them; decision audit
+is still absent. The Core Message feature flag is deployment sequencing, not a
 security control.
 
 ## Hardening Order

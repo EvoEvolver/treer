@@ -1,15 +1,43 @@
 use super::*;
 use crate::policy_provider_store::PolicyProviderStore;
 use treer_protocol::{
-    MachineServiceProtocol, PolicyProviderBundle, PolicyProviderInvalidationRequest,
-    PolicyProviderInvalidationResponse, PolicyProviderManifest, SetWorkspacePolicyProviderRequest,
-    POLICY_PROVIDER_BUNDLE_CAPABILITY_V1, POLICY_PROVIDER_PROTOCOL_V1,
+    InstallDefaultPolicyAppRequest, MachineServiceProtocol, PolicyProviderBundle,
+    PolicyProviderInvalidationRequest, PolicyProviderInvalidationResponse, PolicyProviderManifest,
+    SetWorkspacePolicyProviderRequest, POLICY_PROVIDER_BUNDLE_CAPABILITY_V1,
+    POLICY_PROVIDER_PROTOCOL_V1,
 };
 
 const POLICY_PROVIDER_MANIFEST_MAX_BYTES: u32 = 32 * 1024;
 const POLICY_PROVIDER_MANIFEST_TIMEOUT_MS: u64 = 3_000;
 const POLICY_PROVIDER_BUNDLE_MAX_BYTES: u32 = 300 * 1024;
 const MAX_POLICY_PROVIDER_STALE_SECONDS: u64 = 86_400;
+const DEFAULT_POLICY_APP_NAME: &str = "Treer Policy";
+const DEFAULT_POLICY_APP_COMMAND: &str = "python3";
+const DEFAULT_POLICY_APP_SCRIPT: &str = "treer-policy.py";
+const DEFAULT_POLICY_APP_PORT_START: u16 = 8_787;
+const DEFAULT_POLICY_APP_PORT_END: u16 = 8_899;
+const DEFAULT_POLICY_APP_FILES: &[(&str, &[u8])] = &[
+    (
+        "treer-policy-agent.md",
+        include_bytes!("../../../../apps/policy/AGENT.md"),
+    ),
+    (
+        "treer-policy-index.html",
+        include_bytes!("../../../../apps/policy/web/index.html"),
+    ),
+    (
+        "treer-policy-app.css",
+        include_bytes!("../../../../apps/policy/web/app.css"),
+    ),
+    (
+        "treer-policy-app.js",
+        include_bytes!("../../../../apps/policy/web/app.js"),
+    ),
+    (
+        DEFAULT_POLICY_APP_SCRIPT,
+        include_bytes!("../../../../apps/policy/policy.py"),
+    ),
+];
 
 pub(super) async fn get_policy_provider(
     State(state): State<AppState>,
@@ -34,8 +62,30 @@ pub(super) async fn get_policy_provider(
         hydrate_app_public_url(&auth, &config, app).await?;
     }
     let cache = policy.provider_cache_status(&workspace_id).await;
+    let fallback = if provider.is_none() {
+        let stored = treer_proxy::policy_store::WorkspacePolicyStore::new(auth.pool())
+            .get(&workspace_id)
+            .await
+            .map_err(|error| ApiFailure::internal(error.code(), &error.to_string()))?;
+        Some(match stored {
+            Some(stored) => json!({
+                "kind": "workspace_policy",
+                "name": "Stored Workspace Policy",
+                "mode": stored.mode,
+                "revision": stored.revision,
+            }),
+            None => json!({
+                "kind": "treer_default",
+                "name": "Treer Default",
+                "mode": "monitor",
+                "effect": "allow",
+            }),
+        })
+    } else {
+        None
+    };
     Ok(Json(
-        json!({ "provider": provider, "app": app, "cache": cache }),
+        json!({ "provider": provider, "app": app, "cache": cache, "fallback": fallback }),
     ))
 }
 
@@ -60,6 +110,7 @@ pub(super) async fn set_policy_provider(
     let mut app = auth
         .resolve_app_deployment(&workspace_id, request.app_id.trim())
         .await?;
+    hydrate_app_deployment(&state, &mut app).await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
     let has_public_ingress = auth
         .list_service_ingresses(&workspace_id)
@@ -176,6 +227,177 @@ pub(super) async fn set_policy_provider(
     Ok(Json(
         json!({ "provider": provider, "app": app, "manifest": manifest, "cache": cache }),
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn install_default_policy_app(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(store): Extension<PolicyProviderStore>,
+    Extension(session): Extension<CurrentSession>,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<InstallDefaultPolicyAppRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    auth.require_workspace_owner(&workspace_id, &session.user_id)
+        .await?;
+    if store
+        .get(&workspace_id)
+        .await
+        .map_err(|error| ApiFailure::internal("policy_provider_store_failed", &error.to_string()))?
+        .is_some()
+    {
+        return Err(ApiFailure {
+            status: StatusCode::CONFLICT,
+            error: ProtocolError::new(
+                "policy_provider_already_configured",
+                "remove the current Policy Provider before installing the default App",
+            ),
+        });
+    }
+
+    let existing = auth
+        .list_app_deployments(&workspace_id)
+        .await?
+        .into_iter()
+        .find(is_default_policy_app);
+    let server_id = match &existing {
+        Some(app) if app.server_id != request.server_id => {
+            return Err(ApiFailure::bad_request(
+                "default_policy_app_machine_mismatch",
+                "the existing default Policy App belongs to another machine",
+            ));
+        }
+        Some(app) => app.server_id.clone(),
+        None => {
+            state
+                .select_server(&workspace_id, Some(request.server_id.trim()))
+                .await?
+        }
+    };
+
+    for (file_name, contents) in DEFAULT_POLICY_APP_FILES {
+        let _ = upload_machine_file(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Some(Extension(session.clone())),
+            None,
+            HeaderMap::new(),
+            Path((workspace_id.clone(), server_id.clone())),
+            Json(UploadMachineFileRequest {
+                directory: String::new(),
+                file_name: (*file_name).to_string(),
+                content_base64: base64::engine::general_purpose::STANDARD.encode(contents),
+                overwrite: true,
+            }),
+        )
+        .await?;
+    }
+
+    let app = if let Some(app) = existing {
+        let Json(value) = restart_app_deployment(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(config.clone()),
+            Extension(policy.clone()),
+            Some(Extension(session.clone())),
+            None,
+            HeaderMap::new(),
+            Path((workspace_id.clone(), app.app_id)),
+        )
+        .await?;
+        app_from_response(value)?
+    } else {
+        let services = auth.list_machine_services(&workspace_id).await?;
+        let port = (DEFAULT_POLICY_APP_PORT_START..=DEFAULT_POLICY_APP_PORT_END)
+            .find(|port| {
+                !services
+                    .iter()
+                    .any(|service| service.server_id == server_id && service.target_port == *port)
+            })
+            .ok_or_else(|| {
+                ApiFailure::service_unavailable(
+                    "default_policy_app_port_unavailable",
+                    "no port is available for the default Policy App",
+                )
+            })?;
+        let Json(value) = create_app_deployment(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(config.clone()),
+            Extension(policy.clone()),
+            Some(Extension(session.clone())),
+            None,
+            HeaderMap::new(),
+            Path(workspace_id.clone()),
+            Json(CreateAppDeploymentRequest {
+                server_id: Some(server_id),
+                name: DEFAULT_POLICY_APP_NAME.to_string(),
+                command: DEFAULT_POLICY_APP_COMMAND.to_string(),
+                args: vec![
+                    DEFAULT_POLICY_APP_SCRIPT.to_string(),
+                    "--port".to_string(),
+                    port.to_string(),
+                ],
+                cwd: String::new(),
+                port,
+                hostname: "policy.internal".to_string(),
+                public: false,
+            }),
+        )
+        .await?;
+        app_from_response(value)?
+    };
+
+    let mut last_error = None;
+    for _ in 0..20 {
+        match set_policy_provider(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(config.clone()),
+            Extension(policy.clone()),
+            Extension(store.clone()),
+            Extension(session.clone()),
+            Path(workspace_id.clone()),
+            Json(SetWorkspacePolicyProviderRequest {
+                app_id: app.app_id.clone(),
+                failure_mode: treer_protocol::PolicyProviderFailureMode::FailClosed,
+                max_stale_seconds: 300,
+            }),
+        )
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    Err(last_error.unwrap_or_else(|| {
+        ApiFailure::service_unavailable(
+            "default_policy_app_unavailable",
+            "default Policy App did not become ready",
+        )
+    }))
+}
+
+fn is_default_policy_app(app: &AppDeployment) -> bool {
+    app.name == DEFAULT_POLICY_APP_NAME
+        && app.command == DEFAULT_POLICY_APP_COMMAND
+        && app
+            .args
+            .first()
+            .is_some_and(|arg| arg == DEFAULT_POLICY_APP_SCRIPT)
+}
+
+fn app_from_response(value: Value) -> Result<AppDeployment, ApiFailure> {
+    serde_json::from_value(value.get("app").cloned().unwrap_or(Value::Null)).map_err(|error| {
+        ApiFailure::internal(
+            "invalid_app_response",
+            &format!("Managed App operation returned invalid data: {error}"),
+        )
+    })
 }
 
 pub(super) async fn clear_policy_provider(
@@ -296,5 +518,26 @@ async fn record_policy_provider_audit(
         .await
     {
         tracing::warn!(?error, %workspace_id, action, "failed to record Policy Provider audit event");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_policy_app_bundle_is_complete_and_script_is_installed_last() {
+        let names = DEFAULT_POLICY_APP_FILES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<HashSet<_>>();
+        assert_eq!(names.len(), DEFAULT_POLICY_APP_FILES.len());
+        assert!(DEFAULT_POLICY_APP_FILES
+            .iter()
+            .all(|(_, contents)| !contents.is_empty()));
+        assert_eq!(
+            DEFAULT_POLICY_APP_FILES.last().map(|(name, _)| *name),
+            Some(DEFAULT_POLICY_APP_SCRIPT)
+        );
     }
 }

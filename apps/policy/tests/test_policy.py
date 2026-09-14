@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -142,6 +143,77 @@ class PolicyServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result["effect"], "deny")
         self.assertEqual(result["decision"], "deny")
+
+    def test_bundled_single_directory_install_serves_assets_and_persists(self) -> None:
+        install_root = Path(self.temporary.name) / "installed"
+        install_root.mkdir()
+        files = {
+            SERVER: "treer-policy.py",
+            APP_ROOT / "AGENT.md": "treer-policy-agent.md",
+            APP_ROOT / "web" / "index.html": "treer-policy-index.html",
+            APP_ROOT / "web" / "app.css": "treer-policy-app.css",
+            APP_ROOT / "web" / "app.js": "treer-policy-app.js",
+        }
+        for source, name in files.items():
+            shutil.copyfile(source, install_root / name)
+
+        bundled_port = free_port()
+        environment = os.environ.copy()
+        environment["TREER_WORKSPACE_ID"] = "ws_bundled"
+        for name in (
+            "POLICY_LISTEN",
+            "POLICY_DATA_FILE",
+            "TREER_AGENT_SERVER_URL",
+            "TREER_AGENT_ID",
+            "TREER_WORKLOAD_CREDENTIAL",
+        ):
+            environment.pop(name, None)
+        bundled = subprocess.Popen(
+            [sys.executable, str(install_root / "treer-policy.py"), "--port", str(bundled_port)],
+            cwd=install_root,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            wait_for_health(bundled_port, bundled)
+            source_port = self.port
+            self.port = bundled_port
+            try:
+                status, _, page = self.request("GET", "/", headers={"Accept": "text/html"})
+                self.assertEqual(status, 200)
+                self.assertIn("<title>Treer Policy</title>", page)
+                status, headers, stylesheet = self.request("GET", "/app.css")
+                self.assertEqual(status, 200)
+                self.assertIn("text/css", headers["content-type"])
+                self.assertIn(".shell", stylesheet)
+                status, _, result = self.request(
+                    "POST",
+                    "/v1/policy/publish",
+                    {
+                        "expected_revision": 1,
+                        "mode": "monitor",
+                        "document": {
+                            "schema_version": 1,
+                            "defaults": {},
+                            "groups": {},
+                            "rules": [],
+                        },
+                    },
+                )
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result["bundle"]["revision"], 2)
+            finally:
+                self.port = source_port
+            self.assertTrue((install_root / ".treer-policy-data.json").exists())
+        finally:
+            bundled.terminate()
+            try:
+                bundled.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                bundled.kill()
+                bundled.communicate(timeout=5)
 
 
 def free_port() -> int:

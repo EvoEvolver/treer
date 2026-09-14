@@ -402,6 +402,12 @@ pub struct SetWorkspacePolicyProviderRequest {
     pub max_stale_seconds: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallDefaultPolicyAppRequest {
+    pub server_id: String,
+}
+
 const fn default_policy_provider_max_stale_seconds() -> u64 {
     300
 }
@@ -2365,6 +2371,20 @@ mod tests {
             serde_json::from_value::<PolicyProviderBundle>(value)
                 .expect("deserialize provider bundle"),
             bundle
+        );
+        let install = InstallDefaultPolicyAppRequest {
+            server_id: "server_1".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&install).expect("serialize default Policy App install"),
+            serde_json::json!({"server_id": "server_1"})
+        );
+        assert_eq!(
+            serde_json::from_value::<InstallDefaultPolicyAppRequest>(serde_json::json!({
+                "server_id": "server_1"
+            }))
+            .expect("deserialize default Policy App install"),
+            install
         );
     }
 

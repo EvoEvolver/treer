@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import threading
@@ -19,10 +20,25 @@ APP_ROOT = Path(__file__).resolve().parent
 PROTOCOL = "treer.policy-provider/v1"
 CAPABILITY = "policy.bundle.v1"
 MAX_BODY_BYTES = 300 * 1024
+BUNDLED_INSTALL = (APP_ROOT / "treer-policy-index.html").is_file()
+
+
+def bundled_path(source: Path, installed_name: str) -> Path:
+    return APP_ROOT / installed_name if BUNDLED_INSTALL else source
+
+
 ASSETS = {
-    "/app.js": ("application/javascript; charset=utf-8", APP_ROOT / "web" / "app.js"),
-    "/app.css": ("text/css; charset=utf-8", APP_ROOT / "web" / "app.css"),
+    "/app.js": (
+        "application/javascript; charset=utf-8",
+        bundled_path(APP_ROOT / "web" / "app.js", "treer-policy-app.js"),
+    ),
+    "/app.css": (
+        "text/css; charset=utf-8",
+        bundled_path(APP_ROOT / "web" / "app.css", "treer-policy-app.css"),
+    ),
 }
+INDEX_PATH = bundled_path(APP_ROOT / "web" / "index.html", "treer-policy-index.html")
+AGENT_PATH = bundled_path(APP_ROOT / "AGENT.md", "treer-policy-agent.md")
 
 
 class PolicyError(Exception):
@@ -290,9 +306,9 @@ class PolicyHandler(BaseHTTPRequestHandler):
     def _root(self) -> None:
         representation = root_representation(self.headers.get("accept", ""), self.headers.get("user-agent", ""))
         if representation == "text/html":
-            self._send_bytes(200, "text/html; charset=utf-8", (APP_ROOT / "web" / "index.html").read_bytes(), vary=True)
+            self._send_bytes(200, "text/html; charset=utf-8", INDEX_PATH.read_bytes(), vary=True)
         else:
-            self._send_bytes(200, "text/markdown; charset=utf-8", (APP_ROOT / "AGENT.md").read_bytes(), vary=True)
+            self._send_bytes(200, "text/markdown; charset=utf-8", AGENT_PATH.read_bytes(), vary=True)
 
     def _json(self, status: int, value: object) -> None:
         self._send_bytes(status, "application/json; charset=utf-8", json.dumps(value, separators=(",", ":")).encode())
@@ -346,12 +362,22 @@ def resource_matches(selector: dict[str, Any], resource: dict[str, Any], groups:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Treer Policy Provider")
+    parser.add_argument("--port", type=int, default=None)
+    args = parser.parse_args()
     workspace_id = os.environ.get("TREER_WORKSPACE_ID", "").strip()
     if not workspace_id:
         raise SystemExit("TREER_WORKSPACE_ID is required")
-    listen = os.environ.get("POLICY_LISTEN", "0.0.0.0:8787")
+    listen = os.environ.get(
+        "POLICY_LISTEN", f"0.0.0.0:{args.port}" if args.port is not None else "0.0.0.0:8787"
+    )
     host, raw_port = listen.rsplit(":", 1)
-    data_file = Path(os.environ.get("POLICY_DATA_FILE", str(APP_ROOT / "data" / "policy.json"))).resolve()
+    default_data_file = (
+        APP_ROOT / ".treer-policy-data.json"
+        if BUNDLED_INSTALL
+        else APP_ROOT / "data" / "policy.json"
+    )
+    data_file = Path(os.environ.get("POLICY_DATA_FILE", str(default_data_file))).resolve()
     PolicyHandler.store = PolicyStore(data_file, workspace_id)
     server = ThreadingHTTPServer((host, int(raw_port)), PolicyHandler)
     print(f"Treer Policy Provider listening on {listen} for {workspace_id}")
