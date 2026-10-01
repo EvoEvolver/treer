@@ -14,18 +14,6 @@ pub(super) fn interactive_shell() -> String {
         })
 }
 
-pub(super) fn shell_join(command: &str, args: &[String]) -> String {
-    std::iter::once(command)
-        .chain(args.iter().map(String::as_str))
-        .map(shell_quote)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-pub(super) fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 pub(super) fn encode_prompt_text(text: &str, bracketed_paste: bool) -> Vec<u8> {
     if !bracketed_paste {
         return text.as_bytes().to_vec();
@@ -127,76 +115,4 @@ pub(super) fn protocol_error(code: &str, error: impl std::fmt::Display) -> Proto
 
 pub(super) fn startup_store_error(error: impl std::fmt::Display) -> ProtocolError {
     protocol_error("startup_store_error", error)
-}
-
-pub(super) fn agent_network_proxy_url(base: &str, agent_id: &str) -> String {
-    let Ok(mut url) = url::Url::parse(base) else {
-        return base.to_string();
-    };
-    if url.set_username(agent_id).is_err() || url.set_password(Some("treer")).is_err() {
-        return base.to_string();
-    }
-    url.to_string()
-}
-
-pub(super) fn http_proxy_url(network_proxy_url: &str) -> String {
-    let Ok(parsed) = url::Url::parse(network_proxy_url) else {
-        return network_proxy_url.to_string();
-    };
-    let mut rewritten = String::from("http://");
-    if !parsed.username().is_empty() {
-        rewritten.push_str(parsed.username());
-        if let Some(password) = parsed.password() {
-            rewritten.push(':');
-            rewritten.push_str(password);
-        }
-        rewritten.push('@');
-    }
-    match (parsed.host_str(), parsed.port()) {
-        (Some(host), Some(port)) => {
-            rewritten.push_str(host);
-            rewritten.push(':');
-            rewritten.push_str(&port.to_string());
-        }
-        (Some(host), None) => rewritten.push_str(host),
-        _ => return network_proxy_url.to_string(),
-    }
-    rewritten
-}
-
-pub(super) fn network_environment(
-    network_proxy_url: String,
-    transparent: bool,
-) -> BTreeMap<String, String> {
-    let mut env = BTreeMap::from([("TREER_NETWORK_PROXY".to_string(), network_proxy_url.clone())]);
-    if transparent {
-        // The Controller's loopback is outside the agent network namespace.
-        // Proxy-aware applications must use the TUN path instead of dialing it directly.
-        for name in [
-            "ALL_PROXY",
-            "all_proxy",
-            "HTTP_PROXY",
-            "http_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-        ] {
-            env.insert(name.to_string(), String::new());
-        }
-    } else {
-        env.insert("ALL_PROXY".to_string(), network_proxy_url.clone());
-        env.insert("all_proxy".to_string(), network_proxy_url.clone());
-        let http_proxy = http_proxy_url(&network_proxy_url);
-        // Plain HTTP proxy requests use absolute-form request targets, while this
-        // listener intentionally implements CONNECT only. Let HTTP continue to
-        // use the SOCKS5h ALL_PROXY path and reserve this URL for HTTPS tunnels.
-        for name in ["HTTPS_PROXY", "https_proxy"] {
-            env.insert(name.to_string(), http_proxy.clone());
-        }
-        env.insert("GIT_PROXY_COMMAND".to_string(), "treer".to_string());
-        env.insert("TREER_GIT_PROXY_MODE".to_string(), "1".to_string());
-        for name in ["NO_PROXY", "no_proxy"] {
-            env.insert(name.to_string(), "127.0.0.1,localhost,::1".to_string());
-        }
-    }
-    env
 }

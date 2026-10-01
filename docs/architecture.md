@@ -24,10 +24,10 @@ flowchart LR
 | Component | Owns |
 | --- | --- |
 | `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, distributed coordination, Voice ASR proxy, and Voice command LLM |
-| `treer-agent-server` | Machine Controller, local authenticated API, Proxy connection, network bridge, and Agent definitions |
+| `treer-agent-server` | Machine Controller, authenticated CLI parser/business logic, local API, Proxy link, explicit TCP bridge, and launch snapshots |
 | `treer-agent-host` | Stable local child-process ownership and idempotent mutations |
 | `treer-agent-runtime` | PTY lifecycle, bounded output replay, and working-directory containment |
-| `treer-cli` | Human/operator and managed-Agent commands, including Core Message |
+| `treer-cli` | Thin argv/stdin/stdout/stderr/exit transport; terminal and local forwarding I/O |
 | `treer-protocol` | Shared public and Controller wire models |
 | `apps` | Ordinary service code, presentation, external APIs, configuration, secrets, and App-owned state |
 | `launchers` | Optional profile-driven Agent runtimes and explicitly selected Agent Interfaces; not Host, Controller, or Core behavior |
@@ -108,16 +108,14 @@ view that changes only its owned ingress between `workspace` and `public`
 access. General service, virtual-host, and ingress editing is not exposed in
 the workspace UI.
 
-Managed App lifecycle is the only Agent-authorized path that allocates a
-service, virtual host, or its owned ingress. The public option applies only to
-that App-owned ingress. Direct Agent routes for arbitrary service, virtual-host,
-and ingress mutation return `managed_app_required`, including for older CLIs.
-Logged-in workspace users retain those controls through the browser/public API
-for operator-managed infrastructure.
+Managed Agents may also register ordinary endpoints owned by their authenticated
+Agent and machine. The Proxy derives ownership from credentials and applies
+Policy; it does not trust caller-supplied Agent IDs. New custom virtual-host
+writes are retired. HTTP origins are allocated from the stable service ID under
+the operator's wildcard base domain; legacy aliases are read-compatible only.
 
 The first runtime adapter launches `kind=app` through the existing Host process
-contract. The backing runtime receives its own workload credential, private
-network namespace, and declared `publish_ports` bridge, but is hidden from the
+contract. The backing runtime receives its own workload credential and ordinary host-network endpoint, but is hidden from the
 ordinary Agent snapshot and list. App status is projected from that runtime;
 the durable App, service, and hostname never depend on its runtime ID.
 
@@ -154,8 +152,9 @@ Controller-to-Host protocol is a local length-prefixed bincode socket. The
 socket filename is a 16-hex FNV-1a hash of the machine id (`h-<hash>.sock`)
 so the full path stays inside `sockaddr_un` limits on macOS, where the default
 runtime directory under `$TMPDIR` is already long. Browser terminal and service
-streams route through the Proxy; ordinary virtual-network payload travels
-between Controllers after Proxy authorization.
+streams route through the Proxy. Registered service connections are multiplexed
+onto the destination Controller link, including cross-Proxy NATS routing. There
+is no source-side transparent interception or ordinary internet egress routing.
 
 Machine exec and file upload reuse the authenticated Proxy-to-Controller
 command path. Exec is a non-interactive argv vector with a 30-second ceiling
@@ -178,16 +177,23 @@ of the protocol-v4 baseline.
 Automatic mode starts the Host as a detached `nohup` process on Linux and
 macOS. Treer records the PID and process start identity and redirects output to
 its state directory so lifecycle commands can reject reused PIDs and manage the
-correct Host. An ordinary managed Agent may register one local startup spec
-through `treer agent startup set`. The Controller stores its argv, working
-directory, sandbox port publications, and workload credential in a private
-machine-scoped state file. A new Host epoch restores each enabled spec at most
-once, and only after the Proxy confirms that the Agent credential is still
-active and bound to that machine. Controller-only restarts do not relaunch an
-Agent, and a naturally exited Agent does not enter a restart loop. Explicit
-Agent stop disables its startup spec. Deletion revokes recovery immediately;
-the machine-local record may remain inert so a newer Proxy remains compatible
-with older Controllers during rolling upgrades.
+correct Host. Ordinary Agents save a resolved launch snapshot before process creation,
+including stable Agent ID, argv, cwd, dimensions, credential, and desired state.
+Restore validates identity and durable stopped intent with the Proxy, synchronizes
+Host inventory, attaches surviving processes, and launches missing ones at most
+once per Host epoch. Manual restore can retry a failed start. Managed Apps use
+the existing Proxy desired-state reconciler and are excluded from Agent startup
+snapshots to avoid two competing process owners. Stop disables recovery in Proxy
+state before forwarding to the Controller; deletion/revocation prevents replay.
+A normal successful Agent exit disables its snapshot. Abnormal termination is
+recoverable after a new Host epoch or explicit restore, not an unbounded restart loop.
+
+`treer-agent-server restore --workspace ID` starts a saved machine installation
+without re-enrollment, then reconciles it. `treer runtime restore --all` handles
+an already-running local Controller; an operator may select `--server ID`.
+Reports distinguish started, attached, stopped, revoked, failed, and waiting
+endpoints. Recovery recreates processes, not in-memory conversations or open TCP
+sessions. Saved local state and executables must still exist.
 
 Startup specs do not provide start-at-boot or Host crash restart. A per-user
 systemd service or LaunchAgent remains an explicit operator choice, and attached
@@ -225,62 +231,32 @@ seconds and closes a silent socket within 60 seconds so a sleeping Mac is not
 advertised Online. On Unix `SIGCONT` (lid open / thaw), the Controller aborts a
 socket whose last activity is older than that dead interval and reconnects.
 
-Linux managed Agents run in a private network namespace. Outbound TCP is
-captured onto the Controller SOCKS path. On macOS and other `proxy-env`
-machines the same loopback listener also accepts HTTP CONNECT, and the
-Controller injects `HTTPS_PROXY` so clients without SOCKS support can use that
-path for HTTPS while plain HTTP continues through `ALL_PROXY` as SOCKS5h.
-`proxy-env` classifies locally from the virtual-host snapshot: destinations in
-that snapshot, or the reserved local-API address `192.0.2.1`, still take the
-Treer Open/relay path; every other destination is dialed on this machine
-immediately and does not wait on the Proxy socket. Disconnect resets relayed
-streams and Proxy-authorized Direct streams; compatibility-mode internet bypass
-streams remain independent. New transparent requests fail while disconnected,
-and transport epochs prevent queued Open frames from being replayed on reconnect.
+## Explicit service transport and CLI
 
-The owned [native macOS backend](../native/macos-network/README.md) has an explicit
-`native-experimental` Controller mode. A signed helper readiness check precedes
-startup; per-process registration ACK precedes workload exec. Egress uses the
-same Proxy Open path, while macOS service ingress uses shared localhost ports.
-It has not passed installed-extension acceptance and is not a supported
-transparent backend.
+The Controller opens only the endpoint named by an authenticated Proxy service
+request. TCP Data, WindowUpdate, HalfClose, and Reset preserve binary data,
+backpressure, and independent EOF. Disconnect cancels streams; transport epochs
+reject stale queued frames. Datagram, Direct, and source Open frames are retired.
+Neither OS DNS nor proxy environment variables are changed. A registered host
+must be reachable from the Controller; external containers supply their own
+port mapping or reachable address.
 
-The source Proxy rechecks tracked network authorizations every five seconds.
-Denied relay streams receive Reset on both legs; tracked Direct streams receive
-Reset at the source. Controllers advertise per-stream lifetime tracking in the
-optional Open field and send Reset on full completion. Older Direct sources omit
-that field and retain Open-only checks. Relay lifetimes are also observable from
-the Proxy's stream table. Policy cache TTL and evaluation time add to revocation
-latency; this is periodic revocation, not instantaneous revocation.
+The thin CLI sends raw argv and streams to authenticated `/api/cli/session`.
+The Controller runs its parser in a bounded child invocation with caller-specific
+credentials. Help and embedded skills therefore follow the Controller version.
+Interactive terminal and service-forward requests return typed transport
+instructions; the client handles terminal bytes/resize or a local loopback
+listener without understanding product command syntax. Version mismatches fail
+explicitly. Do not pass client filesystem paths for remote interpretation: pipe
+input through stdin. Command retries must use the operation's own idempotency
+contract; the CLI does not automatically replay mutations after disconnect.
 
-Direct usage is negotiated through the optional `report_usage` target flag.
-The Controller counts successful application writes and sends cumulative Usage
-frames on that authorized stream. The owning source Proxy deduplicates against
-the previous totals and persists deltas as non-billable `direct_network` usage.
-The original relay ledger remains machine-scoped; Agent endpoint detail is
-written separately to `agent_traffic_usage_hourly` and served by `/traffic/agents`.
-Both views use the same observed payload, so they must not be summed together.
-The optional Open flag `durable_usage` negotiates a Proxy-issued `usage_ticket`.
-Ticketed Usage frames carry cumulative totals, persist in the Controller outbox,
-and replay after reconnect. `UsageAck` (kind 10) is sent only after receipt
-deduplication and both hourly ledgers commit together. Receipts bind the original
-machine/workspace and cannot open traffic. They survive Proxy restarts; reporting
-without tickets remains the legacy live-stream path. Delayed reports currently
-use the commit-time hour, and uncheckpointed crash tails are not recoverable.
-Final reports mark receipts closed. Closed receipts and unfinished open receipts
-are retained for at most 90 days; a route that fails before delivery discards
-its unused receipt immediately.
-Operator-managed Agent-scoped services use a Unix bridge (`sandbox-exec
---service-socket`) so the Controller can reach a namespace-local loopback
-listener without publishing a host TCP port. Agents cannot create those
-records themselves. The browser Agent UI iframe uses that same bridge to reach
-the port and `ui_path` declared by the Agent's verified Interface descriptor.
-No separate service or UI registration is required. On a narrow viewport,
-selecting that Agent opens the iframe full-screen, matching the mobile terminal
-overlay.
-`publish_ports` (`sandbox-exec --publish`)
-is only for host-loopback clients that dial `127.0.0.1` themselves; it binds
-that port on the machine and splices accepted connections into the namespace.
+Private service connections authenticate at open and are periodically checked
+against current identity, membership, service, and Policy. HTTP ingress defaults
+to workspace access. Anonymous raw TCP requires configured Proxy ports and an
+explicit public publish action. Deleting a service or disabling its TCP mapping
+terminates active TCP forwarding. Raw TCP is not HTTP and receives no injected
+identity headers or application authentication.
 
 Browser terminal attach is revisioned. The Host keeps a bounded PTY output ring
 keyed by stream epoch. Reconnects send the client's last cursor; the Host
@@ -306,7 +282,7 @@ remounts any embedded UI. A hot Controller restart restores a descriptor only
 when its Agent ID, PID, and process start time still match, then revalidates the
 live manifest before the first Proxy snapshot. The cache contains no credentials and is not a trust
 boundary. The descriptor and capabilities travel with `AgentInfo` snapshots
-and events, while the live endpoint remains on Agent-private loopback. An
+and events, while the live endpoint remains on machine loopback (shared in an unisolated environment). An
 optional `ui_path` exposes an embedded browser interface on that same endpoint;
 HTTP and WebSocket traffic below the path is opaque to the semantic AIS contract.
 
@@ -433,29 +409,3 @@ control plane is a follow-up.
 
 See [Self-hosted Compose](../deploy/README.md), [Security](security.md) for
 trust claims, and [Quality](quality.md) for the verification matrix.
-
-### Experimental datagram transport
-
-The owned macOS UDP adapter uses authenticated SOCKS command `0xf0` on the local
-Controller listener, followed by big-endian u16-length datagrams. This is a Treer
-extension, not SOCKS UDP ASSOCIATE. `OpenDatagram` (binary kind 9) goes through the
-same source-Agent ownership check and `network.connect` Policy as TCP. Each Data
-frame carries one whole datagram, including empty payloads. UDP services are
-registered with `protocol: "udp"`; a TCP/UDP service mismatch is rejected. Existing
-Policy rules are transport-independent host/port rules. Upgrade participating
-Proxies and Controllers together before using UDP services; older peers cannot
-handle kind 9 and are never given a TCP fallback.
-
-Direct UDP stays on the source Controller and reports successful datagram payload
-writes. Relayed UDP traverses the existing regional routing and ledger. Each
-association has a 60-second idle timeout and closes on reset. Datagram windows
-charge payload plus 64 bytes per packet, bounding even empty-packet queues; the local adapter
-bounds destinations and pending replies. UDP carried over TCP preserves message
-boundaries but inherits head-of-line blocking. Linux private Agent UDP service
-bridges are not yet implemented and explicitly reject this destination; host UDP
-services are supported. OS datagram size limits still apply. The owned macOS provider implements a shared persistent virtual-address map and
-loopback UDP/TCP DNS responder. Accepted Controller snapshots synchronize through
-the helper, and the privileged provider maintains only its exact-domain files in
-`/etc/resolver`. Synthetic addresses are reversed to names before TCP/UDP routing.
-Retired addresses are never reassigned, protecting shared DNS caches. Signed
-resolver/capture integration is still an acceptance gate.

@@ -13,7 +13,7 @@ Run TOWER as a private Managed App:
 ```sh
 TOKEN="$(openssl rand -hex 32)"
 treer app create --machine self --name tower --cwd treer --port 9460 \
-  --hostname tower.internal env -- \
+  env -- \
   TOWER_DATA_DIR=.treer/apps/tower \
   TOWER_TOKEN="$TOKEN" \
   python3 apps/tower/tower.py

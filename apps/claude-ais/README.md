@@ -2,7 +2,7 @@
 
 Thin Treer Agent Interface adapter over Claude Code's stream-json session
 protocol (`--print --output-format stream-json --input-format stream-json`).
-One Treer Agent owns one session. Built-in `--kind claude` remains the TUI
+One Treer Agent owns one session. Use a saved profile invoking `claude` directly for the TUI
 path.
 
 ## Launch

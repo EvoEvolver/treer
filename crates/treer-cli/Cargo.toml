@@ -10,11 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
-clap.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
-percent-encoding.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

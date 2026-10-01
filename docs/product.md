@@ -1,7 +1,7 @@
 # Product direction
 
 - Status: maintained
-- Last source review: 2026-08-28 at `feat/machine-connection-ux`
+- Last source review: 2026-09-30 core simplification (working tree)
 
 ## Purpose
 
@@ -33,14 +33,14 @@ In concrete terms:
    acknowledgement and an ordered context DAG. Mail and Telegram are
    replaceable workspace Apps over public contracts rather than privileged
    Proxy features.
-5. Agents can deploy supervised HTTP Apps whose service and stable workspace
-   alias are owned by Core. Logged-in workspace users manage externally
-   supervised machine services and optional wildcard HTTPS ingress. Agents
-   cannot directly publish arbitrary listeners from their own sandbox.
+5. Agents can register their own ordinary TCP/HTTP endpoints, forward services
+   across the workspace, and deploy supervised HTTP Apps. Public HTTP origins use
+   platform-assigned domains and workspace authentication by default. Explicit
+   anonymous publication is available for HTTP and configured raw TCP ports.
 6. An Agent Interface Server can declare a browser UI path alongside its
    semantic capabilities. The control plane embeds that page in place of the
    Agent terminal, and transparently tunnels relative HTTP and WebSocket
-   traffic to the Agent-private Interface port.
+   traffic to the registered Interface port.
 7. Machines connect outward to the Proxy; local Agent Server and service ports
    do not need to be publicly exposed. A workspace member can tell whether a
    machine is Online, local-only, fenced as a duplicate, or stopped, and can
@@ -76,12 +76,14 @@ channels use the managed Agent's CLI identity. This keeps Mail, Telegram, and
 future adapters independently replaceable without creating parallel
 collaboration databases or private Core integrations.
 
-### Local first, managed later
+### User-owned execution environments
 
-The current local Host is the fastest path to personal and lab adoption. A
-future container or microVM backend can implement the same control-plane
-contract for public, paid, or mutually untrusted workloads without forcing that
-operational cost into the prototype.
+Treer launches exact argv from editable profiles. Users own Agent installation,
+provider credentials, proxy variables, containers, VMs, and filesystem/network
+restrictions. Treer does not build or promise a sandbox backend. Its CLI uses a
+separate Agent credential so a user-provided isolation boundary can expose only
+that identity. Without such a boundary, processes under the same account are
+trusted and can reach each other.
 
 ### Persuasive security, accurate wording
 
@@ -95,7 +97,7 @@ must not claim isolation or attribution that the implementation lacks.
 Open sourcing the control plane builds trust and allows private deployment. A
 commercial workflow may still keep proprietary prompts, orchestration, data, or
 managed execution on infrastructure controlled by its operator. Treer supplies
-the coordination boundary; it does not yet prevent a machine owner from
+the coordination boundary; it does not prevent a machine owner from
 inspecting an Agent that runs on that machine.
 
 ## Current fit and non-fit
@@ -105,22 +107,20 @@ inspecting an Agent that runs on that machine.
 | One developer using several owned machines | Good architectural fit |
 | Trusted or mostly trusted lab sharing sessions | Primary product fit |
 | Self-hosted internal Agent coordination | Good fit if operators accept current gaps |
-| Public multi-tenant paid Agent service | Future runtime and accounting work required |
+| Public multi-tenant paid Agent service | Requires independently provided isolation; outside Core scope |
 | Strong protection from the enrolled machine owner | Not provided by the local Host |
 
 ## Near-term sequence
 
 The maintained [capability roadmap](roadmap.md) classifies the larger backlog
-and owns detailed sequencing. At the product level, the priorities remain:
+preserves the broader backlog. The active sequence is the
+[core simplification plan](research/2026-09-30-core-simplification-plan.md):
 
-1. Make enrollment, session sharing, peer coordination, and updates feel
-   reliable enough to drive real use.
-2. Emit append-only attribution events carrying user, workspace, machine,
-   agent, provider, model, time, and provider-reported usage when available.
-3. Add policy, quota, audit, and credential ownership only as actual workflows
-   demand them.
-4. Add a production isolation backend for the managed trust tier while keeping
-   the current Host for personal and lab use.
+1. Keep authentication, scoped identity, explicit connections, and durable process intent.
+2. Move command parsing and help into the Controller; keep `treer` a transport client.
+3. Remove transparent capture, virtual DNS, provider installation, and custom-host provisioning.
+4. Make restoration repeatable: attach surviving processes, restart intended-running
+   processes from saved launch snapshots, and report stopped/revoked/failed items.
 
 Subscription credentials are not currently isolated per platform user, and
 Treer does not implement billing. Core Messages are text-only and do not yet

@@ -64,6 +64,8 @@ pub(crate) async fn set_agent_startup(
         agent_policy_resource(&agent),
     )
     .await?;
+    auth.set_agent_recovery_enabled(&workspace_id, &agent_id, true)
+        .await?;
     let data = state
         .send_command(
             &workspace_id,
@@ -111,6 +113,8 @@ pub(crate) async fn clear_agent_startup(
         agent_policy_resource(&agent),
     )
     .await?;
+    auth.set_agent_recovery_enabled(&workspace_id, &agent_id, false)
+        .await?;
     let data = state
         .send_command(
             &workspace_id,
@@ -157,9 +161,17 @@ pub(crate) async fn validate_agent_startup(
             "at most 256 Agent IDs may be validated at once",
         ));
     }
+    let stopped_agent_ids = auth
+        .stopped_agent_recovery_ids(&workspace_id, &server_id, &request.agent_ids)
+        .await?;
+    let active_agent_ids = auth
+        .active_agent_ids(&workspace_id, &server_id, &request.agent_ids)
+        .await?
+        .into_iter()
+        .filter(|id| !stopped_agent_ids.contains(id))
+        .collect();
     Ok(Json(ValidateAgentStartupResponse {
-        active_agent_ids: auth
-            .active_agent_ids(&workspace_id, &server_id, &request.agent_ids)
-            .await?,
+        stopped_agent_ids,
+        active_agent_ids,
     }))
 }

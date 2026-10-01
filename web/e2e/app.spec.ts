@@ -603,7 +603,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
   await page.getByRole("button", { name: /^workstation / }).first().click()
   await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
   await expect(page.getByRole("button", { name: "Copy restart-controller" })).toBeVisible()
-  await expect(page.getByRole("button", { name: "Copy start" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Copy restore" })).toBeVisible()
 })
 
 test("machine overview only shows agents for the selected machine", async ({ page }) => {
@@ -701,32 +701,32 @@ test("terminal uses a browser-safe close code when output backlog exceeds its li
   expect(pageErrors).toEqual([])
 })
 
-test("create agent dialog can install a git recipe", async ({ page }) => {
+test("create agent dialog offers profiles and explicit commands without provider installation", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
   await page.getByRole("button", { name: "New" }).click()
-  await expect(page.getByRole("dialog")).toBeVisible()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
-  await page.getByRole("option", { name: "Install recipe" }).click()
-  await expect(page.getByPlaceholder("https://github.com/example/recipe.git")).toBeVisible()
-  await expect(page.getByText("Only agents already installed on the selected machine can run a recipe.")).toBeVisible()
-  await expect(page.getByRole("button", { name: "Install recipe" })).toBeVisible()
+  await expect(page.getByRole("option", { name: "Terminal", exact: true })).toBeVisible()
+  await expect(page.getByRole("option", { name: "Custom command", exact: true })).toBeVisible()
+  await expect(page.getByRole("option", { name: /^Install / })).toHaveCount(0)
+  await page.getByRole("option", { name: "Codex", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Create agent" })).toBeVisible()
 })
 
-test("create agent dialog can install a missing CLI directly from the launch list", async ({ page }) => {
+test("create agent custom command preserves argv without a provider installer", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
   await page.getByRole("button", { name: "New" }).click()
-  await expect(page.getByRole("dialog")).toBeVisible()
-  const installRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/ws-1/agents")
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
-  await page.getByRole("option", { name: "Install Codex", exact: true }).click()
-  const request = await installRequest
-  expect(request.postDataJSON()).toMatchObject({
+  await page.getByRole("option", { name: "Custom command", exact: true }).click()
+  await page.getByRole("textbox", { name: "Command", exact: true }).fill('/opt/my-agent --label "two words"')
+  const creation = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/ws-1/agents")
+  await page.getByRole("button", { name: "Create agent", exact: true }).click()
+  expect((await creation).postDataJSON()).toMatchObject({
     server_id: "srv-a",
-    kind: "shell",
+    kind: "command",
     cwd: ".",
-    args: ["bash", "-lc", expect.stringContaining("https://chatgpt.com/codex/install.sh")],
+    args: ["/opt/my-agent", "--label", "two words"],
   })
   await expect(page.getByRole("dialog")).toBeHidden()
 })

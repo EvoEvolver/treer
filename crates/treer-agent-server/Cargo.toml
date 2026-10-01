@@ -36,9 +36,5 @@ uuid.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.21.0"
-tun2proxy = { version = "0.8.3", default-features = false }
-
 [lints]
 workspace = true

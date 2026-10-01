@@ -92,6 +92,10 @@ pub fn router(
             post(validate_agent_startup),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/restore",
+            post(machine_restore_runtime),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
             axum::routing::patch(rename_server).delete(delete_server),
         )
@@ -105,16 +109,23 @@ pub fn router(
         )
         .route(
             "/agent/workspaces/{workspace_id}/services",
-            get(agent_list_machine_services).post(agent_network_publication_forbidden),
+            get(agent_list_machine_services).post(agent_create_machine_service),
         )
         .route(
             "/agent/workspaces/{workspace_id}/services/{service_id}",
-            axum::routing::patch(agent_network_publication_forbidden)
-                .delete(agent_network_publication_forbidden),
+            axum::routing::patch(agent_update_machine_service).delete(agent_delete_machine_service),
         )
         .route(
             "/agent/workspaces/{workspace_id}/services/{service_id}/probe",
             post(agent_probe_machine_service),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/services/{service_id}/connect",
+            post(agent_connect_machine_service),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/services/{service_id}/public-tcp",
+            post(agent_publish_public_tcp_service).delete(agent_unpublish_public_tcp_service),
         )
         .route(
             "/agent/workspaces/{workspace_id}/virtual-hosts",
@@ -126,12 +137,11 @@ pub fn router(
         )
         .route(
             "/agent/workspaces/{workspace_id}/ingresses",
-            get(agent_list_service_ingresses).post(agent_network_publication_forbidden),
+            get(agent_list_service_ingresses).post(agent_create_service_ingress),
         )
         .route(
             "/agent/workspaces/{workspace_id}/ingresses/{ingress_id}",
-            axum::routing::patch(agent_network_publication_forbidden)
-                .delete(agent_network_publication_forbidden),
+            axum::routing::patch(agent_update_service_ingress).delete(agent_delete_service_ingress),
         )
         .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
@@ -354,6 +364,14 @@ pub fn router(
             post(probe_machine_service),
         )
         .route(
+            "/api/workspaces/{workspace_id}/services/{service_id}/connect",
+            post(connect_machine_service),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/services/{service_id}/public-tcp",
+            post(publish_public_tcp_service).delete(unpublish_public_tcp_service),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/virtual-hosts",
             get(list_virtual_network_hosts).post(create_virtual_network_host),
         )
@@ -396,6 +414,10 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/exec",
             post(exec_machine),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/restore",
+            post(restore_machine_runtime),
         )
         .route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/files",

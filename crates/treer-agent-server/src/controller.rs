@@ -43,8 +43,6 @@ const STATUS_SCAN_LIMIT_BYTES: usize = 16 * 1024;
 const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
 const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
-const AGENT_COMMAND_DELAY: Duration = Duration::from_millis(500);
-const CLAUDE_TRUST_CONFIRM_DELAY: Duration = Duration::from_millis(1_500);
 const AGENT_INTERFACE_FAILURE_LIMIT: u8 = 5;
 const MACHINE_EXEC_TIMEOUT_MAX_MS: u64 = 30_000;
 const MACHINE_EXEC_STREAM_LIMIT_BYTES: usize = 64 * 1024;
@@ -69,6 +67,7 @@ fn validate_interface_ui_path(value: &str) -> Result<String, ProtocolError> {
     Ok(value.to_string())
 }
 
+#[derive(Debug)]
 struct AgentLaunch {
     command: String,
     args: Vec<String>,
@@ -116,9 +115,7 @@ pub struct ControllerConfig {
     pub workspace_id: String,
     pub server_id: String,
     pub agent_server_url: String,
-    pub network_proxy_url: String,
     pub treer_binary: Option<PathBuf>,
-    pub sandbox_executable: Option<PathBuf>,
     pub interface_cache_path: PathBuf,
     pub startup_store_path: PathBuf,
     pub root: PathBuf,
@@ -129,13 +126,12 @@ struct ControllerInner {
     workspace_id: String,
     server_id: String,
     agent_server_url: String,
-    network_proxy_url: String,
     treer_binary: Option<PathBuf>,
-    sandbox_executable: Option<PathBuf>,
     root: PathBuf,
     host_epoch: String,
     interface_cache: InterfaceCache,
     startup_store: StartupStore,
+    recovery_lock: tokio::sync::Mutex<()>,
     uploads: Mutex<HashMap<String, PendingUpload>>,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
@@ -155,6 +151,7 @@ struct PendingUpload {
 }
 
 struct ControllerAgent {
+    stream_epoch: String,
     info: AgentInfo,
     workload_credential: String,
     text: String,
@@ -179,6 +176,9 @@ pub struct TerminalSnapshot {
 }
 
 impl ControllerRuntime {
+    pub(crate) fn agent_server_url(&self) -> &str {
+        &self.inner.agent_server_url
+    }
     pub fn from_sync(
         host: HostClient,
         sync: HostResponse,
@@ -206,9 +206,7 @@ impl ControllerRuntime {
                 workspace_id: config.workspace_id,
                 server_id: config.server_id,
                 agent_server_url: config.agent_server_url,
-                network_proxy_url: config.network_proxy_url,
                 treer_binary: config.treer_binary,
-                sandbox_executable: config.sandbox_executable,
                 root: config.root,
                 host_epoch,
                 interface_cache: InterfaceCache::load(config.interface_cache_path),
@@ -218,6 +216,7 @@ impl ControllerRuntime {
                         format!("failed to load Agent startup store: {error}"),
                     )
                 })?,
+                recovery_lock: tokio::sync::Mutex::new(()),
                 uploads: Mutex::new(HashMap::new()),
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
@@ -361,12 +360,7 @@ impl ControllerRuntime {
     }
 
     pub fn available_agent_kinds(&self) -> Vec<String> {
-        let search_path = join_agent_path(self.inner.treer_binary.as_deref());
-        interactive_agent_specs()
-            .iter()
-            .filter(|spec| command_on_path(spec.command, &search_path))
-            .map(|spec| spec.kind.to_string())
-            .collect()
+        vec!["shell".to_string(), "command".to_string()]
     }
 
     pub fn list(&self) -> Vec<AgentInfo> {
@@ -401,6 +395,33 @@ impl ControllerRuntime {
                 "Proxy supplied an invalid workload credential",
             ));
         }
+        // Persist the resolved launch, rather than a mutable profile reference,
+        // before asking the Host to start the workload.
+        if kind != "app" && self.inner.startup_store.get(&agent_id).is_none() {
+            self.inner
+                .startup_store
+                .upsert(StoredAgentStartup {
+                    spec: AgentStartupSpec {
+                        agent_id: agent_id.clone(),
+                        server_id: self.inner.server_id.clone(),
+                        kind: kind.clone(),
+                        name: request.name.clone(),
+                        cwd: request.cwd.clone(),
+                        command: launch.command.clone(),
+                        args: launch.args.clone(),
+                        publish_ports: launch.publish_ports.clone(),
+                        enabled: true,
+                        generation: 1,
+                    },
+                    workspace_id: self.inner.workspace_id.clone(),
+                    workload_credential: workload_credential.clone(),
+                    last_host_epoch: self.inner.host_epoch.clone(),
+                    initial_writes: launch.initial_writes.clone(),
+                    cols: request.cols,
+                    rows: request.rows,
+                })
+                .map_err(startup_store_error)?;
+        }
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
             workspace_id: self.inner.workspace_id.clone(),
@@ -411,22 +432,6 @@ impl ControllerRuntime {
             workload_credential: workload_credential.clone(),
         };
         let env = self.process_environment(Some((&agent_id, &workload_credential)));
-        let network_proxy = agent_network_proxy_url(&self.inner.network_proxy_url, &agent_id);
-        let launch = if cfg!(target_os = "macos") {
-            native_network_launch(
-                self.inner.sandbox_executable.as_deref(),
-                &network_proxy,
-                &agent_id,
-                launch,
-            )
-        } else {
-            sandbox_launch(
-                self.inner.sandbox_executable.as_deref(),
-                &network_proxy,
-                &agent_id,
-                launch,
-            )
-        };
         let response = self
             .inner
             .host
@@ -532,6 +537,9 @@ impl ControllerRuntime {
                 workspace_id: self.inner.workspace_id.clone(),
                 workload_credential,
                 last_host_epoch: self.inner.host_epoch.clone(),
+                initial_writes: vec![],
+                cols: 120,
+                rows: 36,
             })
             .map_err(startup_store_error)?;
         Ok(spec)
@@ -561,10 +569,55 @@ impl ControllerRuntime {
             .map_err(startup_store_error)
     }
 
+    pub fn persist_stopped_startup(&self, agent_id: &str) -> Result<(), ProtocolError> {
+        if let Some(mut entry) = self.inner.startup_store.get(agent_id) {
+            entry.spec.enabled = false;
+            self.inner
+                .startup_store
+                .upsert(entry)
+                .map_err(startup_store_error)?;
+        }
+        Ok(())
+    }
+
     pub async fn restore_startup_agents(
         &self,
         active_agent_ids: &[String],
     ) -> Vec<(String, Result<AgentInfo, ProtocolError>)> {
+        let _guard = self.inner.recovery_lock.lock().await;
+        let mut running_ids = HashSet::new();
+        // A spawn ACK can be lost. The Host inventory, rather than cached
+        // Controller state or a PID, decides whether an instance is missing.
+        match self
+            .inner
+            .host
+            .request(
+                HostCommand::Sync {
+                    cursors: Default::default(),
+                },
+                None,
+            )
+            .await
+        {
+            Ok(HostResponse::Synced { processes, .. }) => {
+                for process in processes {
+                    if process.running {
+                        running_ids.insert(process.process_id.clone());
+                    }
+                    let _ = self.upsert_process(process, None);
+                }
+            }
+            Ok(_) => {
+                return vec![(
+                    "host".into(),
+                    Err(ProtocolError::new(
+                        "host_protocol_error",
+                        "inventory returned an unexpected response",
+                    )),
+                )]
+            }
+            Err(error) => return vec![("host".into(), Err(protocol_error("host_error", error)))],
+        }
         let active: HashSet<_> = active_agent_ids.iter().map(String::as_str).collect();
         let entries = self.inner.startup_store.entries();
         let mut results = Vec::new();
@@ -573,20 +626,36 @@ impl ControllerRuntime {
             if entry.workspace_id != self.inner.workspace_id
                 || entry.spec.server_id != self.inner.server_id
                 || !entry.spec.enabled
-                || entry.last_host_epoch == self.inner.host_epoch
                 || !active.contains(agent_id.as_str())
             {
                 continue;
             }
-            let result = match self.spawn_startup(&entry).await {
-                Ok(info) => {
-                    entry.last_host_epoch.clone_from(&self.inner.host_epoch);
-                    self.inner
-                        .startup_store
-                        .upsert(entry)
-                        .map(|()| info)
-                        .map_err(startup_store_error)
+            if running_ids.contains(&agent_id) {
+                if let Ok(agent) = self.get(&agent_id) {
+                    if let Ok(agent) = agent.lock() {
+                        if !agent.info.status.is_terminal() {
+                            results.push((agent_id, Ok(agent.info.clone())));
+                            continue;
+                        }
+                    }
                 }
+            }
+            // Cached success can refer to a process that has since exited.
+            // Persist a new attempt before spawning a missing instance.
+            entry.spec.generation = entry.spec.generation.saturating_add(1);
+            if let Err(error) = self.inner.startup_store.upsert(entry.clone()) {
+                results.push((agent_id, Err(startup_store_error(error))));
+                continue;
+            }
+            let result = match self.spawn_startup(&entry).await {
+                Ok(info) => self
+                    .inner
+                    .startup_store
+                    .update(&agent_id, |current| {
+                        current.last_host_epoch.clone_from(&self.inner.host_epoch)
+                    })
+                    .map(|()| info)
+                    .map_err(startup_store_error),
                 Err(error) => Err(error),
             };
             results.push((agent_id, result));
@@ -595,6 +664,23 @@ impl ControllerRuntime {
     }
 
     pub fn startup_candidate_ids(&self) -> Vec<String> {
+        let mut ids: Vec<_> = self
+            .inner
+            .startup_store
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.workspace_id == self.inner.workspace_id
+                    && entry.spec.server_id == self.inner.server_id
+                    && entry.spec.enabled
+            })
+            .map(|entry| entry.spec.agent_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    pub fn automatic_startup_candidate_ids(&self) -> Vec<String> {
         self.inner.startup_store.candidate_ids(
             &self.inner.workspace_id,
             &self.inner.server_id,
@@ -602,7 +688,66 @@ impl ControllerRuntime {
         )
     }
 
+    pub async fn restore_runtime(&self, active: &[String]) -> treer_protocol::RuntimeRestoreReport {
+        use treer_protocol::{RuntimeRestoreItem, RuntimeRestoreReport, RuntimeRestoreState};
+        let requested_at = Utc::now();
+        let results = self.restore_startup_agents(active).await;
+        let mut items: Vec<_> = results
+            .into_iter()
+            .map(|(id, result)| {
+                let (state, message) = match result {
+                    Ok(info) => (
+                        if info.started_at <= requested_at {
+                            RuntimeRestoreState::Attached
+                        } else {
+                            RuntimeRestoreState::Started
+                        },
+                        None,
+                    ),
+                    Err(error) => (
+                        RuntimeRestoreState::Failed,
+                        Some(format!("{}: {}", error.code, error.message)),
+                    ),
+                };
+                RuntimeRestoreItem {
+                    workload_id: id,
+                    kind: "agent".into(),
+                    state,
+                    message,
+                }
+            })
+            .collect();
+        for entry in self.inner.startup_store.entries() {
+            if entry.workspace_id != self.inner.workspace_id
+                || entry.spec.server_id != self.inner.server_id
+            {
+                continue;
+            }
+            if !entry.spec.enabled || !active.contains(&entry.spec.agent_id) {
+                items.push(RuntimeRestoreItem {
+                    workload_id: entry.spec.agent_id,
+                    kind: "agent".into(),
+                    state: if entry.spec.enabled {
+                        RuntimeRestoreState::IdentityRevoked
+                    } else {
+                        RuntimeRestoreState::SkippedStopped
+                    },
+                    message: None,
+                });
+            }
+        }
+        items.sort_by(|a, b| a.workload_id.cmp(&b.workload_id));
+        RuntimeRestoreReport {
+            workspace_id: self.inner.workspace_id.clone(),
+            server_id: self.inner.server_id.clone(),
+            items,
+        }
+    }
+
     async fn spawn_startup(&self, entry: &StoredAgentStartup) -> Result<AgentInfo, ProtocolError> {
+        if !entry.spec.publish_ports.is_empty() {
+            return Err(ProtocolError::new("startup_migration_required", "legacy namespace port publications cannot be restored; update the startup command and register an explicit machine service"));
+        }
         let agent_id = &entry.spec.agent_id;
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
@@ -613,17 +758,12 @@ impl ControllerRuntime {
             cwd: entry.spec.cwd.clone(),
             workload_credential: entry.workload_credential.clone(),
         };
-        let launch = sandbox_launch(
-            self.inner.sandbox_executable.as_deref(),
-            &agent_network_proxy_url(&self.inner.network_proxy_url, agent_id),
-            agent_id,
-            AgentLaunch {
-                command: entry.spec.command.clone(),
-                args: entry.spec.args.clone(),
-                initial_writes: vec![],
-                publish_ports: entry.spec.publish_ports.clone(),
-            },
-        );
+        let launch = AgentLaunch {
+            command: entry.spec.command.clone(),
+            args: entry.spec.args.clone(),
+            initial_writes: entry.initial_writes.clone(),
+            publish_ports: entry.spec.publish_ports.clone(),
+        };
         let response = self
             .inner
             .host
@@ -635,13 +775,16 @@ impl ControllerRuntime {
                         args: launch.args,
                         cwd: entry.spec.cwd.clone(),
                         env: self.process_environment(Some((agent_id, &entry.workload_credential))),
-                        cols: 120,
-                        rows: 36,
+                        cols: entry.cols,
+                        rows: entry.rows,
                         metadata: serde_json::to_string(&metadata)
                             .map_err(|error| protocol_error("metadata_error", error))?,
                     },
                 },
-                Some(format!("startup:{}:{agent_id}", self.inner.host_epoch)),
+                Some(format!(
+                    "startup:{}:{agent_id}:{}",
+                    self.inner.host_epoch, entry.spec.generation
+                )),
             )
             .await
             .map_err(|error| protocol_error("host_error", error))?;
@@ -651,7 +794,24 @@ impl ControllerRuntime {
                 "startup spawn returned an unexpected response",
             ));
         };
-        self.upsert_process(process, None)
+        let info = self.upsert_process(process, None)?;
+        if !launch.initial_writes.is_empty() {
+            self.inner
+                .host
+                .request(
+                    HostCommand::Write {
+                        process_id: agent_id.clone(),
+                        writes: launch.initial_writes,
+                    },
+                    Some(format!(
+                        "startup:{}:{agent_id}:{}:launch",
+                        self.inner.host_epoch, entry.spec.generation
+                    )),
+                )
+                .await
+                .map_err(|error| protocol_error("host_error", error))?;
+        }
+        Ok(info)
     }
 
     pub async fn exec_machine(
@@ -917,11 +1077,13 @@ impl ControllerRuntime {
     }
 
     fn process_environment(&self, agent: Option<(&str, &str)>) -> BTreeMap<String, String> {
-        let network_proxy_url = agent.map_or_else(
-            || self.inner.network_proxy_url.clone(),
-            |(agent_id, _)| agent_network_proxy_url(&self.inner.network_proxy_url, agent_id),
-        );
         let mut env = BTreeMap::from([
+            ("TREER_MACHINE_TOKEN".to_string(), String::new()),
+            ("TREER_OPERATOR_CREDENTIAL".to_string(), String::new()),
+            ("TREER_ENROLLMENT_KEY".to_string(), String::new()),
+            ("TREER_WORKLOAD_CREDENTIAL".to_string(), String::new()),
+            ("TREER_AGENT_ID".to_string(), String::new()),
+            ("TREER_IDENTITY_MODE".to_string(), String::new()),
             (
                 "TREER_WORKSPACE_ID".to_string(),
                 self.inner.workspace_id.clone(),
@@ -932,11 +1094,8 @@ impl ControllerRuntime {
                 self.inner.agent_server_url.clone(),
             ),
         ]);
-        env.extend(network_environment(
-            network_proxy_url,
-            self.inner.sandbox_executable.is_some(),
-        ));
         if let Some((agent_id, workload_credential)) = agent {
+            env.insert("TREER_IDENTITY_MODE".to_string(), "agent".to_string());
             env.insert("TREER_AGENT_ID".to_string(), agent_id.to_string());
             env.insert(
                 "TREER_WORKLOAD_CREDENTIAL".to_string(),
@@ -1017,14 +1176,7 @@ impl ControllerRuntime {
             ));
         }
         if let Some(interface) = self.interface_for(agent_id, "prompt.submit")? {
-            crate::agent_interface::submit_prompt(
-                agent_id,
-                &interface,
-                operation_id,
-                text,
-                self.inner.sandbox_executable.is_some(),
-            )
-            .await?;
+            crate::agent_interface::submit_prompt(agent_id, &interface, operation_id, text).await?;
             return self.update_agent_status(agent_id, AgentStatus::Working);
         }
         let bracketed = self
@@ -1067,13 +1219,7 @@ impl ControllerRuntime {
                 "Agent does not expose abort",
             )
         })?;
-        crate::agent_interface::abort(
-            agent_id,
-            &interface,
-            operation_id,
-            self.inner.sandbox_executable.is_some(),
-        )
-        .await?;
+        crate::agent_interface::abort(agent_id, &interface, operation_id).await?;
         let agent = self.get(agent_id)?;
         agent
             .lock()
@@ -1095,14 +1241,7 @@ impl ControllerRuntime {
                     "Agent does not expose transcript.read",
                 )
             })?;
-        crate::agent_interface::transcript(
-            agent_id,
-            &interface,
-            cursor,
-            limit,
-            self.inner.sandbox_executable.is_some(),
-        )
-        .await
+        crate::agent_interface::transcript(agent_id, &interface, cursor, limit).await
     }
 
     pub async fn register_interface(
@@ -1214,12 +1353,7 @@ impl ControllerRuntime {
                 "cached Agent Interface descriptor is invalid",
             ));
         }
-        let manifest = crate::agent_interface::manifest(
-            agent_id,
-            descriptor,
-            self.inner.sandbox_executable.is_some(),
-        )
-        .await?;
+        let manifest = crate::agent_interface::manifest(agent_id, descriptor).await?;
         let mut manifest_capabilities = manifest.capabilities;
         manifest_capabilities.sort();
         manifest_capabilities.dedup();
@@ -1316,13 +1450,7 @@ impl ControllerRuntime {
                     Ok(Some(current)) if current.instance_id == descriptor.instance_id => current,
                     _ => break,
                 };
-                match crate::agent_interface::status(
-                    &agent_id,
-                    &current,
-                    runtime.inner.sandbox_executable.is_some(),
-                )
-                .await
-                {
+                match crate::agent_interface::status(&agent_id, &current).await {
                     Ok(status) => {
                         consecutive_failures = 0;
                         let terminal = runtime
@@ -1510,6 +1638,7 @@ impl ControllerRuntime {
         operation_id: &str,
         agent_id: &str,
     ) -> Result<AgentInfo, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
         if let Some(mut entry) = self.inner.startup_store.get(agent_id) {
             entry.spec.enabled = false;
             entry.spec.generation = entry.spec.generation.saturating_add(1);
@@ -1593,6 +1722,7 @@ impl ControllerRuntime {
             interface,
         };
         let agent = Arc::new(Mutex::new(ControllerAgent {
+            stream_epoch: process.stream_epoch,
             info: info.clone(),
             workload_credential: metadata.workload_credential,
             text,
@@ -1607,6 +1737,15 @@ impl ControllerRuntime {
             .insert(metadata.agent_id, agent);
         if !process.running {
             self.remove_cached_interface(&info.agent_id);
+            if process.exit_code == Some(0) {
+                if let Some(mut entry) = self.inner.startup_store.get(&info.agent_id) {
+                    entry.spec.enabled = false;
+                    self.inner
+                        .startup_store
+                        .upsert(entry)
+                        .map_err(startup_store_error)?;
+                }
+            }
         }
         let _ = self.inner.events.send(info.clone());
         Ok(info)
@@ -1683,6 +1822,9 @@ impl ControllerRuntime {
     fn apply_output(&self, chunk: HostOutputChunk) {
         if let Ok(agent) = self.get(&chunk.process_id) {
             if let Ok(mut agent) = agent.lock() {
+                if agent.stream_epoch != chunk.stream_epoch {
+                    return;
+                }
                 let previous_status = agent.info.status;
                 let plain = strip_ansi_escapes::strip(&chunk.data);
                 agent.text.push_str(&String::from_utf8_lossy(&plain));
@@ -1716,6 +1858,24 @@ impl ControllerRuntime {
     }
 
     fn apply_process(&self, process: HostProcessInfo) {
+        if let Ok(agent) = self.get(&process.process_id) {
+            if let Ok(agent) = agent.lock() {
+                if agent.info.started_at > process.started_at
+                    || (agent.stream_epoch != process.stream_epoch
+                        && agent.info.started_at == process.started_at)
+                {
+                    return;
+                }
+            }
+        }
+        if !process.running && process.exit_code == Some(0) {
+            if let Some(mut entry) = self.inner.startup_store.get(&process.process_id) {
+                entry.spec.enabled = false;
+                if let Err(error) = self.inner.startup_store.upsert(entry) {
+                    warn!(%error, "failed to persist completed Agent state");
+                }
+            }
+        }
         let _ = self.inner.process_events.send(process.clone());
         let Ok(agent) = self.get(&process.process_id) else {
             let _ = self.upsert_process(process, None);

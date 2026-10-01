@@ -63,9 +63,9 @@ virtual host across runtime replacement and Controller reconnects:
 
 ```bash
 treer app create --machine build-machine --name docs --port 8080 \
-  --hostname docs.internal python3 -- -m http.server 8080
+  python3 -- -m http.server 8080
 treer app create --public --machine build-machine --name public-docs --port 8081 \
-  --hostname public-docs.internal python3 -- -m http.server 8081
+  python3 -- -m http.server 8081
 treer app list
 treer app restart docs
 ```
@@ -252,7 +252,7 @@ artifacts, validates both executables, and replaces them atomically. `--proxy`
 selects an explicit download source; without it, the updater orders the
 machine's installed services by server ID and uses the first service's Proxy.
 From a normal host shell it asks every installed stable Host to restart its
-Controller. From a managed Agent sandbox it restarts only that Agent's
+Controller. From a managed Agent context it restarts only that Agent's
 Controller and checks the new epoch through `TREER_AGENT_SERVER_URL`; the shared
 binary is still available to other Controllers on their next restart. If
 activation fails, both binaries are restored and the affected Controller set is
@@ -570,26 +570,13 @@ The web Create Agent dialog includes a built-in Terminal option. It starts the
 machine user's interactive shell without injecting a command and is not stored
 as a launch profile.
 
-The dialog compares recognized launch-profile commands with the CLIs reported
-by the selected machine. A missing built-in CLI is shown as `Install <name>` in
-the Launch list. Selecting it creates an ordinary terminal Agent on that
-machine, runs the cataloged upstream installer, and then starts the CLI so the
-operator can finish login. The built-in catalog covers Codex, Claude, OpenCode,
-and Pi; a custom Cursor profile uses the same flow. The Controller rechecks its
-PATH on every heartbeat, so a successful install appears as available without a
-Controller restart. Installation does not copy provider credentials from
-another machine.
-
-Profiles store an executable and ordered arguments rather than a shell command
-string. The web editor presents them as one quoted command line and the Create
-Agent dialog can launch any saved workspace profile. The Controller starts the
-machine user's interactive shell, waits for its startup files such as `.bashrc`
-or `.zshrc` to load, and then enters the safely quoted profile command through
-the PTY. Shell operators stored as arguments are not interpreted; use an
-explicit shell executable such as `sh` with `-lc` when shell expansion is
-required. Profiles are plaintext workspace configuration and must not contain
-secrets. New workspaces include editable and deletable Codex, Claude, Pi, and
-OpenCode profiles; existing workspaces are left unchanged.
+Profiles store an executable and ordered arguments. The web editor accepts a
+quoted command line, but the Controller launches exact argv without inserting
+it into an interactive shell or guessing a provider. To load shell startup files
+or perform shell expansion, explicitly use a shell in the profile, for example
+`zsh -lc 'exec your-agent'`. Install runtimes and configure network restrictions,
+proxy variables, containers, and credentials yourself. Profiles are plaintext
+workspace configuration and must not contain secrets.
 
 `profile launch --cwd` overrides the saved working directory for that launch
 without changing the profile. The directory is relative to the selected
@@ -606,209 +593,124 @@ It does not understand agent kinds, prompts, workspaces, or the Proxy protocol.
 commands, detects agent status, exposes the local API, and rebuilds its full
 snapshot from the Host after every restart. Mutating Host commands carry stable
 operation IDs so a reconnect or retry cannot spawn or stop an agent twice.
-Codex, Claude, and launch-profile agents start inside the user's interactive
-shell before their commands are entered through the PTY. This loads shell
-configuration such as `.bashrc` or `.zshrc` before command lookup. Explicit
-`command`-kind API and CLI launches remain direct argv execution.
+Profiles and command Agents execute exact argv. Terminal starts the user's
+interactive shell. The thin `treer` client sends argv and input to this
+Controller, which owns parsing, help, skills, and all command business logic.
 
 ## Workspace network
 
-On Linux, each managed agent runs in a rootless user and network namespace. A
-TUN adapter captures its TCP traffic and sends it to the Controller's loopback
-SOCKS5 endpoint, so applications do not need to support proxy environment
-variables. Namespace sockets are created by the parent Controller process and
-passed into the namespace; this keeps the Proxy WebSocket and machine egress
-outside the sandbox. Linux requires `unshare(1)` from `util-linux` and a kernel
-that permits unprivileged user namespaces. Setup probes the same user, network,
-and mount namespace operation before saving the service configuration. When the
-host policy rejects that probe and `TREER_NETWORK_MODE` was not explicitly set,
-Treer warns and persists `proxy-env` mode instead, so Agent shells still start.
-An explicit `TREER_NETWORK_MODE=transparent` fails setup when the probe fails.
+Treer forwards explicitly registered TCP/HTTP endpoints. It does not capture
+outbound traffic, create network namespaces, change OS DNS, or inject proxy
+variables. Default network mode is `plain`. Old saved `transparent`,
+`proxy-env`, and `native-experimental` settings fail with a migration message.
+After replacing dependencies on transparent routing, persist the mode with
+`TREER_NETWORK_MODE=plain treer-agent-server service --workspace WORKSPACE_ID repair`,
+then use the restore command below. Remove an installed native extension
+using its normal OS deactivation/uninstall procedure; deleting source does not
+deactivate a previously installed extension.
 
-The namespace bind-mounts private resolver configuration with `hosts: files
-dns` and a non-loopback nameserver. This bypasses host NSS plugins such as mDNS
-that may reject workspace virtual-host suffixes before a DNS packet reaches the
-TUN adapter. It also masks the host's `nscd` socket so cached host lookups cannot
-bypass the private resolver. `tun2proxy` answers those DNS requests from its
-virtual pool and restores the original hostname for Treer routing. The host's
-resolver files and cache service are not modified, and virtual-host changes
-remain dynamic.
-
-In transparent mode the Controller clears the standard HTTP(S) and all-protocol
-proxy environment variables, because its loopback SOCKS listener is outside the
-agent network namespace and normal application traffic must enter the TUN
-adapter. `TREER_NETWORK_PROXY` remains available for diagnostics. Set
-`TREER_NETWORK_MODE=proxy-env` before starting the Controller to disable the
-transparent namespace wrapper and inject the same loopback listener through
-`ALL_PROXY`/`all_proxy` as SOCKS5h and through `HTTPS_PROXY`/`https_proxy` as
-HTTP CONNECT. Plain HTTP continues through SOCKS5h because the HTTP listener
-implements CONNECT tunnels rather than forward-proxy requests. HTTPS-only
-clients such as Codex's reqwest stack use the HTTPS proxy variable instead. The
-listener classifies locally: workspace virtual-host names from the Controller
-snapshot still take the Treer path; every other destination, including
-`api.github.com`, is dialed on this machine and does not wait on the Proxy
-WebSocket. Disconnect tears down only relayed streams, so `gh`, npm, and curl
-to the public internet keep working while the machine is Offline. In
-this mode, `NO_PROXY` and `no_proxy` contain `127.0.0.1,localhost,::1`, so
-Controller and App loopback calls do not enter the proxy path. Treer also
-configures Git to invoke its
-network bridge, so native `git://` remotes retain workspace virtual-host routing
-even though Git does not honor `ALL_PROXY`. Other TCP clients can use the same
-stdio bridge as their proxy command: `treer network connect HOST PORT`. Native
-macOS currently uses this compatibility mode; use a Linux container when
-transparent capture is required.
-Developers can build and test the owned native backend without a developer
-account using [the macOS check workflow](../native/macos-network/README.md).
-Its `native-experimental` mode requires a properly signed, activated extension
-and is not the default or a supported replacement for the Linux backend.
-A transparent Agent cannot publish an arbitrary namespace-local listener. Use
-`treer app create` for a supervised HTTP App, or register an Agent Interface
-Server for a semantic Agent UI. AIS uses the sandbox's Unix bridge directly;
-when its descriptor includes `ui_path`, the browser iframe reaches that path on
-the Interface port without a service record. Operator-created Agent-scoped
-services use the same bridge. `publish_ports` remains an internal Managed App
-and runtime mechanism, not an Agent CLI capability.
-
-Managed agents reach the Controller's local API through the reserved TEST-NET-1
-address `192.0.2.1`. Using an IP bypasses libc NSS and mDNS entirely. The local
-SOCKS endpoint recognizes this address and bridges HTTP and WebSocket traffic
-directly to the Controller's loopback listener; it is not a workspace virtual
-host and never traverses the Proxy. This keeps `treer` usable inside transparent
-network namespaces.
-
-In transparent mode, every non-loopback TCP connection (apart from the reserved
-local API route) asks the Proxy to resolve the destination and apply network
-policy. For an ordinary hostname or IP address, the Proxy returns a direct route
-and the source Controller opens the outbound socket locally; application payload
-bytes do not traverse the Proxy. Workspace virtual-host streams are multiplexed
-as binary frames over the Controllers' existing `/agent/connect` WebSockets, so
-target machines need no inbound port. Each relayed stream has an independent
-flow-control window, and terminal and relayed network frames share the same
-authenticated connection.
-
-The central usage ledger meters relayed payloads. New Controller/Proxy pairs also
-report successful Direct TCP writes/UDP datagrams every five seconds and when
-the association closes.
-The existing traffic API and Audit view show these as `direct_network`, meter
-version 2, with zero billable bytes. Their `payload_frames` field counts socket
-writes, not Proxy frames or IP packets. Older Proxies do not request reports;
-older Controllers do not produce them. Proxy-env internet bypass is not counted.
-New peers negotiate durable receipts: pending cumulative reports live under the
-Controller root at `.treer/network-usage`, survive restart, and are removed only
-after a database commit acknowledgement. Reconnect and revocation do not discard
-these pending reports. A sudden crash can still lose bytes since the latest
-five-second checkpoint; delayed deltas appear in their commit-time hour. Finished receipts are retained for 90 days; pending reports must be recovered
-within that window. Legacy Direct reporting remains best effort. Relay counters flush every ten seconds.
-
-`GET /api/workspaces/{workspace_id}/traffic/agents?hours=24` returns Agent
-detail for Controller network relay and Direct streams. Its source/destination
-IDs are qualified by `agent`, `machine` or `internet` endpoint types. The Audit
-view shows sent/received totals per Agent. Detail uses a separate table and must
-not be added to machine totals. It does not backfill historical Agent identities
-or add Agent attribution to browser/ingress traffic without Agent metadata.
-See the [Mac networking investigation](research/2026-09-05-macos-transparent-network.md)
-for platform evidence and remaining parity gates.
-
-Network access is allowed by default. A service is a durable record for either a
-long-running host-network process or a managed runtime's private loopback:
-machine, optional runtime, target host, target port, and TCP or HTTP protocol.
-Virtual hosts are independent aliases that map any valid hostname to a service.
-Logged-in workspace users manage both from the Network view or authenticated
-public API. Managed Agents cannot mutate service, virtual-host, or ingress
-records. An existing alias such as `api.internal` remains directly usable:
+Start a process yourself or use a Managed App. An authenticated Agent registers
+its own loopback endpoint; an operator selects `--machine` and may configure
+another reachable target address. External containers must expose a reachable
+port themselves.
 
 ```bash
-curl http://api.internal/
+treer service register --name api --protocol http --port 3000
+treer service list
+treer service forward SERVICE_ID --listen 127.0.0.1:8080
+# In another terminal:
+curl http://127.0.0.1:8080/
 ```
 
-Deleting a machine also deletes its services and their virtual hosts. Deleting
-an Agent deletes services scoped to that Agent. Deleting a service removes its
-aliases but does not stop the external process. Virtual host names are exact and
-case-insensitive; no suffix or naming convention is reserved. Only explicitly
-configured records are treated as workspace virtual hosts. Other hostnames and
-IP addresses use ordinary outbound access through the source machine, subject
-to the same network policy boundary.
+Forwarding binds only a client-side loopback listener and authenticates each
+connection. Data and half-close pass through without HTTP interpretation. The
+service record is durable, but a record alone does not supervise an externally
+started process. Use a Managed App for a supervised HTTP service or a saved
+Agent launch for another protocol. Deleting a service removes its publication,
+not the external process. Removing an Agent or machine removes its owned records.
 
-Virtual-host changes are active without a Proxy or Agent Server restart. The
-Proxy updates its in-memory routing table and immediately broadcasts a full,
-revisioned snapshot to every online Controller in that workspace. A Controller
-receives a fresh snapshot after every WebSocket registration and ignores stale
-revisions on the same connection. The Proxy also reloads PostgreSQL and broadcasts
-snapshots every five seconds, which repairs missed or out-of-band changes.
-
-HTTP services can also be published through wildcard HTTPS ingress. Configure
-one wildcard domain on the Proxy; a logged-in workspace user creates the
-endpoint from the Network view or authenticated public API. This changes only
-PostgreSQL routing metadata and does not create another DNS record or TLS
-certificate:
+For HTTP publication, configure wildcard DNS and TLS once at the Proxy edge:
 
 ```bash
 export TREER_INGRESS_PUBLIC_URL='https://apps.treer.ai/'
+treer service publish SERVICE_ID
+# Explicit anonymous access:
+treer service publish SERVICE_ID --access public
+treer service unpublish SERVICE_ID
 ```
 
-`public` leaves authentication to the application. `workspace` redirects human
-visitors through their Treer login and accepts a managed Agent's audience-bound
-token in `Treer-Authorization`. Application `Authorization`, cookies,
-`Set-Cookie`, streaming responses, and WebSocket upgrades pass through unchanged.
-Treer consumes its own ingress cookie/header and strips client-supplied
-`X-Treer-*` identity headers before forwarding. Only HTTP services can be
-published. Disabling or deleting an ingress does not stop the service.
+The Proxy assigns `svc-<service-id>.<base-domain>`; no custom host or slug is
+accepted for new publication. The default `workspace` access requires current
+membership or a service-audience token. `public` accepts anonymous traffic, so
+the application owns any authentication it needs. HTTP bodies, streaming, and
+WebSocket upgrades remain supported. Treer consumes its gateway credentials and
+strips client-supplied Treer identity headers before forwarding. Legacy alias
+records can still be read; they no longer configure system DNS or traffic capture.
 
-The Proxy also records an hourly logical-usage ledger for payload successfully
-delivered through Treer. Meter version 1 treats payload bytes in both directions
-as billable and classifies them as `virtual_network`, `service_ingress`,
-`virtual_host`, or `agent_interface`. Browser-side traffic uses the stable
-`browser` client endpoint, so requests appear as `browser` to the destination
-machine and responses use the reverse direction. Workspace members can query
-the last 1 to 720 hourly buckets without scanning individual connections:
-
-```text
-GET /api/workspaces/<workspace_id>/traffic?hours=24
-```
-
-The response reports the traffic class, endpoint types and IDs, raw
-`payload_bytes`, `payload_frames`, `billable_bytes`, and `meter_version`.
-Queries include the serving Proxy's not-yet-flushed counters; counters flush to
-PostgreSQL every ten seconds and on graceful shutdown. Another Proxy replica's
-newest counters may remain invisible until its next flush. Legacy machine
-traffic rows remain readable during the 90-day retention window. NATS protocol
-overhead, control-plane messages, retries, PTY bytes, and direct internet egress
-are intentionally excluded: broker topology must not change customer usage.
-This aggregate ledger is a billing foundation, not yet an invoice-grade source;
-hard process failure can lose the pending interval until a durable usage journal
-is added.
-
-Deleting an online machine sends a confirmed shutdown command over its existing
-Controller WebSocket before revoking the machine credential. A capable
-Controller then stops the local `nohup` process, systemd user service, or macOS
-LaunchAgent, which also terminates its Host and managed agents. The service
-remains installed and can still be started manually. Offline machines and older
-Controllers are deleted without waiting; their revoked credential prevents a
-later reconnect.
-
-Authorization is a separate Proxy subsystem. The current policy engine defaults
-to allow and evaluates ordered asynchronous policy evaluators using
-subject/action/resource context. Future agent, terminal, file, shell, and
-network rules can share that boundary without changing virtual-host resolution.
-Agent proxy URLs carry the agent ID through SOCKS5 authentication, so network
-policy requests already identify their originating agent; local machine shells
-fall back to a machine-level subject.
-
-Managed Agents cannot publish their sandbox through discovery records. The
-`treer network` command exposes only the stdio connection bridge:
+Managed Apps allocate their service and platform origin automatically:
 
 ```bash
-treer network connect database.internal 5432
+treer app create --name dashboard --port 3000 -- /path/to/dashboard
 ```
 
-Use `treer app create` for a supervised HTTP process with a stable internal
-hostname. Core allocates its service and virtual host atomically and owns their
-lifecycle. Use `treer interface register` for an Agent UI. Proxy rejects direct
-Agent service, virtual-host, and ingress mutations with `managed_app_required`,
-including requests from an older CLI. Logged-in users retain direct network
-record management for operator-supervised machine services.
+Use `--public` only to request anonymous HTTP access. Do not pass `--hostname`.
+Apps retain their own configuration, secrets, data, and upgrade procedures.
+
+Raw public TCP is separate from HTTP ingress. Configure a dedicated range on
+the Proxy, expose that range through the deployment firewall, and publish
+explicitly. There is no workspace-login protocol on an anonymous raw TCP socket:
+
+```bash
+# Proxy process configuration:
+export TREER_PUBLIC_TCP_PORT_RANGE=20000-20100
+export TREER_PUBLIC_TCP_BIND_ADDRESS=0.0.0.0
+# Agent/operator command:
+treer service publish SERVICE_ID --tcp --access public
+treer service unpublish SERVICE_ID --tcp
+```
+
+The response returns the allocated endpoint. Allocation is stable while the
+mapping exists; exhaustion or unavailable listeners is an explicit error.
+Deleting the service or unpublishing its TCP mapping closes active traffic.
+For deployments with multiple Proxy replicas, route the configured ports to the
+Proxy listener fleet consistently and share the registry database.
+
+`GET /api/workspaces/WORKSPACE_ID/traffic?hours=24` still exposes observed
+Treer-relayed logical payload usage. Historical Direct/virtual-network rows
+remain readable during retention. Ordinary internet egress is no longer observed
+or reported by Treer, and the aggregate ledger is not invoice-grade accounting.
+
+## Restart recovery
+
+After a machine reboot, run the machine-side bootstrap binary, since the thin
+CLI cannot contact a Controller that is down:
+
+```bash
+treer-agent-server restore --workspace WORKSPACE_ID
+# With an already-running Controller:
+treer runtime restore --all
+```
+
+Recovery reuses the existing installation without re-enrollment. Ordinary
+Agents save their actual launch snapshot before spawning. The Controller first
+checks Host inventory, so a hot restart or repeated restore attaches surviving
+processes. Missing intended-running processes restart under their stable Agent
+ID after Proxy credential validation. Explicitly stopped/deleted/revoked items
+stay stopped. Normal successful Agent exit disables recovery; failed launches
+can be retried explicitly. Managed Apps are restored by their existing Proxy
+reconciler, not a duplicate local Agent snapshot. Service registrations and
+public mappings persist independently of process availability.
+
+A restore report distinguishes attached, started, skipped stopped, revoked,
+failed, and waiting endpoints. An unavailable executable, missing directory,
+revoked credential, or offline Proxy is a visible failure. Recovery does not
+reconstruct in-memory conversations, PTY history lost with the Host, application
+data not saved by the application, or open TCP sessions. Optional systemd or
+LaunchAgent startup remains an operator choice. Preserve the machine state
+directory, credentials, and required runtime files.
 
 ## Agent collaboration
+
 
 The `treer` binary talks to the local agent server by default. Managed agents
 receive its location in `PATH` and `TREER_BIN`, so they can discover and contact
@@ -955,7 +857,7 @@ name and is canonicalized to the stable `service_id`:
 
 ```bash
 TOKEN="$(treer token create api)"
-curl -H "Authorization: Bearer $TOKEN" http://api.internal/
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/
 treer token create api --json
 ```
 
@@ -991,7 +893,7 @@ To create a peer:
 treer agent admin create --machine SERVER_ID --kind command --name shell -- /bin/sh
 ```
 
-Print the agent skill bundled with the installed binary:
+Print the agent skill served by the connected Controller:
 
 ```bash
 treer --skill
@@ -1000,24 +902,16 @@ treer --skill install
 treer --skill macos-container
 ```
 
-This does not require a running proxy. The CLI contract is
-`skills/treer/SKILL.md`. Recipe installs use `skills/treer-install/SKILL.md`.
-Apple container Host setup on a Mac uses
-`skills/treer-macos-container/SKILL.md`. They are embedded at build time so
-the printed instructions match the binary.
+Help and skills require a reachable authenticated Controller; the thin client
+contains no product command parser or embedded skill copy. The Controller embeds
+`skills/treer/SKILL.md`, `skills/treer-install/SKILL.md`, and
+`skills/treer-macos-container/SKILL.md`. For a stopped Controller, use
+`treer-agent-server --help` and its restore/service commands directly.
 
-Create an installer that receives the install skill as its first prompt:
-
-```bash
-treer agent admin create --machine SERVER_ID --kind auto --name installer \
-  --recipe https://github.com/example/recipe.git
-```
-
-A successful install saves a launch profile (name and `run` from
-`treer-agent.json`). Each created Agent is one thread. Extra conversations
-use Launch to create another Agent. A recipe may reuse an already healthy
-same-type app server, but each Agent must register its own AIS adapter with a
-unique instance ID and thread binding. Do not run Install recipe again.
+Core no longer selects an installer provider or interprets `--recipe`. Install
+and configure your runtime separately, save a launch profile, then send installer
+instructions through the selected runtime's interface. The install skill remains
+available as documentation for user-owned installers.
 
 ## Checks
 
@@ -1035,11 +929,3 @@ The complete gate checks documentation links, release tooling, the control-plane
 React build, updater tests, and the full Rust workspace. Workspace App and AIS
 adapter tests are focused, opt-in checks; while iterating on messaging, use
 `just app-test` and `just messaging-e2e`.
-
-Experimental native UDP uses the owned helper and matching new Proxy/Controller
-binaries. Register UDP destinations with service `protocol: "udp"`; TCP/HTTP
-services do not accept UDP. Policy remains `network.connect` with the same Agent,
-host and port rules. Direct reports count UDP payload bytes and datagrams, excluding
-local framing. Associations expire after 60 seconds idle. The owned extension supplies exact-domain supplemental DNS configuration and
-restores persistent virtual addresses; signed system integration remains unverified.
-Linux private Agent UDP ingress remains unsupported.

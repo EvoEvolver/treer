@@ -98,6 +98,142 @@ pub(super) async fn probe_machine_service(
     Ok(Json(json!({ "service": service, "health": result })))
 }
 
+pub(super) async fn machine_restore_runtime(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    if headers.contains_key(AGENT_ID_HEADER) {
+        return Err(ApiFailure::forbidden(
+            "operator_required",
+            "runtime restore requires the machine operator identity",
+        ));
+    }
+    let subject = service_subject(&state, &machine, &headers, &workspace_id).await?;
+    let target = state.resolve_server(&workspace_id, &server_id).await?;
+    require_machine_target(Some(&subject), &target.server_id).map_err(|_| {
+        ApiFailure::forbidden(
+            "machine_restore_scope",
+            "machine operator may restore only its authenticated machine",
+        )
+    })?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            "runtime.restore",
+            PolicyResource::new(RESOURCE_MACHINE, &target.server_id),
+        ))
+        .await
+        .map_err(|error| ApiFailure::forbidden(&error.code, &error.message))?;
+    restore_machine_runtime(
+        State(state),
+        Extension(auth),
+        Path((workspace_id, target.server_id)),
+    )
+    .await
+}
+
+pub(super) async fn restore_machine_runtime(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let server = state.resolve_server(&workspace_id, &server_id).await?;
+    let mut report = state
+        .send_command(
+            &workspace_id,
+            &server.server_id,
+            AgentCommand::RestoreRuntime {},
+        )
+        .await?;
+    let previous = auth
+        .list_app_deployments_for_server(&workspace_id, &server.server_id)
+        .await?;
+    reconcile_app_deployments_for_server(
+        state.clone(),
+        auth.clone(),
+        workspace_id.clone(),
+        server.server_id.clone(),
+    )
+    .await;
+    let apps = auth
+        .list_app_deployments_for_server(&workspace_id, &server.server_id)
+        .await?;
+    let items = report
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            ApiFailure::internal(
+                "invalid_restore_report",
+                "Controller returned an invalid restoration report",
+            )
+        })?;
+    for app in apps {
+        let runtime = if let Some(id) = &app.runtime_agent_id {
+            state.resolve_agent(&workspace_id, id).await.ok()
+        } else {
+            None
+        };
+        let (status, message) = if app.desired_state == treer_protocol::AppDesiredState::Stopped {
+            ("skipped_stopped", None)
+        } else if let Some(error) = app.last_error.as_ref() {
+            ("failed", Some(error.clone()))
+        } else if runtime
+            .as_ref()
+            .is_some_and(|agent| !agent.status.is_terminal())
+        {
+            let attached = previous.iter().any(|old| {
+                old.app_id == app.app_id && old.runtime_agent_id == app.runtime_agent_id
+            });
+            (
+                if attached { "attached" } else { "started" },
+                Some("process running; application endpoint readiness is not verified".to_string()),
+            )
+        } else {
+            ("failed",Some("App reconciliation did not produce a running instance; inspect the machine runtime and retry restore".to_string()))
+        };
+        items.push(json!({"workload_id":app.app_id,"kind":"app","state":status,"message":message}));
+    }
+    for service in auth
+        .list_machine_services(&workspace_id)
+        .await?
+        .into_iter()
+        .filter(|service| service.server_id == server.server_id)
+    {
+        let stopped = previous.iter().any(|app| {
+            app.service_id == service.service_id
+                && app.desired_state == treer_protocol::AppDesiredState::Stopped
+        });
+        if stopped {
+            items.push(json!({"workload_id":service.service_id,"kind":"service","state":"skipped_stopped","message":"owning App is intentionally stopped"}));
+            continue;
+        }
+        let probe = state.send_command(
+            &workspace_id,
+            &server.server_id,
+            AgentCommand::ProbeNetwork {
+                host: service.target_host.clone(),
+                port: service.target_port,
+                target_agent_id: service.target_agent_id.clone(),
+                timeout_ms: 1000,
+            },
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), probe).await;
+        let (status,message)=match result {
+            Ok(Ok(value)) if value.get("healthy").and_then(Value::as_bool) == Some(true) => ("attached", "registered endpoint accepts TCP connections".to_string()),
+            Ok(Ok(value)) => ("waiting_endpoint",value.get("error").and_then(Value::as_str).unwrap_or("registered endpoint is not reachable; external processes are not supervised").to_string()),
+            Ok(Err(error)) => ("waiting_endpoint",error.message),
+            Err(_) => ("waiting_endpoint","endpoint probe timed out; retry restore after the endpoint starts".to_string()),
+        };
+        items.push(json!({"workload_id":service.service_id,"kind":"service","state":status,"message":message}));
+    }
+    Ok(Json(report))
+}
+
 pub(super) async fn list_virtual_network_hosts(
     Extension(auth): Extension<AuthStore>,
     Path(workspace_id): Path<String>,
@@ -114,11 +250,11 @@ pub(super) async fn create_virtual_network_host(
     Path(workspace_id): Path<String>,
     Json(request): Json<CreateVirtualNetworkHostRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let host = auth
-        .create_virtual_network_host(&workspace_id, &session.user_id, request)
-        .await?;
-    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
-    Ok(Json(json!({ "host": host })))
+    let _ = (&state, &auth, &session, &workspace_id, &request);
+    Err(ApiFailure::bad_request(
+        "virtual_hosts_retired",
+        "register services by stable ID; platform assigns public domains",
+    ))
 }
 
 pub(super) async fn delete_virtual_network_host(
@@ -784,6 +920,465 @@ pub(super) async fn agent_network_publication_forbidden() -> ApiFailure {
     )
 }
 
+pub(super) async fn agent_create_machine_service(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(mut request): Json<CreateMachineServiceRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    if !headers.contains_key(AGENT_ID_HEADER) {
+        let server_id = machine.server_id.as_deref().ok_or_else(|| {
+            ApiFailure::forbidden(
+                "machine_identity_required",
+                "bound machine identity required",
+            )
+        })?;
+        if (!request.server_id.is_empty() && request.server_id != server_id)
+            || request.target_agent_id.is_some()
+        {
+            return Err(ApiFailure::forbidden(
+                "service_not_owned",
+                "machine may register only its own external endpoints",
+            ));
+        }
+        request.server_id = server_id.to_owned();
+        let subject = PolicySubject::Machine {
+            server_id: server_id.to_owned(),
+        };
+        policy
+            .authorize(&PolicyRequest::new(
+                &workspace_id,
+                subject,
+                "service.create",
+                PolicyResource::new(RESOURCE_MACHINE_SERVICE, "new")
+                    .with_attribute("server_id", server_id),
+            ))
+            .await?;
+        let service = auth
+            .create_machine_service(&workspace_id, server_id, request)
+            .await?;
+        return Ok(Json(json!({"service":service})));
+    }
+    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let PolicySubject::Agent {
+        server_id,
+        agent_id,
+    } = &subject
+    else {
+        unreachable!()
+    };
+    if (!request.server_id.is_empty() && request.server_id != *server_id)
+        || request
+            .target_agent_id
+            .as_ref()
+            .is_some_and(|id| id != agent_id)
+    {
+        return Err(ApiFailure::forbidden(
+            "service_not_owned",
+            "service registration must use the authenticated Agent and machine",
+        ));
+    }
+    request.server_id = server_id.clone();
+    request.target_agent_id = Some(agent_id.clone());
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject.clone(),
+            "service.create",
+            machine_service_policy_resource(
+                "new",
+                &request.name,
+                server_id,
+                Some(agent_id),
+                &request.target_host,
+                request.target_port,
+            ),
+        ))
+        .await?;
+    let service = auth
+        .create_machine_service(&workspace_id, agent_id, request)
+        .await?;
+    Ok(Json(json!({"service": service})))
+}
+
+fn require_service_owner(
+    subject: &PolicySubject,
+    service: &MachineService,
+) -> Result<(), ApiFailure> {
+    if let PolicySubject::Machine { server_id } = subject {
+        if service.server_id == *server_id {
+            return Ok(());
+        }
+    }
+    if let PolicySubject::Agent {
+        server_id,
+        agent_id,
+    } = subject
+    {
+        if service.server_id == *server_id && service.target_agent_id.as_ref() == Some(agent_id) {
+            return Ok(());
+        }
+    }
+    Err(ApiFailure::forbidden(
+        "service_not_owned",
+        "only the owning Agent can modify this service",
+    ))
+}
+
+async fn service_subject(
+    state: &AppState,
+    machine: &MachineSession,
+    headers: &HeaderMap,
+    workspace: &str,
+) -> Result<PolicySubject, ApiFailure> {
+    control_policy_subject(state, Some(machine), headers, workspace)
+        .await?
+        .ok_or_else(|| {
+            ApiFailure::forbidden(
+                "service_identity_required",
+                "authenticated identity required",
+            )
+        })
+}
+
+pub(super) async fn agent_update_machine_service(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, service_id)): Path<(String, String)>,
+    Json(request): Json<UpdateMachineServiceRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = service_subject(&state, &machine, &headers, &workspace_id).await?;
+    let service = auth
+        .resolve_machine_service(&workspace_id, &service_id)
+        .await?;
+    require_service_owner(&subject, &service)?;
+    if request
+        .server_id
+        .as_ref()
+        .is_some_and(|id| id != &service.server_id)
+    {
+        return Err(ApiFailure::forbidden(
+            "service_not_owned",
+            "Agent cannot transfer a service to another machine",
+        ));
+    }
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            "service.update",
+            PolicyResource::new(RESOURCE_MACHINE_SERVICE, &service.service_id),
+        ))
+        .await?;
+    let updated = auth
+        .update_machine_service(
+            &workspace_id,
+            &service.service_id,
+            service
+                .target_agent_id
+                .as_deref()
+                .unwrap_or(&service.server_id),
+            request,
+        )
+        .await?;
+    refresh_service_ingress_routes(&auth).await?;
+    Ok(Json(json!({"service": updated})))
+}
+
+pub(super) async fn agent_delete_machine_service(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace_id, service_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = service_subject(&state, &machine, &headers, &workspace_id).await?;
+    let service = auth
+        .resolve_machine_service(&workspace_id, &service_id)
+        .await?;
+    require_service_owner(&subject, &service)?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            "service.delete",
+            PolicyResource::new(RESOURCE_MACHINE_SERVICE, &service.service_id),
+        ))
+        .await?;
+    auth.delete_machine_service(&workspace_id, &service.service_id)
+        .await?;
+    refresh_service_ingress_routes(&auth).await?;
+    Ok(Json(
+        json!({"deleted": true, "service_id": service.service_id}),
+    ))
+}
+
+pub(super) async fn agent_create_service_ingress(
+    State(state): State<AppState>,
+    Extension(api): Extension<ServiceIngressApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<CreateServiceIngressRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let ServiceIngressApi {
+        auth,
+        policy,
+        config,
+    } = api;
+    let subject = service_subject(&state, &machine, &headers, &workspace_id).await?;
+    let service = auth
+        .resolve_machine_service(&workspace_id, &request.service_id)
+        .await?;
+    require_service_owner(&subject, &service)?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace_id,
+            subject,
+            "ingress.create",
+            PolicyResource::new(RESOURCE_MACHINE_SERVICE, &service.service_id),
+        ))
+        .await?;
+    let ingress = auth
+        .create_service_ingress(
+            &workspace_id,
+            service
+                .target_agent_id
+                .as_deref()
+                .unwrap_or(&service.server_id),
+            config.base_domain()?,
+            request,
+        )
+        .await?;
+    Ok(Json(
+        json!({"ingress": service_ingress_json(&config, ingress)?}),
+    ))
+}
+
+pub(super) async fn agent_update_service_ingress(
+    State(state): State<AppState>,
+    Extension(api): Extension<ServiceIngressApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace, ingress_id)): Path<(String, String)>,
+    Json(request): Json<UpdateServiceIngressRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let ServiceIngressApi {
+        auth,
+        policy,
+        config,
+    } = api;
+    let subject = service_subject(&state, &machine, &headers, &workspace).await?;
+    let ingress = auth
+        .list_service_ingresses(&workspace)
+        .await?
+        .into_iter()
+        .find(|i| i.ingress_id == ingress_id)
+        .ok_or_else(|| ApiFailure::bad_request("ingress_not_found", "ingress not found"))?;
+    let service = auth
+        .resolve_machine_service(&workspace, &ingress.service_id)
+        .await?;
+    require_service_owner(&subject, &service)?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace,
+            subject,
+            "ingress.update",
+            PolicyResource::new(RESOURCE_SERVICE_INGRESS, &ingress_id),
+        ))
+        .await?;
+    let updated = auth
+        .update_service_ingress(&workspace, &ingress_id, &service.server_id, request)
+        .await?;
+    Ok(Json(
+        json!({"ingress":service_ingress_json(&config,updated)?}),
+    ))
+}
+
+pub(super) async fn agent_delete_service_ingress(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace, ingress_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = service_subject(&state, &machine, &headers, &workspace).await?;
+    let ingress = auth
+        .list_service_ingresses(&workspace)
+        .await?
+        .into_iter()
+        .find(|i| i.ingress_id == ingress_id)
+        .ok_or_else(|| ApiFailure::bad_request("ingress_not_found", "ingress not found"))?;
+    let service = auth
+        .resolve_machine_service(&workspace, &ingress.service_id)
+        .await?;
+    require_service_owner(&subject, &service)?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace,
+            subject,
+            "ingress.delete",
+            PolicyResource::new(RESOURCE_SERVICE_INGRESS, &ingress_id),
+        ))
+        .await?;
+    auth.delete_service_ingress(&workspace, &ingress_id).await?;
+    Ok(Json(json!({"deleted":true})))
+}
+
+pub(super) async fn connect_machine_service(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, service_id)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    let service = auth
+        .resolve_machine_service(&workspace_id, &service_id)
+        .await?;
+    if service.service_id != service_id {
+        return Err(ApiFailure::bad_request(
+            "service_id_required",
+            "forwarding requires the stable service ID",
+        ));
+    }
+    upgrade_service_stream(state, auth, None, service, request).await
+}
+
+pub(super) async fn agent_connect_machine_service(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    Path((workspace_id, service_id)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    let subject = service_subject(&state, &machine, request.headers(), &workspace_id).await?;
+    let service = auth
+        .resolve_machine_service(&workspace_id, &service_id)
+        .await?;
+    if service.service_id != service_id {
+        return Err(ApiFailure::bad_request(
+            "service_id_required",
+            "forwarding requires the stable service ID",
+        ));
+    }
+    let authorization = PolicyRequest::new(
+        &workspace_id,
+        subject,
+        "service.connect",
+        machine_service_policy_resource(
+            &service.service_id,
+            &service.name,
+            &service.server_id,
+            service.target_agent_id.as_deref(),
+            &service.target_host,
+            service.target_port,
+        ),
+    );
+    policy.authorize(&authorization).await?;
+    upgrade_service_stream(state, auth, Some((policy, authorization)), service, request).await
+}
+
+async fn upgrade_service_stream(
+    state: AppState,
+    auth: AuthStore,
+    policy: Option<(PolicyEngine, PolicyRequest)>,
+    service: MachineService,
+    mut request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    static CONNECTIONS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    if !service_destination_identity_active(&auth, &service).await {
+        return Err(ApiFailure::forbidden(
+            "service_identity_revoked",
+            "service destination identity is not active",
+        ));
+    }
+    let permit = CONNECTIONS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1024)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiFailure::service_unavailable(
+                "service_connection_limit",
+                "service forwarding connection limit reached",
+            )
+        })?;
+    if service.protocol == treer_protocol::MachineServiceProtocol::Udp {
+        return Err(ApiFailure::bad_request(
+            "udp_not_supported",
+            "explicit forwarding supports TCP and HTTP byte streams",
+        ));
+    }
+    if request
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        != Some("treer-tcp")
+    {
+        return Err(ApiFailure::bad_request(
+            "upgrade_required",
+            "send Upgrade: treer-tcp",
+        ));
+    }
+    let (mut stream, cancel) = state
+        .open_browser_network_stream_cancellable(
+            &service.workspace_id,
+            &service.server_id,
+            service.target_agent_id.as_deref(),
+            &service.target_host,
+            service.target_port,
+            TrafficClass::ServiceIngress,
+        )
+        .await?;
+    let upgrade = hyper::upgrade::on(&mut request);
+    let headers = request.headers().clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        let _cancel = ServiceStreamCancellation(Some(cancel));
+        if let Ok(client) = upgrade.await {
+            let mut client = TokioIo::new(client);
+            let transfer = tokio::io::copy_bidirectional(&mut client, &mut stream);
+            tokio::pin!(transfer);
+            let mut check = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = &mut transfer => break,
+                    _ = check.tick() => {
+                        let valid = async {
+                            let current = auth.resolve_machine_service(&service.workspace_id,&service.service_id).await?;
+                            if current != service || !service_destination_identity_active(&auth,&service).await { return Err(ApiFailure::forbidden("service_changed","service endpoint or destination identity changed")); }
+                            if let Some((engine,authorization)) = &policy {
+                                let machine = auth.authenticate_machine(&headers).await?;
+                                auth.authenticate_agent(&machine,&headers).await?;
+                                engine.authorize(authorization).await?;
+                            } else {
+                                let session = auth::authenticate_request(&auth,&headers).await?;
+                                auth.require_workspace_member(&service.workspace_id,&session.user_id).await?;
+                            }
+                            Ok::<(),ApiFailure>(())
+                        };
+                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),valid).await,Ok(Ok(()))) { break; }
+                    }
+                }
+            }
+        }
+    });
+    Ok(Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "treer-tcp")
+        .body(Body::empty())
+        .expect("static response"))
+}
+
 pub(super) async fn agent_list_machine_services(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -792,7 +1387,7 @@ pub(super) async fn agent_list_machine_services(
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let subject = service_subject(&state, &machine, &headers, &workspace_id).await?;
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -812,11 +1407,15 @@ pub(super) async fn agent_probe_machine_service(
     headers: HeaderMap,
     Path((workspace_id, service_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let subject = service_subject(&state, &machine, &headers, &workspace_id).await?;
     let service = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
-    require_agent_can_probe_service(&subject, &service)?;
+    if matches!(subject, PolicySubject::Agent { .. }) {
+        require_agent_can_probe_service(&subject, &service)?;
+    } else {
+        require_machine_target(Some(&subject), &service.server_id)?;
+    }
     policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -874,7 +1473,7 @@ pub(super) async fn agent_list_service_ingresses(
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let subject = agent_policy_subject(&state, &machine, &headers, &workspace_id).await?;
+    let subject = service_subject(&state, &machine, &headers, &workspace_id).await?;
     api.policy
         .authorize(&PolicyRequest::new(
             &workspace_id,
@@ -913,6 +1512,7 @@ pub(super) async fn refresh_service_ingress_routes(auth: &AuthStore) -> Result<(
 }
 
 pub fn spawn_network_metadata_refresh(state: AppState, auth: AuthStore) {
+    spawn_public_tcp_listeners(state.clone(), auth.clone());
     tokio::spawn(async move {
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(5));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -954,9 +1554,844 @@ pub fn spawn_network_metadata_refresh(state: AppState, auth: AuthStore) {
     });
 }
 
+fn public_tcp_ready() -> &'static std::sync::RwLock<std::collections::HashSet<u16>> {
+    static READY: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<u16>>> =
+        std::sync::OnceLock::new();
+    READY.get_or_init(Default::default)
+}
+
+struct PublicTcpReadyPort(u16);
+impl Drop for PublicTcpReadyPort {
+    fn drop(&mut self) {
+        public_tcp_ready()
+            .write()
+            .expect("TCP ready lock")
+            .remove(&self.0);
+    }
+}
+
+struct ServiceStreamCancellation(Option<tokio::sync::oneshot::Sender<()>>);
+impl Drop for ServiceStreamCancellation {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+async fn service_destination_identity_active(auth: &AuthStore, service: &MachineService) -> bool {
+    if auth.authentication_disabled() {
+        return true;
+    }
+    let active=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM machines m JOIN workspaces w ON w.workspace_id=m.workspace_id WHERE m.server_id=$1 AND m.workspace_id=$2 AND m.revoked_at IS NULL AND w.deleted_at IS NULL AND ($3::text IS NULL OR EXISTS(SELECT 1 FROM agent_credentials a WHERE a.agent_id=$3 AND a.server_id=m.server_id AND a.workspace_id=m.workspace_id AND a.revoked_at IS NULL)))")
+        .bind(&service.server_id).bind(&service.workspace_id).bind(&service.target_agent_id).fetch_one(&auth.pool()).await;
+    matches!(active, Ok(true))
+}
+
+fn public_tcp_range() -> Result<(u16, u16), ApiFailure> {
+    let range = std::env::var("TREER_PUBLIC_TCP_PORT_RANGE").map_err(|_| {
+        ApiFailure::service_unavailable(
+            "public_tcp_not_configured",
+            "configure TREER_PUBLIC_TCP_PORT_RANGE=start-end to enable public TCP",
+        )
+    })?;
+    let parsed = range
+        .split_once('-')
+        .and_then(|(a, b)| Some((a.parse::<u16>().ok()?, b.parse::<u16>().ok()?)));
+    match parsed {
+        Some((start, end)) if start > 0 && end >= start && end - start < 1024 => Ok((start, end)),
+        _ => Err(ApiFailure::service_unavailable(
+            "invalid_public_tcp_range",
+            "TCP range must contain 1 to 1024 nonzero ports",
+        )),
+    }
+}
+
+pub(super) async fn publish_public_tcp_service(
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Path((workspace_id, service_id)): Path<(String, String)>,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, ApiFailure> {
+    let (start, end) = public_tcp_range()?;
+    if request.get("access").and_then(Value::as_str) != Some("public") {
+        return Err(ApiFailure::bad_request("public_access_required", "raw public TCP requires explicit access=public; use authenticated forwarding for workspace access"));
+    }
+    let service = auth
+        .resolve_machine_service(&workspace_id, &service_id)
+        .await?;
+    if service.protocol == treer_protocol::MachineServiceProtocol::Udp {
+        return Err(ApiFailure::bad_request(
+            "udp_not_supported",
+            "UDP publication is not supported",
+        ));
+    }
+    let pool = auth.pool();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(74839201)")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    let existing: Option<i32> =
+        sqlx::query_scalar("SELECT public_port FROM public_tcp_services WHERE service_id=$1")
+            .bind(&service.service_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    let port = if let Some(port) = existing {
+        port
+    } else {
+        let available: Vec<i32> = public_tcp_ready()
+            .read()
+            .expect("TCP ready lock")
+            .iter()
+            .copied()
+            .filter(|port| *port >= start && *port <= end)
+            .map(i32::from)
+            .collect();
+        sqlx::query_scalar::<_, i32>("SELECT candidate FROM generate_series($1::integer,$2::integer) candidate WHERE candidate=ANY($3) AND NOT EXISTS (SELECT 1 FROM public_tcp_services WHERE public_port=candidate) ORDER BY candidate LIMIT 1")
+            .bind(i32::from(start)).bind(i32::from(end)).bind(available).fetch_optional(&mut *tx).await.map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?
+            .ok_or_else(|| ApiFailure::service_unavailable("public_tcp_exhausted", "configured public TCP port range is exhausted"))?
+    };
+    if port < i32::from(start) || port > i32::from(end) {
+        return Err(ApiFailure::service_unavailable(
+            "public_tcp_range_changed",
+            "the service's stable port is outside the configured range",
+        ));
+    }
+    if !public_tcp_ready()
+        .read()
+        .expect("TCP ready lock")
+        .contains(&(port as u16))
+    {
+        return Err(ApiFailure::service_unavailable(
+            "public_tcp_listener_unavailable",
+            "the assigned platform TCP listener is not available",
+        ));
+    }
+    let host = config
+        .proxy_public_url
+        .host_str()
+        .unwrap_or("localhost")
+        .to_owned();
+    sqlx::query("INSERT INTO public_tcp_services(service_id,public_port,enabled) VALUES($1,$2,TRUE) ON CONFLICT(service_id) DO UPDATE SET enabled=TRUE").bind(&service.service_id).bind(port).execute(&mut *tx).await.map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    Ok(Json(
+        json!({"service_id": service.service_id, "access": "public", "hostname": host, "port": port}),
+    ))
+}
+
+pub(super) async fn agent_publish_public_tcp_service(
+    State(state): State<AppState>,
+    Extension(api): Extension<ServiceIngressApi>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace, service_id)): Path<(String, String)>,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, ApiFailure> {
+    let ServiceIngressApi {
+        auth,
+        policy,
+        config,
+    } = api;
+    let subject = service_subject(&state, &machine, &headers, &workspace).await?;
+    let service = auth
+        .resolve_machine_service(&workspace, &service_id)
+        .await?;
+    require_service_owner(&subject, &service)?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace,
+            subject,
+            "ingress.create",
+            PolicyResource::new(RESOURCE_MACHINE_SERVICE, &service.service_id),
+        ))
+        .await?;
+    publish_public_tcp_service(
+        Extension(auth),
+        Extension(config),
+        Path((workspace, service_id)),
+        Json(request),
+    )
+    .await
+}
+
+pub(super) async fn agent_unpublish_public_tcp_service(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(machine): Extension<MachineSession>,
+    headers: HeaderMap,
+    Path((workspace, service_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = service_subject(&state, &machine, &headers, &workspace).await?;
+    let service = auth
+        .resolve_machine_service(&workspace, &service_id)
+        .await?;
+    require_service_owner(&subject, &service)?;
+    policy
+        .authorize(&PolicyRequest::new(
+            &workspace,
+            subject,
+            "ingress.delete",
+            PolicyResource::new(RESOURCE_MACHINE_SERVICE, &service_id),
+        ))
+        .await?;
+    unpublish_public_tcp_service(Extension(auth), Path((workspace, service_id))).await
+}
+
+pub(super) async fn unpublish_public_tcp_service(
+    Extension(auth): Extension<AuthStore>,
+    Path((workspace_id, service_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    let service = auth
+        .resolve_machine_service(&workspace_id, &service_id)
+        .await?;
+    sqlx::query("UPDATE public_tcp_services SET enabled=FALSE WHERE service_id=$1")
+        .bind(&service.service_id)
+        .execute(&auth.pool())
+        .await
+        .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    Ok(Json(
+        json!({"service_id":service.service_id,"enabled":false}),
+    ))
+}
+
+fn spawn_public_tcp_listeners(state: AppState, auth: AuthStore) {
+    let Ok((start, end)) = public_tcp_range() else {
+        return;
+    };
+    let bind_host =
+        std::env::var("TREER_PUBLIC_TCP_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0".into());
+    for port in start..=end {
+        let state = state.clone();
+        let auth = auth.clone();
+        let bind_host = bind_host.clone();
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind((bind_host.as_str(), port)).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::error!(%error,port,"public TCP listener unavailable");
+                    return;
+                }
+            };
+            let limit = Arc::new(tokio::sync::Semaphore::new(64));
+            public_tcp_ready()
+                .write()
+                .expect("TCP ready lock")
+                .insert(port);
+            let _ready = PublicTcpReadyPort(port);
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    break;
+                };
+                let Ok(permit) = limit.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let state = state.clone();
+                let auth = auth.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let row: Result<Option<(String,String)>,_> = sqlx::query_as("SELECT s.workspace_id,s.service_id FROM public_tcp_services p JOIN machine_services s USING(service_id) JOIN workspaces w ON w.workspace_id=s.workspace_id WHERE p.public_port=$1 AND p.enabled=TRUE AND w.deleted_at IS NULL").bind(i32::from(port)).fetch_optional(&auth.pool()).await;
+                    let Ok(Some((workspace, id))) = row else {
+                        return;
+                    };
+                    let Ok(service) = auth.resolve_machine_service(&workspace, &id).await else {
+                        return;
+                    };
+                    if !service_destination_identity_active(&auth, &service).await {
+                        return;
+                    }
+                    let Ok((mut stream, cancel)) = state
+                        .open_browser_network_stream_cancellable(
+                            &workspace,
+                            &service.server_id,
+                            service.target_agent_id.as_deref(),
+                            &service.target_host,
+                            service.target_port,
+                            TrafficClass::ServiceIngress,
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    let _cancel = ServiceStreamCancellation(Some(cancel));
+                    let transfer = tokio::io::copy_bidirectional(&mut client, &mut stream);
+                    tokio::pin!(transfer);
+                    let mut check = tokio::time::interval(std::time::Duration::from_secs(1));
+                    loop {
+                        tokio::select! {
+                            _ = &mut transfer => break,
+                            _ = check.tick() => {
+                                let valid = async {
+                                    let current = auth.resolve_machine_service(&workspace,&id).await;
+                                    let enabled = sqlx::query_scalar::<_,bool>("SELECT p.enabled FROM public_tcp_services p JOIN machine_services s USING(service_id) JOIN workspaces w ON w.workspace_id=s.workspace_id WHERE p.service_id=$1 AND w.deleted_at IS NULL").bind(&id).fetch_optional(&auth.pool()).await;
+                                    matches!(enabled,Ok(Some(true))) && matches!(current,Ok(ref value) if value == &service) && service_destination_identity_active(&auth,&service).await
+                                };
+                                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),valid).await,Ok(true)) { break; }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+}
+
 pub(crate) async fn virtual_network_hosts_snapshot(
     auth: &AuthStore,
     workspace_id: &str,
 ) -> Result<VirtualNetworkHostsSnapshot, auth::AuthFailure> {
     auth.virtual_network_hosts_snapshot(workspace_id).await
+}
+
+#[cfg(test)]
+mod explicit_service_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use treer_protocol::{NetworkBinaryFrame, NetworkBinaryKind};
+
+    async fn relay_fixture(
+        workspace: &str,
+    ) -> (
+        AuthStore,
+        AppState,
+        MachineService,
+        String,
+        MachineSession,
+        tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+        uuid::Uuid,
+    ) {
+        let auth = AuthStore::for_test("owner-password").await;
+        auth.seed_test_workspace(workspace).await;
+        let enrollment = auth
+            .create_machine_enrollment(workspace, "owner")
+            .await
+            .unwrap();
+        let machine = auth.claim_machine_enrollment(&enrollment).await.unwrap();
+        let state = AppState::new();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let connection = uuid::Uuid::new_v4();
+        let build = treer_protocol::BuildInfo {
+            version: "test".into(),
+            git_commit: "test".into(),
+        };
+        state
+            .register_server(
+                treer_protocol::ServerInfo {
+                    server_id: machine.server_id.clone(),
+                    workspace_id: workspace.into(),
+                    name: "test".into(),
+                    hostname: "test".into(),
+                    root: "/tmp".into(),
+                    controller_build: build.clone(),
+                    host_build: build,
+                    supervision: None,
+                    labels: Default::default(),
+                    available_agents: None,
+                    status: treer_protocol::ServerStatus::Online,
+                    connected_at: Utc::now(),
+                    last_seen_at: Utc::now(),
+                },
+                connection,
+                sender,
+            )
+            .await
+            .unwrap();
+        let service = auth
+            .create_machine_service(
+                workspace,
+                "owner",
+                CreateMachineServiceRequest {
+                    name: "echo".into(),
+                    server_id: machine.server_id.clone(),
+                    target_agent_id: None,
+                    target_host: "127.0.0.1".into(),
+                    target_port: 3000,
+                    protocol: treer_protocol::MachineServiceProtocol::Tcp,
+                },
+            )
+            .await
+            .unwrap();
+        let session = MachineSession {
+            server_id: Some(machine.server_id),
+            workspace_id: Some(workspace.into()),
+        };
+        (
+            auth,
+            state,
+            service,
+            machine.machine_token,
+            session,
+            receiver,
+            connection,
+        )
+    }
+
+    async fn next_frame(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+    ) -> NetworkBinaryFrame {
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SocketFrame::Binary(data) => return NetworkBinaryFrame::decode(&data).unwrap(),
+                _ => continue,
+            }
+        }
+    }
+
+    async fn relay(
+        state: &AppState,
+        service: &MachineService,
+        connection: uuid::Uuid,
+        id: &str,
+        kind: NetworkBinaryKind,
+        payload: &[u8],
+    ) {
+        state
+            .relay_network_frame(
+                &service.workspace_id,
+                &service.server_id,
+                connection,
+                NetworkBinaryFrame {
+                    kind,
+                    stream_id: id.into(),
+                    payload: payload.to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_restore_route_authenticates_scopes_and_reports_waiting_endpoints() {
+        use crate::policy::{PolicyDecision, PolicyDenial};
+        use tower::ServiceExt;
+        let (auth, state, service, token, _session, mut receiver, _connection) =
+            relay_fixture("restore-route").await;
+        auth.seed_test_workspace("other-workspace").await;
+        let mut other = state
+            .resolve_server(&service.workspace_id, &service.server_id)
+            .await
+            .unwrap();
+        other.server_id = "different-machine".into();
+        other.name = "different-machine".into();
+        let (other_sender, _other_receiver) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server(other, uuid::Uuid::new_v4(), other_sender)
+            .await
+            .unwrap();
+        let url = Url::parse("https://proxy.example/").unwrap();
+        let browser_url = Url::parse("https://app.example/").unwrap();
+        let bootstrap = BootstrapConfig::new(
+            url.clone(),
+            PathBuf::from("dist"),
+            Url::parse("https://example.test/releases/").unwrap(),
+        );
+        let identity = IdentityIssuer::load(&auth, &url).await.unwrap();
+        let messages = MessageStore::open(auth.pool()).await.unwrap();
+        let browser = BrowserAccess::new(&browser_url, &url).unwrap();
+        let ingress = IngressConfig::new(None, &url, &browser_url).unwrap();
+        let make_router = |policy| {
+            router(
+                state.clone(),
+                bootstrap.clone(),
+                auth.clone(),
+                policy,
+                identity.clone(),
+                browser.clone(),
+                ingress.clone(),
+                messages.clone(),
+                CapabilityRollout::all_enabled(),
+                crate::updater::UpdaterClient::disabled(),
+                crate::voice::VoiceServices::disabled(),
+            )
+        };
+        let app = make_router(PolicyEngine::allow_all());
+        let path = format!(
+            "/agent/workspaces/{}/machines/{}/restore",
+            service.workspace_id, service.server_id
+        );
+        let request = |path: &str, authenticated: bool| {
+            let mut builder = Request::builder().method("POST").uri(path);
+            if authenticated {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&path, false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let wrong_workspace = format!(
+            "/agent/workspaces/other-workspace/machines/{}/restore",
+            service.server_id
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&wrong_workspace, true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let wrong_machine = format!(
+            "/agent/workspaces/{}/machines/different-machine/restore",
+            service.workspace_id
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&wrong_machine, true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let credential = auth
+            .create_agent_credential(&service.workspace_id, &service.server_id, "agent-restore")
+            .await
+            .unwrap();
+        let agent_request = Request::builder()
+            .method("POST")
+            .uri(&path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(AGENT_ID_HEADER, "agent-restore")
+            .header(treer_protocol::WORKLOAD_CREDENTIAL_HEADER, credential)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(agent_request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let denied = make_router(PolicyEngine::new(
+            PolicyDecision::Deny(PolicyDenial::new("restore_denied", "restore denied")),
+            vec![],
+        ));
+        assert_eq!(
+            denied.oneshot(request(&path, true)).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "denied requests must not send Controller commands"
+        );
+        let responder_state = state.clone();
+        let workspace = service.workspace_id.clone();
+        let server_id = service.server_id.clone();
+        let responder = tokio::spawn(async move {
+            let mut actions = Vec::new();
+            while actions.len() < 2 {
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let SocketFrame::Text(encoded) = frame else {
+                    continue;
+                };
+                let treer_protocol::ProxyMessage::Command { envelope } =
+                    serde_json::from_str(&encoded).unwrap()
+                else {
+                    continue;
+                };
+                let value = match envelope.command {
+                    AgentCommand::RestoreRuntime {} => {
+                        actions.push("restore");
+                        json!({"workspace_id":workspace,"server_id":server_id,"items":[]})
+                    }
+                    AgentCommand::ProbeNetwork { .. } => {
+                        actions.push("probe");
+                        json!({"healthy":false,"error":"external process has not started"})
+                    }
+                    command => panic!("unexpected command {command:?}"),
+                };
+                responder_state
+                    .complete_command(treer_protocol::CommandResult::success(
+                        envelope.command_id,
+                        value,
+                    ))
+                    .await;
+            }
+            actions
+        });
+        let response = app.oneshot(request(&path, true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let data = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(report["items"][0]["workload_id"], service.service_id);
+        assert_eq!(report["items"][0]["state"], "waiting_endpoint");
+        assert_eq!(responder.await.unwrap(), vec!["restore", "probe"]);
+    }
+
+    #[tokio::test]
+    async fn private_service_socket_policy_revocation_closes_upgraded_connection() {
+        use crate::policy::{
+            PolicyDecision, PolicyDenial, PolicyEvaluation, PolicyEvaluator, PolicyFuture,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Revocable(Arc<AtomicBool>);
+        impl PolicyEvaluator for Revocable {
+            fn evaluate<'a>(&'a self, _: &'a PolicyRequest) -> PolicyFuture<'a> {
+                Box::pin(async move {
+                    Ok(PolicyEvaluation::Decide(if self.0.load(Ordering::SeqCst) {
+                        PolicyDecision::Deny(PolicyDenial::new("revoked", "revoked"))
+                    } else {
+                        PolicyDecision::Allow
+                    }))
+                })
+            }
+        }
+        let (auth, state, service, token, session, mut receiver, connection) =
+            relay_fixture("private-socket").await;
+        let revoked = Arc::new(AtomicBool::new(false));
+        let policy = PolicyEngine::new(
+            PolicyDecision::Allow,
+            vec![Arc::new(Revocable(revoked.clone()))],
+        );
+        let app = Router::new()
+            .route(
+                "/workspaces/{workspace_id}/services/{service_id}/connect",
+                post(agent_connect_machine_service),
+            )
+            .layer(Extension(auth))
+            .layer(Extension(policy))
+            .layer(Extension(session))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!(
+            "http://{address}/workspaces/{}/services/{}/connect",
+            service.workspace_id, service.service_id
+        );
+        let request = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(url)
+                .bearer_auth(token)
+                .header("connection", "upgrade")
+                .header("upgrade", "treer-tcp")
+                .send()
+                .await
+                .unwrap()
+        });
+        let open = next_frame(&mut receiver).await;
+        assert_eq!(open.kind, NetworkBinaryKind::Open);
+        relay(
+            &state,
+            &service,
+            connection,
+            &open.stream_id,
+            NetworkBinaryKind::Opened,
+            &[],
+        )
+        .await;
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        let mut client = response.upgrade().await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        assert_eq!(next_frame(&mut receiver).await.payload, b"ping");
+        revoked.store(true, Ordering::SeqCst);
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        let reset = loop {
+            let frame = next_frame(&mut receiver).await;
+            if frame.kind == NetworkBinaryKind::Reset {
+                break frame;
+            }
+        };
+        assert_eq!(reset.stream_id, open.stream_id);
+        server.abort();
+    }
+
+    #[test]
+    fn agent_service_mutations_require_both_bound_machine_and_agent() {
+        let service = MachineService {
+            service_id: "svc_test".into(),
+            workspace_id: "workspace".into(),
+            name: "preview".into(),
+            server_id: "machine-a".into(),
+            target_agent_id: Some("agent-a".into()),
+            target_host: "127.0.0.1".into(),
+            target_port: 3000,
+            protocol: treer_protocol::MachineServiceProtocol::Http,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            created_by: "agent-a".into(),
+            updated_by: "agent-a".into(),
+        };
+        assert!(require_service_owner(
+            &PolicySubject::Agent {
+                server_id: "machine-a".into(),
+                agent_id: "agent-a".into()
+            },
+            &service
+        )
+        .is_ok());
+        for (machine, agent) in [("machine-a", "agent-b"), ("machine-b", "agent-a")] {
+            assert!(require_service_owner(
+                &PolicySubject::Agent {
+                    server_id: machine.into(),
+                    agent_id: agent.into()
+                },
+                &service
+            )
+            .is_err());
+        }
+        assert!(require_service_owner(
+            &PolicySubject::Machine {
+                server_id: "machine-b".into()
+            },
+            &service
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated database and an explicitly selected public TCP range"]
+    async fn public_tcp_allocation_is_stable_and_explicitly_revocable() {
+        let (auth, state, service, _token, _session, mut receiver, connection) =
+            relay_fixture("tcp-test").await;
+        spawn_public_tcp_listeners(state.clone(), auth.clone());
+        let (start, _) = public_tcp_range().unwrap();
+        for _ in 0..20 {
+            if public_tcp_ready().read().unwrap().contains(&start) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let config = IngressConfig::new(
+            None,
+            &Url::parse("https://proxy.example/").unwrap(),
+            &Url::parse("https://app.example/").unwrap(),
+        )
+        .unwrap();
+        let publish = || {
+            publish_public_tcp_service(
+                Extension(auth.clone()),
+                Extension(config.clone()),
+                Path(("tcp-test".into(), service.service_id.clone())),
+                Json(json!({"access":"public"})),
+            )
+        };
+        let first = publish().await.unwrap().0;
+        let second = publish().await.unwrap().0;
+        assert_eq!(first["port"], second["port"]);
+        assert_eq!(first["hostname"], "proxy.example");
+        let _ = unpublish_public_tcp_service(
+            Extension(auth.clone()),
+            Path(("tcp-test".into(), service.service_id.clone())),
+        )
+        .await
+        .unwrap();
+        let enabled: bool =
+            sqlx::query_scalar("SELECT enabled FROM public_tcp_services WHERE service_id=$1")
+                .bind(&service.service_id)
+                .fetch_one(&auth.pool())
+                .await
+                .unwrap();
+        assert!(!enabled);
+        assert_eq!(publish().await.unwrap().0["port"], first["port"]);
+        let port = first["port"].as_u64().unwrap() as u16;
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let open = next_frame(&mut receiver).await;
+        relay(
+            &state,
+            &service,
+            connection,
+            &open.stream_id,
+            NetworkBinaryKind::Opened,
+            &[],
+        )
+        .await;
+        client.write_all(b"request").await.unwrap();
+        assert_eq!(next_frame(&mut receiver).await.payload, b"request");
+        client.shutdown().await.unwrap();
+        assert_eq!(
+            next_frame(&mut receiver).await.kind,
+            NetworkBinaryKind::HalfClose
+        );
+        relay(
+            &state,
+            &service,
+            connection,
+            &open.stream_id,
+            NetworkBinaryKind::Data,
+            b"response after EOF",
+        )
+        .await;
+        relay(
+            &state,
+            &service,
+            connection,
+            &open.stream_id,
+            NetworkBinaryKind::HalfClose,
+            &[],
+        )
+        .await;
+        let mut data = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.read_to_end(&mut data),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(data, b"response after EOF");
+        // Drain the completed stream's acknowledgements before opening another.
+        while let Ok(SocketFrame::Binary(_)) = receiver.try_recv() {}
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let open = loop {
+            let frame = next_frame(&mut receiver).await;
+            if frame.kind == NetworkBinaryKind::Open {
+                break frame;
+            }
+        };
+        relay(
+            &state,
+            &service,
+            connection,
+            &open.stream_id,
+            NetworkBinaryKind::Opened,
+            &[],
+        )
+        .await;
+        let _ = unpublish_public_tcp_service(
+            Extension(auth.clone()),
+            Path(("tcp-test".into(), service.service_id.clone())),
+        )
+        .await
+        .unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
 }

@@ -807,280 +807,6 @@ async fn legacy_controller_rejects_commands_added_after_its_protocol() {
 }
 
 #[tokio::test]
-async fn same_machine_network_streams_use_distinct_leg_ids() {
-    let state = AppState::new();
-    let connection_id = Uuid::new_v4();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(test_server(), connection_id, server_tx)
-        .await
-        .expect("register controller");
-
-    let source_stream_id = "net_source".to_string();
-    let connect_payload = serde_json::to_vec(&NetworkConnectRequest {
-        source_server_id: "server".into(),
-        source_agent_id: Some("agent-source".into()),
-        destination_agent_id: Some("agent-destination".into()),
-        host: "127.0.0.1".into(),
-        port: 8080,
-    })
-    .unwrap();
-    state
-        .open_network_stream(
-            "alpha",
-            "server",
-            connection_id,
-            "server",
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Open,
-                stream_id: source_stream_id.clone(),
-                payload: connect_payload.clone(),
-            },
-        )
-        .await
-        .expect("open same-machine stream");
-
-    let destination_open = expect_network(server_rx.recv().await.expect("destination open frame"));
-    assert_eq!(destination_open.kind, NetworkBinaryKind::Open);
-    assert_ne!(destination_open.stream_id, source_stream_id);
-    assert_eq!(destination_open.payload, connect_payload);
-    let destination_stream_id = destination_open.stream_id;
-    assert_eq!(state.inner.network_streams.lock().await.len(), 2);
-
-    state
-        .relay_network_frame(
-            "alpha",
-            "server",
-            connection_id,
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Opened,
-                stream_id: destination_stream_id.clone(),
-                payload: Vec::new(),
-            },
-        )
-        .await
-        .expect("relay destination opened frame");
-    let source_opened = expect_network(server_rx.recv().await.expect("source opened frame"));
-    assert_eq!(source_opened.kind, NetworkBinaryKind::Opened);
-    assert_eq!(source_opened.stream_id, source_stream_id);
-
-    state
-        .relay_network_frame(
-            "alpha",
-            "server",
-            connection_id,
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Data,
-                stream_id: source_stream_id.clone(),
-                payload: b"request".to_vec(),
-            },
-        )
-        .await
-        .expect("relay source data");
-    let destination_data = expect_network(server_rx.recv().await.expect("destination data frame"));
-    assert_eq!(destination_data.stream_id, destination_stream_id);
-    assert_eq!(destination_data.payload, b"request");
-
-    state
-        .relay_network_frame(
-            "alpha",
-            "server",
-            connection_id,
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Data,
-                stream_id: destination_stream_id.clone(),
-                payload: b"response".to_vec(),
-            },
-        )
-        .await
-        .expect("relay destination data");
-    let source_data = expect_network(server_rx.recv().await.expect("source data frame"));
-    assert_eq!(source_data.stream_id, source_stream_id);
-    assert_eq!(source_data.payload, b"response");
-    let detail = state.recent_agent_traffic("alpha", 1).await.unwrap();
-    assert_eq!(detail.len(), 2);
-    assert_eq!(
-        detail
-            .iter()
-            .find(|r| r.source_id == "agent-source")
-            .unwrap()
-            .payload_bytes,
-        7
-    );
-    assert_eq!(
-        detail
-            .iter()
-            .find(|r| r.source_id == "agent-destination")
-            .unwrap()
-            .payload_bytes,
-        8
-    );
-    assert_eq!(
-        state
-            .recent_machine_traffic("alpha", 1)
-            .await
-            .unwrap()
-            .iter()
-            .map(|r| r.payload_bytes)
-            .sum::<u64>(),
-        15
-    );
-
-    for (stream_id, expected_peer_id) in [
-        (source_stream_id.clone(), destination_stream_id.clone()),
-        (destination_stream_id, source_stream_id.clone()),
-    ] {
-        state
-            .relay_network_frame(
-                "alpha",
-                "server",
-                connection_id,
-                NetworkBinaryFrame {
-                    kind: NetworkBinaryKind::HalfClose,
-                    stream_id,
-                    payload: Vec::new(),
-                },
-            )
-            .await
-            .expect("relay half-close");
-        let close = expect_network(server_rx.recv().await.expect("peer half-close frame"));
-        assert_eq!(close.kind, NetworkBinaryKind::HalfClose);
-        assert_eq!(close.stream_id, expected_peer_id);
-    }
-    assert!(state.inner.network_streams.lock().await.is_empty());
-}
-
-#[tokio::test]
-async fn relayed_payload_is_counted_once_in_machine_direction() {
-    let traffic = TrafficRecorder::default();
-    let state = AppState::with_backplanes_and_traffic(
-        EventBus::in_process(),
-        ClusterBus::standalone("traffic-test".to_string()),
-        traffic.clone(),
-    );
-    let source_connection = Uuid::new_v4();
-    let destination_connection = Uuid::new_v4();
-    let (source_tx, mut source_rx) = mpsc::unbounded_channel();
-    let (destination_tx, mut destination_rx) = mpsc::unbounded_channel();
-    let mut source = test_server();
-    source.server_id = "source".to_string();
-    source.name = "source".to_string();
-    let mut destination = test_server();
-    destination.server_id = "destination".to_string();
-    destination.name = "destination".to_string();
-    state
-        .register_server(source, source_connection, source_tx)
-        .await
-        .expect("register source");
-    state
-        .register_server(destination, destination_connection, destination_tx)
-        .await
-        .expect("register destination");
-
-    state
-        .open_network_stream(
-            "alpha",
-            "source",
-            source_connection,
-            "destination",
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Open,
-                stream_id: "source-stream".to_string(),
-                payload: b"connect".to_vec(),
-            },
-        )
-        .await
-        .expect("open stream");
-    let destination_open = expect_network(destination_rx.recv().await.expect("destination open"));
-
-    state
-        .relay_network_frame(
-            "alpha",
-            "source",
-            source_connection,
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Data,
-                stream_id: "source-stream".to_string(),
-                payload: b"request".to_vec(),
-            },
-        )
-        .await
-        .expect("relay request");
-    let _ = destination_rx.recv().await.expect("destination data");
-    state
-        .relay_network_frame(
-            "alpha",
-            "destination",
-            destination_connection,
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Data,
-                stream_id: destination_open.stream_id,
-                payload: b"response".to_vec(),
-            },
-        )
-        .await
-        .expect("relay response");
-    let _ = source_rx.recv().await.expect("source data");
-
-    assert_eq!(
-        traffic.pending_for(
-            "alpha",
-            TrafficClass::VirtualNetwork,
-            "source",
-            "destination"
-        ),
-        (7, 1)
-    );
-    assert_eq!(
-        traffic.pending_for(
-            "alpha",
-            TrafficClass::VirtualNetwork,
-            "destination",
-            "source"
-        ),
-        (8, 1)
-    );
-}
-
-#[tokio::test]
-async fn direct_network_routes_do_not_create_proxy_stream_legs() {
-    let state = AppState::new();
-    let connection_id = Uuid::new_v4();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(test_server(), connection_id, server_tx)
-        .await
-        .expect("register controller");
-
-    let target = NetworkDirectTarget {
-        report_usage: false,
-        usage_ticket: None,
-        host: "example.com".to_string(),
-        port: 443,
-    };
-    state
-        .send_direct_network_route(
-            "alpha",
-            "server",
-            connection_id,
-            "net_source".to_string(),
-            target.clone(),
-        )
-        .await
-        .expect("send direct route");
-
-    let route = expect_network(server_rx.recv().await.expect("direct route frame"));
-    assert_eq!(route.kind, NetworkBinaryKind::Direct);
-    assert_eq!(route.stream_id, "net_source");
-    assert_eq!(
-        serde_json::from_slice::<NetworkDirectTarget>(&route.payload)
-            .expect("decode direct target"),
-        target
-    );
-    assert!(state.inner.network_streams.lock().await.is_empty());
-}
-
-#[tokio::test]
 async fn browser_network_streams_bridge_data_and_close_cleanly() {
     let traffic = TrafficRecorder::default();
     let state = AppState::with_backplanes_and_traffic(
@@ -1623,7 +1349,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
     let now = Utc::now();
     let source_connection = Uuid::new_v4();
     let destination_connection = Uuid::new_v4();
-    let (source_tx, mut source_rx) = mpsc::unbounded_channel();
+    let (source_tx, _source_rx) = mpsc::unbounded_channel();
     let source = ServerInfo {
         server_id: source_id.clone(),
         workspace_id: workspace_id.clone(),
@@ -1867,21 +1593,22 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
         Some(SocketFrame::Binary(_))
     ));
 
-    let source_stream_id = format!("source-stream-{suffix}");
-    state_a
-        .open_network_stream(
-            &workspace_id,
-            &source_id,
-            source_connection,
-            &destination_id,
-            NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Open,
-                stream_id: source_stream_id.clone(),
-                payload: b"connect".to_vec(),
-            },
-        )
-        .await
-        .expect("open cross-proxy network stream");
+    let service_state = state_a.clone();
+    let service_workspace = workspace_id.clone();
+    let service_destination = destination_id.clone();
+    let service_task = tokio::spawn(async move {
+        service_state
+            .open_browser_network_stream(
+                &service_workspace,
+                &service_destination,
+                None,
+                "127.0.0.1",
+                3000,
+                TrafficClass::ServiceIngress,
+            )
+            .await
+            .unwrap()
+    });
     let destination_open = expect_network(destination_rx.recv().await.expect("destination open"));
     assert_eq!(destination_open.kind, NetworkBinaryKind::Open);
     state_b
@@ -1892,76 +1619,32 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
             NetworkBinaryFrame {
                 kind: NetworkBinaryKind::Opened,
                 stream_id: destination_open.stream_id.clone(),
-                payload: Vec::new(),
+                payload: vec![],
             },
         )
         .await
-        .expect("return opened frame to coordinating proxy");
-    let opened = expect_network(source_rx.recv().await.expect("source opened"));
-    assert_eq!(opened.kind, NetworkBinaryKind::Opened);
-    assert_eq!(opened.stream_id, source_stream_id);
-
-    for (sender, server_id, connection_id, stream_id, payload) in [
-        (
-            &state_a,
-            &source_id,
-            source_connection,
-            &source_stream_id,
-            b"request\0\xff".to_vec(),
-        ),
-        (
-            &state_b,
+        .unwrap();
+    let mut service_stream = service_task.await.unwrap();
+    service_stream.write_all(b"request").await.unwrap();
+    let request = expect_network(destination_rx.recv().await.expect("service data"));
+    assert_eq!(request.kind, NetworkBinaryKind::Data);
+    assert_eq!(request.payload, b"request");
+    state_b
+        .relay_network_frame(
+            &workspace_id,
             &destination_id,
             destination_connection,
-            &destination_open.stream_id,
-            b"response\0\xfe".to_vec(),
-        ),
-    ] {
-        sender
-            .relay_network_frame(
-                &workspace_id,
-                server_id,
-                connection_id,
-                NetworkBinaryFrame {
-                    kind: NetworkBinaryKind::Data,
-                    stream_id: stream_id.clone(),
-                    payload: payload.clone(),
-                },
-            )
-            .await
-            .expect("relay binary payload across proxies");
-        let received = if server_id == &source_id {
-            &mut destination_rx
-        } else {
-            &mut source_rx
-        };
-        let frame = expect_network(
-            tokio::time::timeout(Duration::from_secs(5), received.recv())
-                .await
-                .expect("cross-proxy payload arrives")
-                .expect("payload frame"),
-        );
-        assert_eq!(frame.kind, NetworkBinaryKind::Data);
-        assert_eq!(frame.payload, payload);
-    }
-    assert_eq!(
-        state_a.inner.traffic.pending_for(
-            &workspace_id,
-            TrafficClass::VirtualNetwork,
-            &source_id,
-            &destination_id,
-        ),
-        (9, 1)
-    );
-    assert_eq!(
-        state_a.inner.traffic.pending_for(
-            &workspace_id,
-            TrafficClass::VirtualNetwork,
-            &destination_id,
-            &source_id,
-        ),
-        (10, 1)
-    );
+            NetworkBinaryFrame {
+                kind: NetworkBinaryKind::Data,
+                stream_id: destination_open.stream_id.clone(),
+                payload: b"response".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    let mut response = [0; 8];
+    service_stream.read_exact(&mut response).await.unwrap();
+    assert_eq!(&response, b"response");
 
     state_b
         .disconnect_server(&workspace_id, &destination_id, destination_connection)
@@ -1973,11 +1656,11 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
     let closed: TerminalServerMessage =
         serde_json::from_str(&expect_text(terminal_closed)).expect("decode terminal close");
     assert!(matches!(closed, TerminalServerMessage::Closed { .. }));
-    let network_reset = tokio::time::timeout(Duration::from_secs(5), source_rx.recv())
+    let mut tail = [0];
+    let disconnected = tokio::time::timeout(Duration::from_secs(5), service_stream.read(&mut tail))
         .await
-        .expect("remote disconnect resets coordinating network stream")
-        .expect("network reset frame");
-    assert_eq!(expect_network(network_reset).kind, NetworkBinaryKind::Reset);
+        .expect("remote disconnect closes explicit service");
+    assert!(disconnected.is_err() || disconnected.unwrap() == 0);
     state_a
         .disconnect_server(&workspace_id, &source_id, source_connection)
         .await;

@@ -261,7 +261,7 @@ impl ProxyClient {
             },
         )
         .await?;
-        let candidates = self.runtime.startup_candidate_ids();
+        let candidates = self.runtime.automatic_startup_candidate_ids();
         if !candidates.is_empty() {
             match self.validate_startup_agents(candidates).await {
                 Ok(active) => {
@@ -546,8 +546,6 @@ impl ProxyClient {
                                     "proxy selected unsupported protocol {protocol}; Controller supports {PROTOCOL_MIN_VERSION}..={PROTOCOL_VERSION}"
                                 ));
                             }
-                            self.network.clear_virtual_hostnames();
-                            self.network.sync_native_virtual_hostnames().await?;
                             if let Err(error) = self.runtime.reset_virtual_hosts() {
                                 warn!(code = %error.code, message = %error.message, "failed to reset virtual-host snapshot");
                             }
@@ -555,11 +553,8 @@ impl ProxyClient {
                         ProxyMessage::VirtualNetworkHosts { snapshot } => {
                             let revision = snapshot.revision;
                             let count = snapshot.hosts.len();
-                            let names: Vec<_> = snapshot.hosts.iter().map(|host| host.hostname.clone()).collect();
                             match self.runtime.replace_virtual_hosts(snapshot) {
                                 Ok(true) => {
-                                    self.network.set_virtual_hostnames(names);
-                                    self.network.sync_native_virtual_hostnames().await?;
                                     info!(revision, count, "virtual hosts refreshed");
                                 }
                                 Ok(false) => tracing::debug!(revision, "ignored stale virtual-host snapshot"),
@@ -652,26 +647,23 @@ impl ProxyClient {
             self.server.workspace_id, self.server.server_id
         ));
         url.set_query(None);
-        let mut request = reqwest::Client::new()
-            .post(url)
-            .json(&ValidateAgentStartupRequest { agent_ids });
-        if let Some(token) = &self.machine_token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .send()
-            .await
-            .context("startup validation request failed")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("startup validation returned {status}: {body}"));
+        let response = validate_startup_batches(
+            &reqwest::Client::new(),
+            url,
+            self.machine_token.as_deref(),
+            &agent_ids,
+        )
+        .await?;
+        for id in &response.stopped_agent_ids {
+            self.runtime
+                .persist_stopped_startup(id)
+                .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
         }
         Ok(response
-            .json::<ValidateAgentStartupResponse>()
-            .await
-            .context("invalid startup validation response")?
-            .active_agent_ids)
+            .active_agent_ids
+            .into_iter()
+            .filter(|id| !response.stopped_agent_ids.contains(id))
+            .collect())
     }
 
     async fn execute(&self, envelope: CommandEnvelope) -> CommandResult {
@@ -740,6 +732,21 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::RestoreRuntime {} => {
+                match self
+                    .validate_startup_agents(self.runtime.startup_candidate_ids())
+                    .await
+                {
+                    Ok(active) => CommandResult::success(
+                        command_id.clone(),
+                        self.runtime.restore_runtime(&active).await,
+                    ),
+                    Err(error) => CommandResult::failure(
+                        command_id.clone(),
+                        ProtocolError::new("restore_waiting_for_proxy", error.to_string()),
+                    ),
+                }
+            }
             AgentCommand::StartupSet { agent_id, request } => self
                 .runtime
                 .set_startup(&agent_id, request)
@@ -841,6 +848,44 @@ impl ProxyClient {
 enum ConnectionDisposition {
     Reconnect,
     Stop,
+}
+
+async fn validate_startup_batches(
+    client: &reqwest::Client,
+    url: Url,
+    machine_token: Option<&str>,
+    agent_ids: &[String],
+) -> anyhow::Result<ValidateAgentStartupResponse> {
+    let mut validated = ValidateAgentStartupResponse {
+        active_agent_ids: vec![],
+        stopped_agent_ids: vec![],
+    };
+    for batch in agent_ids.chunks(256) {
+        let mut request = client.post(url.clone()).json(&ValidateAgentStartupRequest {
+            agent_ids: batch.to_vec(),
+        });
+        if let Some(token) = machine_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .context("startup validation request failed")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("startup validation returned {status}: {body}"));
+        }
+        let response = response
+            .json::<ValidateAgentStartupResponse>()
+            .await
+            .context("invalid startup validation response")?;
+        validated.active_agent_ids.extend(response.active_agent_ids);
+        validated
+            .stopped_agent_ids
+            .extend(response.stopped_agent_ids);
+    }
+    Ok(validated)
 }
 
 fn connection_error_disposition(code: &str) -> Option<ConnectionDisposition> {
@@ -986,6 +1031,78 @@ mod tests {
     use std::net::Ipv4Addr;
     use tokio::net::TcpListener;
 
+    #[tokio::test]
+    async fn recovery_validation_batches_at_proxy_boundary_and_preserves_stopped_ids() {
+        use axum::{routing::post, Json, Router};
+        let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = sizes.clone();
+        let app = Router::new().route(
+            "/validate",
+            post(
+                move |headers: axum::http::HeaderMap,
+                      Json(request): Json<ValidateAgentStartupRequest>| {
+                    let observed = observed.clone();
+                    async move {
+                        assert_eq!(
+                            headers.get("authorization").unwrap(),
+                            "Bearer machine-secret"
+                        );
+                        assert!(request.agent_ids.len() <= 256);
+                        observed.lock().unwrap().push(request.agent_ids.len());
+                        let (stopped_agent_ids, active_agent_ids) = request
+                            .agent_ids
+                            .into_iter()
+                            .partition(|id| id == "agent-256");
+                        Json(ValidateAgentStartupResponse {
+                            active_agent_ids,
+                            stopped_agent_ids,
+                        })
+                    }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!(
+            "http://{}/validate",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        for (count, expected) in [
+            (0, vec![]),
+            (256, vec![256]),
+            (257, vec![256, 1]),
+            (513, vec![256, 256, 1]),
+        ] {
+            sizes.lock().unwrap().clear();
+            let ids: Vec<_> = (0..count).map(|index| format!("agent-{index}")).collect();
+            let response = validate_startup_batches(
+                &reqwest::Client::new(),
+                url.clone(),
+                Some("machine-secret"),
+                &ids,
+            )
+            .await
+            .unwrap();
+            assert_eq!(*sizes.lock().unwrap(), expected);
+            assert_eq!(
+                response.active_agent_ids.len() + response.stopped_agent_ids.len(),
+                count
+            );
+            assert_eq!(
+                response.stopped_agent_ids,
+                if count > 256 {
+                    vec!["agent-256".to_string()]
+                } else {
+                    vec![]
+                }
+            );
+        }
+        server.abort();
+    }
+
     #[test]
     fn unknown_proxy_messages_are_ignored_without_dropping_the_connection() {
         let decoded = decode_proxy_message(r#"{"type":"future_control","payload":{}}"#)
@@ -1105,10 +1222,7 @@ mod tests {
             .await
             .expect("bind service");
         let port = listener.local_addr().expect("service address").port();
-        let runtime =
-            NetworkRuntime::bind_near(listener.local_addr().expect("listener address"), false)
-                .await
-                .expect("network runtime");
+        let runtime = NetworkRuntime::new();
         let healthy = runtime
             .probe(Ipv4Addr::LOCALHOST.to_string(), port, None, 500)
             .await;

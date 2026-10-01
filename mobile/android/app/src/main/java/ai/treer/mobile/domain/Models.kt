@@ -171,7 +171,7 @@ data class LaunchProfile(
             .lowercase()
 
     val looksAisCapable: Boolean
-        get() = commandName in AIS_COMMANDS
+        get() = false // Interface support is advertised by the running workload.
 }
 
 data class TranscriptEntry(
@@ -263,29 +263,16 @@ data class BootstrapInfo(
     val workspaceId: String = "",
 )
 
-val AGENT_CATALOG: List<CatalogEntry> = listOf(
-    CatalogEntry("claude", "claude", "Claude"),
-    CatalogEntry("cursor", "cursor-agent", "Cursor"),
-    CatalogEntry("grok", "grok", "Grok"),
-    CatalogEntry("opencode", "opencode", "OpenCode"),
-    CatalogEntry("pi", "pi", "Pi"),
-    CatalogEntry("codex", "codex", "Codex"),
-)
+val AGENT_CATALOG: List<CatalogEntry> = emptyList()
 
 fun wireAgentKind(kind: String): String = when (kind) {
-    "terminal" -> "command"
-    "cursor-agent" -> "cursor"
+    "terminal" -> "shell"
     else -> kind
 }
 
 fun preferredCreateKind(machine: Machine?): String {
-    val available = machine?.availableAgents
-    return if (available != null && "codex" in available) "codex" else "terminal"
+    return "terminal"
 }
-
-private val AIS_COMMANDS = setOf(
-    "codex", "claude", "pi", "opencode", "grok", "cursor-agent", "cursor",
-)
 
 val NON_TERMINAL_STATUSES = setOf("starting", "working", "idle", "blocked", "unknown")
 val WORKING_STATUSES = setOf("starting", "working")

@@ -721,6 +721,33 @@ impl AuthStore {
         .map_err(AuthFailure::database)
     }
 
+    pub async fn set_agent_recovery_enabled(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        enabled: bool,
+    ) -> Result<(), AuthFailure> {
+        if self.disabled {
+            return Ok(());
+        }
+        sqlx::query("UPDATE agent_credentials SET recovery_enabled = $3 WHERE workspace_id = $1 AND agent_id = $2 AND revoked_at IS NULL")
+            .bind(workspace_id).bind(agent_id).bind(enabled).execute(&self.pool).await.map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    pub async fn stopped_agent_recovery_ids(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<String>, AuthFailure> {
+        if self.disabled || ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_scalar("SELECT agent_id FROM agent_credentials WHERE workspace_id = $1 AND server_id = $2 AND agent_id = ANY($3) AND revoked_at IS NULL AND NOT recovery_enabled ORDER BY agent_id")
+            .bind(workspace_id).bind(server_id).bind(ids).fetch_all(&self.pool).await.map_err(AuthFailure::database)
+    }
+
     pub async fn machine_is_active(
         &self,
         workspace_id: &str,

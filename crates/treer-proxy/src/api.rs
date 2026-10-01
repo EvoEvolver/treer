@@ -23,10 +23,8 @@ use tower_http::cors::CorsLayer;
 #[cfg(test)]
 use treer_protocol::ApiError;
 use treer_protocol::{
-    installer_base_prompt, installer_composer_ready, pick_existing_installer_agent,
-    recipe_installer_kind_allowed, recipe_url, validate_recipe_url, AcknowledgeMessagesRequest,
-    AgentCommand, AgentInfo, AgentLaunchProfile, AppDeployment, AppDeploymentStatus,
-    AppDesiredState, AppIdentityVerifyRequest, AppPrincipal, AppPrincipalKind,
+    AcknowledgeMessagesRequest, AgentCommand, AgentInfo, AgentLaunchProfile, AppDeployment,
+    AppDeploymentStatus, AppDesiredState, AppIdentityVerifyRequest, AppPrincipal, AppPrincipalKind,
     CreateAgentLaunchProfileRequest, CreateAgentRequest, CreateAppDeploymentRequest,
     CreateMachineServiceRequest, CreateServiceIngressRequest, CreateVirtualNetworkHostRequest,
     GetMessageResponse, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
@@ -47,10 +45,7 @@ use uuid::Uuid;
 use crate::admin;
 use crate::agent_socket;
 use crate::audit::NewWorkspaceAuditEvent;
-use crate::auth::{
-    self, managed_app_ingress_hostname, AuthStore, CurrentSession, MachineSession,
-    ProfileMutationActor,
-};
+use crate::auth::{self, AuthStore, CurrentSession, MachineSession, ProfileMutationActor};
 use crate::identity::IdentityIssuer;
 use crate::message_store::MessageStore;
 use crate::policy::{

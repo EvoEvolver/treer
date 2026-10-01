@@ -674,52 +674,13 @@ struct BootstrapInfo: Decodable, Equatable {
 }
 
 enum AgentCatalog {
-    static let entries: [CatalogEntry] = [
-        CatalogEntry(kind: "claude", label: "Claude"),
-        CatalogEntry(kind: "cursor", label: "Cursor"),
-        CatalogEntry(kind: "grok", label: "Grok"),
-        CatalogEntry(kind: "opencode", label: "OpenCode"),
-        CatalogEntry(kind: "pi", label: "Pi"),
-        CatalogEntry(kind: "codex", label: "Codex"),
-    ]
-
-    static let kinds = entries.map(\.kind)
-
-    static func label(for kind: String) -> String {
-        entries.first { $0.kind == kind }?.label ?? kind
-    }
-
-    static func wireKind(_ kind: String) -> String {
-        switch kind {
-        case "terminal":
-            return "command"
-        case "cursor-agent":
-            return "cursor"
-        default:
-            return kind
-        }
-    }
-
-    static func preferredKind(on machine: ServerInfo?) -> String {
-        if machine?.availableAgents?.contains("codex") == true {
-            return "codex"
-        }
-        return "terminal"
-    }
-
-    static func kind(fromCommand command: String) -> String? {
-        let file = command.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? command
-        let name = file.hasSuffix(".exe") ? String(file.dropLast(4)) : file
-        if name == "cursor-agent" { return "cursor" }
-        if kinds.contains(name) { return name }
-        return nil
-    }
-
-    static func isInstalled(kind: String, on machine: ServerInfo?) -> Bool? {
-        guard let available = machine?.availableAgents else { return nil }
-        let normalized = kind == "cursor-agent" ? "cursor" : kind
-        return available.contains(normalized)
-    }
+    static let entries: [CatalogEntry] = []
+    static let kinds: [String] = []
+    static func label(for kind: String) -> String { kind }
+    static func wireKind(_ kind: String) -> String { kind == "terminal" ? "shell" : kind }
+    static func preferredKind(on machine: ServerInfo?) -> String { "terminal" }
+    static func kind(fromCommand command: String) -> String? { nil }
+    static func isInstalled(kind: String, on machine: ServerInfo?) -> Bool? { nil }
 }
 
 enum ObjectIDSuffix {

@@ -36,6 +36,143 @@ use handlers::*;
 
 const MAX_MACHINE_UPLOAD_BODY_BYTES: usize = 23 * 1024 * 1024;
 
+async fn publish_public_tcp(
+    State(state): State<LocalApiState>,
+    Path(service_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!(
+                    "services/{}/public-tcp",
+                    percent_encoding::utf8_percent_encode(
+                        &service_id,
+                        percent_encoding::NON_ALPHANUMERIC
+                    )
+                ),
+                &request,
+                agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn unpublish_public_tcp(
+    State(state): State<LocalApiState>,
+    Path(service_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(
+                &format!(
+                    "services/{}/public-tcp",
+                    percent_encoding::utf8_percent_encode(
+                        &service_id,
+                        percent_encoding::NON_ALPHANUMERIC
+                    )
+                ),
+                agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+async fn service_connect(
+    State(state): State<LocalApiState>,
+    Path(service_id): Path<String>,
+    headers: HeaderMap,
+    mut request: axum::extract::Request,
+) -> Result<Response, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let upgrade = headers
+        .get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !upgrade.eq_ignore_ascii_case("treer-tcp") {
+        return Err(LocalApiError::bad_gateway(
+            "Upgrade: treer-tcp is required".into(),
+        ));
+    }
+    let mut upstream = state
+        .client
+        .post(state.proxy_url(&format!(
+            "services/{}/connect",
+            percent_encoding::utf8_percent_encode(&service_id, percent_encoding::NON_ALPHANUMERIC)
+        ))?)
+        .header("Connection", "upgrade")
+        .header("Upgrade", "treer-tcp");
+    if let Some(token) = &state.machine_token {
+        upstream = upstream.bearer_auth(token);
+    }
+    if let Some(agent) = agent {
+        upstream = upstream
+            .header(AGENT_ID_HEADER, agent.agent_id)
+            .header(WORKLOAD_CREDENTIAL_HEADER, agent.workload_credential);
+    }
+    let response = upstream
+        .send()
+        .await
+        .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
+    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
+        return Err(LocalApiError::bad_gateway(format!(
+            "service connection denied: {}",
+            response.status()
+        )));
+    }
+    let remote = response
+        .upgrade()
+        .await
+        .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
+    let local = hyper::upgrade::on(&mut request);
+    tokio::spawn(async move {
+        if let Ok(local) = local.await {
+            let mut local = hyper_util::rt::TokioIo::new(local);
+            let mut remote = remote;
+            let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+        }
+    });
+    Ok((
+        StatusCode::SWITCHING_PROTOCOLS,
+        [("connection", "upgrade"), ("upgrade", "treer-tcp")],
+    )
+        .into_response())
+}
+
+async fn cli_session(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let mut identity = match agent {
+        Some(agent) => vec![
+            ("TREER_AGENT_ID".into(), agent.agent_id),
+            (
+                "TREER_WORKLOAD_CREDENTIAL".into(),
+                agent.workload_credential,
+            ),
+        ],
+        None => vec![(
+            "TREER_OPERATOR_CREDENTIAL".into(),
+            headers
+                .get(OPERATOR_CREDENTIAL_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned(),
+        )],
+    };
+    identity.push(("TREER_SERVER_ID".into(), state.server_id.clone()));
+    let base = state.runtime.agent_server_url().to_owned();
+    Ok(ws.on_upgrade(move |socket| {
+        crate::cli_session::serve(socket, base, state.workspace_id, identity)
+    }))
+}
+
 #[derive(Clone)]
 pub struct LocalApiState {
     client: reqwest::Client,
@@ -174,6 +311,12 @@ impl LocalApiState {
 
 pub fn router(state: LocalApiState) -> Router {
     Router::new()
+        .route("/api/cli/session", get(cli_session))
+        .route("/api/services/{service_id}/connect", post(service_connect))
+        .route(
+            "/api/services/{service_id}/public-tcp",
+            post(publish_public_tcp).delete(unpublish_public_tcp),
+        )
         .route("/api/health", get(health))
         .route("/api/discovery", get(discovery))
         .route("/api/identity/token", post(issue_identity_token))
@@ -238,6 +381,7 @@ pub fn router(state: LocalApiState) -> Router {
                 .put(set_agent_startup)
                 .delete(clear_agent_startup),
         )
+        .route("/api/runtime/restore", post(restore_runtime))
         .route(
             "/api/virtual-hosts",
             get(list_virtual_network_hosts).post(create_virtual_network_host),

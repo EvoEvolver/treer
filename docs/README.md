@@ -35,12 +35,17 @@ Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
 
-- [Native macOS networking](research/2026-09-05-macos-network-execution.md):
-  approved implementation and verification gates for parity except Agent
-  network namespaces.
+- [Core simplification, explicit service forwarding, and recovery](research/2026-09-30-core-simplification-plan.md):
+  target boundaries for a thin CLI, user-owned runtime environments, private/public
+  port forwarding, platform-assigned service domains, and restart recovery. This
+  replaces the native transparent-network expansion direction. The working-tree
+  implementation and its validation/remaining deployment gates are tracked there.
 
 ## Historical material
 
+- The [native macOS networking execution log](research/2026-09-05-macos-network-execution.md)
+  preserves the previous parity plan and its evidence. Further network-capture
+  development is superseded by the core simplification plan.
 - The [macOS transparent network investigation](research/2026-09-05-macos-transparent-network.md)
   records successful Apple Linux machine and native macOS capture probes, real
   Policy/relay-ledger experiments, the native half-close failure, and Tailscale references.
@@ -73,10 +78,10 @@ Use this order when documents disagree:
 
 The root [AGENTS.md](../AGENTS.md) is a development index. It deliberately links
 to, but does not duplicate, the embedded Treer skill. Keep
-`skills/treer/SKILL.md` at its current path because the CLI embeds it at build
-time and prints it through `treer --skill` and `treer --skills`. Keep
-`skills/treer-install/SKILL.md` next to it; `treer --skill install` and
-Agent create `--recipe` embed that file. Keep
+`skills/treer/SKILL.md` at its current path because the Controller embeds it at build
+time and serves it through `treer --skill` and `treer --skills`. Keep
+`skills/treer-install/SKILL.md` next to it; `treer --skill install` serves it as
+documentation for user-owned installers. Automatic `--recipe` execution is retired. Keep
 `skills/treer-macos-container/SKILL.md` for Mac container-machine Host
 setup; `treer --skill macos-container` prints it. The image Dockerfile is
 `deploy/apple-container-machine/Dockerfile`.

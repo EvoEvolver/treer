@@ -19,15 +19,16 @@ use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use subtle::ConstantTimeEq;
+#[cfg(test)]
+use treer_protocol::CreateVirtualNetworkHostRequest;
 use treer_protocol::{
     format_machine_enrollment_key, parse_machine_enrollment_key, AgentLaunchProfile,
     AgentServerSnapshot, ApiError, AppDeployment, AppDeploymentStatus, AppDesiredState,
     CreateAgentLaunchProfileRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
-    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, MachineService,
-    MachineServiceProtocol, OrganizationAuditEvent, ProtocolError, ServerInfo, ServiceIngress,
-    ServiceIngressAccess, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo,
-    AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
+    CreateServiceIngressRequest, MachineService, MachineServiceProtocol, OrganizationAuditEvent,
+    ProtocolError, ServerInfo, ServiceIngress, ServiceIngressAccess,
+    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 use uuid::Uuid;

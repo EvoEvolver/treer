@@ -103,3 +103,18 @@ Remote orchestration of machine updates from `/admin` is a follow-up.
 - `/api/admin/update*` require the platform admin session
 - hosted Railway leaves `TREER_UPDATER_URL` unset; `/admin` then shows that
   updates are not configured
+
+## Explicit public service ports
+
+HTTP service domains use the Proxy's `TREER_INGRESS_PUBLIC_URL` wildcard base.
+Core assigns the individual service name; Apps do not supply custom hosts.
+Workspace authentication is the default. Configure wildcard DNS/TLS at your
+edge before exposing the base domain.
+
+Anonymous raw TCP is opt-in: set `TREER_PUBLIC_TCP_PORT_RANGE=start-end` on the
+Proxy and expose that same range through Compose or your deployment firewall.
+`TREER_PUBLIC_TCP_BIND_ADDRESS` defaults to `0.0.0.0`. The maximum configured
+range is 1,024 ports. Merely setting the range does not publish a service; an
+explicit `treer service publish SERVICE_ID --tcp --access public` allocates a
+mapping. The service must implement its own protocol authentication. This
+repository change does not modify an existing deployment or firewall.

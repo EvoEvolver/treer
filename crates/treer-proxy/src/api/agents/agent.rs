@@ -241,18 +241,13 @@ pub(crate) async fn execute_agent_create(
     request: CreateAgentRequest,
     launch_profile_id: Option<&str>,
 ) -> Result<Value, ApiFailure> {
-    if let Some(recipe) = recipe_url(&request) {
-        if let Err(message) = validate_recipe_url(recipe) {
-            return Err(ApiFailure::bad_request("invalid_recipe", &message));
-        }
-        if !recipe_installer_kind_allowed(&request.kind) {
-            return Err(ApiFailure::bad_request(
-                "recipe_requires_interactive_agent",
-                "recipe install requires an interactive agent kind or auto",
-            ));
-        }
+    if request
+        .recipe
+        .as_deref()
+        .is_some_and(|recipe| !recipe.trim().is_empty())
+    {
+        return Err(ApiFailure::bad_request("recipe_runtime_retired", "launch your installer through an explicit saved profile and provide its recipe through the Agent Interface; Core no longer installs or prompts provider runtimes"));
     }
-    let recipe = recipe_url(&request).map(str::to_string);
     let server_id = state
         .select_server(workspace_id, request.server_id.as_deref())
         .await?;
@@ -265,39 +260,12 @@ pub(crate) async fn execute_agent_create(
         PolicyResource::new(RESOURCE_MACHINE, &server_id),
     )
     .await?;
-    if let Some(recipe) = recipe.as_deref() {
-        if let Ok(snapshot) = state.snapshot(workspace_id).await {
-            let filter = if request.kind == "auto" {
-                None
-            } else {
-                Some(request.kind.as_str())
-            };
-            if let Some(existing) =
-                pick_existing_installer_agent(&snapshot.agents, &server_id, filter)
-            {
-                let agent_id = existing.agent_id.clone();
-                let mut data = serde_json::to_value(existing).unwrap_or_else(|_| json!({}));
-                queue_installer_recipe_prompt(
-                    state.clone(),
-                    workspace_id.to_string(),
-                    server_id.clone(),
-                    agent_id,
-                    recipe.to_string(),
-                );
-                if let Some(object) = data.as_object_mut() {
-                    object.insert("installer_reused".into(), json!(true));
-                    object.insert("installer_prompted".into(), json!("queued"));
-                }
-                return Ok(data);
-            }
-        }
-    }
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
     let agent_name = request.name.clone();
     let workload_credential = auth
         .create_agent_credential(workspace_id, &server_id, &agent_id)
         .await?;
-    let mut data = state
+    let data = state
         .send_command(
             workspace_id,
             &server_id,
@@ -308,18 +276,6 @@ pub(crate) async fn execute_agent_create(
             },
         )
         .await?;
-    if let Some(recipe) = recipe.as_deref() {
-        queue_installer_recipe_prompt(
-            state.clone(),
-            workspace_id.to_string(),
-            server_id.clone(),
-            agent_id.clone(),
-            recipe.to_string(),
-        );
-        if let Some(object) = data.as_object_mut() {
-            object.insert("installer_prompted".into(), json!("queued"));
-        }
-    }
     let (actor_kind, actor_id) = control_audit_actor(session, subject);
     let payload = launch_profile_id.map_or_else(
         || json!({ "server_id": &server_id }),

@@ -10,18 +10,17 @@ import org.junit.Test
 
 class CreateFlowTest {
     @Test
-    fun terminalKindWiresToCommand() {
-        assertEquals("command", wireAgentKind("terminal"))
-        assertEquals("codex", wireAgentKind("codex"))
-        assertEquals("cursor", wireAgentKind("cursor-agent"))
+    fun terminalKindWiresToShell() {
+        assertEquals("shell", wireAgentKind("terminal"))
+        assertEquals("command", wireAgentKind("command"))
     }
 
     @Test
-    fun prefersCodexWhenTheMachineReportsIt() {
+    fun defaultsToTerminalRegardlessOfProviderDiscovery() {
         val withCodex = Machine(serverId = "srv_1", availableAgents = listOf("claude", "codex"))
         val without = Machine(serverId = "srv_1", availableAgents = listOf("claude"))
         val unknown = Machine(serverId = "srv_1", availableAgents = null)
-        assertEquals("codex", preferredCreateKind(withCodex))
+        assertEquals("terminal", preferredCreateKind(withCodex))
         assertEquals("terminal", preferredCreateKind(without))
         assertEquals("terminal", preferredCreateKind(unknown))
         assertEquals("terminal", preferredCreateKind(null))

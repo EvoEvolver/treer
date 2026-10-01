@@ -1,5 +1,11 @@
 # Native macOS networking execution plan
 
+Status as of 2026-09-30: superseded by the
+[core simplification plan](2026-09-30-core-simplification-plan.md).
+Do not continue network-capture parity work under this plan. The implementation
+and evidence below remain historical context; removing installed components and
+migrating existing services are still pending work under the new plan.
+
 Approved scope: make native macOS networking match Linux's user-visible
 behavior, except for independent Agent network namespaces. This plan is an
 execution log, not a statement that the target behavior already ships.

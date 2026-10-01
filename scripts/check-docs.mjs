@@ -73,7 +73,7 @@ requireText("docs/README.md", "../deploy/README.md");
 requireText("docs/README.md", "../skills/treer-voice/SKILL.md");
 requireText("docs/README.md", "mobile.md");
 requireText(
-  "crates/treer-cli/src/main.rs",
+  "crates/treer-agent-server/src/cli_command.rs",
   'include_str!("../../../skills/treer/SKILL.md")',
 );
 requireText(
@@ -81,7 +81,7 @@ requireText(
   'include_str!("../../../skills/treer-install/SKILL.md")',
 );
 requireText(
-  "crates/treer-cli/src/main.rs",
+  "crates/treer-agent-server/src/cli_command.rs",
   'include_str!("../../../skills/treer-macos-container/SKILL.md")',
 );
 requireText(

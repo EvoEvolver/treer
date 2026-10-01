@@ -9,13 +9,11 @@ workspace members. It is not a safe multi-tenant execution sandbox.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
 - An Agent can register or clear only its own Agent Interface Server. The
-  Controller verifies the private-loopback manifest before advertising it and
+  Controller verifies the registered loopback manifest before advertising it and
   never forwards the workload credential to the interface. Its local recovery
   cache contains only a process-bound descriptor and is revalidated before use.
-- Agent-authenticated routes cannot create, update, or delete machine services,
-  virtual hosts, or service ingresses. That denial is enforced before workspace
-  Policy, so an old CLI cannot restore the capability. Agents may create Managed
-  Apps; Core atomically owns those Apps' service and virtual-host records.
+- Agent-authenticated service mutations are bound to the Agent's own machine
+  and Agent ID; cross-owner requests fail before Policy can grant them.
 - Local operator requests use a private Controller credential that is not
   injected into managed Agent environments.
 - Service tokens are short-lived and audience-bound. Human App token
@@ -57,7 +55,7 @@ the machine account. Anyone with that account's authority can modify the same
 state or execute an equivalent command.
 
 Apps do not create a security boundary. Managed Apps currently run through the
-same Host and sandbox backend as command Agents, under the installing machine
+same Host process runtime as command Agents, under the installing machine
 account. Externally managed Apps inherit their supervisor's authority.
 Treer Policy limits what authenticated requests Core accepts; it cannot stop an
 App from using other same-machine credentials or services it can reach. Run
@@ -66,8 +64,8 @@ sandbox.
 
 Agent Interface Servers likewise do not create a security boundary. They run
 with the Agent's operating-system authority and may expose transcript and prompt
-operations to callers already authorized by Proxy Policy. Interface ports stay
-on Agent-private loopback; the Controller is the external routing and policy
+operations to callers already authorized by Proxy Policy. Interface ports use
+machine loopback, which is shared without external isolation; the Controller is the external routing and policy
 boundary.
 
 Repository launchers are optional code executed with the Agent's operating-
@@ -79,62 +77,24 @@ path. Selecting the Remote Codex UI profile explicitly trusts and builds the
 immutable upstream commit recorded in the launcher lock file, then serves it
 only through the existing private Agent Interface tunnel.
 
-The Create Agent dialog's one-click CLI installs execute cataloged third-party
-install scripts or package-manager commands with the machine account's
-authority. Treer does not mirror, pin, attest, or sandbox those upstream
-artifacts beyond the Agent runtime already described here. Treat the action as
-trusting that provider's current installer, and use a dedicated machine, VM, or
-stronger sandbox when that trust is not acceptable.
+Treer does not install provider CLIs, capture network traffic, manage OS DNS,
+create namespaces, or configure a sandbox. Profiles and external launchers own
+those choices. Ordinary internet traffic is outside Treer's authorization and
+metering boundary.
 
-`proxy-env` is not a full traffic intercept. The injected HTTP CONNECT and
-SOCKS listeners classify destinations locally: workspace virtual-host names
-and the reserved local-API address stay on the Treer path; ordinary internet
-destinations are dialed on the machine and never wait on the Proxy. Linux
-`transparent` mode still captures all Agent TCP through the TUN. Do not describe
-macOS `proxy-env` as a forced proxy for GitHub or other public sites.
+The thin CLI carries an Agent credential separately from the Controller's
+operator and machine credentials. Agent mode requires both Agent ID and its
+credential; missing credentials must not fall back to an operator identity.
+This enables a caller-provided isolation boundary to expose only the Agent's
+identity. It does not protect credentials from another process under the same
+unisolated account, or from the machine owner.
 
-The opt-in [native Mac network lab](../scripts/network-lab/README.md) demonstrates
-PID capture into this existing virtual-host Policy/relay path. Its cooperative
-registration gate, shared DNS cache, upstream helper half-close behavior, and
-fail-open helper shutdown do not provide Linux namespace isolation or a new
-supported transparent mode. See the [measured limits](research/2026-09-05-macos-transparent-network.md).
-
-The owned [native backend](../native/macos-network/README.md) adds kernel audit
-token and process-birth validation, registration acknowledgement before exec,
-and a corrected directional TCP copier. Roots and observed descendants are
-checkpointed in provider-private storage and restored only for live process
-instances from the same system boot. The UDP adapter routes each target through
-Controller/Proxy authorization. It remains experimental: detached children before
-their first observed flow, protection during extension death, system virtual DNS
-and installed UDP capture still have open delivery gates. Unsigned builds and kernel identity
-unit tests do not establish an installed capture boundary.
-
-Tracked network connections are periodically reauthorized, including Direct
-connections from Controllers that report their complete lifetime. A denial or
-reauthorization timeout closes the tracked connection. Five-second polling and
-the Policy cache mean revocation is not instantaneous. Older Direct Controllers
-continue to have Open-only authorization. Proxy-env internet bypass traffic is
-outside this mechanism.
-
-New Controllers negotiate durable Direct usage receipts. Each receipt is issued
-only after Policy authorization and binds reports to the original workspace,
-machine, Agent and destination. Cumulative reports are checkpointed locally before
-transmission, and removed only after the Proxy commits deduplication state and
-both machine/Agent ledgers in one database transaction. Reports can arrive after
-revocation or reconnect; receipts authorize accounting only, never a new socket.
-Duplicate and older reports add nothing; mixed decreasing/increasing counters are
-rejected. Undelivered, unused receipts are discarded and remaining open receipts
-expire with the 90-day traffic retention window. Legacy peers retain best-effort,
-live-stream reporting.
-
-Direct counters remain machine-reported observations with zero billable bytes.
-Abrupt crashes can lose bytes since the latest five-second checkpoint; delayed
-reports are bucketed at commit time. Disk/storage failures remain visible failures,
-not proof of complete accounting. Agent detail describes the same traffic and is
-not additional billable traffic. An Apple Developer account does not by itself
-supply complete detached-child tracking: Apple's optional Endpoint Security
-[entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.endpoint-security.client)
-requires a separate request. That backend is not implemented or claimed here.
+Service TCP connections are reauthorized periodically and closed when their
+identity, service, membership, mapping, or Policy no longer permits them.
+Polling and Policy caching mean revocation is not instantaneous. New anonymous
+public TCP ports require an explicit public action; the application owns its
+protocol authentication. There is no claim that arbitrary outbound networking
+is restricted or audited.
 
 ## Credentials
 
@@ -191,25 +151,16 @@ compromise. Proxy, App, PostgreSQL, and NATS do not mount the socket. Hosted
 Railway does not run the sidecar. `/api/admin/update*` require a current
 platform admin session; workspace members cannot start an image apply.
 
-Linux `publish_ports` maps a namespace TCP port onto the machine loopback. It
-is not an internet listener. Any process on that machine that can reach
-`127.0.0.1` can reach the published service. Agent-scoped services use a
-separate Unix bridge into the same namespace and do not open a host TCP port.
-Managed Apps use `publish_ports` for their declared HTTP UI port, then route the
-stable service and virtual hostname to that loopback listener. When wildcard
-ingress is configured, Core creates a dedicated ingress for each Managed App.
-It uses `workspace` access by default, requiring a current workspace session or
-service-audience credential. An Agent may request `public` access only while
-creating a Managed App; that App then accepts anonymous internet requests and
-must implement any application-level authentication it needs. Their command,
-arguments, working directory, hostname, access choice, and `public_url` are
-plaintext Proxy metadata; the Managed App API deliberately has no secret field.
-
-Only a logged-in workspace user or operator API may directly mutate service,
-virtual-host, and ingress records. Managed Agents can list or probe existing
-records for compatibility but cannot publish arbitrary sandbox listeners. Their
-only publication authority is the declared HTTP port of a Managed App created
-through the atomic App lifecycle.
+Registered endpoints are ordinary sockets reachable from the Controller.
+Same-machine processes may reach them outside the Proxy. Explicit forwarding
+provides workspace authentication at the Treer entry point, not host firewall
+isolation. User-provided containers or separate accounts supply isolation when
+required. Agent-owned service mutations cannot select another Agent's identity.
+Managed Apps and standalone HTTP services receive platform-assigned domains;
+custom hosts are rejected. Workspace access is the default, while explicit
+public HTTP/TCP exposure accepts anonymous internet connections. Commands,
+arguments, target addresses, and launch snapshots are plaintext configuration;
+keep secrets out of argv and profiles.
 
 Workspace members may change an existing Managed App's owned ingress between
 `workspace` and `public` access from the App settings UI. This endpoint resolves
@@ -228,8 +179,8 @@ security control.
 
 1. Replace allow-all defaults with reviewed policies and auditable decisions.
 2. Bind provider credentials and runtime actions to explicit owners.
-3. Add a real isolation backend for untrusted workloads and scoped secret
-   delivery.
+3. Keep external isolation and secret-delivery integration explicit; do not
+   grow an owned sandbox implementation.
 4. Add credential rotation, retention/deletion workflows, quotas, and incident
    diagnostics.
 5. Enforce signed release manifests and downgrade protection in installed
@@ -237,5 +188,4 @@ security control.
 
 Relevant source boundaries are `crates/treer-proxy/src/auth.rs`,
 `identity.rs`, `policy.rs`, `message_store.rs`, `updater.rs`,
-`deploy/updater/updater.py`, and the Controller sandbox and
-network modules.
+`deploy/updater/updater.py`, and the Controller CLI, startup-store, and explicit network modules.

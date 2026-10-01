@@ -1,5 +1,424 @@
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires cargo build -p treer-agent-host immediately before this isolated real-Host test"]
+async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
+    use std::os::unix::fs::PermissionsExt;
+    use treer_host_protocol::HostDaemonConfig;
+    use treer_protocol::RuntimeRestoreState;
+    struct IsolatedHost(tokio::process::Child);
+    impl Drop for IsolatedHost {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            if let Some(pid) = self.0.id() {
+                // Only direct children of this test's owned Host are targeted.
+                let _ = std::process::Command::new("pkill")
+                    .args(["-TERM", "-P", &pid.to_string()])
+                    .status();
+                let _ = std::process::Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+    let root = PathBuf::from("/tmp").join(format!(
+        "trr-cold-{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let socket = root.join("host.sock");
+    let controller = root.join("idle-controller");
+    std::fs::write(&controller, "#!/bin/sh\nexec sleep 120\n").unwrap();
+    std::fs::set_permissions(&controller, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config_path = root.join("host.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&HostDaemonConfig {
+            socket_path: socket.clone(),
+            controller_path: controller,
+            controller_config_path: root.join("unused.json"),
+            root: root.clone(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let binary =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/treer-agent-host");
+    assert!(binary.is_file(), "build treer-agent-host first");
+    async fn connect(socket: &std::path::Path, root: &std::path::Path) -> ControllerRuntime {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (host, events) = loop {
+            if let Ok(connection) = HostClient::connect(socket).await {
+                break connection;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "isolated Host socket did not appear"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let sync = host.sync(Default::default()).await.unwrap();
+        ControllerRuntime::from_sync(
+            host,
+            sync,
+            events,
+            ControllerConfig {
+                workspace_id: "cold-workspace".into(),
+                server_id: "cold-server".into(),
+                agent_server_url: "http://127.0.0.1:1".into(),
+                treer_binary: None,
+                interface_cache_path: root.join("interfaces.json"),
+                startup_store_path: root.join("startup.json"),
+                root: root.into(),
+            },
+        )
+        .unwrap()
+        .0
+    }
+    async fn shutdown(child: &mut IsolatedHost) {
+        std::process::Command::new("kill")
+            .args(["-TERM", &child.0.id().unwrap().to_string()])
+            .status()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), child.0.wait())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let spawn_host = || {
+        IsolatedHost(
+            tokio::process::Command::new(&binary)
+                .arg("run")
+                .arg("--config")
+                .arg(&config_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let mut first_host = spawn_host();
+    let first = connect(&socket, &root).await;
+    let literal = "literal $() ' spaces";
+    let args = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "printf '%s\\n' \"$1\"; exec sleep 120".into(),
+        "launcher".into(),
+        literal.into(),
+    ];
+    for id in ["survivor", "stopped"] {
+        first
+            .create(
+                &format!("create-{id}"),
+                id.into(),
+                new_workload_credential(),
+                CreateAgentRequest {
+                    server_id: None,
+                    kind: "command".into(),
+                    name: id.into(),
+                    cwd: ".".into(),
+                    args: args.clone(),
+                    cols: 80,
+                    rows: 24,
+                    publish_ports: vec![],
+                    recipe: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let before = first.get_startup("survivor").unwrap();
+    assert_eq!(before.command, "/bin/sh");
+    assert_eq!(before.args, args[1..]);
+    first.stop("stop-intent", "stopped").await.unwrap();
+    assert!(!first.get_startup("stopped").unwrap().enabled);
+    shutdown(&mut first_host).await;
+    let saved = StartupStore::load(root.join("startup.json")).unwrap();
+    assert!(
+        saved.get("survivor").unwrap().spec.enabled,
+        "machine shutdown must preserve running intent"
+    );
+    assert!(!saved.get("stopped").unwrap().spec.enabled);
+    let mut second_host = spawn_host();
+    let second = connect(&socket, &root).await;
+    let active = vec!["survivor".to_string(), "stopped".to_string()];
+    let (a, b) = tokio::join!(
+        second.restore_runtime(&active),
+        second.restore_runtime(&active)
+    );
+    assert_eq!(
+        a.items
+            .iter()
+            .find(|item| item.workload_id == "survivor")
+            .unwrap()
+            .state,
+        RuntimeRestoreState::Started
+    );
+    assert_eq!(
+        b.items
+            .iter()
+            .find(|item| item.workload_id == "stopped")
+            .unwrap()
+            .state,
+        RuntimeRestoreState::SkippedStopped
+    );
+    let HostResponse::Synced { processes, .. } =
+        second.inner.host.sync(Default::default()).await.unwrap()
+    else {
+        panic!("inventory");
+    };
+    assert_eq!(
+        processes.iter().filter(|process| process.running).count(),
+        1
+    );
+    assert_eq!(processes[0].process_id, "survivor");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let HostResponse::Output { replay } = second
+            .inner
+            .host
+            .request(
+                HostCommand::Read {
+                    process_id: "survivor".into(),
+                    cursor: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("read");
+        };
+        if plain_text(&replay).unwrap().contains(literal) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "literal argv did not reach restored process"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    shutdown(&mut second_host).await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
+    use tokio::io::AsyncWriteExt;
+    use treer_host_protocol::{
+        decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
+    };
+    use treer_protocol::RuntimeRestoreState;
+    let root = PathBuf::from("/tmp").join(format!("trr-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    let socket = root.join("host.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let sync = HostResponse::Synced {
+        host_epoch: "new-host".into(),
+        host_build: HostBuildInfo {
+            version: "test".into(),
+            git_commit: "test".into(),
+        },
+        processes: vec![],
+        replay: vec![],
+    };
+    let host_sync = sync.clone();
+    let spawn_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let host_spawn_count = spawn_count.clone();
+    let inventory_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let host_inventory_failed = inventory_failed.clone();
+    let host_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut processes: Vec<HostProcessInfo> = vec![];
+        while let Ok(length) = stream.read_u32().await {
+            let mut bytes = vec![0; length as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            let request: HostRequest = decode_message(&bytes).unwrap();
+            let response = match request.command {
+                HostCommand::Sync { .. } => {
+                    if host_inventory_failed.load(std::sync::atomic::Ordering::SeqCst) {
+                        for process in &mut processes {
+                            process.running = false;
+                            process.exit_code = Some(1);
+                        }
+                    }
+                    let HostResponse::Synced {
+                        host_epoch,
+                        host_build,
+                        replay,
+                        ..
+                    } = host_sync.clone()
+                    else {
+                        unreachable!()
+                    };
+                    HostResponse::Synced {
+                        host_epoch,
+                        host_build,
+                        processes: processes.clone(),
+                        replay,
+                    }
+                }
+                HostCommand::Spawn { request } => {
+                    assert_eq!(
+                        request.process_id, "recover",
+                        "stopped or revoked workload was spawned"
+                    );
+                    assert_eq!(request.command, "/bin/sh");
+                    assert_eq!(request.cols, 80);
+                    assert_eq!(request.rows, 24);
+                    assert_eq!(
+                        request.env.get("TREER_MACHINE_TOKEN").map(String::as_str),
+                        Some("")
+                    );
+                    assert_eq!(
+                        request
+                            .env
+                            .get("TREER_OPERATOR_CREDENTIAL")
+                            .map(String::as_str),
+                        Some("")
+                    );
+                    host_spawn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let now = Utc::now();
+                    let process = HostProcessInfo {
+                        process_id: request.process_id,
+                        pid: Some(1234),
+                        cwd: request.cwd,
+                        running: true,
+                        started_at: now,
+                        last_output_at: now,
+                        exited_at: None,
+                        exit_code: None,
+                        stream_epoch: "stream".into(),
+                        first_revision: 1,
+                        next_revision: 1,
+                        bracketed_paste: false,
+                        metadata: request.metadata,
+                    };
+                    host_inventory_failed.store(false, std::sync::atomic::Ordering::SeqCst);
+                    processes.retain(|old| old.process_id != process.process_id);
+                    processes.push(process.clone());
+                    HostResponse::Process { process }
+                }
+                _ => panic!("unexpected command"),
+            };
+            let message = HostMessage::Response {
+                request_id: request.request_id,
+                response: Some(response),
+                error: None,
+            };
+            let encoded = encode_message(&message).unwrap();
+            stream.write_u32(encoded.len() as u32).await.unwrap();
+            stream.write_all(&encoded).await.unwrap();
+        }
+    });
+    let (host, events) = HostClient::connect(&socket).await.unwrap();
+    let (runtime, _) = ControllerRuntime::from_sync(
+        host,
+        sync,
+        events,
+        ControllerConfig {
+            workspace_id: "workspace".into(),
+            server_id: "server".into(),
+            agent_server_url: "http://127.0.0.1:1".into(),
+            treer_binary: None,
+            interface_cache_path: root.join("interfaces.json"),
+            startup_store_path: root.join("startup.json"),
+            root: root.clone(),
+        },
+    )
+    .unwrap();
+    for (id, enabled) in [("stopped", false), ("revoked", true), ("recover", true)] {
+        runtime
+            .inner
+            .startup_store
+            .upsert(StoredAgentStartup {
+                spec: AgentStartupSpec {
+                    agent_id: id.into(),
+                    server_id: "server".into(),
+                    kind: "command".into(),
+                    name: id.into(),
+                    cwd: ".".into(),
+                    command: "/bin/sh".into(),
+                    args: vec![],
+                    publish_ports: vec![],
+                    enabled,
+                    generation: 1,
+                },
+                workspace_id: "workspace".into(),
+                workload_credential: new_workload_credential(),
+                last_host_epoch: "old-host".into(),
+                initial_writes: vec![],
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap();
+    }
+    let active = vec!["recover".to_string()];
+    let (first, second) = tokio::join!(
+        runtime.restore_runtime(&active),
+        runtime.restore_runtime(&active)
+    );
+    assert_eq!(first.items[0].state, RuntimeRestoreState::Started);
+    assert!(matches!(
+        second.items[0].state,
+        RuntimeRestoreState::Started | RuntimeRestoreState::Attached
+    ));
+    assert_eq!(first.items[1].state, RuntimeRestoreState::IdentityRevoked);
+    assert_eq!(first.items[2].state, RuntimeRestoreState::SkippedStopped);
+    assert_eq!(spawn_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Simulate a lost Controller ACK/cache: Host inventory must reattach.
+    runtime.inner.agents.write().unwrap().clear();
+    let attached = runtime.restore_runtime(&active).await;
+    assert_eq!(attached.items[0].state, RuntimeRestoreState::Attached);
+    assert_eq!(spawn_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(runtime.list()[0].agent_id, "recover");
+    // Controller missed the exit event and still thinks this process runs.
+    inventory_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let repaired = runtime.restore_runtime(&active).await;
+    assert_eq!(repaired.items[0].state, RuntimeRestoreState::Started);
+    assert_eq!(spawn_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let info = runtime.list()[0].clone();
+    let mut completed = HostProcessInfo {
+        process_id: info.agent_id.clone(),
+        pid: info.pid,
+        cwd: info.cwd.clone(),
+        running: false,
+        started_at: info.started_at,
+        last_output_at: Utc::now(),
+        exited_at: Some(Utc::now()),
+        exit_code: Some(1),
+        stream_epoch: "stream".into(),
+        first_revision: 1,
+        next_revision: 1,
+        bracketed_paste: false,
+        metadata: String::new(),
+    };
+    runtime.apply_process(completed.clone());
+    assert!(
+        runtime.get_startup("recover").unwrap().enabled,
+        "failed Agents remain manually recoverable"
+    );
+    completed.exit_code = Some(0);
+    runtime.apply_process(completed);
+    assert!(
+        !runtime.get_startup("recover").unwrap().enabled,
+        "normal completion stops recovery intent"
+    );
+    let completed_report = runtime.restore_runtime(&active).await;
+    assert_eq!(
+        completed_report.items[0].state,
+        RuntimeRestoreState::SkippedStopped
+    );
+    assert_eq!(spawn_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    host_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn status_detector_prefers_blockers() {
     assert_eq!(
@@ -93,93 +512,6 @@ fn prompt_text_uses_bracketed_paste_when_enabled() {
 }
 
 #[test]
-fn agent_commands_are_entered_in_an_interactive_shell() {
-    let args = vec![
-        "--model".to_string(),
-        "gpt 5".to_string(),
-        "it's".to_string(),
-        String::new(),
-    ];
-
-    let launch = shell_agent_launch(
-        "codex",
-        Some("--dangerously-bypass-approvals-and-sandbox"),
-        &args,
-        false,
-        Some("npm install -g @openai/codex"),
-    );
-
-    assert!(!launch.command.is_empty());
-    assert_eq!(launch.args, ["-i"]);
-    assert_eq!(
-            launch.initial_writes,
-            [HostWrite {
-                data: b"if ! command -v 'codex' >/dev/null 2>&1; then echo 'treer: installing missing codex' >&2; npm install -g @openai/codex; fi; 'codex' '--dangerously-bypass-approvals-and-sandbox' '-c' 'check_for_upgrades_on_startup=false' '--model' 'gpt 5' 'it'\\''s' ''; exec 'codex' '--dangerously-bypass-approvals-and-sandbox' '-c' 'check_for_upgrades_on_startup=false' '--model' 'gpt 5' 'it'\\''s' ''\r".to_vec(),
-                delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
-            }]
-        );
-}
-
-#[test]
-fn claude_launch_skips_permissions_and_confirms_workspace_trust() {
-    let request = CreateAgentRequest {
-        server_id: None,
-        kind: "claude".to_string(),
-        name: "claude-test".to_string(),
-        cwd: ".".to_string(),
-        args: vec!["--model".to_string(), "sonnet".to_string()],
-        cols: 120,
-        rows: 36,
-        publish_ports: Vec::new(),
-        recipe: None,
-    };
-
-    let (_kind, launch) = resolve_launch(&request).expect("resolve claude launch");
-
-    assert_eq!(launch.initial_writes.len(), 2);
-    assert_eq!(
-            launch.initial_writes[0].data,
-            b"if ! command -v 'claude' >/dev/null 2>&1; then echo 'treer: installing missing claude' >&2; curl -fsSL https://claude.ai/install.sh | bash; fi; 'claude' '--dangerously-skip-permissions' '--model' 'sonnet'\r"
-        );
-    assert_eq!(launch.initial_writes[1].data, b"\r");
-    assert_eq!(
-        launch.initial_writes[1].delay_ms,
-        CLAUDE_TRUST_CONFIRM_DELAY.as_millis() as u64
-    );
-}
-
-#[test]
-fn shell_commands_are_entered_after_interactive_shell_startup() {
-    let request = CreateAgentRequest {
-        server_id: None,
-        kind: "shell".to_string(),
-        name: "profile".to_string(),
-        cwd: ".".to_string(),
-        args: vec![
-            "opencode".to_string(),
-            "--model".to_string(),
-            "provider/model name".to_string(),
-        ],
-        cols: 120,
-        rows: 36,
-        publish_ports: Vec::new(),
-        recipe: None,
-    };
-
-    let (_kind, launch) = resolve_launch(&request).expect("resolve shell command launch");
-
-    assert!(!launch.command.is_empty());
-    assert_eq!(launch.args, ["-i"]);
-    assert_eq!(
-        launch.initial_writes,
-        [HostWrite {
-            data: b"'opencode' '--model' 'provider/model name'\r".to_vec(),
-            delay_ms: AGENT_COMMAND_DELAY.as_millis() as u64,
-        }]
-    );
-}
-
-#[test]
 fn explicit_command_agents_still_spawn_directly() {
     let request = CreateAgentRequest {
         server_id: None,
@@ -198,34 +530,6 @@ fn explicit_command_agents_still_spawn_directly() {
     assert_eq!(launch.command, "/bin/sh");
     assert_eq!(launch.args, ["-c", "pwd"]);
     assert!(launch.initial_writes.is_empty());
-}
-
-#[test]
-fn managed_apps_spawn_directly_and_publish_their_ui_port() {
-    let request = CreateAgentRequest {
-        server_id: None,
-        kind: "app".to_string(),
-        name: "docs".to_string(),
-        cwd: ".".to_string(),
-        args: vec![
-            "python3".to_string(),
-            "-m".to_string(),
-            "http.server".to_string(),
-            "8080".to_string(),
-        ],
-        cols: 120,
-        rows: 36,
-        publish_ports: vec![8080],
-        recipe: None,
-    };
-
-    let (kind, launch) = resolve_launch(&request).expect("resolve App launch");
-
-    assert_eq!(kind, "app");
-    assert_eq!(launch.command, "python3");
-    assert_eq!(launch.args, ["-m", "http.server", "8080"]);
-    assert!(launch.initial_writes.is_empty());
-    assert_eq!(launch.publish_ports, [8080]);
 }
 
 #[test]
@@ -250,234 +554,6 @@ fn empty_command_request_opens_an_unmodified_interactive_terminal() {
 }
 
 #[test]
-fn auto_kind_selects_the_first_cli_on_the_search_path() {
-    let root = std::env::temp_dir().join(format!("treer-auto-kind-{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).expect("temp path");
-    let cursor = root.join("cursor-agent");
-    std::fs::write(&cursor, "#!/bin/sh\n").expect("write cursor stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod cursor stub");
-    }
-    let request = CreateAgentRequest {
-        server_id: None,
-        kind: "auto".to_string(),
-        name: "installer".to_string(),
-        cwd: ".".to_string(),
-        args: Vec::new(),
-        cols: 120,
-        rows: 36,
-        publish_ports: Vec::new(),
-        recipe: None,
-    };
-
-    let (kind, launch) =
-        resolve_launch_with_path(&request, &root.to_string_lossy()).expect("resolve auto");
-    assert_eq!(kind, "cursor");
-    let script = String::from_utf8(launch.initial_writes[0].data.clone()).expect("utf8");
-    assert!(script.contains("'cursor-agent'"));
-    assert!(!script.contains("npm install -g @openai/codex"));
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn auto_kind_falls_back_to_codex_when_nothing_is_on_path() {
-    let request = CreateAgentRequest {
-        server_id: None,
-        kind: "auto".to_string(),
-        name: "installer".to_string(),
-        cwd: ".".to_string(),
-        args: Vec::new(),
-        cols: 120,
-        rows: 36,
-        publish_ports: Vec::new(),
-        recipe: None,
-    };
-    let empty = std::env::temp_dir().join(format!("treer-empty-path-{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&empty).expect("empty path");
-    let (kind, launch) =
-        resolve_launch_with_path(&request, &empty.to_string_lossy()).expect("resolve auto");
-    assert_eq!(kind, "codex");
-    let script = String::from_utf8(launch.initial_writes[0].data.clone()).expect("utf8");
-    assert!(script.contains("npm install -g @openai/codex"));
-    let _ = std::fs::remove_dir_all(&empty);
-}
-
-#[test]
-fn agent_path_includes_user_local_and_fnm_dirs() {
-    let path = join_agent_path(Some(std::path::Path::new("/opt/treer/bin/treer")));
-    assert!(path.contains("/opt/treer/bin"));
-    if let Some(home) = std::env::var_os("HOME") {
-        let local = std::path::Path::new(&home).join(".local/bin");
-        assert!(path.contains(&*local.to_string_lossy()));
-    }
-}
-
-#[test]
-fn agent_proxy_urls_carry_policy_identity() {
-    let url = agent_network_proxy_url("socks5h://127.0.0.1:8791", "agent-a");
-    let url = url::Url::parse(&url).expect("agent proxy URL");
-    assert_eq!(url.username(), "agent-a");
-    assert_eq!(url.password(), Some("treer"));
-}
-
-#[test]
-fn transparent_networking_does_not_expose_the_host_loopback_proxy() {
-    let env = network_environment("socks5h://agent-a:treer@127.0.0.1:8791".to_string(), true);
-
-    assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(""));
-    assert_eq!(env.get("all_proxy").map(String::as_str), Some(""));
-    assert_eq!(env.get("HTTP_PROXY").map(String::as_str), Some(""));
-    assert_eq!(env.get("http_proxy").map(String::as_str), Some(""));
-    assert_eq!(env.get("HTTPS_PROXY").map(String::as_str), Some(""));
-    assert_eq!(env.get("https_proxy").map(String::as_str), Some(""));
-    assert_eq!(
-        env.get("TREER_NETWORK_PROXY").map(String::as_str),
-        Some("socks5h://agent-a:treer@127.0.0.1:8791")
-    );
-}
-
-#[test]
-fn compatibility_networking_exposes_the_socks_proxy() {
-    let proxy = "socks5h://agent-a:treer@127.0.0.1:8791";
-    let http_proxy = "http://agent-a:treer@127.0.0.1:8791";
-    let env = network_environment(proxy.to_string(), false);
-
-    assert_eq!(env.get("ALL_PROXY").map(String::as_str), Some(proxy));
-    assert_eq!(env.get("all_proxy").map(String::as_str), Some(proxy));
-    assert!(!env.contains_key("HTTP_PROXY"));
-    assert!(!env.contains_key("http_proxy"));
-    assert_eq!(env.get("HTTPS_PROXY").map(String::as_str), Some(http_proxy));
-    assert_eq!(env.get("https_proxy").map(String::as_str), Some(http_proxy));
-    assert_eq!(
-        env.get("GIT_PROXY_COMMAND").map(String::as_str),
-        Some("treer")
-    );
-    assert_eq!(
-        env.get("TREER_GIT_PROXY_MODE").map(String::as_str),
-        Some("1")
-    );
-    assert_eq!(
-        env.get("NO_PROXY").map(String::as_str),
-        Some("127.0.0.1,localhost,::1")
-    );
-    assert_eq!(
-        env.get("no_proxy").map(String::as_str),
-        Some("127.0.0.1,localhost,::1")
-    );
-    assert_eq!(
-        env.get("TREER_NETWORK_PROXY").map(String::as_str),
-        Some(proxy)
-    );
-}
-
-#[test]
-fn native_network_launch_gates_exec_without_reinterpreting_arguments() {
-    let launch = native_network_launch(
-        Some(std::path::Path::new(
-            "/Applications/TreerNetwork.app/Contents/MacOS/TreerNetwork",
-        )),
-        "socks5h://agent-a:treer@127.0.0.1:8791",
-        "agent-a",
-        AgentLaunch {
-            command: "/bin/zsh".into(),
-            args: vec!["-c".into(), "printf '%s' '$literal ; space'".into()],
-            initial_writes: Vec::new(),
-            publish_ports: vec![8080],
-        },
-    );
-    assert_eq!(
-        launch.args,
-        [
-            "exec",
-            "--agent-id",
-            "agent-a",
-            "--network-proxy",
-            "socks5h://agent-a:treer@127.0.0.1:8791",
-            "--",
-            "/bin/zsh",
-            "-c",
-            "printf '%s' '$literal ; space'",
-        ]
-    );
-    assert_eq!(launch.publish_ports, [8080]);
-    assert!(launch.initial_writes.is_empty());
-}
-
-#[test]
-fn transparent_sandbox_preserves_launch_and_initial_input() {
-    let initial_writes = vec![HostWrite {
-        data: b"codex\r".to_vec(),
-        delay_ms: 500,
-    }];
-    let launch = sandbox_launch(
-        Some(std::path::Path::new("/opt/treer-agent-server")),
-        "socks5h://agent-a:treer@127.0.0.1:8791",
-        "agent-a",
-        AgentLaunch {
-            command: "/bin/bash".to_string(),
-            args: vec!["-i".to_string()],
-            initial_writes: initial_writes.clone(),
-            publish_ports: Vec::new(),
-        },
-    );
-
-    assert_eq!(launch.command, "/opt/treer-agent-server");
-    assert_eq!(
-        launch.args,
-        [
-            "sandbox-exec",
-            "--network-proxy",
-            "socks5h://agent-a:treer@127.0.0.1:8791",
-            "--service-socket",
-            crate::network::agent_service_socket_path("agent-a")
-                .display()
-                .to_string()
-                .as_str(),
-            "--",
-            "/bin/bash",
-            "-i"
-        ]
-    );
-    assert_eq!(launch.initial_writes, initial_writes);
-}
-
-#[test]
-fn transparent_sandbox_publishes_requested_namespace_ports() {
-    let launch = sandbox_launch(
-        Some(std::path::Path::new("/opt/treer-agent-server")),
-        "socks5h://127.0.0.1:8791",
-        "agent-a",
-        AgentLaunch {
-            command: "/bin/bash".to_string(),
-            args: vec!["-i".to_string()],
-            initial_writes: Vec::new(),
-            publish_ports: vec![4173],
-        },
-    );
-    assert_eq!(
-        launch.args,
-        [
-            "sandbox-exec",
-            "--network-proxy",
-            "socks5h://127.0.0.1:8791",
-            "--service-socket",
-            crate::network::agent_service_socket_path("agent-a")
-                .display()
-                .to_string()
-                .as_str(),
-            "--publish",
-            "4173",
-            "--",
-            "/bin/bash",
-            "-i"
-        ]
-    );
-}
-
-#[test]
 fn virtual_host_snapshots_only_move_forward_on_one_connection() {
     let current = VirtualNetworkHostsSnapshot {
         workspace_id: "default".to_string(),
@@ -499,4 +575,53 @@ fn virtual_host_snapshots_only_move_forward_on_one_connection() {
             ..current.clone()
         }
     ));
+}
+
+#[test]
+fn profiles_preserve_argv_without_shell_interpretation_or_installation() {
+    let request = CreateAgentRequest {
+        server_id: None,
+        kind: "shell".into(),
+        name: "profile".into(),
+        cwd: ".".into(),
+        args: vec![
+            "arbitrary-agent".into(),
+            "a b".into(),
+            "$(touch forbidden)".into(),
+            "".into(),
+        ],
+        cols: 80,
+        rows: 24,
+        publish_ports: vec![],
+        recipe: None,
+    };
+    let (_, launch) = resolve_launch(&request).unwrap();
+    assert_eq!(launch.command, "arbitrary-agent");
+    assert_eq!(launch.args, request.args[1..]);
+    assert!(launch.initial_writes.is_empty());
+}
+
+#[test]
+fn provider_kinds_and_namespace_ports_require_explicit_migration() {
+    let mut request = CreateAgentRequest {
+        server_id: None,
+        kind: "codex".into(),
+        name: "legacy".into(),
+        cwd: ".".into(),
+        args: vec![],
+        cols: 80,
+        rows: 24,
+        publish_ports: vec![],
+        recipe: None,
+    };
+    assert_eq!(
+        resolve_launch(&request).unwrap_err().code,
+        "agent_kind_retired"
+    );
+    request.kind = "command".into();
+    request.publish_ports = vec![3000];
+    assert_eq!(
+        resolve_launch(&request).unwrap_err().code,
+        "sandbox_ports_retired"
+    );
 }

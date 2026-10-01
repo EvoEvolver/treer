@@ -1,7 +1,7 @@
 # Codex AIS
 
 Thin Treer Agent Interface adapter over `codex app-server`. One Treer Agent
-owns one Codex thread. Built-in `--kind codex` remains the TUI path.
+owns one Codex thread. Use a saved profile invoking `codex` directly for the TUI path.
 
 ## Launch
 

@@ -16,7 +16,7 @@ export type FirstRunTourHost = {
   closeInstall: () => void
   openCreateAgent: (reset: boolean) => void
   closeCreateAgent: () => void
-  setAgentLaunch: (kind: "terminal" | "recipe" | "ui-profile") => void
+  setAgentLaunch: (kind: "terminal" | "ui-profile") => void
 }
 
 const STORAGE_PREFIX = `treer.first-run-tour.${FIRST_RUN_TOUR_VERSION}`
@@ -310,28 +310,11 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
       popover: {
         title: "UI agents (AIS / ACP-style)",
         description:
-          "<p>Saved profiles such as <strong>Codex</strong>, <strong>Claude</strong>, <strong>Pi</strong>, and <strong>OpenCode</strong> start a coding agent that can register an <strong>Agent Interface Server</strong> (AIS), similar to ACP.</p><p>If that agent publishes a <code>ui_path</code>, Treer embeds the page instead of the terminal. Prompts and transcripts go through the interface, not by typing into the shell. The list shows <code>· AIS</code> when that happens.</p>",
+          "<p>Saved profiles run your chosen launcher on the machine. Install its runtime and dependencies first. The launcher may register an <strong>Agent Interface Server</strong> (AIS).</p><p>If the running agent publishes a <code>ui_path</code>, Treer embeds its page. Prompts and transcripts use the advertised interface.</p>",
         side: "left",
         align: "start",
         onPrevClick: () => {
           host.setAgentLaunch("terminal")
-          tour.movePrevious()
-        },
-        onNextClick: () => {
-          void goTo(tour, "[data-tour='agent-recipe']", () => host.setAgentLaunch("recipe"))
-        },
-      },
-    },
-    {
-      element: "[data-tour='agent-recipe']",
-      popover: {
-        title: "What an installer agent is",
-        description:
-          "<p><strong>Install recipe</strong> starts a short-lived coding agent and gives it Treer’s install skill plus a git URL. It clones the recipe, creates a <em>different</em> command agent, and saves a launch profile.</p><p>The installer is not the app. After it finishes, use <strong>Launch</strong> on that profile to start a real agent — with a UI if the recipe registered one. Do not run Install recipe again to open another conversation.</p>",
-        side: "left",
-        align: "start",
-        onPrevClick: () => {
-          host.setAgentLaunch("ui-profile")
           tour.movePrevious()
         },
         onNextClick: () => {
@@ -348,8 +331,8 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
         onPrevClick: () => {
           void (async () => {
             host.openCreateAgent(false)
-            host.setAgentLaunch("recipe")
-            await waitForSelector("[data-tour='agent-recipe']")
+            host.setAgentLaunch("ui-profile")
+            await waitForSelector("[data-tour='agent-launch']")
             tour.movePrevious()
           })()
         },

@@ -35,7 +35,9 @@ environment as it is.
 | **Agents** | Persistent processes and PTYs | Launch any command-based agent, observe it, prompt it, and return after the browser disconnects. |
 | **Apps** | Workspace software with its own UI and data | Run HTTP Apps beside Agents. Treer supplies identity, routing, and a stable workspace address. |
 | **Communication** | Durable Core Messages | Humans and Agents exchange addressed messages with explicit acknowledgement and ordered context. Mail and Telegram remain replaceable channels. |
-| **Network** | Outbound machine connections and private names | Reach Agents, interfaces, and services across enrolled machines without publishing SSH or local service ports. |
+| **Network** | Explicit private/public service forwarding | Register a local port, forward it across the workspace, and optionally expose it on a platform-assigned domain or TCP port. |
+
+A saved launch can be restored after machine restart with `treer-agent-server restore --workspace WORKSPACE_ID`. Treer preserves intended-running Agents and Managed Apps; explicitly stopped workloads stay stopped. It does not restore in-memory Agent conversations.
 
 Treer does not ship another Agent runtime. It coordinates the tools and
 environments you already use through the browser and CLI. Native iOS and Android
@@ -71,7 +73,7 @@ publish SSH or local service ports.
 1. [Open Treer](https://app.treer.ai/) and create or select a workspace.
 2. Choose **Add machine** and run the installer and enrollment command shown by
    the App.
-3. Launch a built-in Agent, define your own command, or open a plain terminal.
+3. Launch an editable command profile or open a plain terminal. Install and configure your Agent runtime yourself.
 
 > [!IMPORTANT]
 > Agents run with the operating-system authority of the account that starts the

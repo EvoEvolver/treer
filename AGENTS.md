@@ -12,8 +12,8 @@ second manual.
   That skill is the runtime CLI contract printed by `treer --skill` and
   `treer --skills`; do not move, rename, or duplicate it here.
 - Recipe installs use [the bundled installer skill](skills/treer-install/SKILL.md),
-  printed by `treer --skill install`. Creating an Agent with `--recipe`
-  sends that skill as the first prompt.
+  served by the Controller through `treer --skill install`. User-owned profiles
+  and launchers run installers; Core no longer interprets `--recipe`.
 - Apple container Host setup on a Mac uses
   [the macOS container skill](skills/treer-macos-container/SKILL.md), printed
   by `treer --skill macos-container`.
@@ -48,7 +48,7 @@ second manual.
 | `crates/treer-agent-server` | Machine Controller, local API, Proxy link, networking |
 | `crates/treer-agent-host` | Stable local process ownership and idempotent mutations |
 | `crates/treer-agent-runtime` | PTY lifecycle, output replay, working-directory boundary |
-| `crates/treer-cli` | Human/Agent commands and the Core Message surface |
+| `crates/treer-cli` | Thin authenticated argv/stream client; command parsing lives in Agent Server |
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
 | `apps` | Ordinary workspace services, channel presentation, configuration, state, and docs |

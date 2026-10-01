@@ -1,5 +1,11 @@
 # Transparent network research probes
 
+Historical fixtures only: the 2026-09-30 core simplification removes the
+sandbox, SOCKS capture, Direct/UDP reporting, and native helper these scripts
+exercise. They require a matching historical revision and are not current
+acceptance gates. Use explicit-service and recovery tests in
+[Quality](../../docs/quality.md) for current behavior.
+
 These are opt-in development experiments, not a new Controller network mode.
 They do not enroll a machine, edit existing workspace policies, or replace
 running Treer binaries. The live experiment creates temporary local instances

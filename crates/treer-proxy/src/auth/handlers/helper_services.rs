@@ -112,53 +112,26 @@ pub(crate) const fn service_ingress_access_str(access: ServiceIngressAccess) -> 
     }
 }
 
-pub(crate) fn normalize_ingress_slug(value: &str) -> Result<String, AuthFailure> {
-    let mut slug = String::new();
-    let mut separator = false;
-    for byte in value.trim().bytes() {
-        if byte.is_ascii_alphanumeric() {
-            if separator && !slug.is_empty() && slug.len() < 40 {
-                slug.push('-');
-            }
-            if slug.len() < 40 {
-                slug.push(byte.to_ascii_lowercase() as char);
-            }
-            separator = false;
-        } else {
-            separator = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    if slug.is_empty() {
-        return Err(AuthFailure::bad_request(
-            "invalid_ingress_slug",
-            "ingress slug must contain an ASCII letter or number",
-        ));
-    }
-    Ok(slug)
-}
-
-pub(crate) fn managed_app_ingress_hostname(
-    app_name: &str,
-    app_id: &str,
+pub(crate) fn platform_service_hostname(
+    service_id: &str,
     base_domain: &str,
 ) -> Result<String, AuthFailure> {
-    let slug = normalize_ingress_slug(app_name).unwrap_or_else(|_| "app".to_string());
-    let suffix = app_id
-        .strip_prefix("app_")
-        .unwrap_or(app_id)
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(12)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    let hostname = format!("{slug}-{suffix}.{base_domain}");
-    if suffix.is_empty() || hostname.len() > 253 {
+    let id = service_id.strip_prefix("svc_").unwrap_or(service_id);
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
         return Err(AuthFailure::bad_request(
-            "invalid_ingress_slug",
-            "generated App ingress hostname is invalid",
+            "invalid_service_id",
+            "service ID cannot form a platform address",
+        ));
+    }
+    let hostname = format!("svc-{}.{}", id.to_ascii_lowercase(), base_domain);
+    if hostname.len() > 253 {
+        return Err(AuthFailure::bad_request(
+            "invalid_service_domain",
+            "platform address exceeds DNS length",
         ));
     }
     Ok(hostname)

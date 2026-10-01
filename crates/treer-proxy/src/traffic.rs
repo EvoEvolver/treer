@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use tracing::warn;
-use treer_protocol::{MachineTrafficRecord, NetworkUsageReport, NetworkUsageTotals, ProtocolError};
+use treer_protocol::MachineTrafficRecord;
 
 #[path = "traffic_persistence.rs"]
 mod persistence;
@@ -60,11 +60,6 @@ pub(crate) struct TrafficCounter {
 }
 
 impl TrafficCounter {
-    fn record_observed(&self, bytes: u64, chunks: u64) {
-        self.payload_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.payload_frames.fetch_add(chunks, Ordering::Relaxed);
-        // Controller-reported internet writes are observation, not relay billing.
-    }
     pub(crate) fn record(&self, payload_bytes: usize) {
         self.payload_bytes.fetch_add(
             u64::try_from(payload_bytes).unwrap_or(u64::MAX),
@@ -75,66 +70,6 @@ impl TrafficCounter {
             u64::try_from(payload_bytes).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
-    }
-}
-
-pub(crate) struct DirectTrafficMeter {
-    counters: StreamTrafficCounters,
-    agent_counters: Option<StreamTrafficCounters>,
-    previous: NetworkUsageTotals,
-}
-
-impl DirectTrafficMeter {
-    pub(crate) fn with_agent_meter(mut self, meter: Option<Self>) -> Self {
-        self.agent_counters = meter.map(|meter| meter.counters);
-        self
-    }
-    pub(crate) fn record(&mut self, totals: NetworkUsageTotals) -> Result<(), ProtocolError> {
-        let previous = self.previous;
-        if totals.sent_bytes < previous.sent_bytes
-            || totals.received_bytes < previous.received_bytes
-            || totals.sent_chunks < previous.sent_chunks
-            || totals.received_chunks < previous.received_chunks
-        {
-            return Err(ProtocolError::new(
-                "invalid_network_usage",
-                "cumulative network usage cannot decrease",
-            ));
-        }
-        if [
-            totals.sent_bytes,
-            totals.received_bytes,
-            totals.sent_chunks,
-            totals.received_chunks,
-        ]
-        .iter()
-        .any(|value| *value > i64::MAX as u64)
-        {
-            return Err(ProtocolError::new(
-                "invalid_network_usage",
-                "network usage exceeds supported counters",
-            ));
-        }
-        self.counters.source_to_destination.record_observed(
-            totals.sent_bytes - previous.sent_bytes,
-            totals.sent_chunks - previous.sent_chunks,
-        );
-        self.counters.destination_to_source.record_observed(
-            totals.received_bytes - previous.received_bytes,
-            totals.received_chunks - previous.received_chunks,
-        );
-        self.previous = totals;
-        if let Some(counters) = &self.agent_counters {
-            counters.source_to_destination.record_observed(
-                totals.sent_bytes - previous.sent_bytes,
-                totals.sent_chunks - previous.sent_chunks,
-            );
-            counters.destination_to_source.record_observed(
-                totals.received_bytes - previous.received_bytes,
-                totals.received_chunks - previous.received_chunks,
-            );
-        }
-        Ok(())
     }
 }
 
@@ -194,63 +129,6 @@ impl TrafficRecorder {
         }
     }
 
-    pub(crate) fn register_agent_stream(
-        &self,
-        workspace: &str,
-        source_server: &str,
-        destination_server: &str,
-        source_agent: Option<&str>,
-        destination_agent: Option<&str>,
-    ) -> Option<StreamTrafficCounters> {
-        if source_agent.is_none() && destination_agent.is_none() {
-            return None;
-        }
-        Some(self.register_stream(
-            workspace,
-            TrafficClass::VirtualNetwork,
-            if source_agent.is_some() {
-                "agent"
-            } else {
-                ENDPOINT_MACHINE
-            },
-            source_agent.unwrap_or(source_server),
-            if destination_agent.is_some() {
-                "agent"
-            } else {
-                ENDPOINT_MACHINE
-            },
-            destination_agent.unwrap_or(destination_server),
-        ))
-    }
-    pub(crate) fn register_direct_stream(
-        &self,
-        workspace_id: &str,
-        source_server_id: &str,
-        host: &str,
-        port: u16,
-    ) -> DirectTrafficMeter {
-        let destination = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
-        DirectTrafficMeter {
-            counters: self.register_stream(
-                workspace_id,
-                TrafficClass::DirectNetwork,
-                if self.inner.agent_detail {
-                    "agent"
-                } else {
-                    ENDPOINT_MACHINE
-                },
-                source_server_id,
-                "internet",
-                &destination,
-            ),
-            previous: NetworkUsageTotals::default(),
-            agent_counters: None,
-        }
-    }
     pub(crate) fn new(pool: PgPool) -> Self {
         Self {
             inner: Arc::new(TrafficRecorderInner {
@@ -261,22 +139,6 @@ impl TrafficRecorder {
                 agents: OnceLock::new(),
             }),
         }
-    }
-
-    pub(crate) fn register_machine_stream(
-        &self,
-        workspace_id: &str,
-        source_server_id: &str,
-        destination_server_id: &str,
-    ) -> StreamTrafficCounters {
-        self.register_stream(
-            workspace_id,
-            TrafficClass::VirtualNetwork,
-            ENDPOINT_MACHINE,
-            source_server_id,
-            ENDPOINT_MACHINE,
-            destination_server_id,
-        )
     }
 
     pub(crate) fn register_client_stream(

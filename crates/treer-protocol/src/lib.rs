@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+pub mod cli;
+pub mod recovery;
+pub use recovery::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,11 +13,13 @@ pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
 pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
+pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,
     CAPABILITY_MACHINE_EXEC,
     CAPABILITY_MACHINE_UPLOAD,
+    CAPABILITY_RUNTIME_RESTORE,
 ];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -705,8 +710,8 @@ pub struct CreateAgentRequest {
     /// Each value is both the namespace listen port and the host publish port.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publish_ports: Vec<u16>,
-    /// Git URL of a community recipe. When set, Treer prompts the new Agent
-    /// with the bundled install skill instead of waiting for a later prompt.
+    /// Legacy recipe automation. Nonempty values are rejected with migration
+    /// guidance; installers now run through explicit commands or profiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
 }
@@ -746,6 +751,8 @@ pub struct ValidateAgentStartupRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidateAgentStartupResponse {
+    #[serde(default)]
+    pub stopped_agent_ids: Vec<String>,
     #[serde(default)]
     pub active_agent_ids: Vec<String>,
 }
@@ -817,180 +824,13 @@ pub struct CreateAppDeploymentRequest {
     #[serde(default)]
     pub cwd: String,
     pub port: u16,
+    #[serde(default)]
     pub hostname: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub public: bool,
 }
 
 pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKILL.md");
-
-pub fn recipe_url(request: &CreateAgentRequest) -> Option<&str> {
-    request
-        .recipe
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-pub fn validate_recipe_url(url: &str) -> Result<(), String> {
-    let url = url.trim();
-    if url.len() > 2048 {
-        return Err("recipe URL is too long".to_string());
-    }
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| "recipe must be an http(s) URL".to_string())?;
-    if rest.is_empty() || rest.contains(' ') || rest.contains('@') {
-        return Err("recipe URL must be an http(s) URL without credentials".to_string());
-    }
-    Ok(())
-}
-
-pub fn installer_base_prompt(recipe_url: &str) -> String {
-    format!(
-        "{INSTALL_SKILL}\n\n## This install\n\nRecipe URL: {recipe_url}\n\nInspect the recipe, list the agents it can install, and ask the human which ones to install. Do not run apply.sh until they answer.\n"
-    )
-}
-
-pub fn installer_composer_ready(text: &str) -> bool {
-    if text.contains("Do you trust") || text.contains("Press enter to continue") {
-        return false;
-    }
-    text.contains("Ask Codex")
-        || text.contains("YOLO mode")
-        || text.contains("OpenAI Codex (")
-        || text.contains("Ask Claude")
-        || text.contains("Grok Build")
-        || text.contains("cursor-agent")
-        || text.contains("OpenCode")
-}
-
-pub fn recipe_installer_kind_allowed(kind: &str) -> bool {
-    matches!(
-        kind,
-        "auto"
-            | "codex"
-            | "claude"
-            | "cursor"
-            | "cursor-agent"
-            | "grok"
-            | "opencode"
-            | "pi"
-            | "shell"
-    )
-}
-
-pub fn reusable_installer_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "codex" | "claude" | "cursor" | "cursor-agent" | "grok" | "opencode" | "pi"
-    )
-}
-
-pub fn pick_existing_installer_agent<'a>(
-    agents: &'a [AgentInfo],
-    server_id: &str,
-    kind: Option<&str>,
-) -> Option<&'a AgentInfo> {
-    let wanted = kind
-        .map(normalize_interactive_agent_kind)
-        .filter(|value| *value != "auto");
-    let mut best: Option<&AgentInfo> = None;
-    let mut best_rank = u8::MAX;
-    for agent in agents {
-        if agent.server_id != server_id || !reusable_installer_kind(&agent.kind) {
-            continue;
-        }
-        if wanted.is_some_and(|kind| normalize_interactive_agent_kind(&agent.kind) != kind) {
-            continue;
-        }
-        if agent.status.is_terminal() || agent.status == AgentStatus::Working {
-            continue;
-        }
-        let rank = match agent.status {
-            AgentStatus::Idle => 0,
-            AgentStatus::Blocked => 1,
-            AgentStatus::Starting => 2,
-            AgentStatus::Unknown => 3,
-            _ => 4,
-        };
-        if rank < best_rank {
-            best = Some(agent);
-            best_rank = rank;
-        }
-    }
-    best
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InteractiveAgentCatalogEntry {
-    pub kind: &'static str,
-    pub command: &'static str,
-    pub install: Option<&'static str>,
-}
-
-pub const INTERACTIVE_AGENT_CATALOG: &[InteractiveAgentCatalogEntry] = &[
-    InteractiveAgentCatalogEntry {
-        kind: "claude",
-        command: "claude",
-        install: Some("curl -fsSL https://claude.ai/install.sh | bash"),
-    },
-    InteractiveAgentCatalogEntry {
-        kind: "cursor",
-        command: "cursor-agent",
-        install: Some("curl https://cursor.com/install -fsS | bash"),
-    },
-    InteractiveAgentCatalogEntry {
-        kind: "grok",
-        command: "grok",
-        install: None,
-    },
-    InteractiveAgentCatalogEntry {
-        kind: "opencode",
-        command: "opencode",
-        install: Some("npm install -g opencode-ai"),
-    },
-    InteractiveAgentCatalogEntry {
-        kind: "pi",
-        command: "pi",
-        install: None,
-    },
-    InteractiveAgentCatalogEntry {
-        kind: "codex",
-        command: "codex",
-        install: Some("npm install -g @openai/codex"),
-    },
-];
-
-pub fn normalize_interactive_agent_kind(kind: &str) -> &str {
-    if kind == "cursor-agent" {
-        "cursor"
-    } else {
-        kind
-    }
-}
-
-pub fn interactive_agent_kind_for_command(command: &str) -> Option<&'static str> {
-    let file = command.rsplit(['/', '\\']).next().unwrap_or(command);
-    let name = file.strip_suffix(".exe").unwrap_or(file);
-    if name == "cursor-agent" {
-        return Some("cursor");
-    }
-    INTERACTIVE_AGENT_CATALOG
-        .iter()
-        .find(|entry| entry.kind == name || entry.command == name)
-        .map(|entry| entry.kind)
-}
-
-pub fn interactive_agent_catalog_entry(
-    kind: &str,
-) -> Option<&'static InteractiveAgentCatalogEntry> {
-    let kind = normalize_interactive_agent_kind(kind);
-    INTERACTIVE_AGENT_CATALOG
-        .iter()
-        .find(|entry| entry.kind == kind)
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLaunchProfile {
@@ -1136,6 +976,7 @@ pub struct AgentServerSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AgentCommand {
+    RestoreRuntime {},
     Create {
         agent_id: String,
         workload_credential: String,
@@ -1209,6 +1050,7 @@ pub enum AgentCommand {
 impl AgentCommand {
     pub fn required_capability(&self) -> Option<&'static str> {
         match self {
+            Self::RestoreRuntime {} => Some(CAPABILITY_RUNTIME_RESTORE),
             Self::Abort { .. } => Some(CAPABILITY_AGENT_ABORT),
             Self::StartupSet { .. } | Self::StartupGet { .. } | Self::StartupClear { .. } => {
                 Some(CAPABILITY_AGENT_STARTUP)
@@ -1646,8 +1488,8 @@ pub struct CreateVirtualNetworkHostRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceIngressAccess {
-    #[default]
     Public,
+    #[default]
     Workspace,
 }
 
@@ -2741,78 +2583,6 @@ mod tests {
                 limit: 50,
                 wait_milliseconds: 0,
             }
-        );
-    }
-
-    #[test]
-    fn installer_prompt_embeds_the_bundled_skill_and_recipe_url() {
-        assert!(INSTALL_SKILL.starts_with("---\nname: treer-install\n"));
-        assert!(!INSTALL_SKILL.contains("TODO"));
-        let prompt = installer_base_prompt("https://github.com/example/recipe.git");
-        assert!(prompt.contains("You are the **installer**"));
-        assert!(prompt.contains("Recipe URL: https://github.com/example/recipe.git"));
-        assert!(validate_recipe_url("https://github.com/example/recipe.git").is_ok());
-        assert!(validate_recipe_url("https://user:pass@example.com/repo.git").is_err());
-        assert!(!installer_composer_ready("Do you trust the contents"));
-        assert!(installer_composer_ready("Ask Codex to do anything"));
-        assert!(installer_composer_ready("Ask Claude to do anything"));
-        assert!(installer_composer_ready("OpenAI Codex (v0.150.1)"));
-        assert!(prompt.contains("ask the human which ones to install"));
-        assert!(recipe_installer_kind_allowed("auto"));
-        assert!(recipe_installer_kind_allowed("cursor"));
-        assert!(!recipe_installer_kind_allowed("command"));
-        assert!(reusable_installer_kind("claude"));
-        assert!(!reusable_installer_kind("auto"));
-        assert!(!reusable_installer_kind("shell"));
-    }
-
-    fn installer_agent(
-        agent_id: &str,
-        server_id: &str,
-        kind: &str,
-        status: AgentStatus,
-    ) -> AgentInfo {
-        let now = Utc::now();
-        AgentInfo {
-            agent_id: agent_id.to_string(),
-            workspace_id: "ws_test".to_string(),
-            server_id: server_id.to_string(),
-            kind: kind.to_string(),
-            name: agent_id.to_string(),
-            cwd: ".".to_string(),
-            status,
-            pid: None,
-            started_at: now,
-            updated_at: now,
-            exited_at: None,
-            exit_code: None,
-            output_revision: 0,
-            interface: None,
-        }
-    }
-
-    #[test]
-    fn recipe_install_reuses_an_idle_interactive_agent_on_the_machine() {
-        let idle_claude = installer_agent("ag_claude", "srv_a", "claude", AgentStatus::Idle);
-        let working_codex = installer_agent("ag_codex", "srv_a", "codex", AgentStatus::Working);
-        let other_machine = installer_agent("ag_other", "srv_b", "cursor", AgentStatus::Idle);
-        let terminal = installer_agent("ag_term", "srv_a", "command", AgentStatus::Idle);
-        let agents = vec![working_codex, terminal, other_machine, idle_claude.clone()];
-        let picked = pick_existing_installer_agent(&agents, "srv_a", None).expect("idle installer");
-        assert_eq!(picked.agent_id, idle_claude.agent_id);
-        assert_eq!(
-            pick_existing_installer_agent(&agents, "srv_a", Some("codex"))
-                .map(|agent| agent.agent_id.as_str()),
-            None
-        );
-        assert!(pick_existing_installer_agent(&agents, "srv_missing", None).is_none());
-        assert_eq!(
-            interactive_agent_kind_for_command("cursor-agent"),
-            Some("cursor")
-        );
-        assert_eq!(
-            interactive_agent_kind_for_command("/usr/bin/claude"),
-            Some("claude")
         );
     }
 

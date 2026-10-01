@@ -20,7 +20,6 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub async fn manifest(
     agent_id: &str,
     interface: &AgentInterfaceDescriptor,
-    transparent_networking: bool,
 ) -> Result<AgentInterfaceManifest, ProtocolError> {
     request::<serde_json::Value, AgentInterfaceManifest>(
         agent_id,
@@ -28,7 +27,6 @@ pub async fn manifest(
         Method::GET,
         "/v1/manifest",
         None,
-        transparent_networking,
     )
     .await
 }
@@ -37,7 +35,6 @@ pub async fn abort(
     agent_id: &str,
     interface: &AgentInterfaceDescriptor,
     operation_id: &str,
-    transparent_networking: bool,
 ) -> Result<(), ProtocolError> {
     let _: serde_json::Value = request(
         agent_id,
@@ -45,7 +42,6 @@ pub async fn abort(
         Method::POST,
         "/v1/abort",
         Some(&serde_json::json!({ "operation_id": operation_id })),
-        transparent_networking,
     )
     .await?;
     Ok(())
@@ -56,7 +52,6 @@ pub async fn submit_prompt(
     interface: &AgentInterfaceDescriptor,
     operation_id: &str,
     text: &str,
-    transparent_networking: bool,
 ) -> Result<(), ProtocolError> {
     let _: serde_json::Value = request(
         agent_id,
@@ -68,7 +63,6 @@ pub async fn submit_prompt(
             "text": text,
             "mode": "prompt"
         })),
-        transparent_networking,
     )
     .await?;
     Ok(())
@@ -79,7 +73,6 @@ pub async fn transcript(
     interface: &AgentInterfaceDescriptor,
     cursor: Option<&str>,
     limit: Option<usize>,
-    transparent_networking: bool,
 ) -> Result<AgentTranscriptResponse, ProtocolError> {
     let mut path = "/v1/transcript".to_string();
     let mut separator = '?';
@@ -105,7 +98,6 @@ pub async fn transcript(
         Method::GET,
         &path,
         None,
-        transparent_networking,
     )
     .await
 }
@@ -113,7 +105,6 @@ pub async fn transcript(
 pub async fn status(
     agent_id: &str,
     interface: &AgentInterfaceDescriptor,
-    transparent_networking: bool,
 ) -> Result<AgentInterfaceStatusResponse, ProtocolError> {
     let status = request::<serde_json::Value, AgentInterfaceStatusResponse>(
         agent_id,
@@ -121,7 +112,6 @@ pub async fn status(
         Method::GET,
         "/v1/status",
         None,
-        transparent_networking,
     )
     .await?;
     if status.agent_id != agent_id || status.interface_instance_id != interface.instance_id {
@@ -139,10 +129,9 @@ async fn request<B: Serialize + ?Sized, T: DeserializeOwned>(
     method: Method,
     path: &str,
     body: Option<&B>,
-    transparent_networking: bool,
 ) -> Result<T, ProtocolError> {
     let future = async {
-        let stream = connect_agent_service(agent_id, interface.port, transparent_networking)
+        let stream = connect_agent_service(agent_id, interface.port)
             .await
             .map_err(unavailable)?;
         let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
@@ -256,7 +245,7 @@ mod tests {
             ui_path: Some("/".to_string()),
             registered_at: Utc::now(),
         };
-        let value = manifest("agent-test", &descriptor, false)
+        let value = manifest("agent-test", &descriptor)
             .await
             .expect("read manifest");
         assert_eq!(value.instance_id, "pi-test");
@@ -305,7 +294,7 @@ mod tests {
             ui_path: None,
             registered_at: Utc::now(),
         };
-        let value = transcript("agent-test", &descriptor, Some("2"), Some(1), false)
+        let value = transcript("agent-test", &descriptor, Some("2"), Some(1))
             .await
             .expect("read transcript");
         assert_eq!(value.page, Some(2));

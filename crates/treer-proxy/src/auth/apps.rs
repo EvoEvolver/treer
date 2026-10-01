@@ -299,7 +299,12 @@ impl AuthStore {
                 "App port must be between 1 and 65535",
             ));
         }
-        let hostname = normalize_virtual_hostname(&request.hostname)?;
+        if !request.hostname.trim().is_empty() {
+            return Err(AuthFailure::bad_request(
+                "platform_domain_required",
+                "App domains are assigned by the platform; omit hostname",
+            ));
+        }
         let now = Utc::now();
         let service = MachineService {
             service_id: format!("svc_{}", Uuid::new_v4().simple()),
@@ -315,6 +320,7 @@ impl AuthStore {
             updated_at: now,
             updated_by: actor.to_string(),
         };
+        let hostname = platform_service_hostname(&service.service_id, "internal")?;
         let deployment = AppDeployment {
             app_id: format!("app_{}", Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),

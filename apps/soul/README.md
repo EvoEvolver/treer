@@ -20,7 +20,7 @@ host instead of allowing the calling Agent to register its own listener:
 
 ```bash
 treer app create --machine self --name soul --cwd . --port 9420 \
-  --hostname soul.internal env -- \
+  env -- \
   SOUL_DATA_DIR=.treer/apps/soul \
   SOUL_PUBLIC_URL=http://soul.internal \
   python3 apps/soul/soul.py

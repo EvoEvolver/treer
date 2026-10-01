@@ -14,7 +14,7 @@ addresses.
 Before controlling peers, verify that this process is a Treer-managed agent:
 
 ```bash
-test -n "${TREER_AGENT_ID:-}" && test -n "${TREER_AGENT_SERVER_URL:-}"
+test -n "${TREER_AGENT_ID:-}" && test -n "${TREER_WORKLOAD_CREDENTIAL:-}" && test -n "${TREER_AGENT_SERVER_URL:-}"
 treer whoami
 ```
 
@@ -27,7 +27,11 @@ If the environment check fails, do not guess a proxy or local server address.
 Explain that the process is not running inside a managed Treer agent. A human
 may still use `treer --url <agent-server-url> ...` explicitly outside an agent.
 
-The installed binary is the authority for syntax:
+The Controller supplies the command tree, help, and skills. The thin client
+preserves argv and streams stdin and output. Set `TREER_IDENTITY_MODE=agent`
+for independently configured Agent clients: missing identity or credentials
+fail without reading operator credentials. Connection options belong before
+the business command. The Controller must be online for business help:
 
 ```bash
 treer --help
@@ -37,7 +41,8 @@ treer agent admin profile --help
 treer machine --help
 treer exec --help
 treer message --help
-treer network --help
+treer service --help
+treer runtime --help
 treer interface --help
 treer member --help
 treer token --help
@@ -106,15 +111,15 @@ treer member list
 ## Manage long-running Apps
 
 A Managed App is one supervised command with one HTTP UI endpoint. Its service
-and virtual hostname remain stable when the runtime exits or the Controller
+and platform-assigned ingress address remain stable when the runtime exits or the Controller
 reconnects:
 
 ```bash
 treer app create --machine build-machine --name docs --cwd . --port 8080 \
-  --hostname docs.internal python3 -- -m http.server 8080
+  python3 -- -m http.server 8080
 # Explicitly allow anonymous internet access to this Managed App:
 treer app create --public --machine build-machine --name public-docs --cwd . \
-  --port 8081 --hostname public-docs.internal python3 -- -m http.server 8081
+  --port 8081 python3 -- -m http.server 8081
 treer app list
 treer app show docs
 treer app stop docs
@@ -133,24 +138,30 @@ Public creation fails, and `public_url` is absent for private Apps, when the
 Proxy has no wildcard ingress configured.
 
 Use this only for a single-process HTTP App. It does not install dependencies,
-store secrets, migrate state, or isolate hostile code. Service, virtual-host,
-and ingress records are owned by the Managed App. `--public` selects access for
-that owned ingress, but an Agent cannot create or mutate arbitrary network
-records, including through an older CLI. Use the browser control plane for
+store secrets, migrate state, or isolate hostile code. Service and ingress
+records are owned by the Managed App. `--public` selects access for that owned
+ingress. Agents can register and publish their own services under Policy; they
+cannot register unrelated workloads. Use the browser control plane for
 externally supervised or non-HTTP processes.
 
 ## Connect to an existing service
 
-Use an existing virtual hostname normally from a managed Agent. Use the stdio
-bridge when a TCP client accepts a proxy command:
+Register a running process on your own loopback, then forward its stable service
+ID through an authenticated local listener:
 
 ```bash
-treer network connect database.internal 5432
+treer service register --name database --port 5432
+treer service forward <service-id> --listen 127.0.0.1:15432
 ```
 
-`treer network` intentionally exposes no service, host, or publish mutation
-commands. To expose an HTTP process, deploy it with `treer app create`. To show
-an Agent-native UI, register an Agent Interface Server.
+Private forwarding is the default. `treer service publish <service-id>`
+allocates a platform-managed HTTP address with workspace authentication;
+`--access public` explicitly removes that ingress authentication. Raw TCP
+publication uses `--tcp --access public` and requires a configured platform
+port range. Treer registers and routes processes; the user owns their runtime
+environment and its isolation. Transparent network proxying is retired.
+Use `treer service unpublish <service-id>` to revoke HTTP ingress while retaining
+the running service, or add `--tcp` to revoke its public TCP listener.
 
 ## Use an Agent Interface Server
 
@@ -200,8 +211,8 @@ Codex app-server sidecar without HTML, `apps/opencode-ais` for OpenCode HTTP,
 `apps/dsh-ais` for DeepSeek Harness, `apps/claude-ais` for Claude Code
 stream-json, `apps/grok-ais` for Grok Build ACP, and `apps/cursor-ais` for
 Cursor ACP. Launch Cursor with `cursor-agent`, not `agent`. Each Agent is one
-thread/session. Built-in `--kind codex` and `--kind claude` stay on the terminal
-path and are not Interfaces.
+thread/session. Provider-specific runtimes belong in explicit commands or
+launch profiles; they are not built-in Agent kinds.
 
 ## Authenticate to an identity-aware service
 
@@ -247,7 +258,7 @@ multiline or generated content so the body is not exposed in process arguments:
 
 ```bash
 printf '%s\n' 'Review is complete.' | \
-  treer message send --to coordinator --idempotency-key task-42-result --body-file -
+  treer message send --to coordinator --idempotency-key task-42-result
 ```
 
 Use a sender-scoped idempotency key whenever a send may be retried. Repeating an
@@ -256,7 +267,7 @@ content fails. Reply by stable Message ID to preserve conversational context:
 
 ```bash
 printf '%s\n' 'I addressed both findings.' | \
-  treer message reply <message-id> --to sender --body-file -
+  treer message reply <message-id> --to sender
 ```
 
 `reply` reads the parent first, uses its sender when `--to` is omitted or is
@@ -372,28 +383,26 @@ Use `profile launch --cwd <relative-path>` to override the saved working
 directory for one Agent without changing the profile. The path is relative to
 the selected machine's Host root and must stay inside that root.
 
-Select an online machine from `treer status`, then create the requested
-agent kind. Preserve the current working directory unless the task requires a
+Select an online machine from `treer status`, then create an explicit command
+Agent. Preserve the current working directory unless the task requires a
 different relative directory.
 
 ```bash
-treer agent admin create --machine <server-id> --kind codex --name reviewer --cwd .
+treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex
 ```
 
 ```bash
 treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- /path/to/codex-agent-ui/scripts/treer-agent.sh
 ```
 
-To install a public git recipe, pass `--recipe`. `--kind auto` reuses an idle
-interactive Agent on that machine when one exists; otherwise Treer starts an
-available CLI (Claude, Cursor, Grok, OpenCode, Pi, or Codex) and installs a
-missing default if needed. Treer then prompts that Agent with the bundled
-install skill (`treer --skill install`). Do not write a second prompt.
+To install a public git recipe, select and launch an explicit installer command
+or saved launch profile. Read the bundled install skill and submit it with the
+recipe URL to that Agent. Automatic provider selection and `--recipe` creation
+are retired.
 
 ```bash
 treer --skill install
-treer agent admin create --machine <server-id> --kind auto --name installer \
-  --recipe https://github.com/example/recipe.git
+treer agent admin create --machine <server-id> --kind command --name installer -- codex
 ```
 
 The installer creates a different command Agent and must save a launch
@@ -410,7 +419,7 @@ Interface descriptor's `ui_path`, then confirm
 Native agent arguments go after `--`:
 
 ```bash
-treer agent admin create --machine <server-id> --kind codex --name reviewer --cwd . -- <agent-args...>
+treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex <agent-args...>
 ```
 
 Submit work by unique name and wait for a settled state:

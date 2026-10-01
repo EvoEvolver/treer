@@ -165,6 +165,9 @@ pub(crate) async fn stop_agent(
     .await?;
     let agent = context.resolve_agent(&target).await?;
     context.authorize_agent(&agent, ACTION_AGENT_STOP).await?;
+    // Central intent wins even if the machine is offline or its stop ACK is lost.
+    auth.set_agent_recovery_enabled(&workspace_id, &agent.agent_id, false)
+        .await?;
     let data = context
         .state()
         .send_command(

@@ -241,8 +241,20 @@ impl HostRuntime {
             self.inner.processes.write().map_err(|_| {
                 RuntimeError::Terminal("process registry lock poisoned".to_string())
             })?;
-        if processes.contains_key(&request.process_id) {
-            return Err(RuntimeError::ProcessExists(request.process_id));
+        if let Some(process) = processes.get(&request.process_id) {
+            if process
+                .info
+                .lock()
+                .map_err(|_| RuntimeError::Terminal("process state lock poisoned".into()))?
+                .running
+            {
+                return Err(RuntimeError::ProcessExists(request.process_id));
+            }
+            self.inner
+                .completed_processes
+                .lock()
+                .map_err(|_| RuntimeError::Terminal("completed registry lock poisoned".into()))?
+                .retain(|id| id != &request.process_id);
         }
         let cwd = self.resolve_cwd(&request.cwd)?;
         let pty_system = native_pty_system();
@@ -482,6 +494,15 @@ impl RuntimeInner {
         let Some(process_id) = process_id else {
             return;
         };
+        let Ok(mut processes) = self.processes.write() else {
+            return;
+        };
+        if !processes
+            .get(&process_id)
+            .is_some_and(|current| std::ptr::eq(current.as_ref(), process))
+        {
+            return;
+        }
         let evicted = self
             .completed_processes
             .lock()
@@ -490,9 +511,7 @@ impl RuntimeInner {
                 push_bounded(&mut completed, process_id, COMPLETED_PROCESS_LIMIT)
             });
         if let Some(evicted) = evicted {
-            if let Ok(mut processes) = self.processes.write() {
-                processes.remove(&evicted);
-            }
+            processes.remove(&evicted);
         }
     }
 }
@@ -847,6 +866,43 @@ mod tests {
             })
             .expect("spawn process");
         wait_for_output(&runtime, "p1", "host-runtime-ok");
+    }
+
+    #[test]
+    fn recovery_replaces_terminal_process_but_rejects_live_duplicate() {
+        let temporary = std::env::temp_dir().join(format!(
+            "treer-recovery-runtime-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temporary).unwrap();
+        let runtime = HostRuntime::new(&temporary).unwrap();
+        let mut request = HostSpawnRequest {
+            process_id: "stable-agent".into(),
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 1".into()],
+            cwd: ".".into(),
+            env: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+            metadata: "{}".into(),
+        };
+        runtime.spawn(request.clone()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.list()[0].running {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        request.args = vec!["-c".into(), "sleep 30".into()];
+        let restored = runtime.spawn(request.clone()).unwrap();
+        assert_eq!(restored.process_id, "stable-agent");
+        assert!(restored.running);
+        assert!(matches!(
+            runtime.spawn(request),
+            Err(RuntimeError::ProcessExists(_))
+        ));
+        runtime.stop("stable-agent").unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(temporary).unwrap();
     }
 
     #[test]

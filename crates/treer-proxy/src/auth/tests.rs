@@ -8,18 +8,19 @@ use treer_protocol::{AgentInfo, AgentStatus, CreateVirtualNetworkHostRequest, Se
 type EmailCapture = Arc<Mutex<Option<oneshot::Sender<(HeaderMap, Value)>>>>;
 
 #[test]
-fn managed_app_ingress_hostnames_are_stable_and_dns_safe() {
+fn platform_service_hostnames_are_stable_and_dns_safe() {
     assert_eq!(
-        managed_app_ingress_hostname("Soul Archive", "app_abcdef1234567890", "apps.treer.test")
+        platform_service_hostname("svc_abcdef1234567890", "apps.treer.test")
             .expect("managed App hostname"),
-        "soul-archive-abcdef123456.apps.treer.test"
+        "svc-abcdef1234567890.apps.treer.test"
     );
     assert_eq!(
-        managed_app_ingress_hostname("灵魂", "app_1234567890abcdef", "apps.treer.test")
+        platform_service_hostname("svc_1234567890abcdef", "apps.treer.test")
             .expect("fallback App hostname"),
-        "app-1234567890ab.apps.treer.test"
+        "svc-1234567890abcdef.apps.treer.test"
     );
-    assert!(managed_app_ingress_hostname("Soul", "app_---", "apps.treer.test").is_err());
+    assert!(platform_service_hostname("svc_", "apps.treer.test").is_err());
+    assert!(platform_service_hostname("svc_invalid.name", "apps.treer.test").is_err());
 }
 
 async fn capture_email(
@@ -343,7 +344,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
                 args: vec!["apps/soul/soul.py".to_string()],
                 cwd: ".".to_string(),
                 port: 9420,
-                hostname: "soul.internal".to_string(),
+                hostname: String::new(),
                 public: false,
             },
         )
@@ -356,7 +357,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
     assert_eq!(service.target_agent_id, None);
     assert_eq!(service.target_port, 9420);
     let host = store
-        .resolve_virtual_network_host("apps", "soul.internal")
+        .resolve_virtual_network_host("apps", &app.hostname)
         .await
         .expect("resolve App virtual host")
         .expect("App virtual host");
@@ -372,7 +373,10 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
         .expect("create App ingress");
     assert_eq!(ingress.service_id, app.service_id);
     assert_eq!(ingress.access, ServiceIngressAccess::Workspace);
-    assert!(ingress.hostname.starts_with("soul-"));
+    assert_eq!(
+        ingress.hostname,
+        platform_service_hostname(&app.service_id, "apps.treer.test").unwrap()
+    );
     assert!(ingress.hostname.ends_with(".apps.treer.test"));
     assert_eq!(
         store
@@ -395,7 +399,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
                 args: vec!["-m".to_string(), "http.server".to_string()],
                 cwd: ".".to_string(),
                 port: 8080,
-                hostname: "public-docs.internal".to_string(),
+                hostname: String::new(),
                 public: true,
             },
         )
@@ -469,7 +473,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
         .expect("replacement runtime claim");
     assert_eq!(second.restart_count, 1);
     assert_eq!(second.service_id, app.service_id);
-    assert_eq!(second.hostname, "soul.internal");
+    assert_eq!(second.hostname, app.hostname);
 
     let stopped = store
         .set_app_desired_state("apps", &app.app_id, AppDesiredState::Stopped, "owner")
@@ -485,7 +489,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
         .await
         .is_err());
     assert!(store
-        .resolve_virtual_network_host("apps", "soul.internal")
+        .resolve_virtual_network_host("apps", &app.hostname)
         .await
         .expect("resolve deleted host")
         .is_none());
@@ -1804,7 +1808,39 @@ async fn service_ingress_and_human_authorization_are_durable_and_scoped() {
         )
         .await
         .expect("create ingress");
-    assert!(ingress.hostname.starts_with("issue-tracker-"));
+    assert_eq!(
+        ingress.hostname,
+        platform_service_hostname(&service.service_id, "apps.treer.ai")
+            .expect("platform service address")
+    );
+    let republished = store
+        .create_service_ingress(
+            "published",
+            &owner.user_id,
+            "apps.treer.ai",
+            CreateServiceIngressRequest {
+                service_id: service.service_id.clone(),
+                slug: None,
+                access: ServiceIngressAccess::Workspace,
+            },
+        )
+        .await
+        .expect("idempotent publication");
+    assert_eq!(republished.ingress_id, ingress.ingress_id);
+    let custom = store
+        .create_service_ingress(
+            "published",
+            &owner.user_id,
+            "apps.treer.ai",
+            CreateServiceIngressRequest {
+                service_id: service.service_id.clone(),
+                slug: Some("custom".into()),
+                access: ServiceIngressAccess::Public,
+            },
+        )
+        .await
+        .expect_err("custom service domains retired");
+    assert_eq!(custom.error.code, "platform_domain_required");
     assert!(ingress.hostname.ends_with(".apps.treer.ai"));
     assert_eq!(
         store
@@ -1946,6 +1982,61 @@ async fn disabled_auth_injects_a_local_user() {
         .expect("local session");
     assert_eq!(session.user_id, "local");
     assert_eq!(session.preferred_name, "Local user");
+}
+
+#[tokio::test]
+async fn recovery_stopped_intent_is_durable_and_workspace_bound() {
+    let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("workspace-a").await;
+    let enrollment = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .unwrap();
+    let claim = store.claim_machine_enrollment(&enrollment).await.unwrap();
+    store
+        .create_agent_credential("workspace-a", &claim.server_id, "agent-recovery")
+        .await
+        .unwrap();
+    let ids = vec!["agent-recovery".to_string()];
+    assert!(store
+        .stopped_agent_recovery_ids("workspace-a", &claim.server_id, &ids)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .set_agent_recovery_enabled("another-workspace", "agent-recovery", false)
+        .await
+        .unwrap();
+    assert!(store
+        .stopped_agent_recovery_ids("workspace-a", &claim.server_id, &ids)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .set_agent_recovery_enabled("workspace-a", "agent-recovery", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .stopped_agent_recovery_ids("workspace-a", &claim.server_id, &ids)
+            .await
+            .unwrap(),
+        ids
+    );
+    assert!(store
+        .stopped_agent_recovery_ids("workspace-a", "other-machine", &ids)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .set_agent_recovery_enabled("workspace-a", "agent-recovery", true)
+        .await
+        .unwrap();
+    assert!(store
+        .stopped_agent_recovery_ids("workspace-a", &claim.server_id, &ids)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

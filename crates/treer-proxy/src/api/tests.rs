@@ -117,7 +117,7 @@ async fn app_reconcile_stops_a_runtime_left_running_while_the_machine_was_offlin
                 args: vec!["-m".to_string(), "http.server".to_string()],
                 cwd: ".".to_string(),
                 port: 8080,
-                hostname: "docs.internal".to_string(),
+                hostname: String::new(),
                 public: false,
             },
         )
@@ -268,7 +268,7 @@ fn app_public_url_reports_the_managed_ingress_access() {
         args: vec![],
         cwd: ".".to_string(),
         port: 8080,
-        hostname: "docs.internal".to_string(),
+        hostname: String::new(),
         service_id: "svc_docs".to_string(),
         public_url: None,
         access: None,
@@ -284,9 +284,8 @@ fn app_public_url_reports_the_managed_ingress_access() {
         updated_at: now,
         updated_by: "agent-a".to_string(),
     };
-    let hostname = managed_app_ingress_hostname(
-        &app.name,
-        &app.app_id,
+    let hostname = crate::auth::platform_service_hostname(
+        &app.service_id,
         config.base_domain().expect("base domain"),
     )
     .expect("managed hostname");
@@ -309,7 +308,7 @@ fn app_public_url_reports_the_managed_ingress_access() {
     assert!(app
         .public_url
         .as_deref()
-        .is_some_and(|url| url.starts_with("https://public-docs-")));
+        .is_some_and(|url| url.starts_with("https://svc-")));
 }
 
 async fn admin_router(updater: crate::updater::UpdaterClient) -> Router {
@@ -753,45 +752,60 @@ async fn machine_routes_expose_managed_apps_but_deny_direct_network_publication(
         json!({ "apps": [] })
     );
 
-    for (method, path) in [
-        (Method::POST, "/agent/workspaces/default/services"),
-        (Method::PATCH, "/agent/workspaces/default/services/svc_old"),
-        (Method::DELETE, "/agent/workspaces/default/services/svc_old"),
-        (Method::POST, "/agent/workspaces/default/virtual-hosts"),
-        (
-            Method::DELETE,
-            "/agent/workspaces/default/virtual-hosts/old.internal",
-        ),
-        (Method::POST, "/agent/workspaces/default/ingresses"),
-        (Method::PATCH, "/agent/workspaces/default/ingresses/ing_old"),
-        (
-            Method::DELETE,
-            "/agent/workspaces/default/ingresses/ing_old",
-        ),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header(
-                        header::AUTHORIZATION,
-                        format!("Bearer {}", machine.machine_token),
-                    )
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
-                    .expect("network mutation request"),
-            )
-            .await
-            .expect("network mutation response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read network mutation response");
-        let error: ApiError = serde_json::from_slice(&body).expect("decode network mutation error");
-        assert_eq!(error.error.code, "managed_app_required", "{path}");
-    }
+    let response = app.clone().oneshot(Request::builder().method(Method::POST)
+        .uri("/agent/workspaces/default/services")
+        .header(header::AUTHORIZATION, format!("Bearer {}",machine.machine_token))
+        .header(header::CONTENT_TYPE,"application/json")
+        .body(Body::from(serde_json::to_vec(&json!({"name":"preview","server_id":machine.server_id,"target_port":3000,"protocol":"http"})).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let data = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&data).unwrap();
+    let id = value["service"]["service_id"].as_str().unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/agent/workspaces/default/services")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", machine.machine_token),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"wrong","server_id":"another-machine","target_port":3000}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/agent/workspaces/default/services/{id}/public-tcp"
+                ))
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", machine.machine_token),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"access":"public"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let data = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let error: ApiError = serde_json::from_slice(&data).unwrap();
+    assert_eq!(error.error.code, "public_tcp_not_configured");
 }
 
 #[tokio::test]
@@ -820,7 +834,7 @@ async fn workspace_ingress_redirects_humans_to_proxy_authorization() {
             "apps.treer.ai",
             CreateServiceIngressRequest {
                 service_id: service.service_id,
-                slug: Some("private".to_string()),
+                slug: None,
                 access: ServiceIngressAccess::Workspace,
             },
         )
@@ -854,7 +868,7 @@ async fn workspace_ingress_redirects_humans_to_proxy_authorization() {
         .to_str()
         .expect("location text");
     assert!(location.starts_with("https://proxy.treer.ai/.treer/ingress/authorize?"));
-    assert!(location.contains("hostname=private-"));
+    assert!(location.contains("hostname=svc-"));
     assert!(location.contains("return_path=%2Fdashboard%3Ftab%3Dactive"));
 }
 
@@ -2226,7 +2240,7 @@ async fn public_ingress_preserves_application_auth_and_strips_treer_headers() {
             "apps.treer.ai",
             CreateServiceIngressRequest {
                 service_id: service.service_id,
-                slug: Some("demo".to_string()),
+                slug: None,
                 access: ServiceIngressAccess::Public,
             },
         )
@@ -2271,7 +2285,7 @@ async fn public_ingress_preserves_application_auth_and_strips_treer_headers() {
         assert!(lower.contains("cookie: app_session=visible\r\n"));
         assert!(!lower.contains("treer_ingress"));
         assert!(!lower.contains("x-treer-spoofed"));
-        assert!(lower.contains("host: demo-"));
+        assert!(lower.contains("host: svc-"));
         assert!(lower.contains(".apps.treer.ai\r\n"));
         controller_state
                 .relay_network_frame(

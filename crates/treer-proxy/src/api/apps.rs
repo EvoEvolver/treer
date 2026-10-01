@@ -96,7 +96,7 @@ pub(super) fn attach_app_public_url(
     app: &mut AppDeployment,
 ) {
     let managed_hostname = config.base_domain_if_configured().and_then(|base_domain| {
-        managed_app_ingress_hostname(&app.name, &app.app_id, base_domain).ok()
+        crate::auth::platform_service_hostname(&app.service_id, base_domain).ok()
     });
     let ingress = ingresses.iter().find(|ingress| {
         managed_hostname.as_deref() == Some(ingress.hostname.as_str())
@@ -263,7 +263,7 @@ pub(super) async fn launch_app_runtime(
                     args,
                     cols: 120,
                     rows: 36,
-                    publish_ports: vec![app.port],
+                    publish_ports: Vec::new(),
                     recipe: None,
                 },
             },

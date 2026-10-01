@@ -10,10 +10,9 @@ use tracing::warn;
 use treer_protocol::{
     AgentCommand, AgentInfo, AgentServerSnapshot, CommandEnvelope, CommandResult, DomainEventActor,
     DomainEventEnvelope, DomainEventResource, MachineTrafficRecord, NetworkBinaryFrame,
-    NetworkBinaryKind, NetworkConnectRequest, NetworkDirectTarget, ProtocolError, ProxyMessage,
-    ServerInfo, ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalCursor,
-    TerminalServerMessage, WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot,
-    DOMAIN_EVENT_SCHEMA_VERSION,
+    NetworkBinaryKind, NetworkConnectRequest, ProtocolError, ProxyMessage, ServerInfo,
+    ServerStatus, TerminalBinaryFrame, TerminalBinaryKind, TerminalCursor, TerminalServerMessage,
+    WorkspaceEvent, WorkspaceInfo, WorkspaceSnapshot, DOMAIN_EVENT_SCHEMA_VERSION,
 };
 use uuid::Uuid;
 
@@ -24,7 +23,7 @@ use crate::cluster::{
 use crate::event_bus::EventBus;
 #[cfg(test)]
 use crate::traffic::BROWSER_TRAFFIC_ENDPOINT;
-use crate::traffic::{StreamTrafficCounters, TrafficClass, TrafficCounter, TrafficRecorder};
+use crate::traffic::{StreamTrafficCounters, TrafficClass, TrafficRecorder};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
 const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -54,7 +53,6 @@ struct Inner {
     cluster_leases: Mutex<HashMap<ServerKey, (u64, Option<Instant>)>>,
     pending: Mutex<HashMap<String, PendingCommand>>,
     terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
-    network_streams: Mutex<HashMap<NetworkStreamKey, NetworkStreamLeg>>,
     browser_network_streams: Mutex<HashMap<NetworkStreamKey, mpsc::Sender<NetworkBinaryFrame>>>,
     events: broadcast::Sender<WorkspaceEvent>,
     event_bus: EventBus,
@@ -106,20 +104,6 @@ struct NetworkStreamKey {
     stream_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkStreamRole {
-    Source,
-    Destination,
-}
-
-struct NetworkStreamLeg {
-    peer: NetworkStreamKey,
-    role: NetworkStreamRole,
-    closed: bool,
-    outgoing_traffic: std::sync::Arc<TrafficCounter>,
-    outgoing_agent_traffic: Option<std::sync::Arc<TrafficCounter>>,
-}
-
 struct WorkspaceState {
     info: WorkspaceInfo,
     revision: u64,
@@ -151,15 +135,6 @@ mod commands;
 mod core;
 mod network;
 mod terminal;
-
-fn remove_network_stream(
-    streams: &mut HashMap<NetworkStreamKey, NetworkStreamLeg>,
-    key: &NetworkStreamKey,
-) -> Option<NetworkStreamLeg> {
-    let stream = streams.remove(key)?;
-    streams.remove(&stream.peer);
-    Some(stream)
-}
 
 fn decode_network_reset(frame: &NetworkBinaryFrame) -> ProtocolError {
     serde_json::from_slice::<ProtocolError>(&frame.payload)

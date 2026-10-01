@@ -328,6 +328,7 @@ CREATE TABLE IF NOT EXISTS agent_credentials (
 );
 CREATE INDEX IF NOT EXISTS agent_credentials_workspace_server
     ON agent_credentials(workspace_id, server_id) WHERE revoked_at IS NULL;
+ALTER TABLE agent_credentials ADD COLUMN IF NOT EXISTS recovery_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 CREATE TABLE IF NOT EXISTS machine_names (
     server_id TEXT PRIMARY KEY,
@@ -366,6 +367,11 @@ CREATE TABLE IF NOT EXISTS machine_services (
     updated_at TEXT NOT NULL,
     updated_by TEXT NOT NULL,
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS public_tcp_services (
+    service_id TEXT PRIMARY KEY REFERENCES machine_services(service_id) ON DELETE CASCADE,
+    public_port INTEGER NOT NULL UNIQUE CHECK(public_port BETWEEN 1 AND 65535),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 DO $$
 BEGIN

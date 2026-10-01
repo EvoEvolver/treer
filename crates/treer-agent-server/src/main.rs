@@ -1,15 +1,12 @@
 mod agent_interface;
+mod cli_command;
+mod cli_session;
 mod controller;
 mod host_client;
 mod interface_cache;
 mod local_api;
 mod network;
-mod network_datagram;
-mod network_meter;
-mod network_usage_outbox;
 mod proxy;
-#[cfg(target_os = "linux")]
-mod sandbox;
 mod service;
 mod startup_store;
 mod tui;
@@ -17,8 +14,6 @@ mod tui;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
-use std::process::{Command as ProcessCommand, Stdio};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
@@ -50,6 +45,11 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Start or reconnect the enrolled machine and restore its workloads")]
+    Restore {
+        #[arg(long)]
+        workspace: String,
+    },
     #[command(about = "Connect this machine to a Proxy workspace")]
     Connect(ConnectArgs),
     #[command(about = "Download and hot-activate the latest Controller and treer CLI")]
@@ -61,15 +61,6 @@ enum Command {
     },
     #[command(about = "Manage the host agent-server service")]
     Service(ServiceArgs),
-    #[cfg(target_os = "linux")]
-    #[command(hide = true)]
-    SandboxExec(sandbox::ExecArgs),
-    #[cfg(target_os = "linux")]
-    #[command(hide = true)]
-    SandboxChild(sandbox::ChildArgs),
-    #[cfg(target_os = "linux")]
-    #[command(hide = true)]
-    SandboxAgent(sandbox::AgentArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -172,6 +163,9 @@ struct ServerArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if cli_command::maybe_execute().await? {
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -194,6 +188,7 @@ async fn main() -> Result<()> {
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
         Some(Command::Update(update)) => service::update(update.proxy).await,
+        Some(Command::Restore { workspace }) => service::restore(&workspace).await,
         Some(Command::Run { config }) => {
             let config = service::ServiceConfig::load(&config)?;
             service::require_install_hostname(&config)?;
@@ -220,12 +215,6 @@ async fn main() -> Result<()> {
             run_service_command(service_args).await?;
             Ok(())
         }
-        #[cfg(target_os = "linux")]
-        Some(Command::SandboxExec(sandbox_args)) => sandbox::run(sandbox_args).await,
-        #[cfg(target_os = "linux")]
-        Some(Command::SandboxChild(sandbox_args)) => sandbox::run_child(sandbox_args).await,
-        #[cfg(target_os = "linux")]
-        Some(Command::SandboxAgent(sandbox_args)) => sandbox::run_agent(sandbox_args).await,
     }
 }
 
@@ -261,23 +250,9 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind local API at {}", args.listen))?;
     let listen_address = listener.local_addr()?;
-    let network = select_network_mode(args.network_mode)?;
-    network.announce();
-    let sandbox_executable = transparent_network_executable(network.mode).await?;
-    let network = network::NetworkRuntime::bind_near(listen_address, sandbox_executable.is_some())
-        .await
-        .context("failed to bind local network proxy")?;
-    network
-        .enable_usage_outbox(
-            root.join(".treer/network-usage"),
-            workspace.clone(),
-            server_id.clone(),
-        )
-        .await?;
-    let agent_server_url = agent_server_url(
-        listen_address,
-        cfg!(target_os = "linux") && sandbox_executable.is_some(),
-    );
+    select_network_mode(args.network_mode)?;
+    let network = network::NetworkRuntime::new();
+    let agent_server_url = agent_server_url(listen_address);
     let (host, host_events) = HostClient::connect(&args.host_socket).await?;
     let sync = host.sync(std::collections::BTreeMap::new()).await?;
     let host_build = match &sync {
@@ -295,9 +270,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
             workspace_id: workspace.clone(),
             server_id: server_id.clone(),
             agent_server_url,
-            network_proxy_url: network.proxy_url(),
             treer_binary: sibling_treer_binary(),
-            sandbox_executable,
             interface_cache_path: args.host_socket.with_extension("interfaces.json"),
             startup_store_path: service::startup_state_path(&server_id)?,
             root: root.clone(),
@@ -341,7 +314,6 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
     let app = local_api::router(local_state);
     info!(
         address = %listen_address,
-        network_proxy = %network.listen_address(),
         %server_id,
         %workspace,
         root = %root.display(),
@@ -358,169 +330,27 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
     result
 }
 
-fn agent_server_url(listen_address: SocketAddr, transparent: bool) -> String {
-    let host = if transparent {
-        network::SANDBOX_LOCAL_API_IP
-    } else {
-        "127.0.0.1"
-    };
-    format!("http://{host}:{}", listen_address.port())
+fn agent_server_url(listen_address: SocketAddr) -> String {
+    format!("http://{listen_address}")
 }
 
-async fn transparent_network_executable(mode: service::NetworkMode) -> Result<Option<PathBuf>> {
-    match mode {
-        service::NetworkMode::ProxyEnv => Ok(None),
-        service::NetworkMode::Transparent if cfg!(target_os = "linux") => std::env::current_exe()
-            .context("failed to locate Controller executable for network sandbox")
-            .map(Some),
-        service::NetworkMode::NativeExperimental if cfg!(target_os = "macos") => {
-            let helper = std::env::var_os("TREER_MACOS_NETWORK_HELPER")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from("/Applications/TreerNetwork.app/Contents/MacOS/TreerNetwork")
-                });
-            anyhow::ensure!(
-                helper.is_absolute() && helper.is_file(),
-                "native capture requires the built, signed TreerNetwork helper; see native/macos-network/README.md"
-            );
-            let output = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                tokio::process::Command::new(&helper)
-                    .arg("status")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .context("native capture readiness check timed out")?
-            .context("failed to run native capture readiness check")?;
-            let status: serde_json::Value = serde_json::from_slice(&output.stdout).context(
-                "native capture is not ready; activate the signed TreerNetwork extension first",
-            )?;
-            anyhow::ensure!(
-                output.status.success() && status["version"] == 1 && status["ready"] == true,
-                "native capture did not acknowledge readiness"
-            );
-            Ok(Some(helper))
-        }
-        service::NetworkMode::Transparent => anyhow::bail!(
-            "transparent network mode is currently supported only on Linux; use a Linux container"
-        ),
-        service::NetworkMode::NativeExperimental => {
-            anyhow::bail!("native-experimental network mode is supported only on macOS")
-        }
-    }
-}
-
-#[derive(Debug)]
-struct NetworkModeSelection {
-    mode: service::NetworkMode,
-    fallback_reason: Option<String>,
-}
-
-impl NetworkModeSelection {
-    fn announce(&self) {
-        if let Some(reason) = &self.fallback_reason {
-            eprintln!(
-                "treer: warning: transparent networking is unavailable ({reason}); falling back to proxy-env mode"
-            );
-        }
-    }
-}
-
-fn select_network_mode(configured: Option<service::NetworkMode>) -> Result<NetworkModeSelection> {
+fn select_network_mode(configured: Option<service::NetworkMode>) -> Result<service::NetworkMode> {
     let explicit = std::env::var("TREER_NETWORK_MODE").ok();
-    let mode = match explicit.as_deref() {
-        Some("transparent") => service::NetworkMode::Transparent,
-        Some("native-experimental") => service::NetworkMode::NativeExperimental,
-        Some("proxy-env") => service::NetworkMode::ProxyEnv,
-        Some(_) => anyhow::bail!(
-            "TREER_NETWORK_MODE must be transparent, proxy-env, or native-experimental"
-        ),
-        None => configured.unwrap_or(if cfg!(target_os = "linux") {
-            service::NetworkMode::Transparent
-        } else {
-            service::NetworkMode::ProxyEnv
-        }),
+    plain_network_mode(explicit.as_deref(), configured)
+}
+
+fn plain_network_mode(
+    explicit: Option<&str>,
+    configured: Option<service::NetworkMode>,
+) -> Result<service::NetworkMode> {
+    let mode = match explicit {
+        Some("plain") => service::NetworkMode::Plain,
+        Some(_) => anyhow::bail!("Treer no longer manages transparent networking or proxy variables. Set TREER_NETWORK_MODE=plain and configure networking in your profile; explicitly deactivate any previously installed network helper."),
+        None => configured.unwrap_or(service::NetworkMode::Plain),
     };
-
-    #[cfg(target_os = "linux")]
-    {
-        select_linux_network_mode(mode, explicit.is_some(), probe_transparent_networking)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        match mode {
-            service::NetworkMode::ProxyEnv => {}
-            service::NetworkMode::NativeExperimental if cfg!(target_os = "macos") => {}
-            service::NetworkMode::Transparent => anyhow::bail!(
-                "transparent network mode is currently supported only on Linux; use proxy-env or native-experimental on macOS"
-            ),
-            service::NetworkMode::NativeExperimental => {
-                anyhow::bail!("native-experimental network mode is supported only on macOS")
-            }
-        }
-        Ok(NetworkModeSelection {
-            mode,
-            fallback_reason: None,
-        })
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn select_linux_network_mode(
-    mode: service::NetworkMode,
-    explicit: bool,
-    probe: impl FnOnce() -> Result<()>,
-) -> Result<NetworkModeSelection> {
-    if mode == service::NetworkMode::NativeExperimental {
-        anyhow::bail!("native-experimental network mode is supported only on macOS");
-    }
-    if mode == service::NetworkMode::ProxyEnv {
-        return Ok(NetworkModeSelection {
-            mode,
-            fallback_reason: None,
-        });
-    }
-    match probe() {
-        Ok(()) => Ok(NetworkModeSelection {
-            mode,
-            fallback_reason: None,
-        }),
-        Err(error) if explicit => Err(error).context(
-            "TREER_NETWORK_MODE=transparent was requested but unprivileged namespaces are unavailable; use proxy-env",
-        ),
-        Err(error) => Ok(NetworkModeSelection {
-            mode: service::NetworkMode::ProxyEnv,
-            fallback_reason: Some(format!("{error:#}")),
-        }),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn probe_transparent_networking() -> Result<()> {
-    let output = ProcessCommand::new("unshare")
-        .args([
-            "--user",
-            "--map-current-user",
-            "--net",
-            "--mount",
-            "--keep-caps",
-            "--kill-child",
-            "--fork",
-            "true",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .context("transparent networking requires unshare(1) from util-linux")?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if detail.is_empty() {
-        anyhow::bail!("unshare probe exited with {}", output.status);
-    }
-    anyhow::bail!("unshare probe failed: {detail}")
+    anyhow::ensure!(mode == service::NetworkMode::Plain,
+        "This install uses retired network mode {mode}. Migrate namespace services to explicit ports and run with TREER_NETWORK_MODE=plain; deactivate any installed capture helper first.");
+    Ok(mode)
 }
 
 async fn run_service_command(args: ServiceArgs) -> Result<()> {
@@ -550,9 +380,8 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
                 ServiceCommand::RestartController => service::restart_controller(&workspace),
                 ServiceCommand::Repair { service_mode } => {
                     let network = select_network_mode(config.network_mode)?;
-                    network.announce();
                     let activation =
-                        service::repair_and_wait(&workspace, service_mode, network.mode).await?;
+                        service::repair_and_wait(&workspace, service_mode, network).await?;
                     service::wait_for_foreground(activation).await
                 }
                 ServiceCommand::Status => service::status(&workspace),
@@ -587,7 +416,6 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     let selection = service::preflight_registration(&enrollment.workspace_id, args.service_mode)?;
     selection.announce();
     let network = select_network_mode(None)?;
-    network.announce();
     if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
         let installed_proxy = normalize_http_url(
             Url::parse(&config.proxy).context("invalid proxy URL in installed service config")?,
@@ -621,7 +449,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         config.proxy = proxy.to_string();
         config.service_manager = selection.manager;
         config.service_fallback_reason = selection.fallback_reason.clone();
-        config.network_mode = Some(network.mode);
+        config.network_mode = Some(network);
         let activation = service::refresh_registration_and_wait(config)
             .await
             .with_context(|| {
@@ -656,7 +484,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         listen: listen.to_string(),
         host_socket,
         install_hostname,
-        network_mode: Some(network.mode),
+        network_mode: Some(network),
         service_manager: selection.manager,
         service_fallback_reason: selection.fallback_reason,
     })
@@ -848,6 +676,28 @@ fn sibling_treer_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_network_requires_explicit_legacy_migration() {
+        use crate::service::NetworkMode;
+        assert_eq!(
+            super::plain_network_mode(None, None).unwrap(),
+            NetworkMode::Plain
+        );
+        for mode in [
+            NetworkMode::Transparent,
+            NetworkMode::ProxyEnv,
+            NetworkMode::NativeExperimental,
+        ] {
+            assert!(super::plain_network_mode(None, Some(mode)).is_err());
+            assert_eq!(
+                super::plain_network_mode(Some("plain"), Some(mode)).unwrap(),
+                NetworkMode::Plain
+            );
+        }
+        for mode in ["transparent", "proxy-env", "native-experimental", "unknown"] {
+            assert!(super::plain_network_mode(Some(mode), None).is_err());
+        }
+    }
     use super::*;
     use axum::http::HeaderMap;
     use axum::routing::post;
@@ -863,13 +713,6 @@ mod tests {
         assert!(
             require_loopback_listen("192.0.2.1:8790".parse().expect("public address")).is_err()
         );
-    }
-
-    #[test]
-    fn transparent_agents_use_the_sandbox_local_api_route() {
-        let address = "127.0.0.1:8790".parse().expect("local API address");
-        assert_eq!(agent_server_url(address, true), "http://192.0.2.1:8790");
-        assert_eq!(agent_server_url(address, false), "http://127.0.0.1:8790");
     }
 
     #[test]
@@ -997,43 +840,6 @@ mod tests {
             non_interactive,
             accept_risk,
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn unavailable_namespaces_fall_back_to_proxy_env() {
-        let selection = select_linux_network_mode(service::NetworkMode::Transparent, false, || {
-            anyhow::bail!("uid_map denied")
-        })
-        .expect("automatic fallback");
-        assert_eq!(selection.mode, service::NetworkMode::ProxyEnv);
-        assert!(selection
-            .fallback_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("uid_map denied")));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn explicit_transparent_mode_preserves_probe_failure() {
-        let error = select_linux_network_mode(service::NetworkMode::Transparent, true, || {
-            anyhow::bail!("uid_map denied")
-        })
-        .expect_err("explicit transparent mode must fail");
-        let detail = format!("{error:#}");
-        assert!(detail.contains("TREER_NETWORK_MODE=transparent"));
-        assert!(detail.contains("uid_map denied"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn proxy_env_mode_skips_the_namespace_probe() {
-        let selection = select_linux_network_mode(service::NetworkMode::ProxyEnv, false, || {
-            panic!("proxy-env must not run unshare")
-        })
-        .expect("proxy-env selection");
-        assert_eq!(selection.mode, service::NetworkMode::ProxyEnv);
-        assert_eq!(selection.fallback_reason, None);
     }
 
     #[test]

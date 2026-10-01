@@ -30,7 +30,6 @@ impl AppState {
                 cluster_leases: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 terminal_sessions: Mutex::new(HashMap::new()),
-                network_streams: Mutex::new(HashMap::new()),
                 browser_network_streams: Mutex::new(HashMap::new()),
                 events,
                 event_bus,
@@ -46,69 +45,6 @@ impl AppState {
         hours: u16,
     ) -> anyhow::Result<Vec<MachineTrafficRecord>> {
         self.inner.traffic.recent(workspace_id, hours).await
-    }
-
-    pub(crate) fn direct_traffic_meter(
-        &self,
-        workspace_id: &str,
-        server_id: &str,
-        host: &str,
-        port: u16,
-        agent_id: Option<&str>,
-    ) -> crate::traffic::DirectTrafficMeter {
-        self.inner
-            .traffic
-            .register_direct_stream(workspace_id, server_id, host, port)
-            .with_agent_meter(agent_id.map(|agent| {
-                self.inner.traffic.agent_view().register_direct_stream(
-                    workspace_id,
-                    agent,
-                    host,
-                    port,
-                )
-            }))
-    }
-
-    pub(crate) async fn issue_usage_ticket(
-        &self,
-        workspace: &str,
-        server: &str,
-        agent: Option<&str>,
-        host: &str,
-        port: u16,
-    ) -> anyhow::Result<Option<String>> {
-        self.inner
-            .traffic
-            .issue_usage_ticket(workspace, server, agent, host, port)
-            .await
-    }
-
-    pub(crate) async fn abandon_usage_ticket(
-        &self,
-        workspace: &str,
-        server: &str,
-        ticket: &str,
-    ) -> anyhow::Result<()> {
-        self.inner
-            .traffic
-            .abandon_usage_ticket(workspace, server, ticket)
-            .await
-    }
-
-    pub(crate) async fn persist_usage_report(
-        &self,
-        workspace: &str,
-        server: &str,
-        connection: Uuid,
-        report: &treer_protocol::NetworkUsageReport,
-    ) -> anyhow::Result<()> {
-        self.require_current_connection(workspace, server, connection)
-            .await
-            .map_err(|error| anyhow::anyhow!("{}", error.message))?;
-        self.inner
-            .traffic
-            .persist_usage_report(workspace, server, report)
-            .await
     }
 
     pub async fn recent_agent_traffic(

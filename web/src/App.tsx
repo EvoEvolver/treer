@@ -45,12 +45,10 @@ import {
   UserRound,
   Users,
   X,
-  CircleCheck,
   Download,
   Upload,
 } from "lucide-react"
 import { api, ApiError, machineName, proxyUrl, websocketUrl, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type ControlPlaneUpdateStatus, type Machine, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type PlatformAuditEvent, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkspaceAccess } from "@/lib/api"
-import { agentKindFromCommand, availableCatalog, catalogEntry, installThenStartScript, isAgentInstalled, type AgentCatalogEntry } from "@/lib/agents"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { clearAdminTour, clearFirstRunTour, firstRunTourMode, shouldAutoStartAdminTour, shouldAutoStartFirstRunTour, startAdminTour, startFirstRunTour, stopFirstRunTour, type AdminTourHost, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
 import { interfaceFrameKey, postEmbedTheme, withEmbedTheme } from "@/lib/embed-ui"
@@ -175,7 +173,7 @@ function machineDisplayName(machine: Machine, machines: Machine[] = []) {
 
 function machineRecoveryCommands(workspaceId: string) {
   return {
-    start: `treer-agent-server service --workspace ${workspaceId} start`,
+    start: `treer-agent-server restore --workspace ${workspaceId}`,
     restartController: `treer-agent-server service --workspace ${workspaceId} restart-controller`,
   }
 }
@@ -192,7 +190,7 @@ function MachineRecovery({ workspaceId, onCopy, reason }: { workspaceId: string;
       </div>
       <div className="rounded-md border bg-muted/30 p-2">
         <code className="block break-all font-mono text-[10px] leading-5">{commands.start}</code>
-        <Button size="sm" variant="outline" className="mt-2 h-7" onClick={() => onCopy(commands.start)}><Copy />Copy start</Button>
+        <Button size="sm" variant="outline" className="mt-2 h-7" onClick={() => onCopy(commands.start)}><Copy />Copy restore</Button>
       </div>
     </div>
   </div>
@@ -879,7 +877,7 @@ function AppSettingsView({ app, machine, onOpen, onAccess, onAction, onDelete, o
 
     <section className="border-y py-6"><div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]"><div><h2 className="text-sm font-semibold">Access</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Treer authentication for the App's dedicated public URL.</p></div><div className="space-y-3"><Field label="Who can access"><Select value={app.access ?? "workspace"} onValueChange={(access: "public" | "workspace") => onAccess(app, access)}><SelectTrigger aria-label="App access"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="workspace">Workspace session required</SelectItem><SelectItem value="public">Public · no authentication</SelectItem></SelectContent></Select></Field>{app.public_url ? <div className="flex min-w-0 items-center gap-1"><button type="button" className="min-w-0 truncate font-mono text-xs hover:underline" onClick={() => onOpen(app)}>{app.public_url}</button><IconButton label="Copy App URL" onClick={() => onCopy(app.public_url!)}><Copy /></IconButton><IconButton label={`Open ${app.name}`} onClick={() => onOpen(app)} disabled={app.status !== "running"}><ExternalLink /></IconButton></div> : <p className="text-xs text-muted-foreground">No wildcard App origin is configured.</p>}{app.access === "public" && <p className="text-xs text-destructive">Anyone with this URL can access the App without a Treer session.</p>}</div></div></section>
 
-    <section className="border-b py-6"><div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]"><div><h2 className="text-sm font-semibold">Runtime</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Managed process and endpoint details.</p></div><div className="space-y-4"><dl className="grid gap-x-4 gap-y-3 text-xs sm:grid-cols-[130px_minmax(0,1fr)]"><dt className="text-muted-foreground">Machine</dt><dd>{machineName(machine, app.server_id)}</dd><dt className="text-muted-foreground">Command</dt><dd className="break-all font-mono">{commandLine}</dd><dt className="text-muted-foreground">Working directory</dt><dd className="break-all font-mono">{app.cwd || "."}</dd><dt className="text-muted-foreground">Internal endpoint</dt><dd className="break-all font-mono">{app.hostname}:{app.port}</dd><dt className="text-muted-foreground">Restarts</dt><dd>{app.restart_count}</dd></dl>{app.last_error && <p className="text-xs text-destructive">{app.last_error}</p>}<div className="flex flex-wrap gap-2">{app.desired_state === "stopped" ? <Button size="sm" onClick={() => onAction(app, "start")} disabled={!machineIsOnline}><Play />Start</Button> : <Button size="sm" variant="outline" onClick={() => onAction(app, "stop")} disabled={!machineIsOnline}><Square />Stop</Button>}<Button size="sm" variant="outline" onClick={() => onAction(app, "restart")} disabled={!machineIsOnline}><RotateCw />Restart</Button></div></div></div></section>
+    <section className="border-b py-6"><div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]"><div><h2 className="text-sm font-semibold">Runtime</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Managed process and endpoint details.</p></div><div className="space-y-4"><dl className="grid gap-x-4 gap-y-3 text-xs sm:grid-cols-[130px_minmax(0,1fr)]"><dt className="text-muted-foreground">Machine</dt><dd>{machineName(machine, app.server_id)}</dd><dt className="text-muted-foreground">Command</dt><dd className="break-all font-mono">{commandLine}</dd><dt className="text-muted-foreground">Working directory</dt><dd className="break-all font-mono">{app.cwd || "."}</dd><dt className="text-muted-foreground">Service</dt><dd className="break-all font-mono">{app.service_id} · port {app.port}</dd><dt className="text-muted-foreground">Restarts</dt><dd>{app.restart_count}</dd></dl>{app.last_error && <p className="text-xs text-destructive">{app.last_error}</p>}<div className="flex flex-wrap gap-2">{app.desired_state === "stopped" ? <Button size="sm" onClick={() => onAction(app, "start")} disabled={!machineIsOnline}><Play />Start</Button> : <Button size="sm" variant="outline" onClick={() => onAction(app, "stop")} disabled={!machineIsOnline}><Square />Stop</Button>}<Button size="sm" variant="outline" onClick={() => onAction(app, "restart")} disabled={!machineIsOnline}><RotateCw />Restart</Button></div></div></div></section>
 
     <section className="border-b py-6"><div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]"><div><h2 className="text-sm font-semibold text-destructive">Danger zone</h2></div><div className="flex items-center justify-between gap-4 border border-destructive/30 p-4"><p className="text-xs text-muted-foreground">Stops the process and removes its service, hostname, and public origin.</p><Button variant="destructive" className="shrink-0" onClick={() => onDelete(app)}><Trash2 />Delete App</Button></div></div></section>
   </div></div>
@@ -1142,7 +1140,6 @@ function WorkspaceApp() {
   const [deleteWorkspaceOpen, setDeleteWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [creatingAgent, setCreatingAgent] = useState(false)
-  const [installingAgentKind, setInstallingAgentKind] = useState<string | null>(null)
   const [deletingApp, setDeletingApp] = useState<AppDeployment | null>(null)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
   const [editingLaunchProfile, setEditingLaunchProfile] = useState<AgentLaunchProfile | null>(null)
@@ -1169,9 +1166,7 @@ function WorkspaceApp() {
   const [agentProfileId, setAgentProfileId] = useState("terminal")
   const [agentServerId, setAgentServerId] = useState("")
   const [agentCwd, setAgentCwd] = useState(".")
-  const [agentCommandLine, setAgentCommandLine] = useState("codex")
-  const [agentRecipeUrl, setAgentRecipeUrl] = useState("")
-  const [agentRecipeKind, setAgentRecipeKind] = useState("")
+  const [agentCommandLine, setAgentCommandLine] = useState("")
   const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
   const [apps, setApps] = useState<AppDeployment[]>([])
   const [appsLoading, setAppsLoading] = useState(false)
@@ -1339,11 +1334,6 @@ function WorkspaceApp() {
   const selectedApp = apps.find((app) => app.app_id === selectedAppId)
   const selectedAppMachine = snapshot?.servers.find((machine) => machine.server_id === selectedApp?.server_id)
   const selectedCreateProfile = launchProfiles.find((profile) => profile.profile_id === agentProfileId)
-  const selectedCreateMachine = onlineMachines.find((machine) => machine.server_id === agentServerId)
-  const selectedProfileKind = selectedCreateProfile ? agentKindFromCommand(selectedCreateProfile.command) : null
-  const selectedProfileInstalled = selectedProfileKind ? isAgentInstalled(selectedCreateMachine, selectedProfileKind) : null
-  const selectedProfileInstall = selectedProfileKind ? catalogEntry(selectedProfileKind) : undefined
-  const recipeInstallers = availableCatalog(selectedCreateMachine)
   const organization = organizations.find((item) => item.organization_id === organizationId)
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
   const workspaceMachineCount = snapshot?.workspace.workspace_id === workspaceId
@@ -1477,11 +1467,6 @@ function WorkspaceApp() {
     if (createAgentOpen && !onlineMachines.some((machine) => machine.server_id === agentServerId)) setAgentServerId(onlineMachines[0]?.server_id ?? "")
   }, [createAgentOpen, onlineMachines, agentServerId])
 
-  const availableAgentKey = (selectedCreateMachine?.available_agents ?? []).join(",")
-  useEffect(() => {
-    const kinds = availableCatalog(selectedCreateMachine).map((entry) => entry.kind)
-    setAgentRecipeKind((current) => (current && kinds.includes(current) ? current : (kinds[0] ?? "")))
-  }, [agentServerId, availableAgentKey, selectedCreateMachine])
 
   async function createOrganization(event: FormEvent) {
     event.preventDefault()
@@ -1554,15 +1539,10 @@ function WorkspaceApp() {
     try {
       let agent
       if (agentProfileId === "terminal") {
-        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "command", name: agentName, cwd: agentCwd, args: [], cols: 120, rows: 36 }) })
-      } else if (agentProfileId === "recipe") {
-        const kind = agentRecipeKind || recipeInstallers[0]?.kind || "auto"
-        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind, name: agentName, cwd: ".", args: [], recipe: agentRecipeUrl.trim(), cols: 120, rows: 36 }) })
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "shell", name: agentName, cwd: agentCwd, args: [], cols: 120, rows: 36 }) })
       } else if (agentProfileId === "manual") {
         const parsed = parseCommandLine(agentCommandLine)
-        const kind = parsed.command === "codex" || parsed.command === "claude" ? parsed.command : "command"
-        const args = kind === "command" ? [parsed.command, ...parsed.args] : parsed.args
-        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind, name: agentName, cwd: agentCwd, args, cols: 120, rows: 36 }) })
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "command", name: agentName, cwd: agentCwd, args: [parsed.command, ...parsed.args], cols: 120, rows: 36 }) })
       } else {
         agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(agentProfileId)}/launch`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, agent_name: agentName, cols: 120, rows: 36 }) })
       }
@@ -1580,9 +1560,7 @@ function WorkspaceApp() {
       setAgentProfileId("terminal")
       setAgentName(defaultAgentName("terminal"))
       setAgentNameCustomized(false)
-      setAgentCommandLine("codex")
-      setAgentRecipeUrl("")
-      setAgentRecipeKind("")
+      setAgentCommandLine("")
     }
     setCreateAgentOpen(true)
     if (!preview) void loadLaunchProfiles().catch(showError)
@@ -1596,34 +1574,8 @@ function WorkspaceApp() {
     openCreateAgent()
   }
 
-  async function installAgent(entry: AgentCatalogEntry, name: string) {
-    if (!workspaceId || !entry.install || !agentServerId || installingAgentKind) return
-    const script = installThenStartScript(entry)
-    if (!script) return
-    setInstallingAgentKind(entry.kind)
-    try {
-      const agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "shell", name, cwd: ".", args: ["bash", "-lc", script], cols: 120, rows: 36 }) })
-      if (!agent.agent_id) throw new Error("Create agent did not return an id")
-      setCreateAgentOpen(false)
-      showAgentTerminal(agent.agent_id)
-      await refreshSnapshot()
-    } catch (reason) { showError(reason) }
-    finally { setInstallingAgentKind(null) }
-  }
-
-  async function installSelectedAgent() {
-    if (!selectedProfileInstall) return
-    await installAgent(selectedProfileInstall, agentName || defaultProfileAgentName(selectedProfileInstall.label))
-  }
-
   function selectAgentProfile(profileId: string) {
     changeAgentProfile(profileId)
-    const profile = launchProfiles.find((item) => item.profile_id === profileId)
-    const kind = profile ? agentKindFromCommand(profile.command) : null
-    const entry = kind ? catalogEntry(kind) : undefined
-    if (entry?.install && isAgentInstalled(selectedCreateMachine, entry.kind) === false) {
-      void installAgent(entry, defaultProfileAgentName(profile?.name ?? entry.label))
-    }
   }
 
   function changeAgentCommandLine(commandLine: string) {
@@ -1631,8 +1583,7 @@ function WorkspaceApp() {
     if (agentNameCustomized) return
     try {
       const { command } = parseCommandLine(commandLine)
-      const kind = command === "codex" || command === "claude" ? command : "command"
-      setAgentName(defaultAgentName(kind))
+      setAgentName(defaultProfileAgentName(command.split(/[/\\]/).pop() || "command"))
     } catch {
       // Keep the last generated name until the command line is valid again.
     }
@@ -1646,14 +1597,9 @@ function WorkspaceApp() {
       return
     }
     if (profileId === "manual") {
-      setAgentName(defaultAgentName("codex"))
+      setAgentName(defaultAgentName("command"))
       setAgentNameCustomized(false)
-      setAgentCommandLine("codex")
-      return
-    }
-    if (profileId === "recipe") {
-      setAgentName(defaultAgentName("installer"))
-      setAgentNameCustomized(false)
+      setAgentCommandLine("")
       return
     }
     const profile = launchProfiles.find((item) => item.profile_id === profileId)
@@ -1903,7 +1849,7 @@ function WorkspaceApp() {
     closeCreateAgent: () => setCreateAgentOpen(false),
     setAgentLaunch: (kind) => {
       if (kind === "ui-profile") {
-        const profile = launchProfiles.find((item) => item.name === "Codex") ?? launchProfiles[0]
+        const profile = launchProfiles[0]
         changeAgentProfile(profile?.profile_id ?? "terminal")
         return
       }
@@ -2302,27 +2248,7 @@ function WorkspaceApp() {
               <SelectContent>
                 <SelectItem value="terminal">Terminal</SelectItem>
                 <SelectItem value="manual">Custom command</SelectItem>
-                <SelectItem value="recipe">Install recipe</SelectItem>
-                {launchProfiles.map((profile) => {
-                  const kind = agentKindFromCommand(profile.command)
-                  const installed = kind ? isAgentInstalled(selectedCreateMachine, kind) : null
-                  const installable = installed === false && Boolean(kind && catalogEntry(kind)?.install)
-                  const installing = Boolean(kind && installingAgentKind === kind)
-                  return (
-                    <SelectItem
-                      key={profile.profile_id}
-                      value={profile.profile_id}
-                      className={installed === false ? "text-muted-foreground" : undefined}
-                      trailing={installed === true
-                        ? <CircleCheck className="size-3.5 text-emerald-700" />
-                        : installable
-                          ? installing ? <RotateCw className="size-3.5 animate-spin" /> : <Download className="size-3.5" />
-                          : null}
-                    >
-                      {installable ? `Install ${profile.name}` : profile.name}
-                    </SelectItem>
-                  )
-                })}
+                {launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </Field>
@@ -2331,19 +2257,12 @@ function WorkspaceApp() {
             : selectedCreateProfile
               ? <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 px-3 py-2"><code className="block max-w-full truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block max-w-full truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div>
               : null}
-          {agentProfileId === "manual" && <Field label="Command"><Input className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="codex" required /></Field>}
-          {agentProfileId === "recipe" && <div data-tour="agent-recipe"><Field label="Installer"><Select value={agentRecipeKind} onValueChange={setAgentRecipeKind} disabled={!recipeInstallers.length}><SelectTrigger><SelectValue placeholder={recipeInstallers.length ? "Select an installed agent" : "No installed agent on this machine"} /></SelectTrigger><SelectContent>{recipeInstallers.map((entry) => <SelectItem key={entry.kind} value={entry.kind} trailing={<CircleCheck className="size-3.5 text-emerald-700" />}>{entry.label}</SelectItem>)}</SelectContent></Select><span className="mt-1 block text-[10px] text-muted-foreground">{recipeInstallers.length ? "Only agents already installed on the selected machine can run a recipe." : "Install Claude, Cursor, Codex, OpenCode, or Pi on this machine first."}</span></Field><Field label="Recipe URL"><Input className="font-mono" value={agentRecipeUrl} onChange={(event) => setAgentRecipeUrl(event.target.value)} placeholder="https://github.com/example/recipe.git" required /></Field></div>}
-          {selectedCreateProfile && selectedProfileInstalled === false && selectedProfileInstall?.install
-            ? <div className="rounded-md border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">Installation runs on {machineName(selectedCreateMachine)} and opens a terminal for setup and login.</div>
-            : selectedCreateProfile
-              ? <span className="block text-[10px] text-muted-foreground">Creates another Agent. Each Agent is one thread. A running same-type UI is reused when this process can reach it.</span>
-              : null}
+          {agentProfileId === "manual" && <Field label="Command"><Input aria-label="Command" className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="/path/to/your-launcher --option" required /></Field>}
+          {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Runs the saved command on this machine. Install its runtime and dependencies before launching.</span>}
           <Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>
-            {selectedProfileInstalled === false && selectedProfileInstall?.install
-              ? <Button type="button" onClick={() => { void installSelectedAgent() }} disabled={!agentServerId || Boolean(installingAgentKind)}>{installingAgentKind ? <RotateCw className="animate-spin" /> : <Download />}{installingAgentKind ? "Starting installer…" : `Install ${selectedProfileInstall.label}`}</Button>
-              : <Button type="submit" disabled={creatingAgent || Boolean(installingAgentKind) || !agentServerId || (agentProfileId === "recipe" && (!agentRecipeUrl.trim() || !agentRecipeKind))}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : agentProfileId === "recipe" ? "Install recipe" : "Create agent"}</Button>}
+            <Button type="submit" disabled={creatingAgent || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : "Create agent"}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -2479,7 +2398,7 @@ function MachineItem({ machine, machines = [], workspaceId, selected, onClick, o
   const builds = `Controller ${buildLabel(machine.controller_build)} · Host ${buildLabel(machine.host_build)}`
   const buildTitle = `Controller ${machine.controller_build.version} (${machine.controller_build.git_commit})\nHost ${machine.host_build.version} (${machine.host_build.git_commit})`
   const commands = workspaceId ? machineRecoveryCommands(workspaceId) : null
-  return <div className={cn("group flex min-h-[68px] items-start gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="flex min-w-0 flex-1 items-start gap-2 text-left"><span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-400", machine.status === "online" && "bg-emerald-500")} /><div className="min-w-0 flex-1"><div className="truncate text-xs font-medium">{machineDisplayName(machine, machines)}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{machine.root}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={buildTitle}>{builds}</div>{machine.status !== "online" && <div className="mt-1 text-[9px] uppercase text-red-600">offline</div>}</div></button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100" aria-label={`Actions for ${machineName(machine)}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem>{commands && machine.status !== "online" && <><DropdownMenuItem onSelect={() => onCopy(commands.restartController)}><Copy />Copy restart-controller</DropdownMenuItem><DropdownMenuItem onSelect={() => onCopy(commands.start)}><Copy />Copy start</DropdownMenuItem><DropdownMenuSeparator /></>}<DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+  return <div className={cn("group flex min-h-[68px] items-start gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="flex min-w-0 flex-1 items-start gap-2 text-left"><span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-400", machine.status === "online" && "bg-emerald-500")} /><div className="min-w-0 flex-1"><div className="truncate text-xs font-medium">{machineDisplayName(machine, machines)}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{machine.root}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={buildTitle}>{builds}</div>{machine.status !== "online" && <div className="mt-1 text-[9px] uppercase text-red-600">offline</div>}</div></button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100" aria-label={`Actions for ${machineName(machine)}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem>{commands && machine.status !== "online" && <><DropdownMenuItem onSelect={() => onCopy(commands.restartController)}><Copy />Copy restart-controller</DropdownMenuItem><DropdownMenuItem onSelect={() => onCopy(commands.start)}><Copy />Copy restore</DropdownMenuItem><DropdownMenuSeparator /></>}<DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
 }
 
 function AgentItem({ agent, machine, selected, onClick, onRename, onStop, onDelete }: { agent: Agent; machine?: Machine; selected: boolean; onClick: () => void; onRename: () => void; onStop: () => void; onDelete: () => void }) {

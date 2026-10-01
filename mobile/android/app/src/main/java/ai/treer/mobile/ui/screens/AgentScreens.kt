@@ -173,7 +173,7 @@ fun CreateAgentScreen(vm: AppViewModel, serverId: String?) {
                 )
             }
         }
-        Text("What to run · AIS first", style = MaterialTheme.typography.titleSmall)
+        Text("What to run", style = MaterialTheme.typography.titleSmall)
         profiles.forEach { profile ->
             FilterChip(
                 selected = vm.createProfileId == profile.profileId,
@@ -182,7 +182,7 @@ fun CreateAgentScreen(vm: AppViewModel, serverId: String?) {
                     vm.createKind = profile.commandName
                     vm.createName = defaultProfileAgentName(profile.name)
                 },
-                label = { Text(profile.name + if (profile.looksAisCapable) " · AIS" else " · TUI") },
+                label = { Text(profile.name) },
                 modifier = Modifier.testTag("create-profile-${profile.profileId}"),
             )
         }

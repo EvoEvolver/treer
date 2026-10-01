@@ -27,9 +27,11 @@ The apps are a **fleet orchestrator**, not a Codex thread list.
   `/api/workspaces/{id}/bootstrap` and shows the install and connect commands
   to copy onto a computer. The phone does not run a Host; the machine appears
   in the snapshot when `treer-agent-server connect` succeeds.
-- Home tab `+` opens **Assign**. Create Agent lists AIS-capable launch profiles
-  first, then catalog TUI kinds (including Codex), then a built-in Terminal
-  (`kind=command`). Recipe install is not available on mobile. Empty-machine
+- Home tab `+` opens **Assign**. Create Agent lists saved launch profiles and
+  a built-in Terminal (`kind=shell`). Profiles run the operator's configured
+  command; install its runtime and dependencies on the machine first. Interface
+  support is advertised by the running workload, not inferred from a provider
+  catalog. Recipe install is not available on mobile. Empty-machine
   Assign links to Add machine instead of a dead end.
 
 See the dated product scheme in

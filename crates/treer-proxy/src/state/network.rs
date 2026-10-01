@@ -10,6 +10,28 @@ impl AppState {
         port: u16,
         traffic_class: TrafficClass,
     ) -> Result<DuplexStream, ProtocolError> {
+        let (stream, _cancel) = self
+            .open_browser_network_stream_cancellable(
+                workspace_id,
+                destination_server_id,
+                destination_agent_id,
+                host,
+                port,
+                traffic_class,
+            )
+            .await?;
+        Ok(stream)
+    }
+
+    pub async fn open_browser_network_stream_cancellable(
+        &self,
+        workspace_id: &str,
+        destination_server_id: &str,
+        destination_agent_id: Option<&str>,
+        host: &str,
+        port: u16,
+        traffic_class: TrafficClass,
+    ) -> Result<(DuplexStream, tokio::sync::oneshot::Sender<()>), ProtocolError> {
         let key = NetworkStreamKey {
             workspace_id: workspace_id.to_string(),
             server_id: destination_server_id.to_string(),
@@ -93,11 +115,15 @@ impl AppState {
             destination_server_id,
         );
         let state = self.clone();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            if let Err(error) = state
-                .bridge_browser_network_stream(&key, bridge, incoming_rx, traffic)
-                .await
-            {
+            let bridge = state.bridge_browser_network_stream(&key, bridge, incoming_rx, traffic);
+            tokio::pin!(bridge);
+            let result = tokio::select! {
+                result=&mut bridge=>result,
+                cancelled=cancel_rx=> if cancelled.is_ok() {Err(ProtocolError::new("service_stream_cancelled","service forwarding was cancelled or authorization revoked"))} else {bridge.await},
+            };
+            if let Err(error) = result {
                 state.reset_browser_network_stream(&key, error).await;
             } else {
                 state
@@ -108,7 +134,7 @@ impl AppState {
                     .remove(&key);
             }
         });
-        Ok(client)
+        Ok((client, cancel_tx))
     }
 
     pub(super) async fn bridge_browser_network_stream(
@@ -200,143 +226,6 @@ impl AppState {
             .await;
     }
 
-    pub async fn open_network_stream(
-        &self,
-        workspace_id: &str,
-        source_server_id: &str,
-        connection_id: Uuid,
-        destination_server_id: &str,
-        mut frame: NetworkBinaryFrame,
-    ) -> Result<(), ProtocolError> {
-        self.require_current_connection(workspace_id, source_server_id, connection_id)
-            .await?;
-        if !matches!(
-            frame.kind,
-            NetworkBinaryKind::Open | NetworkBinaryKind::OpenDatagram
-        ) {
-            return Err(ProtocolError::new(
-                "invalid_network_frame",
-                "new network stream must begin with an open frame",
-            ));
-        }
-        let source = NetworkStreamKey {
-            workspace_id: workspace_id.to_string(),
-            server_id: source_server_id.to_string(),
-            stream_id: frame.stream_id.clone(),
-        };
-        let destination = NetworkStreamKey {
-            workspace_id: workspace_id.to_string(),
-            server_id: destination_server_id.to_string(),
-            stream_id: self.inner.cluster.routed_id("net"),
-        };
-        let traffic = self.inner.traffic.register_machine_stream(
-            workspace_id,
-            source_server_id,
-            destination_server_id,
-        );
-        let agent_traffic = serde_json::from_slice::<NetworkConnectRequest>(&frame.payload)
-            .ok()
-            .and_then(|request| {
-                self.inner.traffic.agent_view().register_agent_stream(
-                    workspace_id,
-                    source_server_id,
-                    destination_server_id,
-                    request.source_agent_id.as_deref(),
-                    request.destination_agent_id.as_deref(),
-                )
-            });
-        {
-            let mut streams = self.inner.network_streams.lock().await;
-            if streams.contains_key(&source) || streams.contains_key(&destination) {
-                return Err(ProtocolError::new(
-                    "network_stream_exists",
-                    "network stream ID is already in use",
-                ));
-            }
-            streams.insert(
-                source.clone(),
-                NetworkStreamLeg {
-                    peer: destination.clone(),
-                    role: NetworkStreamRole::Source,
-                    closed: false,
-                    outgoing_traffic: traffic.source_to_destination,
-                    outgoing_agent_traffic: agent_traffic
-                        .as_ref()
-                        .map(|c| c.source_to_destination.clone()),
-                },
-            );
-            streams.insert(
-                destination.clone(),
-                NetworkStreamLeg {
-                    peer: source.clone(),
-                    role: NetworkStreamRole::Destination,
-                    closed: false,
-                    outgoing_traffic: traffic.destination_to_source,
-                    outgoing_agent_traffic: agent_traffic
-                        .as_ref()
-                        .map(|c| c.destination_to_source.clone()),
-                },
-            );
-        }
-        frame.stream_id.clone_from(&destination.stream_id);
-        let encoded = frame.encode()?;
-        if self
-            .send_server_frame(
-                workspace_id,
-                destination_server_id,
-                SocketFrame::Binary(encoded),
-            )
-            .await
-            .is_err()
-        {
-            let mut streams = self.inner.network_streams.lock().await;
-            remove_network_stream(&mut streams, &source);
-            return Err(ProtocolError::new("server_offline", destination_server_id));
-        }
-        Ok(())
-    }
-
-    pub async fn send_direct_network_route(
-        &self,
-        workspace_id: &str,
-        source_server_id: &str,
-        connection_id: Uuid,
-        stream_id: String,
-        target: NetworkDirectTarget,
-    ) -> Result<(), ProtocolError> {
-        let key = ServerKey {
-            workspace_id: workspace_id.to_string(),
-            server_id: source_server_id.to_string(),
-        };
-        let outgoing = {
-            let connections = self.inner.connections.read().await;
-            match connections.get(&key) {
-                Some(connection) if connection.connection_id == connection_id => {
-                    connection.outgoing.clone()
-                }
-                _ => {
-                    return Err(ProtocolError::new(
-                        "stale_connection",
-                        format!("connection for {source_server_id} is no longer current"),
-                    ));
-                }
-            }
-        };
-        let frame = NetworkBinaryFrame {
-            kind: NetworkBinaryKind::Direct,
-            stream_id,
-            payload: serde_json::to_vec(&target).map_err(|error| {
-                ProtocolError::new(
-                    "encode_error",
-                    format!("failed to encode direct route: {error}"),
-                )
-            })?,
-        };
-        outgoing
-            .send(SocketFrame::Binary(frame.encode()?))
-            .map_err(|_| ProtocolError::new("server_offline", source_server_id))
-    }
-
     pub async fn relay_network_frame(
         &self,
         workspace_id: &str,
@@ -350,28 +239,11 @@ impl AppState {
             .await
     }
 
-    pub(crate) async fn has_network_stream(
-        &self,
-        workspace_id: &str,
-        server_id: &str,
-        stream_id: &str,
-    ) -> bool {
-        self.inner
-            .network_streams
-            .lock()
-            .await
-            .contains_key(&NetworkStreamKey {
-                workspace_id: workspace_id.to_string(),
-                server_id: server_id.to_string(),
-                stream_id: stream_id.to_string(),
-            })
-    }
-
     pub(super) async fn relay_network_frame_inner(
         &self,
         workspace_id: &str,
         server_id: &str,
-        mut frame: NetworkBinaryFrame,
+        frame: NetworkBinaryFrame,
     ) -> Result<(), ProtocolError> {
         if matches!(
             frame.kind,
@@ -408,73 +280,18 @@ impl AppState {
             }
             return Ok(());
         }
-        let route = {
-            let mut streams = self.inner.network_streams.lock().await;
-            let Some(stream) = streams.get_mut(&key) else {
-                drop(streams);
-                let target = ClusterBus::route_target(&frame.stream_id).ok_or_else(|| {
-                    ProtocolError::new("network_stream_not_found", &frame.stream_id)
-                })?;
-                if target == self.inner.cluster.instance_id() {
-                    return Err(ProtocolError::new(
-                        "network_stream_not_found",
-                        &frame.stream_id,
-                    ));
-                }
-                return self
-                    .inner
-                    .cluster
-                    .deliver_network(&target, workspace_id, server_id, frame.encode()?)
-                    .await;
-            };
-            if frame.kind == NetworkBinaryKind::Opened
-                && stream.role != NetworkStreamRole::Destination
-            {
-                return Err(ProtocolError::new(
-                    "invalid_network_frame",
-                    "only the destination can open a network stream",
-                ));
-            }
-            if frame.kind == NetworkBinaryKind::HalfClose {
-                stream.closed = true;
-            }
-            let peer = stream.peer.clone();
-            let traffic =
-                (frame.kind == NetworkBinaryKind::Data).then(|| stream.outgoing_traffic.clone());
-            let agent_traffic = (frame.kind == NetworkBinaryKind::Data)
-                .then(|| stream.outgoing_agent_traffic.clone())
-                .flatten();
-            let remove = frame.kind == NetworkBinaryKind::Reset
-                || (stream.closed && streams.get(&peer).is_some_and(|peer| peer.closed));
-            if remove {
-                remove_network_stream(&mut streams, &key);
-            }
-            (peer, remove, traffic, agent_traffic)
-        };
-        let (peer, remove, traffic, agent_traffic) = route;
-        let payload_bytes = frame.payload.len();
-        frame.stream_id.clone_from(&peer.stream_id);
-        if self
-            .send_server_frame(
-                workspace_id,
-                &peer.server_id,
-                SocketFrame::Binary(frame.encode()?),
-            )
+        let target = ClusterBus::route_target(&frame.stream_id)
+            .ok_or_else(|| ProtocolError::new("network_stream_not_found", &frame.stream_id))?;
+        if target == self.inner.cluster.instance_id() {
+            return Err(ProtocolError::new(
+                "network_stream_not_found",
+                &frame.stream_id,
+            ));
+        }
+        self.inner
+            .cluster
+            .deliver_network(&target, workspace_id, server_id, frame.encode()?)
             .await
-            .is_err()
-            && !remove
-        {
-            let mut streams = self.inner.network_streams.lock().await;
-            remove_network_stream(&mut streams, &key);
-            return Err(ProtocolError::new("server_offline", peer.server_id));
-        }
-        if let Some(traffic) = traffic {
-            traffic.record(payload_bytes);
-        }
-        if let Some(traffic) = agent_traffic {
-            traffic.record(payload_bytes);
-        }
-        Ok(())
     }
 
     pub(crate) async fn handle_cluster_network_delivery(
@@ -513,42 +330,6 @@ impl AppState {
                     payload: browser_payload.clone(),
                 })
                 .await;
-        }
-
-        let routes = {
-            let mut streams = self.inner.network_streams.lock().await;
-            let keys = streams
-                .keys()
-                .filter(|key| key.workspace_id == workspace_id && key.server_id == server_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut routes = Vec::new();
-            for key in keys {
-                let Some(stream) = remove_network_stream(&mut streams, &key) else {
-                    continue;
-                };
-                if stream.peer.server_id != server_id {
-                    routes.push(stream.peer);
-                }
-            }
-            routes
-        };
-        let payload = serde_json::to_vec(&ProtocolError::new(
-            "server_offline",
-            "network peer disconnected",
-        ))
-        .unwrap_or_default();
-        for peer in routes {
-            let frame = NetworkBinaryFrame {
-                kind: NetworkBinaryKind::Reset,
-                stream_id: peer.stream_id,
-                payload: payload.clone(),
-            };
-            if let Ok(encoded) = frame.encode() {
-                let _ = self
-                    .send_server_frame(workspace_id, &peer.server_id, SocketFrame::Binary(encoded))
-                    .await;
-            }
         }
     }
 

@@ -13,7 +13,7 @@ hostname:
 
 ```sh
 treer app create --machine self --name gits --cwd treer --port 9430 \
-  --hostname gits.internal env -- \
+  env -- \
   GITS_DATA_DIR=.treer/apps/gits \
   GITS_PUBLIC_URL=http://gits.internal \
   python3 apps/gits/gits.py

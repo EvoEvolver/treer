@@ -41,6 +41,7 @@ pub enum ServiceMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkMode {
+    Plain,
     Transparent,
     NativeExperimental,
     ProxyEnv,
@@ -49,6 +50,7 @@ pub enum NetworkMode {
 impl std::fmt::Display for NetworkMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::Plain => "plain",
             Self::Transparent => "transparent",
             Self::NativeExperimental => "native-experimental",
             Self::ProxyEnv => "proxy-env",
@@ -635,6 +637,34 @@ pub async fn start_and_wait(workspace: &str) -> Result<ServiceActivation> {
     }
     println!("treer: Controller and Proxy connection are ready");
     Ok(activation)
+}
+
+pub async fn restore(workspace: &str) -> Result<()> {
+    let (_, config) = installed_service(workspace)?;
+    let activation = if controller_health_document(&config).await.is_some() {
+        ServiceActivation::Managed
+    } else {
+        start_and_wait(workspace).await?
+    };
+    wait_for_controller_and_proxy(&config).await?;
+    let mut url = controller_health_url(&config).context("invalid Controller URL")?;
+    url.set_path("/api/runtime/restore");
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
+        .post(url)
+        .header("x-treer-operator-credential", &config.operator_credential)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .context("runtime restore request failed")?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        bail!("runtime restore returned {status}: {body}");
+    }
+    println!("{body}");
+    wait_for_foreground(activation).await
 }
 
 fn should_migrate_host_socket(current: &Path, preferred: &Path) -> bool {

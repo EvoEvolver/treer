@@ -58,6 +58,12 @@ impl AuthStore {
         actor: &str,
         request: CreateMachineServiceRequest,
     ) -> Result<MachineService, AuthFailure> {
+        if request.protocol == MachineServiceProtocol::Udp {
+            return Err(AuthFailure::bad_request(
+                "udp_not_supported",
+                "new UDP service registrations are retired; use your external network environment",
+            ));
+        }
         let name = validate_resource_name(&request.name, "service")?;
         let target_agent_id = request
             .target_agent_id
@@ -129,6 +135,12 @@ impl AuthStore {
         actor: &str,
         request: UpdateMachineServiceRequest,
     ) -> Result<MachineService, AuthFailure> {
+        if request.protocol == Some(MachineServiceProtocol::Udp) {
+            return Err(AuthFailure::bad_request(
+                "udp_not_supported",
+                "UDP publication is retired; use your external network environment",
+            ));
+        }
         let _update = self.virtual_hosts_update.lock().await;
         let current = self.resolve_machine_service(workspace_id, target).await?;
         if current.target_agent_id.is_some() {
@@ -268,6 +280,7 @@ impl AuthStore {
             .cloned())
     }
 
+    #[cfg(test)]
     pub async fn create_virtual_network_host(
         &self,
         workspace_id: &str,
@@ -492,9 +505,39 @@ impl AuthStore {
                 "public ingress requires an HTTP service",
             ));
         }
-        let slug = normalize_ingress_slug(request.slug.as_deref().unwrap_or(&service.name))?;
-        let suffix = Uuid::new_v4().simple().to_string();
-        let hostname = format!("{slug}-{}.{}", &suffix[..8], base_domain);
+        if request.slug.is_some() {
+            return Err(AuthFailure::bad_request(
+                "platform_domain_required",
+                "service domains are assigned by the platform; omit slug",
+            ));
+        }
+        let hostname = platform_service_hostname(&service.service_id, base_domain)?;
+        let existing = self
+            .service_ingresses
+            .read()
+            .await
+            .get(&hostname)
+            .map(|entry| entry.ingress.clone());
+        if let Some(existing) = existing {
+            if existing.workspace_id != workspace_id || existing.service_id != service.service_id {
+                return Err(AuthFailure::conflict(
+                    "ingress_exists",
+                    "platform domain is already allocated",
+                ));
+            }
+            drop(_update);
+            return self
+                .update_service_ingress(
+                    workspace_id,
+                    &existing.ingress_id,
+                    actor,
+                    UpdateServiceIngressRequest {
+                        access: Some(request.access),
+                        enabled: Some(true),
+                    },
+                )
+                .await;
+        }
         if hostname.len() > 253 {
             return Err(AuthFailure::bad_request(
                 "invalid_ingress_slug",
@@ -562,7 +605,7 @@ impl AuthStore {
             .resolve_machine_service(&app.workspace_id, &app.service_id)
             .await?;
         let _update = self.service_ingresses_update.lock().await;
-        let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+        let hostname = platform_service_hostname(&app.service_id, base_domain)?;
         if let Some(existing) = self.service_ingresses.read().await.get(&hostname) {
             return if existing.ingress.service_id == app.service_id
                 && (requested_access.is_none() || requested_access == Some(existing.ingress.access))
@@ -655,7 +698,7 @@ impl AuthStore {
             .collect::<Result<Vec<_>, _>>()?;
         let mut created = 0;
         for app in apps {
-            let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+            let hostname = platform_service_hostname(&app.service_id, base_domain)?;
             let existed = self.service_ingresses.read().await.contains_key(&hostname);
             self.ensure_app_ingress(&app, actor, base_domain, None)
                 .await?;
@@ -671,7 +714,7 @@ impl AuthStore {
         base_domain: &str,
         access: ServiceIngressAccess,
     ) -> Result<ServiceIngress, AuthFailure> {
-        let hostname = managed_app_ingress_hostname(&app.name, &app.app_id, base_domain)?;
+        let hostname = platform_service_hostname(&app.service_id, base_domain)?;
         let Some(existing) = self.resolve_service_ingress_hostname(&hostname).await? else {
             return self
                 .ensure_app_ingress(app, actor, base_domain, Some(access))

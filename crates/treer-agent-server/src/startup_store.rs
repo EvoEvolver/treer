@@ -17,6 +17,19 @@ pub struct StoredAgentStartup {
     pub workspace_id: String,
     pub workload_credential: String,
     pub last_host_epoch: String,
+    #[serde(default)]
+    pub initial_writes: Vec<treer_host_protocol::HostWrite>,
+    #[serde(default = "default_cols")]
+    pub cols: u16,
+    #[serde(default = "default_rows")]
+    pub rows: u16,
+}
+
+fn default_cols() -> u16 {
+    120
+}
+fn default_rows() -> u16 {
+    36
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -89,8 +102,11 @@ impl StartupStore {
             .entries
             .lock()
             .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
-        entries.insert(entry.spec.agent_id.clone(), entry);
-        persist(&self.inner.path, &entries)
+        let mut updated = entries.clone();
+        updated.insert(entry.spec.agent_id.clone(), entry);
+        persist(&self.inner.path, &updated)?;
+        *entries = updated;
+        Ok(())
     }
 
     pub fn remove(&self, agent_id: &str) -> io::Result<bool> {
@@ -99,11 +115,32 @@ impl StartupStore {
             .entries
             .lock()
             .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
-        let removed = entries.remove(agent_id).is_some();
+        let mut updated = entries.clone();
+        let removed = updated.remove(agent_id).is_some();
         if removed {
-            persist(&self.inner.path, &entries)?;
+            persist(&self.inner.path, &updated)?;
+            *entries = updated;
         }
         Ok(removed)
+    }
+
+    pub fn update(
+        &self,
+        agent_id: &str,
+        mutate: impl FnOnce(&mut StoredAgentStartup),
+    ) -> io::Result<()> {
+        let mut entries = self
+            .inner
+            .entries
+            .lock()
+            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        let mut updated = entries.clone();
+        if let Some(entry) = updated.get_mut(agent_id) {
+            mutate(entry);
+            persist(&self.inner.path, &updated)?;
+            *entries = updated;
+        }
+        Ok(())
     }
 }
 
@@ -195,6 +232,9 @@ mod tests {
             workspace_id: "workspace-one".to_string(),
             workload_credential: "wlc_secret".to_string(),
             last_host_epoch: "host-one".to_string(),
+            initial_writes: vec![],
+            cols: 120,
+            rows: 36,
         }
     }
 

@@ -2,14 +2,13 @@ import XCTest
 @testable import Treer
 
 final class CreateFlowTests: XCTestCase {
-    func testTerminalWiresToCommand() {
-        XCTAssertEqual(AgentCatalog.wireKind("terminal"), "command")
-        XCTAssertEqual(AgentCatalog.wireKind("codex"), "codex")
-        XCTAssertEqual(AgentCatalog.wireKind("cursor-agent"), "cursor")
+    func testTerminalWiresToShell() {
+        XCTAssertEqual(AgentCatalog.wireKind("terminal"), "shell")
+        XCTAssertEqual(AgentCatalog.wireKind("command"), "command")
     }
 
-    func testPrefersCodexWhenTheMachineReportsIt() {
-        XCTAssertEqual(AgentCatalog.preferredKind(on: FixtureData.onlineMachine), "codex")
+    func testDefaultsToTerminalRegardlessOfProviderDiscovery() {
+        XCTAssertEqual(AgentCatalog.preferredKind(on: FixtureData.onlineMachine), "terminal")
         XCTAssertEqual(AgentCatalog.preferredKind(on: FixtureData.offlineMachine), "terminal")
         XCTAssertEqual(AgentCatalog.preferredKind(on: nil), "terminal")
     }

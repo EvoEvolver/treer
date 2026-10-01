@@ -1,4 +1,20 @@
 use super::*;
+pub(super) async fn restore_runtime(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, LocalApiError> {
+    authenticate_operator(&state, &headers)?;
+    let server_id = request
+        .get("server_id")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.server_id);
+    Ok(Json(
+        state
+            .post_as(&format!("machines/{server_id}/restore"), &json!({}), None)
+            .await?,
+    ))
+}
 pub(super) async fn exec_machine(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
@@ -204,8 +220,8 @@ pub(super) async fn list_machine_services(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent_id = required_validated_source_agent(&state, &headers)?;
-    Ok(Json(state.get_as("services", Some(&agent_id)).await?))
+    let agent_id = validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("services", agent_id.as_ref()).await?))
 }
 
 pub(super) async fn create_machine_service(
@@ -213,14 +229,14 @@ pub(super) async fn create_machine_service(
     headers: HeaderMap,
     Json(request): Json<CreateMachineServiceRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent_id = required_validated_source_agent(&state, &headers)?;
+    let agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .post_as(
                 "services",
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
-                Some(&agent_id),
+                agent_id.as_ref(),
             )
             .await?,
     ))
@@ -232,14 +248,14 @@ pub(super) async fn update_machine_service(
     Path(service_id): Path<String>,
     Json(request): Json<UpdateMachineServiceRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent_id = required_validated_source_agent(&state, &headers)?;
+    let agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .patch_as(
                 &format!("services/{service_id}"),
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
-                Some(&agent_id),
+                agent_id.as_ref(),
             )
             .await?,
     ))
@@ -250,10 +266,10 @@ pub(super) async fn delete_machine_service(
     headers: HeaderMap,
     Path(service_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent_id = required_validated_source_agent(&state, &headers)?;
+    let agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .delete_as(&format!("services/{service_id}"), Some(&agent_id))
+            .delete_as(&format!("services/{service_id}"), agent_id.as_ref())
             .await?,
     ))
 }
@@ -263,13 +279,13 @@ pub(super) async fn probe_machine_service(
     headers: HeaderMap,
     Path(service_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent_id = required_validated_source_agent(&state, &headers)?;
+    let agent_id = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .post_as(
                 &format!("services/{service_id}/probe"),
                 &json!({}),
-                Some(&agent_id),
+                agent_id.as_ref(),
             )
             .await?,
     ))
@@ -362,8 +378,8 @@ pub(super) async fn list_service_ingresses(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent = required_validated_source_agent(&state, &headers)?;
-    Ok(Json(state.get_as("ingresses", Some(&agent)).await?))
+    let agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("ingresses", agent.as_ref()).await?))
 }
 
 pub(super) async fn create_service_ingress(
@@ -371,14 +387,14 @@ pub(super) async fn create_service_ingress(
     headers: HeaderMap,
     Json(request): Json<CreateServiceIngressRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent = required_validated_source_agent(&state, &headers)?;
+    let agent = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .post_as(
                 "ingresses",
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
-                Some(&agent),
+                agent.as_ref(),
             )
             .await?,
     ))
@@ -390,14 +406,14 @@ pub(super) async fn update_service_ingress(
     Path(ingress_id): Path<String>,
     Json(request): Json<UpdateServiceIngressRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent = required_validated_source_agent(&state, &headers)?;
+    let agent = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
             .patch_as(
                 &format!("ingresses/{ingress_id}"),
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
-                Some(&agent),
+                agent.as_ref(),
             )
             .await?,
     ))
@@ -408,10 +424,10 @@ pub(super) async fn delete_service_ingress(
     headers: HeaderMap,
     Path(ingress_id): Path<String>,
 ) -> Result<Json<Value>, LocalApiError> {
-    let agent = required_validated_source_agent(&state, &headers)?;
+    let agent = validated_source_agent(&state, &headers)?;
     Ok(Json(
         state
-            .delete_as(&format!("ingresses/{ingress_id}"), Some(&agent))
+            .delete_as(&format!("ingresses/{ingress_id}"), agent.as_ref())
             .await?,
     ))
 }

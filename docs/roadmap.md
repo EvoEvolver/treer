@@ -3,6 +3,15 @@
 - Status: maintained
 - Last source review: 2026-08-21 at `239f9c6`
 
+The capability inventory below preserves the earlier broader backlog. Execution
+priority and product ownership are superseded by the
+[2026-09-30 core simplification plan](research/2026-09-30-core-simplification-plan.md).
+Core now focuses on authentication, scoped identity, explicit port forwarding,
+platform-assigned public origins, and recoverable process intent. Transparent
+capture, virtual DNS, provider installation, custom-host provisioning, and an
+owned sandbox backend are outside its scope. References below to those systems
+describe the historical baseline or external integrations, not delivery promises.
+
 ## Purpose
 
 This document classifies Treer's product needs by user outcome and system
