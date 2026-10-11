@@ -25,6 +25,10 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v pnpm >/dev/null 2>&1 || { echo "pnpm is required" >&2; exit 1; }
 
+upload=$(mktemp -d "${TMPDIR:-/tmp}/treer-proxy-upload.XXXXXX")
+trap 'rm -rf "$upload"' EXIT HUP INT TERM
+sh scripts/stage-hosted-proxy.sh "$commit" "$upload"
+
 wait_for_deployment() {
     service=$1
     deployment=$2
@@ -60,7 +64,7 @@ railway variable set \
     --service "$proxy_service" \
     --skip-deploys --json >/dev/null
 
-proxy_deploy=$(railway up --detach --json \
+proxy_deploy=$(railway up "$upload" --path-as-root --no-gitignore --detach --json \
     --project "$project_id" \
     --environment "$environment" \
     --service "$proxy_service" \
@@ -72,6 +76,7 @@ proxy_deployment_id=$(printf '%s' "$proxy_deploy" | jq -er '.deploymentId // .id
 
 wait_for_deployment "$proxy_service" "$proxy_deployment_id"
 curl -fsS --retry 12 --retry-all-errors "$proxy_url/api/health" >/dev/null
+sh scripts/verify-served-artifacts.sh "$proxy_url" "$upload/dist"
 curl -fsS --retry 12 --retry-all-errors "$app_url/health" \
     | jq -e '.service == "treer-app" and .status == "ok" and .environment == "canary"' >/dev/null
 curl -fsS --retry 12 --retry-all-errors "$app_url/config.json" \

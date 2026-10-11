@@ -1,17 +1,23 @@
 name: Build release artifacts
+run-name: Machine artifacts ${{ inputs.revision || github.sha }}
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact source commit to build (defaults to workflow ref)
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-artifacts-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-artifacts-${{ inputs.revision || github.sha }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -41,11 +47,19 @@ jobs:
 
     env:
       RUST_VERSION: 1.90.0
-      TREER_BUILD_COMMIT: ${{ github.sha }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Record source commit
+        shell: bash
+        run: echo "TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: Verify native runner
         shell: bash

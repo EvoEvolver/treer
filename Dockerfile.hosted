@@ -1,0 +1,32 @@
+# Hosted deployments must carry verified native artifacts for all supported machines.
+FROM rust:1-bookworm AS builder
+ARG TREER_BUILD_COMMIT
+ENV TREER_BUILD_COMMIT=$TREER_BUILD_COMMIT
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY skills ./skills
+COPY apps/policy/AGENT.md apps/policy/policy.py ./apps/policy/
+COPY apps/policy/web ./apps/policy/web
+RUN cargo build --locked --release -p treer-proxy
+
+FROM debian:bookworm-slim AS artifacts
+ARG TREER_BUILD_COMMIT
+RUN apt-get update && apt-get install -y --no-install-recommends jq ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/verify-machine-artifacts.sh /verify-machine-artifacts.sh
+COPY dist /dist
+RUN sh /verify-machine-artifacts.sh "$TREER_BUILD_COMMIT" /dist
+
+FROM debian:bookworm-slim
+ARG TREER_BUILD_COMMIT
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /app/target/release/treer-proxy /usr/local/bin/treer-proxy
+COPY --from=artifacts /dist /app/dist
+LABEL org.opencontainers.image.source="https://github.com/EvoEvolver/treer"
+LABEL org.opencontainers.image.revision="${TREER_BUILD_COMMIT}"
+ENV TREER_ARTIFACTS_DIR=/app/dist
+EXPOSE 8080
+ENTRYPOINT ["treer-proxy"]

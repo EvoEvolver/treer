@@ -1,0 +1,6 @@
+# The upload context contains only git-archived source and verified dist/ bytes.
+.git
+target
+.treer
+web/node_modules
+web/dist

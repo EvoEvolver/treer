@@ -1,7 +1,7 @@
 # Canary environment
 
 - Status: maintained
-- Last reviewed: 2026-10-10
+- Last reviewed: 2026-10-11
 
 Canary is the required deployment target before production. It uses a separate
 Railway environment, PostgreSQL database, NATS instance, and Proxy plus a
@@ -58,7 +58,7 @@ end-to-end evidence for the PR.
 
 ## Deploy and test
 
-The operator needs authenticated Railway and Wrangler CLIs plus `curl`, `jq`,
+The operator needs authenticated GitHub, Railway and Wrangler CLIs plus `curl`, `jq`,
 `pnpm`, Python 3, PostgreSQL client tools, Docker, and `just`:
 
 ```bash
@@ -71,6 +71,14 @@ Cloudflare, and verifies their health endpoints. It also sets the Canary public
 URLs explicitly so this environment cannot accidentally emit Production
 installation or App links. The Proxy deployment explicitly enables
 `TREER_ENABLE_CORE_MESSAGES=true`; self-hosted launches default this gate off.
+
+Before changing Canary resources, deployment collects CLI, Host, and Controller
+artifacts for both Linux and macOS architectures from the native GitHub workflow
+at the exact candidate commit. All four sets must pass metadata and checksum
+validation. The hosted Proxy image bundles them; deployment checks all twelve
+public downloads against those bytes and rejects redirects to older Releases.
+See [Machine artifacts](releases.md#machine-artifacts) for preparation and retry
+details. Installed Controllers still require a separate update/restart.
 
 The local gate inside `release-canary` includes the control-plane frontend and
 Core Message tests against local PostgreSQL. Workspace App and AIS adapter

@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-08-21 at `239f9c6`
+- Last reviewed: 2026-10-11
 
 Treer promotes an explicit Git commit through Canary before Production. A
 release is not a branch name, a mutable `latest` label, or the contents of an
@@ -77,6 +77,23 @@ explicitly. The existing `artifacts-prepare`, `artifacts-canary`, and
 `artifacts-stable` commands then sign and distribute those bytes without
 recompiling them.
 
+Hosted deployment automatically runs `scripts/ensure-machine-artifacts.sh`.
+It reuses verified `dist/` bytes or dispatches the native workflow with the exact
+source commit and waits for all four platforms. Manual dispatch can build a
+specific commit with its `revision` input; its workflow `headSha` may differ from
+the built revision, so the source metadata is authoritative. Stale or incomplete
+local `dist/` trees fail validation rather than being overwritten. To prepare
+the artifacts independently, run `just ensure-artifacts HEAD`.
+
+`Dockerfile.hosted` bundles all twelve native binaries without recompiling them.
+The upload directory contains only `git archive` source from the clean candidate
+commit and verified artifacts. Its generated Railway configuration selects this
+Dockerfile; self-hosted/GHCR builds continue using `Dockerfile`. Validation runs
+both before changing deployment variables and inside the hosted image build.
+After deployment, all twelve public downloads must return HTTP 200 without a
+redirect and match the collected bytes. This prevents macOS installs from
+silently falling back to an older GitHub `latest` Release.
+
 ## Workspace Apps
 
 Mail and Telegram are source Apps, not additional Rust machine binaries and not
@@ -88,7 +105,7 @@ normal service tooling; Treer has no App package installer.
 
 ## Canary release
 
-The operator needs authenticated Railway and Wrangler CLIs, Docker, `just`,
+The operator needs authenticated GitHub, Railway and Wrangler CLIs, Docker, `just`,
 `pnpm`, Python 3, PostgreSQL client tools, `jq`, and `curl`. Start from a clean
 checkout of the candidate commit:
 
@@ -110,9 +127,11 @@ Cloudflare Worker version ID, endpoints, and test timestamp. Failure never
 creates an eligible manifest.
 
 The deployment scripts also set `TREER_BUILD_COMMIT` on the Railway Proxy
-service before each build. The Docker builder embeds that candidate commit in
-the Proxy-bundled Host, Controller, and CLI artifacts; it is release metadata,
-not a mutable runtime version override.
+service before each build. The hosted builder embeds the candidate commit in
+the Proxy; the native workflow embeds the same commit in the bundled Host,
+Controller, and CLI artifacts. It is release metadata, not a mutable runtime
+version override. Deployment updates the downloadable binaries; already
+installed machines require an explicit Controller update/restart.
 
 Canary and Production Proxy deployment scripts explicitly set
 `TREER_ENABLE_CORE_MESSAGES=true`. It defaults off outside those scripts. App
@@ -129,7 +148,8 @@ just promote-production .treer/releases/<full-commit>/manifest.json
 ```
 
 Promotion requires `status: canary_passed`, verifies the commit and artifact
-checksum, deploys the Production Proxy and the exact Canary frontend artifact,
+checksum, verifies all four machine artifact sets, deploys the Production Proxy
+and the exact Canary frontend artifact,
 then checks Proxy health, App health/configuration, and wildcard TLS routing.
 It updates the manifest to `status: production_deployed` with Production IDs.
 

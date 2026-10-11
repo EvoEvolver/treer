@@ -77,7 +77,9 @@ mkdir "$lock" 2>/dev/null || {
     echo "another Treer release is active: $lock" >&2
     exit 1
 }
-trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+upload=$(mktemp -d "${TMPDIR:-/tmp}/treer-proxy-upload.XXXXXX")
+trap 'rm -rf "$upload"; rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+sh scripts/stage-hosted-proxy.sh "$commit" "$upload"
 
 mkdir -p web/dist
 cp "$artifact" web/dist/index.html
@@ -91,7 +93,7 @@ railway variable set \
     --project "$project_id" --environment "$environment" \
     --service "$proxy_service" --skip-deploys --json >/dev/null
 
-proxy_deploy=$(railway up --detach --json \
+proxy_deploy=$(railway up "$upload" --path-as-root --no-gitignore --detach --json \
     --project "$project_id" --environment "$environment" \
     --service "$proxy_service" --message "production $short_commit")
 proxy_deployment_id=$(printf '%s' "$proxy_deploy" | jq -er '.deploymentId // .id')
@@ -121,6 +123,7 @@ done
 }
 
 curl -fsS --retry 12 --retry-all-errors "$proxy_url/api/health" >/dev/null
+sh scripts/verify-served-artifacts.sh "$proxy_url" "$upload/dist"
 curl -fsS --retry 12 --retry-all-errors "$app_url/health" \
     | jq -e '.service == "treer-app" and .status == "ok" and .environment == "production"' >/dev/null
 curl -fsS --retry 12 --retry-all-errors "$app_url/config.json" \

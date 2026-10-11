@@ -42,6 +42,7 @@ just messaging-e2e
 just web-test
 just ais-e2e
 just service-canary
+just machine-artifacts-test
 cargo test -p treer-proxy message_
 cargo test -p treer-proxy -- updater::
 cargo test -p treer-proxy -- admin_update_
@@ -83,7 +84,7 @@ node scripts/check-docs.mjs
 | Voice ASR or command | Proxy `voice` / `voice_llm` tests plus authenticated `/voice/command` route tests; optional `TREER_VOICE_LLM_LIVE_TEST=1` against a configured upstream |
 | Native iOS/Android fleet | `just mobile-ios-ci`, `just mobile-android-ci`, Android `CreateFlowTest`, iOS `CreateFlowTests` / `TreerUITests`; live AOSP + iOS simulator login/create-machine/create-agent/prompt when a Proxy and Host are available |
 | Documentation | `node scripts/check-docs.mjs` |
-| Release publishing | `node --test scripts/release-r2.test.mjs` plus isolated R2 verification |
+| Release publishing | `just machine-artifacts-test`, `node --test scripts/release-r2.test.mjs`; hosted downloads must match all twelve binaries without redirects; isolated R2 verification when publishing signed manifests |
 | Self-host GHCR or updater | `just updater-test`, Proxy admin update tests, and `/admin` e2e |
 
 Documentation describes the current source, not future intent. Dated research
