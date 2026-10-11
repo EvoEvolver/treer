@@ -89,6 +89,7 @@ pub(super) async fn get_policy_provider(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn set_policy_provider(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -435,6 +436,7 @@ pub(super) async fn clear_policy_provider(
     Ok(Json(json!({ "cleared": cleared })))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn invalidate_policy_provider(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,

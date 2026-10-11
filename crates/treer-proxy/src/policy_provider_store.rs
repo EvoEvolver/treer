@@ -29,6 +29,7 @@ impl PolicyProviderStore {
         .map_err(sqlx::Error::Decode)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn set(
         &self,
         workspace_id: &str,
