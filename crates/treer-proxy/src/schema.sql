@@ -405,6 +405,19 @@ END $$;
 
 ALTER TABLE machine_services
     ADD COLUMN IF NOT EXISTS target_agent_id TEXT;
+ALTER TABLE machine_services
+    ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'machine_services'::regclass
+          AND conname = 'machine_services_primary_http_check') THEN
+        ALTER TABLE machine_services ADD CONSTRAINT machine_services_primary_http_check
+            CHECK (NOT is_primary OR (target_agent_id IS NOT NULL AND protocol = 'http'));
+    END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS machine_services_agent_primary
+    ON machine_services(workspace_id, target_agent_id) WHERE is_primary;
 CREATE UNIQUE INDEX IF NOT EXISTS machine_services_workspace_name_lower
     ON machine_services(workspace_id, lower(name));
 CREATE INDEX IF NOT EXISTS machine_services_server

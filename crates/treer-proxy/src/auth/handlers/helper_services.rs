@@ -31,6 +31,7 @@ pub(crate) fn machine_service_from_row(
         name: row.get("name"),
         server_id: row.get("server_id"),
         target_agent_id: row.get("target_agent_id"),
+        primary: row.get("is_primary"),
         target_host: row.get("target_host"),
         target_port,
         protocol,
@@ -52,6 +53,29 @@ pub(crate) fn parse_database_timestamp(
             format!("{resource} has invalid {column}: {error}"),
         )
     })
+}
+
+pub(crate) fn validate_primary_service(
+    primary: bool,
+    target_agent_id: Option<&str>,
+    protocol: MachineServiceProtocol,
+) -> Result<(), AuthFailure> {
+    if primary && (target_agent_id.is_none() || protocol != MachineServiceProtocol::Http) {
+        return Err(AuthFailure::bad_request(
+            "invalid_primary_service",
+            "a primary endpoint must be an Agent-owned HTTP service",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn primary_service_requires_an_agent_owned_http_endpoint() {
+    assert!(validate_primary_service(true, Some("agent-a"), MachineServiceProtocol::Http).is_ok());
+    assert!(validate_primary_service(true, None, MachineServiceProtocol::Http).is_err());
+    assert!(validate_primary_service(true, Some("agent-a"), MachineServiceProtocol::Tcp).is_err());
+    assert!(validate_primary_service(false, None, MachineServiceProtocol::Tcp).is_ok());
 }
 
 pub(crate) fn validate_service_target_host(value: &str) -> Result<String, AuthFailure> {
@@ -187,6 +211,7 @@ pub(crate) fn resolved_service_ingress_from_row(
         name: row.get("service_name"),
         server_id: row.get("server_id"),
         target_agent_id: row.get("target_agent_id"),
+        primary: row.get("is_primary"),
         target_host: row.get("target_host"),
         target_port,
         protocol: match row.get::<String, _>("service_protocol").as_str() {

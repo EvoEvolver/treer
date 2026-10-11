@@ -1550,6 +1550,9 @@ pub struct MachineService {
     pub server_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
+    /// The owning Agent's primary HTTP communication endpoint.
+    #[serde(default)]
+    pub primary: bool,
     pub target_host: String,
     pub target_port: u16,
     pub protocol: MachineServiceProtocol,
@@ -1565,6 +1568,8 @@ pub struct CreateMachineServiceRequest {
     pub server_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
+    #[serde(default)]
+    pub primary: bool,
     #[serde(default = "default_network_target_host")]
     pub target_host: String,
     pub target_port: u16,
@@ -1574,6 +1579,8 @@ pub struct CreateMachineServiceRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateMachineServiceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2049,6 +2056,46 @@ fn invalid_enrollment_key() -> ProtocolError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn primary_service_models_accept_legacy_records_and_round_trip() {
+        let legacy = serde_json::json!({
+            "name": "api", "server_id": "machine-a", "target_port": 4180,
+            "protocol": "http"
+        });
+        let mut request: super::CreateMachineServiceRequest =
+            serde_json::from_value(legacy).unwrap();
+        assert!(!request.primary);
+        request.primary = true;
+        request.target_agent_id = Some("agent-a".into());
+        assert_eq!(
+            serde_json::from_value::<super::CreateMachineServiceRequest>(
+                serde_json::to_value(&request).unwrap()
+            )
+            .unwrap(),
+            request
+        );
+        let record = serde_json::json!({
+            "service_id": "svc_a", "workspace_id": "workspace-a", "name": "api",
+            "server_id": "machine-a", "target_agent_id": "agent-a",
+            "target_host": "127.0.0.1", "target_port": 4180, "protocol": "http",
+            "created_at": "2026-10-11T00:00:00Z", "created_by": "agent-a",
+            "updated_at": "2026-10-11T00:00:00Z", "updated_by": "agent-a"
+        });
+        let mut service: super::MachineService = serde_json::from_value(record).unwrap();
+        assert!(!service.primary);
+        service.primary = true;
+        assert_eq!(
+            serde_json::from_value::<super::MachineService>(
+                serde_json::to_value(&service).unwrap()
+            )
+            .unwrap(),
+            service
+        );
+        let update: super::UpdateMachineServiceRequest =
+            serde_json::from_value(serde_json::json!({"primary": false})).unwrap();
+        assert_eq!(update.primary, Some(false));
+    }
+
     #[test]
     fn lifecycle_declaration_defaults_to_starting_missing_for_older_senders() {
         let command: super::AgentCommand = serde_json::from_value(serde_json::json!({

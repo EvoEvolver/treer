@@ -100,6 +100,9 @@ Current focused transport and recovery checks:
 ```sh
 cargo test -p treer-agent-server network
 cargo test -p treer-agent-server workload_proxy
+cargo test -p treer-agent-server --test agent_address
+# Optional real HTTP client check; requires curl on PATH:
+cargo test -p treer-agent-server curl_uses_inherited_proxy -- --ignored
 cargo test -p treer-agent-server recovery
 cargo test -p treer-cli --test session
 cargo test -p treer-proxy network

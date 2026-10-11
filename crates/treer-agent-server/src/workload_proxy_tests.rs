@@ -265,6 +265,67 @@ async fn http_identity_is_bound_to_entry_and_denial_never_falls_back() {
 }
 
 #[tokio::test]
+#[ignore = "requires the curl executable"]
+async fn curl_uses_inherited_proxy_for_agent_http_routes_and_identity() {
+    let (origin, _origin_task) =
+        serve(Router::new().fallback(|request: Request<Body>| async move {
+            let identity = request.headers()[IDENTITY_HEADER]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let authorization = request.headers()[header::AUTHORIZATION]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(!request.headers().contains_key(WORKLOAD_CREDENTIAL_HEADER));
+            let path = request.uri().path().to_owned();
+            let body = axum::body::to_bytes(request.into_body(), 4096)
+                .await
+                .unwrap();
+            Json(
+                json!({"path": path, "identity": identity, "authorization": authorization,
+            "body": String::from_utf8(body.to_vec()).unwrap()}),
+            )
+        }))
+        .await;
+    let (proxies, control, _control_task) =
+        control(origin.strip_prefix("http://").unwrap().into()).await;
+    let port = proxies.ensure("caller", "credential-caller", None).unwrap();
+    let mut environment = BTreeMap::new();
+    inject_environment(&mut environment, port);
+    for (path, body) in [
+        ("openapi.json", None),
+        ("review", Some(r#"{"file":"example.rs"}"#)),
+    ] {
+        let mut command = tokio::process::Command::new("curl");
+        command
+            .envs(&environment)
+            .env("no_proxy", "localhost,127.0.0.1,::1")
+            .env("NO_PROXY", "localhost,127.0.0.1,::1")
+            .args(["--silent", "--show-error", "--fail", "--max-time", "5"])
+            .args(["-H", "x-treer-workload-credential: must-not-leak"])
+            .arg(format!("http://svc_test.treer/{path}"));
+        if let Some(body) = body {
+            command.args(["-H", "Content-Type: application/json", "--data", body]);
+        }
+        let output = command.output().await.unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["path"], format!("/{path}"));
+        assert_eq!(value["body"], body.unwrap_or_default());
+        assert!(value["identity"]
+            .as_str()
+            .unwrap()
+            .starts_with("token-caller-"));
+        assert_eq!(
+            value["authorization"],
+            format!("Bearer {}", value["identity"].as_str().unwrap())
+        );
+    }
+    assert_eq!(control.tokens.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn names_resolve_to_canonical_audiences_and_follow_renames_without_a_cache() {
     let (origin, _origin_task) = serve(Router::new().fallback(|headers: HeaderMap| async move {
         headers[IDENTITY_HEADER].to_str().unwrap().to_owned()

@@ -17,8 +17,9 @@ use serde_json::{json, Value};
 mod workload_tree;
 use treer_protocol::{
     AcknowledgeMessagesRequest, AgentInfo, AgentStatus, ApiError, CreateAgentLaunchProfileRequest,
-    CreateAgentRequest, CreateAppDeploymentRequest, GetMessageResponse, ImportMessagesRequest,
-    InputAgentRequest, LaunchAgentProfileRequest, LegacyMailMessage, MachineExecRequest,
+    CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
+    GetMessageResponse, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
+    LegacyMailMessage, MachineExecRequest, MachineService, MachineServiceProtocol,
     MessageExternalSource, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
     SendMessageRequest, ServerInfo, SetAgentStartupRequest, UpdateAgentLaunchProfileRequest,
     WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
@@ -209,6 +210,11 @@ enum ServiceCommand {
         host: String,
         #[arg(long, default_value = "tcp")]
         protocol: String,
+        #[arg(
+            long,
+            help = "Register or update this Agent's stable primary HTTP endpoint"
+        )]
+        primary: bool,
     },
     Forward {
         service: String,
@@ -386,6 +392,13 @@ enum AgentCommand {
     List,
     #[command(about = "Show one agent by unique name or id")]
     Show { target: String },
+    #[command(about = "Print an Agent's primary HTTP service URL for curl or other HTTP clients")]
+    Address {
+        #[arg(default_value = "self")]
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
     #[command(about = "Attach the current terminal; press Ctrl-] to detach")]
     Attach { target: String },
     #[command(about = "Submit a prompt to another agent")]
@@ -893,12 +906,27 @@ async fn run_cli() -> anyhow::Result<()> {
                 machine,
                 host,
                 protocol,
+                primary,
             } => {
-                if !matches!(protocol.as_str(), "tcp" | "http") {
-                    bail!("service protocol must be tcp or http; UDP is retired");
-                }
+                let protocol = match protocol.as_str() {
+                    "http" => MachineServiceProtocol::Http,
+                    "tcp" => MachineServiceProtocol::Tcp,
+                    _ => bail!("service protocol must be tcp or http; UDP is retired"),
+                };
                 let server_id = resolve_service_machine(&client, machine.as_deref()).await?;
-                client.value(Method::POST,"api/services",Some(json!({"name":name,"server_id":server_id,"target_host":host,"target_port":port,"protocol":protocol}))).await?
+                register_service(
+                    &client,
+                    CreateMachineServiceRequest {
+                        name,
+                        server_id,
+                        target_agent_id: None,
+                        primary,
+                        target_host: host,
+                        target_port: port,
+                        protocol,
+                    },
+                )
+                .await?
             }
             ServiceCommand::Forward { .. } => {
                 bail!("service forwarding requires the thin client transport")
@@ -1008,6 +1036,26 @@ async fn run_cli() -> anyhow::Result<()> {
                     Some(json!({ "server_id": server })),
                 )
                 .await?
+        }
+        Command::Agent {
+            command: AgentCommand::Address { target, json },
+        } => {
+            let agent = client.get_agent(&target).await?;
+            let services = list_services(&client).await?;
+            let service = primary_service(&services, &agent.agent_id)?
+                .with_context(|| format!("Agent {} has no primary HTTP service; register one from its runtime with treer service register --primary --protocol http --name NAME --port PORT", agent.name))?;
+            let address = format!("http://{}.treer/", service.service_id);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "agent_id": agent.agent_id, "service_id": service.service_id, "address": address
+                    }))?
+                );
+            } else {
+                println!("{address}");
+            }
+            return Ok(());
         }
         Command::Agent { command } => run_agent_command(&client, command).await?,
         Command::App { command } => run_app_command(&client, command).await?,
@@ -1182,6 +1230,9 @@ async fn app_action(client: &ApiClient, target: &str, action: &str) -> anyhow::R
 
 async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow::Result<Value> {
     match command {
+        AgentCommand::Address { .. } => {
+            unreachable!("address output is handled before JSON rendering")
+        }
         AgentCommand::Mkdir { path, parents } => workload_tree::mkdir(client, &path, parents).await,
         AgentCommand::Ls { path, recursive } => workload_tree::ls(client, &path, recursive).await,
         AgentCommand::Mv {
@@ -1722,6 +1773,78 @@ async fn run_interface_command(
         }
         InterfaceCommand::Clear => client.value(Method::DELETE, "api/interface", None).await,
     }
+}
+
+async fn register_service(
+    client: &ApiClient,
+    request: CreateMachineServiceRequest,
+) -> anyhow::Result<Value> {
+    if request.primary {
+        if request.protocol != MachineServiceProtocol::Http {
+            bail!("a primary endpoint requires --protocol http");
+        }
+        let agent_id = client
+            .source_agent_id
+            .as_deref()
+            .context("--primary requires a managed Agent identity")?;
+        let services = list_services(client).await?;
+        let existing = primary_service(&services, agent_id)?.or_else(|| {
+            services.iter().find(|service| {
+                service.target_agent_id.as_deref() == Some(agent_id)
+                    && service.name.eq_ignore_ascii_case(request.name.trim())
+            })
+        });
+        if let Some(service) = existing {
+            if service.server_id != request.server_id {
+                bail!("an Agent's primary service cannot be moved to another machine");
+            }
+            // Reuse service.update ownership/Policy checks and preserve the ID.
+            return client
+                .value(
+                    Method::PATCH,
+                    &format!("api/services/{}", path_segment(&service.service_id)),
+                    Some(
+                        json!({"name": request.name, "target_host": request.target_host,
+                    "target_port": request.target_port, "protocol": "http", "primary": true}),
+                    ),
+                )
+                .await;
+        }
+    }
+    client
+        .value(
+            Method::POST,
+            "api/services",
+            Some(serde_json::to_value(request)?),
+        )
+        .await
+}
+
+async fn list_services(client: &ApiClient) -> anyhow::Result<Vec<MachineService>> {
+    #[derive(serde::Deserialize)]
+    struct Services {
+        services: Vec<MachineService>,
+    }
+    Ok(client
+        .request::<Services>(Method::GET, "api/services", None)
+        .await?
+        .services)
+}
+
+fn primary_service<'a>(
+    services: &'a [MachineService],
+    agent_id: &str,
+) -> anyhow::Result<Option<&'a MachineService>> {
+    let mut matches = services
+        .iter()
+        .filter(|service| service.primary && service.target_agent_id.as_deref() == Some(agent_id));
+    let Some(service) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() || service.protocol != MachineServiceProtocol::Http {
+        bail!("Agent {agent_id} has an invalid primary HTTP service binding");
+    }
+    Ok(Some(service))
 }
 
 async fn resolve_service_machine(

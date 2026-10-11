@@ -334,6 +334,7 @@ impl AuthStore {
             name: name.clone(),
             server_id: server_id.clone(),
             target_agent_id: None,
+            primary: false,
             target_host: "127.0.0.1".to_string(),
             target_port: request.port,
             protocol: MachineServiceProtocol::Http,

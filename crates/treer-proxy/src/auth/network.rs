@@ -7,7 +7,7 @@ impl AuthStore {
     ) -> Result<Vec<MachineService>, AuthFailure> {
         let rows = sqlx::query(
             "SELECT service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, \
-             protocol, created_at, created_by, updated_at, updated_by \
+             protocol, is_primary, created_at, created_by, updated_at, updated_by \
              FROM machine_services WHERE workspace_id = $1 \
              ORDER BY lower(name), service_id",
         )
@@ -25,7 +25,7 @@ impl AuthStore {
     ) -> Result<MachineService, AuthFailure> {
         let row = sqlx::query(
             "SELECT service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, \
-             protocol, created_at, created_by, updated_at, updated_by \
+             protocol, is_primary, created_at, created_by, updated_at, updated_by \
              FROM machine_services WHERE workspace_id = $1 AND service_id = $2",
         )
         .bind(workspace_id)
@@ -37,7 +37,7 @@ impl AuthStore {
             Some(row) => row,
             None => sqlx::query(
                 "SELECT service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, \
-                 protocol, created_at, created_by, updated_at, updated_by \
+                 protocol, is_primary, created_at, created_by, updated_at, updated_by \
                  FROM machine_services WHERE workspace_id = $1 AND lower(name) = lower($2)",
             )
             .bind(workspace_id)
@@ -75,6 +75,11 @@ impl AuthStore {
         } else {
             validate_service_target_host(&request.target_host)?
         };
+        validate_primary_service(
+            request.primary,
+            target_agent_id.as_deref(),
+            request.protocol,
+        )?;
         if request.target_port == 0 {
             return Err(AuthFailure::bad_request(
                 "invalid_service",
@@ -88,6 +93,7 @@ impl AuthStore {
             name,
             server_id: request.server_id,
             target_agent_id,
+            primary: request.primary,
             target_host,
             target_port: request.target_port,
             protocol: request.protocol,
@@ -99,7 +105,8 @@ impl AuthStore {
         sqlx::query(
             "INSERT INTO machine_services(\
              service_id, workspace_id, name, server_id, target_agent_id, target_host, target_port, protocol, \
-             created_at, created_by, updated_at, updated_by) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+             created_at, created_by, updated_at, updated_by, is_primary) \
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(&service.service_id)
         .bind(&service.workspace_id)
@@ -113,6 +120,7 @@ impl AuthStore {
         .bind(&service.created_by)
         .bind(service.updated_at.to_rfc3339())
         .bind(&service.updated_by)
+        .bind(service.primary)
         .execute(&self.pool)
         .await
         .map_err(|error| {
@@ -120,7 +128,12 @@ impl AuthStore {
                 .as_database_error()
                 .is_some_and(|error| error.is_unique_violation())
             {
-                AuthFailure::conflict("service_exists", "service name already exists")
+                if error.as_database_error().and_then(|error| error.constraint())
+                    == Some("machine_services_agent_primary") {
+                    AuthFailure::conflict("primary_service_exists", "Agent already has a primary HTTP service")
+                } else {
+                    AuthFailure::conflict("service_exists", "service name already exists")
+                }
             } else {
                 AuthFailure::database(error)
             }
@@ -159,6 +172,7 @@ impl AuthStore {
             }
         }
         let service = MachineService {
+            primary: request.primary.unwrap_or(current.primary),
             name: request
                 .name
                 .as_deref()
@@ -178,6 +192,11 @@ impl AuthStore {
             updated_by: actor.to_string(),
             ..current
         };
+        validate_primary_service(
+            service.primary,
+            service.target_agent_id.as_deref(),
+            service.protocol,
+        )?;
         if service.target_port == 0 {
             return Err(AuthFailure::bad_request(
                 "invalid_service",
@@ -186,7 +205,7 @@ impl AuthStore {
         }
         sqlx::query(
             "UPDATE machine_services SET name = $1, server_id = $2, target_host = $3, \
-             target_port = $4, protocol = $5, updated_at = $6, updated_by = $7 \
+             target_port = $4, protocol = $5, updated_at = $6, updated_by = $7, is_primary = $10 \
              WHERE workspace_id = $8 AND service_id = $9",
         )
         .bind(&service.name)
@@ -198,6 +217,7 @@ impl AuthStore {
         .bind(&service.updated_by)
         .bind(workspace_id)
         .bind(&service.service_id)
+        .bind(service.primary)
         .execute(&self.pool)
         .await
         .map_err(|error| {
@@ -205,7 +225,18 @@ impl AuthStore {
                 .as_database_error()
                 .is_some_and(|error| error.is_unique_violation())
             {
-                AuthFailure::conflict("service_exists", "service name already exists")
+                if error
+                    .as_database_error()
+                    .and_then(|error| error.constraint())
+                    == Some("machine_services_agent_primary")
+                {
+                    AuthFailure::conflict(
+                        "primary_service_exists",
+                        "Agent already has a primary HTTP service",
+                    )
+                } else {
+                    AuthFailure::conflict("service_exists", "service name already exists")
+                }
             } else {
                 AuthFailure::database(error)
             }
@@ -467,7 +498,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
-             s.name AS service_name, s.server_id, s.target_agent_id, s.target_host, s.target_port, \
+             s.name AS service_name, s.server_id, s.target_agent_id, s.is_primary, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \
@@ -802,7 +833,7 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
-             s.name AS service_name, s.server_id, s.target_agent_id, s.target_host, s.target_port, \
+             s.name AS service_name, s.server_id, s.target_agent_id, s.is_primary, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
              s.updated_by AS service_updated_by \

@@ -560,7 +560,7 @@ Production accepts only that manifest through `just promote-production`. See
 [the release process](releases.md) and [Canary runbook](canary.md).
 
 Open the App URL to create Agents and manage Agents and Apps together in the
-workspace's Workloads tree. Each row offers Start, Stop, Restart, and Logs;
+workspace's Tree sidebar. Each row offers Start, Stop, Restart, and Logs;
 App rows also offer App settings for access controls and the service URL.
 Use New folder to organize workloads into nested folders. Drag a workload or
 folder onto another folder, or use its Move to folder action to select a
@@ -576,7 +576,7 @@ screens, cursor movement, per-keystroke input, paste, and dynamic resize. PTY
 input, replay, and live output remain raw bytes from the Host through the
 Controller and Proxy to the browser. The Host socket uses length-prefixed binary
 frames, and both WebSocket hops use binary frames instead of Base64 JSON payloads.
-On mobile, the workspace opens on the Workloads tree without mounting a
+On mobile, the workspace opens on the Tree sidebar without mounting a
 terminal. Selecting a workload opens its terminal or Agent Interface directly
 in full-screen mode; closing it returns to the tree.
 Agents inherit `TREER_WORKSPACE_ID`,
@@ -664,6 +664,33 @@ service record is durable, but a record alone does not supervise an externally
 started process. Use a Managed App for a supervised HTTP service or a saved
 Agent launch for another protocol. Deleting a service removes its publication,
 not the external process. Removing an Agent or machine removes its owned records.
+
+An Agent can designate one of its HTTP services as its primary communication
+endpoint. Run registration from that Agent's managed runtime:
+
+```bash
+treer service register --primary --protocol http --name reviewer-api --port 4180
+# From another managed Agent:
+addr=$(treer agent address reviewer)
+curl --fail-with-body "$addr/openapi.json"
+curl --fail-with-body -X POST "$addr/review" \
+  -H 'Content-Type: application/json' -d @request.json
+```
+
+The serving Agent owns its API/schema; these paths are examples. `address`
+prints only the stable service-ID URL; `--json` includes the Agent and service
+IDs. It accepts a unique name or Agent ID and defaults to `self`. It fails when
+no primary service is registered. The URL requires a Treer HTTP proxy, which
+managed processes inherit; it is not a public DNS address. Repeating primary
+registration updates the existing service through ownership and update Policy
+checks, preserving its ID even when its name or port changes.
+If no primary exists, an existing same-name service owned by this Agent is
+promoted in place. Include server
+startup and registration in the Agent's saved launch command for cold recovery.
+No process supervision is added by registering the service. AIS registration
+alone does not expose a `.treer` address; register its listener as a service too
+when other Agents need direct HTTP access. Offline delivery/retries belong to
+the calling/serving application.
 
 For HTTP publication, configure wildcard DNS and TLS once at the Proxy edge:
 

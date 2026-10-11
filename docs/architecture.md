@@ -352,6 +352,20 @@ Calls from the entry and thin CLI to the local API bypass environment proxies;
 the workload credential travels only to the local API, never to the destination service.
 No new public API, custom host, or OS DNS record is needed.
 
+Agent HTTP communication uses the same service registry and proxy path.
+`treer service register --primary --protocol http` marks one Agent-owned service
+as its primary endpoint. PostgreSQL enforces one primary per workspace/Agent
+and requires HTTP with an Agent binding; older records default to non-primary.
+The Controller's `treer agent address NAME_OR_ID` resolves the Agent under the
+caller's identity and selects only its explicitly marked primary, returning
+`http://SERVICE_ID.treer/`. Re-registration from that Agent updates the existing
+service through the normal ownership/Policy checks, preserving its stable ID.
+Agent launchers own HTTP server startup and re-registration after cold recovery.
+API routes and schemas are owned by the serving Agent; callers use curl or any
+HTTP client through their inherited proxy. AIS registration remains separate:
+its private listener must also be registered as a service for this address path.
+HTTP does not introduce durable delivery or offline queues.
+
 Other HTTP destinations connect directly without Treer token injection.
 CONNECT supports ordinary HTTPS and native TCP protocols, including SSH; a
 `SERVICE_ID.treer` or `NAME.treer` CONNECT target uses the registered endpoint

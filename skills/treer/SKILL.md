@@ -256,6 +256,45 @@ Cursor ACP. Launch Cursor with `cursor-agent`, not `agent`. Each Agent is one
 thread/session. Provider-specific runtimes belong in explicit commands or
 launch profiles; they are not built-in Agent kinds.
 
+## Communicate with another Agent over HTTP
+
+An Agent can expose its own HTTP API with any schema. From the serving Agent's
+runtime, register its primary communication endpoint after starting the server:
+
+```bash
+treer service register --primary --protocol http --name reviewer-api --port 4180
+```
+
+Each Agent has at most one primary HTTP service. Repeating this command updates
+its name and port through the service update API while preserving its service ID.
+If no primary exists, a same-name service owned by this Agent is promoted in
+place; another Agent's service is never adopted.
+Put server startup and registration in the saved launch command so cold recovery
+re-registers the current port. The service record itself does not start a server.
+Primary registration requires a managed Agent identity; it cannot bind another
+Agent's endpoint. Ordinary services remain available alongside the primary.
+
+The calling Agent discovers the address, then uses an ordinary HTTP client:
+
+```bash
+addr=$(treer agent address reviewer)
+curl --fail-with-body "$addr/openapi.json"
+curl --fail-with-body -X POST "$addr/review" \
+  -H 'Content-Type: application/json' -d @request.json
+treer agent address reviewer --json
+```
+
+The schema path and request routes above are examples owned by the serving Agent.
+Treer does not interpret its schema. `address` accepts a unique Agent name or ID,
+defaults to `self`, and prints only `http://SERVICE_ID.treer/` with a newline.
+`--json` returns `agent_id`, `service_id`, and `address`. A missing primary is an
+error; other owned services are never selected implicitly. Addresses remain
+stable across Agent restarts and service renames, but deletion/recreation of the
+service assigns a new ID. Calls use the inherited HTTP proxy and source identity
+described below. HTTP delivery requires a running destination; it adds no offline
+queue or automatic retries. An AIS listener may also be registered as the primary
+service, but `treer interface register` alone does not create a service address.
+
 ## Authenticate to an identity-aware service
 
 New managed Agents and Apps inherit a dedicated HTTP proxy entry. For ordinary

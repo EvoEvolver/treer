@@ -238,6 +238,7 @@ async fn virtual_network_hosts_are_normalized_resolved_and_cleaned_up() {
                 name: "development API".to_string(),
                 server_id: "destination".to_string(),
                 target_agent_id: None,
+                primary: false,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 8080,
                 protocol: MachineServiceProtocol::Http,
@@ -336,6 +337,7 @@ async fn machine_service_updates_refresh_aliases_and_delete_cascades() {
                 name: "web".to_string(),
                 server_id: "machine-a".to_string(),
                 target_agent_id: None,
+                primary: false,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 3000,
                 protocol: MachineServiceProtocol::Http,
@@ -576,6 +578,109 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
 }
 
 #[tokio::test]
+async fn primary_agent_services_are_unique_http_scoped_and_keep_their_identity() {
+    let store = AuthStore::for_test("password").await;
+    store.seed_test_workspace("primary").await;
+    store.seed_test_workspace("other").await;
+    let request = CreateMachineServiceRequest {
+        name: "review-api".into(),
+        server_id: "machine-a".into(),
+        target_agent_id: Some("agent-a".into()),
+        primary: true,
+        target_host: "127.0.0.1".into(),
+        target_port: 4180,
+        protocol: MachineServiceProtocol::Http,
+    };
+    let mut invalid = request.clone();
+    invalid.target_agent_id = None;
+    assert_eq!(
+        store
+            .create_machine_service("primary", "test", invalid)
+            .await
+            .unwrap_err()
+            .code(),
+        "invalid_primary_service"
+    );
+    let mut invalid = request.clone();
+    invalid.protocol = MachineServiceProtocol::Tcp;
+    assert_eq!(
+        store
+            .create_machine_service("primary", "test", invalid)
+            .await
+            .unwrap_err()
+            .code(),
+        "invalid_primary_service"
+    );
+
+    let mut second = request.clone();
+    second.name = "another-api".into();
+    let (left, right) = tokio::join!(
+        store.create_machine_service("primary", "test", request.clone()),
+        store.create_machine_service("primary", "test", second),
+    );
+    assert_ne!(
+        left.is_ok(),
+        right.is_ok(),
+        "concurrent registration must produce exactly one primary"
+    );
+    let service = left.or(right).unwrap();
+    let updated = store
+        .update_machine_service(
+            "primary",
+            &service.service_id,
+            "test",
+            UpdateMachineServiceRequest {
+                name: Some("renamed-api".into()),
+                target_port: Some(4199),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.service_id, service.service_id);
+    assert!(updated.primary);
+    assert_eq!(updated.target_port, 4199);
+    let resolved = store
+        .resolve_machine_service("primary", "renamed-api")
+        .await
+        .unwrap();
+    assert_eq!(resolved, updated);
+    assert!(store
+        .resolve_machine_service("other", &service.service_id)
+        .await
+        .is_err());
+    assert!(store
+        .update_machine_service(
+            "primary",
+            &service.service_id,
+            "test",
+            UpdateMachineServiceRequest {
+                protocol: Some(MachineServiceProtocol::Tcp),
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+    // The same Agent ID is independent in another workspace; other Agents may
+    // each register a primary inside this workspace.
+    assert!(store
+        .create_machine_service("other", "test", request.clone())
+        .await
+        .is_ok());
+    let mut other_agent = request;
+    other_agent.target_agent_id = Some("agent-b".into());
+    assert!(store
+        .create_machine_service("primary", "test", other_agent)
+        .await
+        .is_ok());
+    store.delete_agent("primary", "agent-a").await.unwrap();
+    assert!(store
+        .resolve_machine_service("primary", &service.service_id)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn agent_services_keep_their_scope_and_delete_with_the_agent() {
     let store = AuthStore::for_test("owner-password").await;
     store.seed_test_workspace("default").await;
@@ -587,6 +692,7 @@ async fn agent_services_keep_their_scope_and_delete_with_the_agent() {
                 name: "Agent app".to_string(),
                 server_id: "machine-a".to_string(),
                 target_agent_id: Some("agent-a".to_string()),
+                primary: false,
                 target_host: "localhost".to_string(),
                 target_port: 3000,
                 protocol: MachineServiceProtocol::Http,
@@ -1863,6 +1969,7 @@ async fn service_ingress_and_human_authorization_are_durable_and_scoped() {
                 name: "Issue Tracker".to_string(),
                 server_id: "machine-a".to_string(),
                 target_agent_id: None,
+                primary: false,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 3000,
                 protocol: MachineServiceProtocol::Http,
