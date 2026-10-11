@@ -247,6 +247,7 @@ impl ControllerRuntime {
             let Some(replay) = replays.get(&process.process_id) else {
                 continue;
             };
+            runtime.migrate_legacy_live_generation(&process)?;
             process.stream_epoch.clone_from(&replay.stream_epoch);
             process.next_revision = replay.next_revision;
             runtime.restore_process(process, replay)?;
@@ -262,6 +263,29 @@ impl ControllerRuntime {
         runtime.start_event_tasks(events);
         runtime.start_idle_monitor();
         Ok((runtime, disconnected))
+    }
+
+    // Only initial inventory may normalize an old configuration revision into
+    // a process generation. Never call this while reconciling later events:
+    // generation-zero exits after a replacement intent are stale.
+    fn migrate_legacy_live_generation(
+        &self,
+        process: &HostProcessInfo,
+    ) -> Result<(), ProtocolError> {
+        let metadata: AgentMetadata = serde_json::from_str(&process.metadata)
+            .map_err(|error| protocol_error("invalid_host_metadata", error))?;
+        if process.running
+            && metadata.run_generation == 0
+            && metadata.workspace_id == self.inner.workspace_id
+            && metadata.server_id == self.inner.server_id
+            && self.inner.startup_store.get(&process.process_id).is_some()
+        {
+            self.inner
+                .startup_store
+                .update(&process.process_id, |entry| entry.spec.generation = 0)
+                .map_err(startup_store_error)?;
+        }
+        Ok(())
     }
 
     pub async fn restore_cached_interfaces(&self) {
@@ -641,7 +665,13 @@ impl ControllerRuntime {
                         args: launch.args,
                         publish_ports: launch.publish_ports,
                         enabled,
-                        generation: if start_missing { 1 } else { 0 },
+                        generation: self
+                            .get(&agent_id)
+                            .ok()
+                            .and_then(|agent| {
+                                agent.lock().ok().map(|agent| agent.info.run_generation)
+                            })
+                            .unwrap_or(if start_missing { 1 } else { 0 }),
                     },
                     workspace_id: self.inner.workspace_id.clone(),
                     workload_credential: credential,
@@ -803,7 +833,7 @@ impl ControllerRuntime {
             .inner
             .startup_store
             .get(agent_id)
-            .map_or(1, |entry| entry.spec.generation);
+            .map_or(info.run_generation, |entry| entry.spec.generation);
         let spec = AgentStartupSpec {
             agent_id: agent_id.to_string(),
             server_id: self.inner.server_id.clone(),

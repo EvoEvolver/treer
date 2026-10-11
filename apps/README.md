@@ -2,7 +2,11 @@
 
 Treer supports two deployment forms. A Managed App is a single HTTP process
 created with `treer app create`; Treer persists its command, machine, service,
-and generated public origin, and restores the process after exit or Controller reconnect.
+and generated public origin. Its process uses the same stable Agent identity
+and Controller-owned start/stop/restart/recovery as other managed workloads.
+Enabled Apps retry after exit; stopped Apps stay stopped across machine restart.
+The browser lists Agents and Apps together in a persistent workspace folder
+tree, with shared lifecycle and log actions and App-specific access settings.
 With wildcard ingress configured, Treer also owns a stable,
 workspace-authenticated `public_url` for the App by default. An Agent may pass
 `treer app create --public` to make only that Managed App's declared HTTP port
@@ -26,8 +30,10 @@ network access remain deployment concerns.
 New Managed App runtimes also inherit their own `http_proxy`/`https_proxy` entry.
 HTTP calls to `http://NAME.treer/` or `http://SERVICE_ID.treer/` automatically
 carry that runtime's service-audience identity; Apps need no token
-acquisition/refresh code. This is the backing runtime's Agent identity, separate
-from the durable App/service ID.
+acquisition/refresh code. New Apps use their durable App ID as their stable Agent
+identity; existing active Apps retain their established Agent ID. Service IDs
+remain separate stable endpoint identities. Restart changes the process
+generation while preserving the workload's identity and credential.
 See [workload identity](../docs/operator-guide.md#workload-identity) for headers,
 CONNECT, recovery, and the limits of shared-machine identity attribution.
 Externally supervised Apps configure their own identity/transport explicitly.

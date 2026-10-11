@@ -586,7 +586,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
             treer_binary: None,
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: root.join("startup.json"),
-            root: root.clone(),
+            root: std::fs::canonicalize(&root).unwrap(),
         },
     )
     .unwrap();
@@ -692,7 +692,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
         "failed Agents remain manually recoverable"
     );
     completed.exit_code = Some(0);
-    runtime.apply_process(completed);
+    runtime.apply_process(completed.clone());
     assert!(
         !runtime.get_startup("recover").unwrap().enabled,
         "normal completion stops recovery intent"
@@ -703,6 +703,73 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
         RuntimeRestoreState::SkippedStopped
     );
     assert_eq!(spawn_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // A pre-upgrade live Host has no process generation, while its old startup
+    // generation counted configuration edits. Initial adoption normalizes it.
+    let mut legacy = completed;
+    legacy.running = true;
+    legacy.exit_code = None;
+    legacy.exited_at = None;
+    let mut metadata: serde_json::Value = serde_json::from_str(&legacy.metadata).unwrap();
+    metadata.as_object_mut().unwrap().remove("run_generation");
+    legacy.metadata = metadata.to_string();
+    runtime
+        .inner
+        .startup_store
+        .update("recover", |entry| {
+            entry.spec.enabled = true;
+            entry.spec.generation = 7;
+        })
+        .unwrap();
+    runtime.inner.agents.write().unwrap().clear();
+    runtime.migrate_legacy_live_generation(&legacy).unwrap();
+    assert_eq!(runtime.get_startup("recover").unwrap().generation, 0);
+    assert_eq!(
+        runtime
+            .upsert_process(legacy.clone(), None)
+            .unwrap()
+            .run_generation,
+        0
+    );
+    let saved_legacy = runtime.inner.startup_store.get("recover").unwrap();
+    runtime.inner.startup_store.remove("recover").unwrap();
+    let registered = runtime
+        .set_startup(
+            "recover",
+            SetAgentStartupRequest {
+                cwd: ".".into(),
+                command: saved_legacy.spec.command.clone(),
+                args: saved_legacy.spec.args.clone(),
+                publish_ports: vec![],
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        registered.generation, 0,
+        "registering a legacy live process preserves generation zero"
+    );
+    runtime.inner.startup_store.upsert(saved_legacy).unwrap();
+    legacy.running = false;
+    legacy.exit_code = Some(0);
+    legacy.exited_at = Some(Utc::now());
+    runtime.apply_process(legacy.clone());
+    assert!(runtime.list()[0].status.is_terminal());
+    assert!(!runtime.get_startup("recover").unwrap().enabled);
+    // The replacement persists its new generation before spawning. An old
+    // legacy exit cannot be normalized again or cancel that running intent.
+    runtime
+        .inner
+        .startup_store
+        .update("recover", |entry| {
+            entry.spec.enabled = true;
+            entry.spec.generation = 1;
+        })
+        .unwrap();
+    let entry = runtime.inner.startup_store.get("recover").unwrap();
+    let replacement = runtime.spawn_startup(&entry).await.unwrap();
+    assert_eq!(replacement.run_generation, 1);
+    runtime.apply_process(legacy);
+    assert!(runtime.get_startup("recover").unwrap().enabled);
+    assert!(!runtime.list()[0].status.is_terminal());
     host_task.abort();
     std::fs::remove_dir_all(root).unwrap();
 }
