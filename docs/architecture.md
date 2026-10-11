@@ -234,8 +234,13 @@ during rolling upgrades. TUI reads the same persisted state locally.
 Startup is complete only when the Controller identity endpoint reports
 `proxy_connected`. Local `/api/agents` success is not a Proxy lease. Because
 service configuration is saved before native registration, `service repair` can
-reconstruct a partial installation without another enrollment key. Manager
-changes remove the old native registration or stop the old `nohup` process
+reconstruct a partial installation without another enrollment key. A
+registration refresh probes the Host after registration: an unavailable socket
+starts the Host directly, while a live Host receives a Controller-only restart
+to preserve its agents and PTYs. Restart request failures are captured during
+recovery and included in the final diagnostic if recovery fails. A live
+foreground Host is never replaced as a fallback by another foreground process.
+Manager changes remove the old native registration or stop the old `nohup` process
 first, and reject transitions that would leave a running Host owned by the
 wrong supervisor. `connect` reuses the
 existing `server_id` for an already-installed hostname and workspace; a second

@@ -87,7 +87,7 @@ pub(super) mod platform {
         )
     }
 
-    pub(super) fn cleanup_systemd_registration_with(
+    pub(in crate::service) fn cleanup_systemd_registration_with(
         executable: impl AsRef<OsStr>,
         unit_path: &Path,
         wants_path: &Path,
@@ -134,7 +134,7 @@ pub(super) mod platform {
         )
     }
 
-    pub(super) fn register_systemd_with(
+    pub(in crate::service) fn register_systemd_with(
         executable: impl AsRef<OsStr>,
         paths: &ServicePaths,
         config: &ServiceConfig,

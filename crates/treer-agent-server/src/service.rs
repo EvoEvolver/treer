@@ -433,21 +433,44 @@ pub async fn refresh_registration_and_wait(mut config: ServiceConfig) -> Result<
     }
     let workspace = config.workspace.clone();
     register(config)?;
-    let (_, installed) = installed_service(&workspace)?;
-    if installed.service_manager == ServiceManager::Foreground {
-        if restart_controller(&workspace).is_ok() {
-            wait_for_controller_and_proxy(&installed).await?;
-            return Ok(ServiceActivation::Managed);
-        }
-        return start_and_wait(&workspace).await;
+    let (paths, installed) = installed_service(&workspace)?;
+    activate_registered_service(&paths, &installed).await
+}
+
+async fn activate_registered_service(
+    paths: &ServicePaths,
+    config: &ServiceConfig,
+) -> Result<ServiceActivation> {
+    // Registration can stop the old Host when switching supervisors. Probe
+    // afterwards so a cold start never sends a restart request to a missing socket.
+    #[cfg(unix)]
+    if !host_is_running(&config.host_socket) {
+        return start_service_and_wait(paths, config).await;
     }
-    if let Err(error) = restart_controller(&workspace) {
-        eprintln!(
-            "treer: warning: hot Controller restart failed ({error:#}); restarting the Host service"
-        );
-        restart(&workspace)?;
+
+    if let Err(error) = restart_controller_at(paths, &config.host_socket) {
+        let diagnostic = format!("Controller hot restart failed ({error:#}); Host recovery failed");
+        let recovery = async {
+            // The Host may have exited between the probe and the request.
+            #[cfg(unix)]
+            if !host_is_running(&config.host_socket) {
+                return start_service_and_wait(paths, config).await;
+            }
+            if config.service_manager == ServiceManager::Foreground {
+                // A live foreground Host belongs to another caller. Do not
+                // launch a second Host or terminate its agents as a fallback.
+                bail!("the live foreground Host cannot be replaced during recovery");
+            }
+            eprintln!("treer: restarting the Host service after a failed Controller restart");
+            platform::restart(paths, config)?;
+            wait_for_controller_and_proxy(config).await?;
+            Ok(ServiceActivation::Managed)
+        };
+        // Preserve the original diagnostic if recovery also fails, without
+        // printing a subprocess error before a successful recovery.
+        return recovery.await.context(diagnostic);
     }
-    wait_for_controller_and_proxy(&installed).await?;
+    wait_for_controller_and_proxy(config).await?;
     Ok(ServiceActivation::Managed)
 }
 
@@ -597,6 +620,13 @@ pub fn start(workspace: &str) -> Result<()> {
 
 pub async fn start_and_wait(workspace: &str) -> Result<ServiceActivation> {
     let (paths, config) = installed_service(workspace)?;
+    start_service_and_wait(&paths, &config).await
+}
+
+async fn start_service_and_wait(
+    paths: &ServicePaths,
+    config: &ServiceConfig,
+) -> Result<ServiceActivation> {
     let mut activation = if config.service_manager == ServiceManager::Foreground {
         eprintln!(
             "treer: starting Host in foreground mode; keep this terminal open or run the command under a process supervisor"
@@ -614,16 +644,16 @@ pub async fn start_and_wait(workspace: &str) -> Result<ServiceActivation> {
             })?;
         ServiceActivation::Foreground(child)
     } else {
-        platform::start(&paths, &config)?;
+        platform::start(paths, config)?;
         ServiceActivation::Managed
     };
 
-    if let Err(error) = wait_for_controller_and_proxy(&config).await {
+    if let Err(error) = wait_for_controller_and_proxy(config).await {
         if let ServiceActivation::Foreground(child) = &mut activation {
             let _ = child.kill().await;
             let _ = child.wait().await;
         } else if config.service_manager == ServiceManager::Nohup {
-            let _ = platform::stop(&paths, &config);
+            let _ = platform::stop(paths, config);
         }
         return Err(error);
     }
@@ -1721,13 +1751,24 @@ fn save_json(value: &impl Serialize, path: &Path) -> Result<()> {
 }
 
 fn restart_controller_at(paths: &ServicePaths, socket: &Path) -> Result<()> {
-    run_checked(
-        Command::new(&paths.host_executable)
-            .arg("restart-controller")
-            .arg("--socket")
-            .arg(socket),
-        "treer-agent-host restart-controller",
-    )
+    let output = Command::new(&paths.host_executable)
+        .arg("restart-controller")
+        .arg("--socket")
+        .arg(socket)
+        .output()
+        .context("failed to run treer-agent-host restart-controller")?;
+    if !output.status.success() {
+        bail!(
+            "treer-agent-host restart-controller exited with {}: {}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    use std::io::Write;
+    std::io::stdout().write_all(&output.stdout)?;
+    std::io::stderr().write_all(&output.stderr)?;
+    Ok(())
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {

@@ -305,6 +305,10 @@ print that table and exit 2. Pass the real workspace ID (`ws_…`) from Add
 machine or from that table. `service start` is ready only when `/api/health`
 reports `proxy_connected`; a live local API is not enough. After lid-close
 sleep, Proxy bounce, or a duplicate fence, the Controller reconnects by itself.
+`connect` and `service repair` start the Host directly when its socket is
+unavailable; an already-running Host gets a Controller-only restart, preserving
+its agents and PTYs. A recoverable restart request failure is not printed as a
+standalone `Error`; if recovery fails, the command reports the failure details.
 If the webpage still shows Offline, copy:
 
 ```bash

@@ -176,6 +176,299 @@ fn unavailable_legacy_socket_is_migrated_but_a_live_socket_is_not() {
     fs::remove_dir_all(directory).expect("remove temporary directory");
 }
 
+#[cfg(unix)]
+struct ActivationFixture {
+    paths: ServicePaths,
+    config: ServiceConfig,
+    health: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+#[cfg(unix)]
+impl ActivationFixture {
+    async fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            PathBuf::from("/tmp").join(format!("treer-activation-{}", Uuid::new_v4().simple()));
+        fs::create_dir(&directory).unwrap();
+        let paths = ServicePaths {
+            executable: directory.join("controller"),
+            host_executable: directory.join("host"),
+            config: directory.join("controller.json"),
+            host_config: directory.join("host.json"),
+            state_dir: directory.clone(),
+        };
+        // Record actual subprocess invocations. The fixture can simulate a
+        // Host disappearing after the socket probe, before the restart request.
+        fs::write(
+            &paths.host_executable,
+            r#"#!/bin/sh
+directory=$(dirname "$0")
+echo "$1" >> "$directory/invocations"
+if [ "$1" = restart-controller ]; then
+    if [ -f "$directory/disappear" ]; then
+        rm "$directory/host.sock"
+    elif [ -f "$directory/succeed" ]; then
+        exit 0
+    fi
+    echo 'Error: simulated Host restart failure' >&2
+    exit 1
+fi
+exec sleep 5
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&paths.host_executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let config = ServiceConfig {
+            proxy: "https://treer.example/".into(),
+            workspace: "default".into(),
+            server_id: "srv_test".into(),
+            machine_token: "srv_test.secret".into(),
+            operator_credential: "op_test".into(),
+            root: directory.clone(),
+            listen: listener.local_addr().unwrap().to_string(),
+            host_socket: directory.join("host.sock"),
+            install_hostname: current_hostname().unwrap(),
+            network_mode: None,
+            service_manager: ServiceManager::Foreground,
+            service_fallback_reason: None,
+        };
+        let app = Router::new().route(
+            "/api/health",
+            get(|| async {
+                Json(json!({
+                    "service": "treer-agent-server",
+                    "workspace_id": "default",
+                    "server_id": "srv_test",
+                    "proxy_connected": true,
+                }))
+            }),
+        );
+        let health = tokio::spawn(async move { axum::serve(listener, app).await });
+        Self {
+            paths,
+            config,
+            health,
+        }
+    }
+
+    async fn stop_foreground(&self, activation: ServiceActivation) {
+        let ServiceActivation::Foreground(mut child) = activation else {
+            panic!("expected a newly started foreground Host");
+        };
+        self.wait_for_run().await;
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+
+    async fn wait_for_run(&self) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !self.invocations().ends_with("run\n") {
+            assert!(Instant::now() < deadline, "Host did not start");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn invocations(&self) -> String {
+        fs::read_to_string(self.paths.state_dir.join("invocations")).unwrap_or_default()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ActivationFixture {
+    fn drop(&mut self) {
+        self.health.abort();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.config.service_manager == ServiceManager::Nohup {
+            let _ = stop_nohup(&self.paths, &self.config, true);
+        }
+        fs::remove_dir_all(&self.paths.state_dir).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn service_canary_cold_activation_skips_restart_for_missing_and_stale_sockets() {
+    for stale in [false, true] {
+        let fixture = ActivationFixture::new().await;
+        if stale {
+            drop(std::os::unix::net::UnixListener::bind(&fixture.config.host_socket).unwrap());
+        }
+        let activation = activate_registered_service(&fixture.paths, &fixture.config)
+            .await
+            .unwrap();
+        fixture.stop_foreground(activation).await;
+        assert_eq!(fixture.invocations(), "run\n");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn service_canary_cold_nohup_activation_records_and_stops_host() {
+    let mut fixture = ActivationFixture::new().await;
+    fixture.config.service_manager = ServiceManager::Nohup;
+    assert!(matches!(
+        activate_registered_service(&fixture.paths, &fixture.config)
+            .await
+            .unwrap(),
+        ServiceActivation::Managed
+    ));
+    fixture.wait_for_run().await;
+    let process = read_nohup_process(&fixture.paths, &fixture.config)
+        .unwrap()
+        .expect("recorded Host PID");
+    assert!(nohup_process_is_current(&process).unwrap());
+    assert_eq!(fixture.invocations(), "run\n");
+    stop_nohup(&fixture.paths, &fixture.config, true).unwrap();
+    assert!(!nohup_pid_path(&fixture.paths, &fixture.config).exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+#[ignore = "requires cargo build -p treer-agent-host immediately before this isolated real-Host test"]
+async fn service_canary_real_host_activation_preserves_workload_pid_and_pty() {
+    use crate::host_client::HostClient;
+    use std::os::unix::fs::PermissionsExt;
+    use treer_host_protocol::{HostCommand, HostResponse, HostSpawnRequest};
+
+    let mut fixture = ActivationFixture::new().await;
+    fixture.config.service_manager = ServiceManager::Nohup;
+    fixture.paths.host_executable = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("debug/treer-agent-host");
+    assert!(fixture.paths.host_executable.is_file(), "build Host first");
+    fs::write(&fixture.paths.executable, "#!/bin/sh\nexec sleep 120\n").unwrap();
+    fs::set_permissions(&fixture.paths.executable, fs::Permissions::from_mode(0o755)).unwrap();
+    save_json(
+        &HostDaemonConfig {
+            socket_path: fixture.config.host_socket.clone(),
+            controller_path: fixture.paths.executable.clone(),
+            controller_config_path: fixture.paths.config.clone(),
+            root: fixture.config.root.clone(),
+        },
+        &fixture.paths.host_config,
+    )
+    .unwrap();
+    activate_registered_service(&fixture.paths, &fixture.config)
+        .await
+        .unwrap();
+    let host_pid = read_nohup_process(&fixture.paths, &fixture.config)
+        .unwrap()
+        .unwrap()
+        .pid;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (host, _events) = loop {
+        if let Ok(connection) = HostClient::connect(&fixture.config.host_socket).await {
+            break connection;
+        }
+        assert!(Instant::now() < deadline, "Host socket did not appear");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let HostResponse::Process { process: before } = host
+        .request(
+            HostCommand::Spawn {
+                request: HostSpawnRequest {
+                    process_id: "survivor".into(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), "exec sleep 120".into()],
+                    cwd: ".".into(),
+                    env: Default::default(),
+                    cols: 80,
+                    rows: 24,
+                    metadata: "{}".into(),
+                },
+            },
+            Some("create-survivor".into()),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected workload process");
+    };
+    for _ in 0..2 {
+        activate_registered_service(&fixture.paths, &fixture.config)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_nohup_process(&fixture.paths, &fixture.config)
+                .unwrap()
+                .unwrap()
+                .pid,
+            host_pid
+        );
+        let HostResponse::Synced { processes, .. } = host.sync(Default::default()).await.unwrap()
+        else {
+            panic!("expected Host inventory");
+        };
+        assert_eq!(processes.len(), 1);
+        let after = &processes[0];
+        assert!(after.running);
+        assert_eq!(after.pid, before.pid);
+        assert_eq!(after.stream_epoch, before.stream_epoch);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn service_canary_live_host_only_restarts_controller_on_repeated_activation() {
+    let fixture = ActivationFixture::new().await;
+    let listener = std::os::unix::net::UnixListener::bind(&fixture.config.host_socket).unwrap();
+    fs::write(fixture.paths.state_dir.join("succeed"), "").unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            activate_registered_service(&fixture.paths, &fixture.config)
+                .await
+                .unwrap(),
+            ServiceActivation::Managed
+        ));
+        // Drain the probe connection, keeping the same Host listener alive.
+        listener.accept().unwrap();
+    }
+    assert_eq!(
+        fixture.invocations(),
+        "restart-controller\nrestart-controller\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn service_canary_host_exit_during_restart_recovers_with_a_cold_start() {
+    let fixture = ActivationFixture::new().await;
+    let _listener = std::os::unix::net::UnixListener::bind(&fixture.config.host_socket).unwrap();
+    fs::write(fixture.paths.state_dir.join("disappear"), "").unwrap();
+    let activation = activate_registered_service(&fixture.paths, &fixture.config)
+        .await
+        .unwrap();
+    fixture.stop_foreground(activation).await;
+    assert_eq!(fixture.invocations(), "restart-controller\nrun\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn service_canary_live_foreground_restart_failure_keeps_host_and_diagnostic() {
+    let fixture = ActivationFixture::new().await;
+    let listener = std::os::unix::net::UnixListener::bind(&fixture.config.host_socket).unwrap();
+    let error = match activate_registered_service(&fixture.paths, &fixture.config).await {
+        Err(error) => error,
+        Ok(_) => panic!("expected restart failure"),
+    };
+    assert!(format!("{error:#}").contains("simulated Host restart failure"));
+    assert_eq!(fixture.invocations(), "restart-controller\n");
+    assert!(host_is_running(&fixture.config.host_socket));
+    drop(listener);
+
+    fs::remove_file(&fixture.paths.host_executable).unwrap();
+    let error = match activate_registered_service(&fixture.paths, &fixture.config).await {
+        Err(error) => error,
+        Ok(_) => panic!("expected missing executable failure"),
+    };
+    assert!(format!("{error:#}").contains("failed to start foreground Host"));
+}
+
 #[test]
 fn automatic_address_uses_the_loopback_port_range() {
     let address = allocate_loopback_address().expect("allocate local API address");
