@@ -158,6 +158,23 @@ impl TrafficRecorder {
         )
     }
 
+    pub(crate) fn register_machine_stream(
+        &self,
+        workspace_id: &str,
+        traffic_class: TrafficClass,
+        source_server_id: &str,
+        destination_server_id: &str,
+    ) -> StreamTrafficCounters {
+        self.register_stream(
+            workspace_id,
+            traffic_class,
+            ENDPOINT_MACHINE,
+            source_server_id,
+            ENDPOINT_MACHINE,
+            destination_server_id,
+        )
+    }
+
     fn register_stream(
         &self,
         workspace_id: &str,

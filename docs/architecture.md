@@ -275,6 +275,9 @@ direction's EOF. The local CLI-to-Controller `treer-tcp` upgrade stays local;
 the Proxy also accepts that older upgrade on direct HTTP deployments. Both
 transports share connection limits and ongoing identity, service, and Policy
 revocation checks.
+Forwarded connections retain the authenticated source machine and Agent in the
+Controller request; traffic accounting keeps both machine directions distinct.
+Human/browser connections continue to use the client traffic bucket.
 
 Each newly launched managed Agent or App runtime gets its own loopback HTTP
 proxy listener, owned by the Controller. Its port fixes the source Agent ID;

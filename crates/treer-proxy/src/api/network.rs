@@ -1371,13 +1371,28 @@ async fn upgrade_service_stream(
             "use a service WebSocket or send Upgrade: treer-tcp",
         ));
     };
+    let (source_server_id, source_agent_id) = match policy
+        .as_ref()
+        .map(|(_, authorization)| &authorization.subject)
+    {
+        Some(PolicySubject::Agent {
+            server_id,
+            agent_id,
+        }) => (server_id.clone(), Some(agent_id.clone())),
+        Some(PolicySubject::Machine { server_id }) => (server_id.clone(), None),
+        _ => ("browser".into(), None),
+    };
     let (mut stream, cancel) = state
-        .open_browser_network_stream_cancellable(
+        .open_client_network_stream_cancellable(
             &service.workspace_id,
             &service.server_id,
-            service.target_agent_id.as_deref(),
-            &service.target_host,
-            service.target_port,
+            treer_protocol::NetworkConnectRequest {
+                source_server_id,
+                source_agent_id,
+                destination_agent_id: service.target_agent_id.clone(),
+                host: service.target_host.clone(),
+                port: service.target_port,
+            },
             TrafficClass::ServiceIngress,
         )
         .await?;
@@ -2326,6 +2341,9 @@ mod explicit_service_tests {
         });
         let open = next_frame(&mut receiver).await;
         assert_eq!(open.kind, NetworkBinaryKind::Open);
+        let connect: treer_protocol::NetworkConnectRequest =
+            serde_json::from_slice(&open.payload).unwrap();
+        assert_eq!(connect.source_server_id, service.server_id);
         relay(
             &state,
             &service,

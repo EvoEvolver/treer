@@ -808,6 +808,15 @@ async fn legacy_controller_rejects_commands_added_after_its_protocol() {
 
 #[tokio::test]
 async fn browser_network_streams_bridge_data_and_close_cleanly() {
+    client_network_streams_bridge_data_and_close_cleanly(false).await;
+}
+
+#[tokio::test]
+async fn service_network_streams_preserve_machine_source_and_directional_accounting() {
+    client_network_streams_bridge_data_and_close_cleanly(true).await;
+}
+
+async fn client_network_streams_bridge_data_and_close_cleanly(machine_source: bool) {
     let traffic = TrafficRecorder::default();
     let state = AppState::with_backplanes_and_traffic(
         EventBus::in_process(),
@@ -822,17 +831,45 @@ async fn browser_network_streams_bridge_data_and_close_cleanly() {
         .expect("register controller");
 
     let opening_state = state.clone();
+    let source = if machine_source {
+        "source-server"
+    } else {
+        BROWSER_TRAFFIC_ENDPOINT
+    };
+    let traffic_class = if machine_source {
+        TrafficClass::ServiceIngress
+    } else {
+        TrafficClass::AgentInterface
+    };
     let opening = tokio::spawn(async move {
-        opening_state
-            .open_browser_network_stream(
-                "alpha",
-                "server",
-                Some("agent-a"),
-                "127.0.0.1",
-                8080,
-                TrafficClass::AgentInterface,
-            )
-            .await
+        if machine_source {
+            opening_state
+                .open_client_network_stream_cancellable(
+                    "alpha",
+                    "server",
+                    NetworkConnectRequest {
+                        source_server_id: source.into(),
+                        source_agent_id: Some("source-agent".into()),
+                        destination_agent_id: Some("agent-a".into()),
+                        host: "127.0.0.1".into(),
+                        port: 8080,
+                    },
+                    traffic_class,
+                )
+                .await
+                .map(|(stream, _)| stream)
+        } else {
+            opening_state
+                .open_browser_network_stream(
+                    "alpha",
+                    "server",
+                    Some("agent-a"),
+                    "127.0.0.1",
+                    8080,
+                    TrafficClass::AgentInterface,
+                )
+                .await
+        }
     });
     let open = expect_network(server_rx.recv().await.expect("browser open frame"));
     assert_eq!(open.kind, NetworkBinaryKind::Open);
@@ -840,7 +877,11 @@ async fn browser_network_streams_bridge_data_and_close_cleanly() {
         serde_json::from_slice(&open.payload).expect("decode browser connect request");
     assert_eq!(request.host, "127.0.0.1");
     assert_eq!(request.port, 8080);
-    assert_eq!(request.source_server_id, "browser");
+    assert_eq!(request.source_server_id, source);
+    assert_eq!(
+        request.source_agent_id.as_deref(),
+        machine_source.then_some("source-agent")
+    );
     assert_eq!(request.destination_agent_id.as_deref(), Some("agent-a"));
 
     state
@@ -908,21 +949,11 @@ async fn browser_network_streams_bridge_data_and_close_cleanly() {
     tokio::task::yield_now().await;
     assert!(state.inner.browser_network_streams.lock().await.is_empty());
     assert_eq!(
-        traffic.pending_for(
-            "alpha",
-            TrafficClass::AgentInterface,
-            BROWSER_TRAFFIC_ENDPOINT,
-            "server"
-        ),
+        traffic.pending_for("alpha", traffic_class, source, "server"),
         (7, 1)
     );
     assert_eq!(
-        traffic.pending_for(
-            "alpha",
-            TrafficClass::AgentInterface,
-            "server",
-            BROWSER_TRAFFIC_ENDPOINT
-        ),
+        traffic.pending_for("alpha", traffic_class, "server", source),
         (8, 1)
     );
 }

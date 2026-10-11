@@ -32,6 +32,28 @@ impl AppState {
         port: u16,
         traffic_class: TrafficClass,
     ) -> Result<(DuplexStream, tokio::sync::oneshot::Sender<()>), ProtocolError> {
+        self.open_client_network_stream_cancellable(
+            workspace_id,
+            destination_server_id,
+            NetworkConnectRequest {
+                source_server_id: "browser".to_string(),
+                source_agent_id: None,
+                destination_agent_id: destination_agent_id.map(str::to_string),
+                host: host.to_string(),
+                port,
+            },
+            traffic_class,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_client_network_stream_cancellable(
+        &self,
+        workspace_id: &str,
+        destination_server_id: &str,
+        request: NetworkConnectRequest,
+        traffic_class: TrafficClass,
+    ) -> Result<(DuplexStream, tokio::sync::oneshot::Sender<()>), ProtocolError> {
         let key = NetworkStreamKey {
             workspace_id: workspace_id.to_string(),
             server_id: destination_server_id.to_string(),
@@ -44,13 +66,6 @@ impl AppState {
             .await
             .insert(key.clone(), incoming_tx);
 
-        let request = NetworkConnectRequest {
-            source_server_id: "browser".to_string(),
-            source_agent_id: None,
-            destination_agent_id: destination_agent_id.map(str::to_string),
-            host: host.to_string(),
-            port,
-        };
         let frame = NetworkBinaryFrame {
             kind: NetworkBinaryKind::Open,
             stream_id: key.stream_id.clone(),
@@ -109,11 +124,20 @@ impl AppState {
         }
 
         let (client, bridge) = tokio::io::duplex(NETWORK_INITIAL_WINDOW);
-        let traffic = self.inner.traffic.register_client_stream(
-            workspace_id,
-            traffic_class,
-            destination_server_id,
-        );
+        let traffic = if request.source_server_id == "browser" {
+            self.inner.traffic.register_client_stream(
+                workspace_id,
+                traffic_class,
+                destination_server_id,
+            )
+        } else {
+            self.inner.traffic.register_machine_stream(
+                workspace_id,
+                traffic_class,
+                &request.source_server_id,
+                destination_server_id,
+            )
+        };
         let state = self.clone();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
