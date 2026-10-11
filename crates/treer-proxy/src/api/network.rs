@@ -1347,17 +1347,30 @@ async fn upgrade_service_stream(
             "explicit forwarding supports TCP and HTTP byte streams",
         ));
     }
-    if request
+    let websocket = request
         .headers()
         .get(header::UPGRADE)
         .and_then(|v| v.to_str().ok())
-        != Some("treer-tcp")
-    {
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    let headers = request.headers().clone();
+    let ws = if websocket {
+        use axum::extract::FromRequestParts;
+        let (mut parts, body) = request.into_parts();
+        let ws = WebSocketUpgrade::from_request_parts(&mut parts, &state)
+            .await
+            .map_err(|_| {
+                ApiFailure::bad_request("invalid_websocket", "invalid service WebSocket handshake")
+            })?;
+        request = Request::from_parts(parts, body);
+        Some(ws.max_message_size(64 * 1024).max_frame_size(64 * 1024))
+    } else if headers.get(header::UPGRADE).and_then(|v| v.to_str().ok()) == Some("treer-tcp") {
+        None
+    } else {
         return Err(ApiFailure::bad_request(
             "upgrade_required",
-            "send Upgrade: treer-tcp",
+            "use a service WebSocket or send Upgrade: treer-tcp",
         ));
-    }
+    };
     let (mut stream, cancel) = state
         .open_browser_network_stream_cancellable(
             &service.workspace_id,
@@ -1368,37 +1381,34 @@ async fn upgrade_service_stream(
             TrafficClass::ServiceIngress,
         )
         .await?;
+    if let Some(ws) = ws {
+        return Ok(ws.on_upgrade(move |socket| async move {
+            let _permit = permit;
+            let _cancel = ServiceStreamCancellation(Some(cancel));
+            monitor_service_transfer(
+                relay_service_websocket(socket, stream),
+                auth,
+                policy,
+                service,
+                headers,
+            )
+            .await;
+        }));
+    }
     let upgrade = hyper::upgrade::on(&mut request);
-    let headers = request.headers().clone();
     tokio::spawn(async move {
         let _permit = permit;
         let _cancel = ServiceStreamCancellation(Some(cancel));
         if let Ok(client) = upgrade.await {
             let mut client = TokioIo::new(client);
-            let transfer = tokio::io::copy_bidirectional(&mut client, &mut stream);
-            tokio::pin!(transfer);
-            let mut check = tokio::time::interval(std::time::Duration::from_secs(1));
-            loop {
-                tokio::select! {
-                    _ = &mut transfer => break,
-                    _ = check.tick() => {
-                        let valid = async {
-                            let current = auth.resolve_machine_service(&service.workspace_id,&service.service_id).await?;
-                            if current != service || !service_destination_identity_active(&auth,&service).await { return Err(ApiFailure::forbidden("service_changed","service endpoint or destination identity changed")); }
-                            if let Some((engine,authorization)) = &policy {
-                                let machine = auth.authenticate_machine(&headers).await?;
-                                auth.authenticate_agent(&machine,&headers).await?;
-                                engine.authorize(authorization).await?;
-                            } else {
-                                let session = auth::authenticate_request(&auth,&headers).await?;
-                                auth.require_workspace_member(&service.workspace_id,&session.user_id).await?;
-                            }
-                            Ok::<(),ApiFailure>(())
-                        };
-                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),valid).await,Ok(Ok(()))) { break; }
-                    }
-                }
-            }
+            monitor_service_transfer(
+                tokio::io::copy_bidirectional(&mut client, &mut stream),
+                auth,
+                policy,
+                service,
+                headers,
+            )
+            .await;
         }
     });
     Ok(Response::builder()
@@ -1407,6 +1417,76 @@ async fn upgrade_service_stream(
         .header(header::UPGRADE, "treer-tcp")
         .body(Body::empty())
         .expect("static response"))
+}
+
+async fn relay_service_websocket(socket: WebSocket, stream: tokio::io::DuplexStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut outgoing, mut incoming) = socket.split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let send = async {
+        let mut buffer = vec![0; 32 * 1024];
+        loop {
+            let count = reader.read(&mut buffer).await.map_err(|_| ())?;
+            if count == 0 {
+                outgoing
+                    .send(Message::Text(treer_protocol::SERVICE_STREAM_EOF.into()))
+                    .await
+                    .map_err(|_| ())?;
+                return Ok::<(), ()>(());
+            }
+            outgoing
+                .send(Message::Binary(buffer[..count].to_vec().into()))
+                .await
+                .map_err(|_| ())?;
+        }
+    };
+    let receive = async {
+        while let Some(message) = incoming.next().await {
+            match message.map_err(|_| ())? {
+                Message::Binary(bytes) => writer.write_all(&bytes).await.map_err(|_| ())?,
+                Message::Text(text) if text == treer_protocol::SERVICE_STREAM_EOF => {
+                    writer.shutdown().await.map_err(|_| ())?;
+                    return Ok(());
+                }
+                Message::Ping(_) | Message::Pong(_) => {}
+                _ => return Err(()),
+            }
+        }
+        Err(())
+    };
+    let _ = tokio::try_join!(send, receive);
+}
+
+async fn monitor_service_transfer<F: std::future::Future>(
+    transfer: F,
+    auth: AuthStore,
+    policy: Option<(PolicyEngine, PolicyRequest)>,
+    service: MachineService,
+    headers: HeaderMap,
+) {
+    tokio::pin!(transfer);
+    let mut check = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = &mut transfer => break,
+            _ = check.tick() => {
+                let valid = async {
+                    let current = auth.resolve_machine_service(&service.workspace_id,&service.service_id).await?;
+                    if current != service || !service_destination_identity_active(&auth,&service).await { return Err(ApiFailure::forbidden("service_changed","service endpoint or destination identity changed")); }
+                    if let Some((engine,authorization)) = &policy {
+                        let machine = auth.authenticate_machine(&headers).await?;
+                        auth.authenticate_agent(&machine,&headers).await?;
+                        engine.authorize(authorization).await?;
+                    } else {
+                        let session = auth::authenticate_request(&auth,&headers).await?;
+                        auth.require_workspace_member(&service.workspace_id,&session.user_id).await?;
+                    }
+                    Ok::<(),ApiFailure>(())
+                };
+                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),valid).await,Ok(Ok(()))) { break; }
+            }
+        }
+    }
 }
 
 pub(super) async fn agent_list_machine_services(
@@ -2169,6 +2249,15 @@ mod explicit_service_tests {
 
     #[tokio::test]
     async fn private_service_socket_by_name_uses_stable_policy_id_and_revocation() {
+        private_service_transport_revocation(false).await;
+    }
+
+    #[tokio::test]
+    async fn private_service_websocket_preserves_half_close_and_policy_revocation() {
+        private_service_transport_revocation(true).await;
+    }
+
+    async fn private_service_transport_revocation(websocket: bool) {
         use crate::policy::{
             PolicyDecision, PolicyDenial, PolicyEvaluation, PolicyEvaluator, PolicyFuture,
         };
@@ -2199,7 +2288,7 @@ mod explicit_service_tests {
         let app = Router::new()
             .route(
                 "/workspaces/{workspace_id}/services/{service_id}/connect",
-                post(agent_connect_machine_service),
+                get(agent_connect_machine_service).post(agent_connect_machine_service),
             )
             .layer(Extension(auth))
             .layer(Extension(policy))
@@ -2214,14 +2303,26 @@ mod explicit_service_tests {
             service.name.to_uppercase()
         );
         let request = tokio::spawn(async move {
-            reqwest::Client::new()
-                .post(url)
-                .bearer_auth(token)
-                .header("connection", "upgrade")
-                .header("upgrade", "treer-tcp")
-                .send()
-                .await
-                .unwrap()
+            if websocket {
+                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+                let mut request = url
+                    .replacen("http://", "ws://", 1)
+                    .into_client_request()
+                    .unwrap();
+                request
+                    .headers_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
+                Ok(tokio_tungstenite::connect_async(request).await.unwrap().0)
+            } else {
+                Err(reqwest::Client::new()
+                    .post(url)
+                    .bearer_auth(token)
+                    .header("connection", "upgrade")
+                    .header("upgrade", "treer-tcp")
+                    .send()
+                    .await
+                    .unwrap())
+            }
         });
         let open = next_frame(&mut receiver).await;
         assert_eq!(open.kind, NetworkBinaryKind::Open);
@@ -2234,7 +2335,53 @@ mod explicit_service_tests {
             &[],
         )
         .await;
-        let response = request.await.unwrap();
+        let response = match request.await.unwrap() {
+            Ok(mut client) => {
+                use tokio_tungstenite::tungstenite::Message as WireMessage;
+                client
+                    .send(WireMessage::Binary(b"ping".to_vec().into()))
+                    .await
+                    .unwrap();
+                assert_eq!(next_frame(&mut receiver).await.payload, b"ping");
+                client
+                    .send(WireMessage::Text(treer_protocol::SERVICE_STREAM_EOF.into()))
+                    .await
+                    .unwrap();
+                let half_close = next_frame(&mut receiver).await;
+                assert_eq!(half_close.kind, NetworkBinaryKind::HalfClose);
+                relay(
+                    &state,
+                    &service,
+                    connection,
+                    &open.stream_id,
+                    NetworkBinaryKind::Data,
+                    b"pong",
+                )
+                .await;
+                assert_eq!(
+                    client.next().await.unwrap().unwrap(),
+                    WireMessage::Binary(b"pong".to_vec().into())
+                );
+                revoked.store(true, Ordering::SeqCst);
+                let closed = tokio::time::timeout(std::time::Duration::from_secs(3), client.next())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    closed,
+                    None | Some(Err(_)) | Some(Ok(WireMessage::Close(_)))
+                ));
+                let reset = loop {
+                    let frame = next_frame(&mut receiver).await;
+                    if frame.kind == NetworkBinaryKind::Reset {
+                        break frame;
+                    }
+                };
+                assert_eq!(reset.stream_id, open.stream_id);
+                server.abort();
+                return;
+            }
+            Err(response) => response,
+        };
         assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
         let mut client = response.upgrade().await.unwrap();
         client.write_all(b"ping").await.unwrap();

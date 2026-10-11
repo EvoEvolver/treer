@@ -99,48 +99,90 @@ async fn service_connect(
         ));
     }
     let mut upstream = state
-        .client
-        .post(state.proxy_url(&format!(
+        .proxy_websocket_url(&format!(
             "services/{}/connect",
             percent_encoding::utf8_percent_encode(&service_id, percent_encoding::NON_ALPHANUMERIC)
-        ))?)
-        .header("Connection", "upgrade")
-        .header("Upgrade", "treer-tcp");
+        ))?
+        .as_str()
+        .into_client_request()
+        .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
     if let Some(token) = &state.machine_token {
-        upstream = upstream.bearer_auth(token);
+        upstream.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?,
+        );
     }
     if let Some(agent) = agent {
-        upstream = upstream
-            .header(AGENT_ID_HEADER, agent.agent_id)
-            .header(WORKLOAD_CREDENTIAL_HEADER, agent.workload_credential);
+        for (key, value) in [
+            (AGENT_ID_HEADER, agent.agent_id),
+            (WORKLOAD_CREDENTIAL_HEADER, agent.workload_credential),
+        ] {
+            upstream.headers_mut().insert(
+                key,
+                HeaderValue::from_str(&value)
+                    .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?,
+            );
+        }
     }
-    let response = upstream
-        .send()
-        .await
-        .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
-    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-        return Err(LocalApiError {
-            status: if response.status().is_client_error() || response.status().is_server_error() {
-                response.status()
-            } else {
-                StatusCode::BAD_GATEWAY
-            },
+    let (remote, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio_tungstenite::connect_async(upstream),
+    )
+    .await
+    .map_err(|_| LocalApiError::bad_gateway("service connection timed out".into()))?
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => LocalApiError {
+            status: response.status(),
             error: ProtocolError::new(
                 "service_connection_denied",
                 "service connection denied or unavailable",
             ),
-        });
-    }
-    let remote = response
-        .upgrade()
-        .await
-        .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
+        },
+        error => LocalApiError::bad_gateway(error.to_string()),
+    })?;
     let local = hyper::upgrade::on(&mut request);
     tokio::spawn(async move {
         if let Ok(local) = local.await {
-            let mut local = hyper_util::rt::TokioIo::new(local);
-            let mut remote = remote;
-            let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut reader, mut writer) = tokio::io::split(hyper_util::rt::TokioIo::new(local));
+            let (mut outgoing, mut incoming) = remote.split();
+            let send = async {
+                let mut buffer = vec![0; 32 * 1024];
+                loop {
+                    let count = reader.read(&mut buffer).await.map_err(|_| ())?;
+                    if count == 0 {
+                        outgoing
+                            .send(ProxyMessage::Text(
+                                treer_protocol::SERVICE_STREAM_EOF.into(),
+                            ))
+                            .await
+                            .map_err(|_| ())?;
+                        return Ok::<(), ()>(());
+                    }
+                    outgoing
+                        .send(ProxyMessage::Binary(buffer[..count].to_vec().into()))
+                        .await
+                        .map_err(|_| ())?;
+                }
+            };
+            let receive = async {
+                while let Some(message) = incoming.next().await {
+                    match message.map_err(|_| ())? {
+                        ProxyMessage::Binary(bytes) => {
+                            writer.write_all(&bytes).await.map_err(|_| ())?
+                        }
+                        ProxyMessage::Text(text) if text == treer_protocol::SERVICE_STREAM_EOF => {
+                            writer.shutdown().await.map_err(|_| ())?;
+                            return Ok(());
+                        }
+                        ProxyMessage::Ping(_) | ProxyMessage::Pong(_) => {}
+                        _ => return Err(()),
+                    }
+                }
+                Err(())
+            };
+            let _ = tokio::try_join!(send, receive);
         }
     });
     Ok((

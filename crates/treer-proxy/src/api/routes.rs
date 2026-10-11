@@ -126,7 +126,7 @@ pub fn router(
         )
         .route(
             "/agent/workspaces/{workspace_id}/services/{service_id}/connect",
-            post(agent_connect_machine_service),
+            get(agent_connect_machine_service).post(agent_connect_machine_service),
         )
         .route(
             "/agent/workspaces/{workspace_id}/services/{service_id}/public-tcp",
@@ -380,7 +380,7 @@ pub fn router(
         )
         .route(
             "/api/workspaces/{workspace_id}/services/{service_id}/connect",
-            post(connect_machine_service),
+            get(connect_machine_service).post(connect_machine_service),
         )
         .route(
             "/api/workspaces/{workspace_id}/services/{service_id}/public-tcp",

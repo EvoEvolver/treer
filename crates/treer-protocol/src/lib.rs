@@ -9,6 +9,8 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 4;
 pub const PROTOCOL_MIN_VERSION: u32 = 4;
+/// Text control frame on a private service WebSocket; binary frames carry bytes.
+pub const SERVICE_STREAM_EOF: &str = "treer-service-eof-v1";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";

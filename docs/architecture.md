@@ -268,6 +268,14 @@ OS DNS is unchanged. A registered host
 must be reachable from the Controller; external containers supply their own
 port mapping or reachable address.
 
+Private service connections use a standard authenticated WebSocket between the
+Controller and Proxy so public HTTP gateways can carry them. Binary messages
+carry stream bytes; the shared `SERVICE_STREAM_EOF` text frame preserves each
+direction's EOF. The local CLI-to-Controller `treer-tcp` upgrade stays local;
+the Proxy also accepts that older upgrade on direct HTTP deployments. Both
+transports share connection limits and ongoing identity, service, and Policy
+revocation checks.
+
 Each newly launched managed Agent or App runtime gets its own loopback HTTP
 proxy listener, owned by the Controller. Its port fixes the source Agent ID;
 callers cannot select an identity with request headers. Standard `http_proxy`,
