@@ -2080,7 +2080,7 @@ fn bootstrap_separates_public_installation_from_workspace_connection() {
 }
 
 #[test]
-fn installer_is_posix_shell_and_only_installs_binaries() {
+fn installer_is_posix_shell_and_keeps_enrollment_separate() {
     let config = test_config();
     let script = render_install_script(&config.public_url);
     assert!(script.starts_with("#!/bin/sh\nset -eu\n"));

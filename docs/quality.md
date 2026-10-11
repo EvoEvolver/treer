@@ -43,6 +43,7 @@ just web-test
 just ais-e2e
 just service-canary
 just machine-artifacts-test
+node --test scripts/install-path.test.mjs
 cargo test -p treer-proxy message_
 cargo test -p treer-proxy -- updater::
 cargo test -p treer-proxy -- admin_update_

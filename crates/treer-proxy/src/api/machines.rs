@@ -284,6 +284,8 @@ else
 fi
 
 mkdir -p "$install_dir" "$server_dir"
+install_dir=$(CDPATH= cd -- "$install_dir" && pwd)
+server_dir=$(CDPATH= cd -- "$server_dir" && pwd)
 tmp_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/treer-install.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
@@ -298,9 +300,10 @@ mv "$tmp_dir/treer-agent-server" "$server_dir/treer-agent-server"
 ln -sf "$server_dir/treer-agent-server" "$install_dir/treer-agent-server"
 
 echo "treer: binaries installed"
-echo "treer: add $install_dir to PATH to use treer and treer-agent-server"
+{path_setup}
 echo "treer: run the workspace connection command from the Proxy UI next"
 "#,
         artifact_base = shell_quote(artifact_base.as_str().trim_end_matches('/')),
+        path_setup = include_str!("../install-path.sh"),
     )
 }

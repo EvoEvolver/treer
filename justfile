@@ -21,6 +21,7 @@ service-canary:
 check:
     node scripts/check-docs.mjs
     node --test scripts/release-r2.test.mjs scripts/machine-artifacts.test.mjs
+    node --test scripts/install-path.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
     cd web && pnpm test:e2e

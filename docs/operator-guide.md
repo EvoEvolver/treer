@@ -179,7 +179,14 @@ curl -fsSL 'https://PROXY_HOST/install.sh' | sh
 The script detects the target platform, installs `treer` to `~/.local/bin`, and
 puts the Host and Controller binaries in `~/.local/libexec/treer`. It also exposes
 `treer-agent-server` in `~/.local/bin` as a symlink to the Controller, so both
-commands are available from the same PATH entry. It does not contain a
+commands are available from the same PATH entry. The installer automatically adds
+the installation directory to the selected shell's startup files: `.zprofile`
+and `.zshrc` for zsh (respecting `ZDOTDIR`), `.bashrc` and the existing login file
+for bash, or `.profile` for POSIX shells. It preserves existing content and does
+not duplicate its PATH entry on reinstall. Open a new terminal afterward, or run
+the printed `export PATH=...` command in the current shell. Set
+`TREER_INSTALL_MODIFY_PATH=0` to leave shell startup files untouched; other shells
+receive manual PATH instructions. The script does not contain a
 credential, create workspace configuration, register a service, or start a
 process. Override `TREER_INSTALL_DIR` or `TREER_AGENT_SERVER_INSTALL_DIR` when
 needed.
