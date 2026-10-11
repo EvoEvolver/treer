@@ -380,7 +380,7 @@ pub fn router(
         )
         .route(
             "/api/workspaces/{workspace_id}/services/{service_id}/connect",
-            get(connect_machine_service).post(connect_machine_service),
+            post(connect_machine_service),
         )
         .route(
             "/api/workspaces/{workspace_id}/services/{service_id}/public-tcp",
