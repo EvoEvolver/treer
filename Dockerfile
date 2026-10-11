@@ -6,6 +6,8 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY skills ./skills
+COPY apps/policy/AGENT.md apps/policy/policy.py ./apps/policy/
+COPY apps/policy/web ./apps/policy/web
 RUN set -eu; \
     cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
     case "$(uname -m)" in \
