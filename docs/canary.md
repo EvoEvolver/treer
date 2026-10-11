@@ -1,7 +1,7 @@
 # Canary environment
 
 - Status: maintained
-- Last reviewed: 2026-08-21 at `239f9c6`
+- Last reviewed: 2026-10-10
 
 Canary is the required deployment target before production. It uses a separate
 Railway environment, PostgreSQL database, NATS instance, and Proxy plus a
@@ -132,7 +132,13 @@ delete the affected volume-backed `.treer-canary/identity.json` and run
 `just test-canary-enroll`. That recovery variant additionally mints and installs
 new one-use enrollment keys. Do not use it for routine image changes.
 
-The default fixtures are the two maintained Canary machine services. Override
+The default fixtures are the two maintained Canary machine services:
+`treer-canary-machine-a` and `treer-canary-machine-b`, enrolled as `canary-a`
+and `canary-b`. Both mount persistent volumes at `/workspace`. Service selectors
+use these explicit names so replacing an environment fixture does not leave a
+retired Railway UUID in the test script. Fresh fixtures need
+`just test-canary-enroll`; routine releases reuse their saved identities.
+Override
 `TREER_CANARY_MACHINE_A_SERVICE`, `TREER_CANARY_MACHINE_B_SERVICE`,
 `TREER_CANARY_MACHINE_A_NAME`, and `TREER_CANARY_MACHINE_B_NAME` together when
 moving the test fleet. The test intentionally fails when wildcard DNS or
