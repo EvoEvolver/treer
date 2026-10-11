@@ -46,3 +46,9 @@ pub struct SetWorkloadPlacementRequest {
     pub folder_id: Option<String>,
     pub position: i64,
 }
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct DeleteWorkloadFolderQuery {
+    #[serde(default)]
+    pub require_empty: bool,
+}

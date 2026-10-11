@@ -1,4 +1,89 @@
 use super::*;
+
+pub(super) async fn get_workload_tree(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(state.get_as("workload-tree", agent.as_ref()).await?))
+}
+
+pub(super) async fn create_workload_folder(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateWorkloadFolderRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let body =
+        serde_json::to_value(request).map_err(|e| LocalApiError::bad_request(e.to_string()))?;
+    Ok(Json(
+        state
+            .post_as("workload-tree/folders", &body, agent.as_ref())
+            .await?,
+    ))
+}
+
+pub(super) async fn update_workload_folder(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateWorkloadFolderRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let body =
+        serde_json::to_value(request).map_err(|e| LocalApiError::bad_request(e.to_string()))?;
+    Ok(Json(
+        state
+            .patch_as(
+                &format!("workload-tree/folders/{}", encode_path_segment(&id)),
+                &body,
+                agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+pub(super) async fn delete_workload_folder(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<DeleteWorkloadFolderQuery>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(
+                &format!(
+                    "workload-tree/folders/{}?require_empty={}",
+                    encode_path_segment(&id),
+                    query.require_empty
+                ),
+                agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+pub(super) async fn set_workload_placement(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<SetWorkloadPlacementRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let body =
+        serde_json::to_value(request).map_err(|e| LocalApiError::bad_request(e.to_string()))?;
+    Ok(Json(
+        state
+            .put_as(
+                &format!("workload-tree/placements/{}", encode_path_segment(&id)),
+                &body,
+                agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
 pub(super) async fn restore_runtime(
     State(state): State<LocalApiState>,
     headers: HeaderMap,

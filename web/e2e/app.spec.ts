@@ -358,6 +358,49 @@ test("folder loading failure keeps workloads usable and supports retry", async (
   await expect(page.getByRole("alert")).toHaveCount(0)
 })
 
+test("external folder changes refresh without resetting an open editor", async ({ page }) => {
+  await page.clock.install()
+  let folders: { folder_id: string; name: string; parent_id: string | null }[] = []
+  await page.route("**/api/workspaces/ws-1/workload-tree", (route) => ok(route, { folders, placements: folders.length ? [{ agent_id: "ag-1", folder_id: "cli-folder", position: 0 }] : [] }))
+  await page.goto("/")
+  await expect(page.getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("Unsaved folder")
+  folders = [{ folder_id: "cli-folder", name: "From CLI", parent_id: null }]
+  await page.clock.fastForward(5100)
+  await expect(page.getByRole("treeitem", { name: "From CLI", exact: true, includeHidden: true })).toBeAttached()
+  await expect(page.getByRole("textbox", { name: "Folder name" })).toHaveValue("Unsaved folder")
+  await page.getByRole("button", { name: "Cancel", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "From CLI", exact: true }).getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
+})
+
+test("a stale background tree read cannot undo a local folder mutation", async ({ page }) => {
+  let blockRead = false
+  let release: (() => void) | undefined
+  let started: (() => void) | undefined
+  const pending = new Promise<void>((resolve) => { started = resolve })
+  await page.route("**/api/workspaces/ws-1/workload-tree", async (route) => {
+    if (!blockRead) return route.fallback()
+    blockRead = false
+    started!()
+    await new Promise<void>((resolve) => { release = resolve })
+    return ok(route, { folders: [], placements: [] })
+  })
+  await page.goto("/")
+  await expect(page.getByRole("button", { name: "New folder", exact: true })).toBeEnabled()
+  blockRead = true
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")))
+  await pending
+  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("Keep this folder")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Keep this folder", exact: true })).toBeVisible()
+  const staleRead = page.waitForResponse((response) => response.url().endsWith("/workload-tree"))
+  release!()
+  await staleRead
+  await expect(page.getByRole("treeitem", { name: "Keep this folder", exact: true })).toBeVisible()
+})
+
 test("an App missing from machine inventory remains visible with its stable runtime ID", async ({ page }) => {
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB] }))
   await page.goto("/")

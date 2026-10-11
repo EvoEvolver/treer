@@ -790,6 +790,32 @@ names or their stable Agent IDs. Restart retains the Agent ID and increments
 its run generation to identify the new process. App-specific deployment,
 service, access, and configuration commands remain under `treer app`.
 
+Organize both kinds using commands under the same prefix:
+
+```bash
+treer agent mkdir -p /research/experiments
+treer agent ls /research
+treer agent ls -R /
+treer agent mv reviewer /research/experiments/
+treer agent mv /research/experiments /research/runs
+treer agent mv reviewer /
+treer agent rmdir /research/runs
+```
+
+These are workspace tree paths, resolved from `/` on every invocation, with
+case-sensitive names and no persistent cwd. `ls` returns JSON folders and
+Agent/App records, including dormant Apps; `-R` includes descendants. Folder
+IDs are accepted alongside paths for `ls`, `mv`, and `rmdir`. `mkdir -p` creates
+missing parents and accepts existing folders. `mv` moves an Agent/App by ID,
+unique name, `self`/`.`, or tree path into an existing directory; it can also
+move or rename folders. Workload renaming remains `treer agent admin rename`.
+No destination folder is overwritten. `rmdir` removes only empty folders,
+checking emptiness under the same database lock as placement changes. It never
+deletes or stops a process. Browser folder deletion keeps its existing behavior
+of promoting children to the parent. Commands use workload or local operator
+authentication; Proxy Policy actions `agent.tree.read` and `agent.tree.manage`
+govern access to the workspace's `agent.tree` resource.
+
 For a provider that runs outside the Host, launch a command-owned bridge:
 
 ```bash

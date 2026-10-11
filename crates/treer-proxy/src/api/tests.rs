@@ -74,6 +74,276 @@ async fn state_with_managed_agent() -> AppState {
     state
 }
 
+fn workload_tree_agent_router(state: AppState, auth: AuthStore, policy: PolicyEngine) -> Router {
+    Router::new()
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree",
+            get(get_workload_tree),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree/folders",
+            post(create_workload_folder),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree/folders/{folder_id}",
+            patch(update_workload_folder).delete(delete_workload_folder),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree/placements/{agent_id}",
+            axum::routing::put(set_workload_placement),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            auth.clone(),
+            auth::require_machine,
+        ))
+        .layer(Extension(auth))
+        .layer(Extension(policy))
+        .with_state(state)
+}
+
+async fn tree_request(
+    router: &Router,
+    headers: &HeaderMap,
+    method: Method,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request.headers_mut().extend(headers.clone());
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn workload_tree_agent_auth_and_directory_operations() {
+    let auth = AuthStore::for_test("password").await;
+    auth.seed_test_workspace("default").await;
+    auth.seed_test_workspace("other").await;
+    let enrollment = auth
+        .create_machine_enrollment("default", "admin")
+        .await
+        .unwrap();
+    let machine = auth.claim_machine_enrollment(&enrollment).await.unwrap();
+    let credential = auth
+        .create_agent_credential("default", &machine.server_id, "agent-a")
+        .await
+        .unwrap();
+    auth.create_agent_credential("other", "foreign-machine", "foreign-agent")
+        .await
+        .unwrap();
+    let state = state_with_managed_agent().await;
+    let mut agent = state.resolve_agent("default", "agent-a").await.unwrap();
+    agent.server_id = machine.server_id.clone();
+    state.test_insert_agent(agent).await;
+    let router = workload_tree_agent_router(state.clone(), auth.clone(), PolicyEngine::allow_all());
+    let base = "/agent/workspaces/default/workload-tree";
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", machine.machine_token).parse().unwrap(),
+    );
+    headers.insert(AGENT_ID_HEADER, "agent-a".parse().unwrap());
+    // Partial/spoofed workload identities fail before the handler.
+    assert_eq!(
+        tree_request(&router, &headers, Method::GET, base, json!(null))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    headers.insert(
+        treer_protocol::WORKLOAD_CREDENTIAL_HEADER,
+        "wrong".parse().unwrap(),
+    );
+    assert_eq!(
+        tree_request(&router, &headers, Method::GET, base, json!(null))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    headers.insert(
+        treer_protocol::WORKLOAD_CREDENTIAL_HEADER,
+        credential.parse().unwrap(),
+    );
+    assert_eq!(
+        tree_request(
+            &router,
+            &headers,
+            Method::GET,
+            "/agent/workspaces/other/workload-tree",
+            json!(null)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
+    let (status, folder) = tree_request(
+        &router,
+        &headers,
+        Method::POST,
+        &format!("{base}/folders"),
+        json!({"name":"research"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = folder["folder"]["folder_id"].as_str().unwrap();
+    let duplicate = tree_request(
+        &router,
+        &headers,
+        Method::POST,
+        &format!("{base}/folders"),
+        json!({"name":"research"}),
+    )
+    .await;
+    assert_eq!(duplicate.1["error"]["code"], "folder_exists");
+    assert_eq!(
+        tree_request(
+            &router,
+            &headers,
+            Method::POST,
+            &format!("{base}/folders"),
+            json!({"name":"bad/path"})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let moved = tree_request(
+        &router,
+        &headers,
+        Method::PUT,
+        &format!("{base}/placements/agent-a"),
+        json!({"folder_id":id,"position":99}),
+    )
+    .await;
+    assert_eq!(moved.0, StatusCode::OK);
+    assert_eq!(moved.1["placement"]["agent_id"], "agent-a");
+    assert_eq!(
+        tree_request(
+            &router,
+            &headers,
+            Method::PUT,
+            &format!("{base}/placements/foreign-agent"),
+            json!({"folder_id":id,"position":0})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let not_empty = tree_request(
+        &router,
+        &headers,
+        Method::DELETE,
+        &format!("{base}/folders/{id}?require_empty=true"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(not_empty.1["error"]["code"], "folder_not_empty");
+    assert_eq!(
+        tree_request(
+            &router,
+            &headers,
+            Method::PATCH,
+            &format!("{base}/folders/{id}"),
+            json!({"name":"science","parent_id":null})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let snapshot = tree_request(&router, &headers, Method::GET, base, json!(null))
+        .await
+        .1;
+    assert_eq!(snapshot["folders"][0]["name"], "science");
+    assert_eq!(snapshot["placements"][0]["folder_id"], id);
+
+    // A different Proxy/router reads the same durable tree.
+    let reloaded =
+        workload_tree_agent_router(state.clone(), auth.clone(), PolicyEngine::allow_all());
+    assert_eq!(
+        tree_request(&reloaded, &headers, Method::GET, base, json!(null))
+            .await
+            .1,
+        snapshot
+    );
+    assert_eq!(
+        tree_request(
+            &router,
+            &headers,
+            Method::PUT,
+            &format!("{base}/placements/agent-a"),
+            json!({"folder_id":null,"position":0})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        tree_request(
+            &router,
+            &headers,
+            Method::DELETE,
+            &format!("{base}/folders/{id}?require_empty=true"),
+            json!(null)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Tree authorization is independent of workload control or discovery.
+    let store = WorkspacePolicyStore::new(auth.pool());
+    store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([
+                    ("agent.tree.read".into(), PolicyEffect::Deny),
+                    ("agent.tree.manage".into(), PolicyEffect::Deny),
+                ]),
+                groups: BTreeMap::new(),
+                rules: vec![],
+            },
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let denied = workload_tree_agent_router(state, auth, PolicyEngine::durable(store));
+    assert_eq!(
+        tree_request(&denied, &headers, Method::GET, base, json!(null))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        tree_request(
+            &denied,
+            &headers,
+            Method::POST,
+            &format!("{base}/folders"),
+            json!({"name":"denied"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
 #[tokio::test]
 async fn public_workspace_snapshots_include_app_workloads() {
     let state = state_with_managed_agent().await;

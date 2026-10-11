@@ -119,6 +119,30 @@ explicit start or restart.
 
 Names are workspace-visible labels; agent IDs and server IDs do not change.
 
+Organize Agents and Apps in the shared workspace tree:
+
+```bash
+treer agent mkdir -p /research/experiments
+treer agent ls /research
+treer agent ls -R /
+treer agent mv reviewer /research/experiments/
+treer agent mv /research/experiments /research/runs
+treer agent mv reviewer /
+treer agent rmdir /research/runs
+```
+
+Paths are case-sensitive and start at workspace root on every invocation;
+there is no persistent directory or filesystem change. `mkdir -p` creates
+missing parents and accepts existing folders. `ls` prints JSON folders and
+workloads; `-R` includes descendants. `mv` moves an Agent/App by ID, unique name,
+`self`/`.`, or tree path into an existing folder. It also moves or renames a
+folder without overwriting another folder. To rename an Agent/App, use
+`treer agent admin rename TARGET NAME`. `rmdir` rejects nonempty folders and
+never stops or deletes workloads. Folder IDs from `ls` are also accepted by
+`ls`, `mv`, and `rmdir` when names are ambiguous. These operations use the
+Agent's existing credential and the `agent.tree.read` / `agent.tree.manage`
+Policy actions; no user session or extra token is needed.
+
 List organization members addressable from the workspace without exposing
 their email addresses:
 

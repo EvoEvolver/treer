@@ -12,6 +12,9 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
+
+#[path = "cli_workload_tree.rs"]
+mod workload_tree;
 use treer_protocol::{
     AcknowledgeMessagesRequest, AgentInfo, AgentStatus, ApiError, CreateAgentLaunchProfileRequest,
     CreateAgentRequest, CreateAppDeploymentRequest, GetMessageResponse, ImportMessagesRequest,
@@ -356,6 +359,23 @@ enum MessageCommand {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
+    #[command(about = "Create a workspace folder (paths start at workspace root)")]
+    Mkdir {
+        path: String,
+        #[arg(short = 'p', long)]
+        parents: bool,
+    },
+    #[command(about = "List folders and Agent/App workloads")]
+    Ls {
+        #[arg(default_value = "/")]
+        path: String,
+        #[arg(short = 'R', long)]
+        recursive: bool,
+    },
+    #[command(about = "Move an Agent/App into a folder, or move/rename a folder")]
+    Mv { source: String, destination: String },
+    #[command(about = "Remove an empty workspace folder")]
+    Rmdir { path: String },
     #[command(about = "Start an Agent or App from its saved launch")]
     Start { target: String },
     #[command(about = "Stop an Agent or App")]
@@ -1162,6 +1182,13 @@ async fn app_action(client: &ApiClient, target: &str, action: &str) -> anyhow::R
 
 async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow::Result<Value> {
     match command {
+        AgentCommand::Mkdir { path, parents } => workload_tree::mkdir(client, &path, parents).await,
+        AgentCommand::Ls { path, recursive } => workload_tree::ls(client, &path, recursive).await,
+        AgentCommand::Mv {
+            source,
+            destination,
+        } => workload_tree::mv(client, &source, &destination).await,
+        AgentCommand::Rmdir { path } => workload_tree::rmdir(client, &path).await,
         AgentCommand::Start { target } => lifecycle_agent(client, &target, "start").await,
         AgentCommand::Stop { target } => stop_agent(client, &target).await,
         AgentCommand::Restart { target } => lifecycle_agent(client, &target, "restart").await,

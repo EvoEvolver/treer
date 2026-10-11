@@ -1,0 +1,531 @@
+use super::*;
+use treer_protocol::{AppDeployment, WorkloadFolder, WorkloadTree};
+
+const TREE: &str = "api/workload-tree";
+
+fn fail(code: &str, message: impl Into<String>) -> anyhow::Error {
+    CliFailure {
+        code: code.into(),
+        message: message.into(),
+    }
+    .into()
+}
+
+// No process-global cwd: every invocation resolves paths from workspace root.
+fn components(path: &str) -> anyhow::Result<Vec<&str>> {
+    if path.trim().is_empty() {
+        return Err(fail("invalid_tree_path", "path cannot be empty"));
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            name if name.trim() != name || name.chars().any(char::is_control) => {
+                return Err(fail(
+                    "invalid_tree_path",
+                    "path components must have visible names without surrounding whitespace",
+                ));
+            }
+            name => parts.push(name),
+        }
+    }
+    Ok(parts)
+}
+
+fn child<'a>(
+    tree: &'a WorkloadTree,
+    parent: Option<&str>,
+    name: &str,
+) -> anyhow::Result<Option<&'a WorkloadFolder>> {
+    let matches: Vec<_> = tree
+        .folders
+        .iter()
+        .filter(|f| f.parent_id.as_deref() == parent && f.name == name)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [folder] => Ok(Some(folder)),
+        _ => Err(fail(
+            "folder_ambiguous",
+            "folder name is duplicated; use its folder ID",
+        )),
+    }
+}
+
+fn resolve_folder(tree: &WorkloadTree, path: &str) -> anyhow::Result<Option<String>> {
+    if let Some(folder) = tree.folders.iter().find(|f| f.folder_id == path) {
+        return Ok(Some(folder.folder_id.clone()));
+    }
+    let mut parent = None;
+    for name in components(path)? {
+        parent = Some(
+            child(tree, parent.as_deref(), name)?
+                .ok_or_else(|| fail("folder_not_found", format!("folder not found: {path}")))?
+                .folder_id
+                .clone(),
+        );
+    }
+    Ok(parent)
+}
+
+fn folder_path(tree: &WorkloadTree, id: Option<&str>) -> anyhow::Result<String> {
+    let mut parts = Vec::new();
+    let mut next = id;
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = next {
+        if !seen.insert(id) {
+            return Err(fail("invalid_workload_tree", "folder cycle detected"));
+        }
+        let folder = tree
+            .folders
+            .iter()
+            .find(|f| f.folder_id == id)
+            .ok_or_else(|| {
+                fail(
+                    "folder_not_found",
+                    "folder no longer exists; retry the command",
+                )
+            })?;
+        parts.push(folder.name.as_str());
+        next = folder.parent_id.as_deref();
+    }
+    parts.reverse();
+    Ok(format!("/{}", parts.join("/")))
+}
+
+fn entry_path(parent: &str, name: &str) -> String {
+    format!("{}/{}", parent.trim_end_matches('/'), name)
+}
+
+pub(super) async fn mkdir(client: &ApiClient, path: &str, parents: bool) -> anyhow::Result<Value> {
+    let mut tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
+    let parts = components(path)?;
+    if parts.is_empty() {
+        if parents {
+            return Ok(json!({"path":"/", "folder":null}));
+        }
+        return Err(fail("folder_exists", "workspace root already exists"));
+    }
+    let mut parent = None;
+    let mut result = None;
+    for (index, name) in parts.iter().enumerate() {
+        if let Some(folder) = child(&tree, parent.as_deref(), name)? {
+            if index == parts.len() - 1 && !parents {
+                return Err(fail("folder_exists", "folder already exists"));
+            }
+            result = Some(folder.clone());
+            parent = Some(folder.folder_id.clone());
+            continue;
+        }
+        if !parents && index != parts.len() - 1 {
+            return Err(fail(
+                "folder_not_found",
+                "parent folder does not exist; use mkdir -p",
+            ));
+        }
+        let response = client
+            .value(
+                Method::POST,
+                &format!("{TREE}/folders"),
+                Some(json!({"name":name,"parent_id":parent})),
+            )
+            .await;
+        // Another caller may create the same parent after our initial read.
+        if parents
+            && response.as_ref().err().is_some_and(|error| {
+                error
+                    .downcast_ref::<CliFailure>()
+                    .is_some_and(|failure| failure.code == "folder_exists")
+            })
+        {
+            tree = client.request(Method::GET, TREE, None).await?;
+            let folder = child(&tree, parent.as_deref(), name)?
+                .ok_or_else(|| fail("folder_not_found", "concurrent folder change; retry mkdir"))?
+                .clone();
+            parent = Some(folder.folder_id.clone());
+            result = Some(folder);
+            continue;
+        }
+        let response = response?;
+        let folder: WorkloadFolder = serde_json::from_value(response["folder"].clone())?;
+        parent = Some(folder.folder_id.clone());
+        result = Some(folder.clone());
+        tree.folders.push(folder);
+    }
+    Ok(json!({"path":folder_path(&tree,parent.as_deref())?,"folder":result}))
+}
+
+#[derive(serde::Deserialize)]
+struct Agents {
+    agents: Vec<AgentInfo>,
+}
+#[derive(serde::Deserialize)]
+struct Apps {
+    apps: Vec<AppDeployment>,
+}
+
+// Include dormant Apps without duplicating the same workload from inventory.
+async fn workloads(client: &ApiClient) -> anyhow::Result<Vec<Value>> {
+    let (agents, apps) = tokio::try_join!(
+        client.request::<Agents>(Method::GET, "api/agents", None),
+        client.request::<Apps>(Method::GET, "api/apps", None)
+    )?;
+    let mut rows = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    for agent in agents.agents {
+        ids.insert(agent.agent_id.clone());
+        rows.push(serde_json::to_value(agent)?);
+    }
+    for app in apps.apps {
+        let id = app.runtime_agent_id.as_deref().unwrap_or(&app.app_id);
+        if ids.insert(id.to_owned()) {
+            rows.push(json!({"agent_id":id,"name":app.name,"kind":"app","status":app.status,"server_id":app.server_id}));
+        }
+    }
+    Ok(rows)
+}
+
+pub(super) async fn ls(client: &ApiClient, path: &str, recursive: bool) -> anyhow::Result<Value> {
+    let tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
+    let parent = resolve_folder(&tree, path)?;
+    let base = folder_path(&tree, parent.as_deref())?;
+    let mut folders = Vec::new();
+    for folder in &tree.folders {
+        if Some(folder.folder_id.as_str()) == parent.as_deref() {
+            continue;
+        }
+        let full = entry_path(
+            &folder_path(&tree, folder.parent_id.as_deref())?,
+            &folder.name,
+        );
+        if folder.parent_id == parent || (recursive && within(&base, &full)) {
+            let mut value = serde_json::to_value(folder)?;
+            value["path"] = json!(full);
+            folders.push(value);
+        }
+    }
+    let mut agents = Vec::new();
+    for mut agent in workloads(client).await? {
+        let placement = tree
+            .placements
+            .iter()
+            .find(|p| Some(p.agent_id.as_str()) == agent["agent_id"].as_str());
+        let folder = placement.and_then(|p| p.folder_id.as_deref());
+        let location = folder_path(&tree, folder)?;
+        if folder == parent.as_deref() || (recursive && within(&base, &location)) {
+            agent["path"] = json!(entry_path(
+                &location,
+                agent["name"].as_str().unwrap_or_default()
+            ));
+            agent["folder_id"] = json!(folder);
+            agent["position"] = json!(placement.map(|p| p.position));
+            agents.push(agent);
+        }
+    }
+    folders.sort_by_key(|f| f["path"].as_str().unwrap_or_default().to_owned());
+    agents.sort_by_key(|a| {
+        (
+            a["folder_id"].as_str().unwrap_or_default().to_owned(),
+            a["position"].as_i64().unwrap_or(i64::MAX),
+            a["agent_id"].as_str().unwrap_or_default().to_owned(),
+        )
+    });
+    Ok(json!({"path":base,"folders":folders,"agents":agents}))
+}
+
+fn within(base: &str, path: &str) -> bool {
+    base == "/"
+        || path == base
+        || path
+            .strip_prefix(base)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
+pub(super) async fn rmdir(client: &ApiClient, path: &str) -> anyhow::Result<Value> {
+    let tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
+    let id = resolve_folder(&tree, path)?
+        .ok_or_else(|| fail("invalid_tree_path", "cannot remove workspace root"))?;
+    client
+        .value(
+            Method::DELETE,
+            &format!("{TREE}/folders/{}?require_empty=true", path_segment(&id)),
+            None,
+        )
+        .await
+}
+
+pub(super) async fn mv(
+    client: &ApiClient,
+    source: &str,
+    destination: &str,
+) -> anyhow::Result<Value> {
+    let tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
+    // self and . always denote the calling Agent, matching existing commands.
+    let source_folder = if matches!(source, "self" | ".") {
+        None
+    } else {
+        match resolve_folder(&tree, source) {
+            Ok(Some(id)) => Some(id),
+            Ok(None) => return Err(fail("invalid_tree_path", "cannot move workspace root")),
+            Err(error)
+                if error
+                    .downcast_ref::<CliFailure>()
+                    .is_some_and(|e| e.code == "folder_not_found") =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    if let Some(id) = source_folder {
+        let folder = tree
+            .folders
+            .iter()
+            .find(|f| f.folder_id == id)
+            .expect("resolved folder");
+        let (parent, name) = match resolve_folder(&tree, destination) {
+            Ok(existing) if existing.as_deref() == Some(&id) => {
+                return Ok(json!({"folder":folder}))
+            }
+            Ok(existing) => (existing, folder.name.clone()),
+            Err(error)
+                if !destination.ends_with('/')
+                    && error
+                        .downcast_ref::<CliFailure>()
+                        .is_some_and(|e| e.code == "folder_not_found") =>
+            {
+                let parts = components(destination)?;
+                let name = parts
+                    .last()
+                    .ok_or_else(|| fail("invalid_tree_path", "cannot replace workspace root"))?
+                    .to_string();
+                let parent_path = format!("/{}", parts[..parts.len() - 1].join("/"));
+                (resolve_folder(&tree, &parent_path)?, name)
+            }
+            Err(error) => return Err(error),
+        };
+        if child(&tree, parent.as_deref(), &name)?.is_some_and(|f| f.folder_id != id) {
+            return Err(fail(
+                "folder_exists",
+                "destination already contains this folder name",
+            ));
+        }
+        return client
+            .value(
+                Method::PATCH,
+                &format!("{TREE}/folders/{}", path_segment(&id)),
+                Some(json!({"name":name,"parent_id":parent})),
+            )
+            .await;
+    }
+    let destination = resolve_folder(&tree, destination)?;
+    let agent = if source.contains('/') {
+        let parts = components(source)?;
+        let name = parts
+            .last()
+            .ok_or_else(|| fail("agent_not_found", "Agent path is empty"))?;
+        let parent = resolve_folder(&tree, &format!("/{}", parts[..parts.len() - 1].join("/")))?;
+        let rows = workloads(client).await?;
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|a| {
+                let folder = tree
+                    .placements
+                    .iter()
+                    .find(|p| Some(p.agent_id.as_str()) == a["agent_id"].as_str())
+                    .and_then(|p| p.folder_id.as_deref());
+                a["name"].as_str() == Some(*name) && folder == parent.as_deref()
+            })
+            .collect();
+        match matches.as_slice() {
+            [agent] => agent["agent_id"]
+                .as_str()
+                .context("missing agent ID")?
+                .to_owned(),
+            [] => return Err(fail("agent_not_found", "Agent not found at this path")),
+            _ => {
+                return Err(fail(
+                    "agent_ambiguous",
+                    "multiple Agents at this path; use the Agent ID",
+                ))
+            }
+        }
+    } else {
+        client.get_agent(source).await?.agent_id
+    };
+    client
+        .value(
+            Method::PUT,
+            &format!("{TREE}/placements/{}", path_segment(&agent)),
+            Some(json!({"folder_id":destination,"position":i64::MAX})),
+        )
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, extract::State, http::Request, routing::any, Json, Router};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    type Expected = (Method, String, Option<Value>, Value);
+
+    async fn mock_request(
+        State(expected): State<Arc<Mutex<std::collections::VecDeque<Expected>>>>,
+        request: Request<Body>,
+    ) -> Json<Value> {
+        assert_eq!(request.headers()[AGENT_ID_HEADER], "agent-caller");
+        assert_eq!(
+            request.headers()[WORKLOAD_CREDENTIAL_HEADER],
+            "test-workload-credential"
+        );
+        assert!(!request.headers().contains_key(OPERATOR_CREDENTIAL_HEADER));
+        let mut pending = expected.lock().await;
+        let index = pending
+            .iter()
+            .position(|(method, path, _, _)| {
+                request.method() == method && request.uri().to_string() == *path
+            })
+            .expect("unexpected CLI request");
+        let (method, path, body, response) = pending.remove(index).unwrap();
+        drop(pending);
+        assert_eq!(request.method(), method);
+        assert_eq!(request.uri().to_string(), path);
+        let bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            if bytes.is_empty() {
+                None
+            } else {
+                Some(serde_json::from_slice::<Value>(&bytes).unwrap())
+            },
+            body
+        );
+        Json(response)
+    }
+
+    #[tokio::test]
+    async fn directory_commands_use_authenticated_api_and_preserve_workload_identity() {
+        let empty = json!({"folders":[],"placements":[]});
+        let research = json!({"folder_id":"folder_root","name":"research","parent_id":null});
+        let experiments =
+            json!({"folder_id":"folder_child","name":"experiments","parent_id":"folder_root"});
+        let tree = json!({"folders":[research,experiments],"placements":[]});
+        let agent = json!({
+            "agent_id":"agent-reviewer","workspace_id":"ws","server_id":"machine","kind":"command","name":"reviewer","cwd":".",
+            "status":"idle","pid":null,"started_at":"2026-10-11T00:00:00Z","updated_at":"2026-10-11T00:00:00Z","exited_at":null,"exit_code":null,"output_revision":0
+        });
+        let app = json!({
+            "app_id":"app-dormant","workspace_id":"ws","server_id":"machine","name":"docs","command":"serve","cwd":".","port":8080,"hostname":"","service_id":"svc-docs","desired_state":"stopped","status":"stopped",
+            "created_at":"2026-10-11T00:00:00Z","updated_at":"2026-10-11T00:00:00Z","created_by":"owner","updated_by":"owner"
+        });
+        let expected: Arc<Mutex<std::collections::VecDeque<Expected>>> = Arc::new(Mutex::new(vec![
+            (Method::GET,"/api/workload-tree".into(),None,empty),
+            (Method::POST,"/api/workload-tree/folders".into(),Some(json!({"name":"research","parent_id":null})),json!({"folder":research})),
+            (Method::POST,"/api/workload-tree/folders".into(),Some(json!({"name":"experiments","parent_id":"folder_root"})),json!({"folder":experiments})),
+            // Repeating mkdir -p makes no writes.
+            (Method::GET,"/api/workload-tree".into(),None,tree.clone()),
+            (Method::GET,"/api/workload-tree".into(),None,tree.clone()),
+            (Method::PATCH,"/api/workload-tree/folders/folder%5Fchild".into(),Some(json!({"name":"runs","parent_id":"folder_root"})),json!({"ok":true})),
+            (Method::GET,"/api/workload-tree".into(),None,tree.clone()),
+            (Method::GET,"/api/agents/reviewer".into(),None,agent.clone()),
+            (Method::PUT,"/api/workload-tree/placements/agent%2Dreviewer".into(),Some(json!({"folder_id":"folder_child","position":i64::MAX})),json!({"placement":{"agent_id":"agent-reviewer","folder_id":"folder_child","position":0}})),
+            (Method::GET,"/api/workload-tree".into(),None,tree.clone()),
+            (Method::DELETE,"/api/workload-tree/folders/folder%5Fchild?require_empty=true".into(),None,json!({"ok":true})),
+            (Method::GET,"/api/workload-tree".into(),None,json!({"folders":[research,experiments],"placements":[{"agent_id":"agent-reviewer","folder_id":"folder_child","position":0}]})),
+            (Method::GET,"/api/agents".into(),None,json!({"agents":[agent]})),
+            (Method::GET,"/api/apps".into(),None,json!({"apps":[app]})),
+        ].into()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .fallback(any(mock_request))
+            .with_state(expected.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = ApiClient {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            base: Url::parse(&format!("http://{address}/")).unwrap(),
+            source_agent_id: Some("agent-caller".into()),
+            workload_credential: Some("test-workload-credential".into()),
+            operator_credential: None,
+        };
+        for argv in [
+            vec!["treer", "agent", "mkdir", "-p", "/research/experiments"],
+            vec!["treer", "agent", "mkdir", "-p", "research/experiments"],
+            vec![
+                "treer",
+                "agent",
+                "mv",
+                "/research/experiments",
+                "/research/runs",
+            ],
+            vec!["treer", "agent", "mv", "reviewer", "/research/experiments/"],
+            vec!["treer", "agent", "rmdir", "/research/experiments"],
+        ] {
+            let args = Args::try_parse_from(argv).unwrap();
+            let Some(Command::Agent { command }) = args.command else {
+                panic!("Agent command")
+            };
+            run_agent_command(&client, command).await.unwrap();
+        }
+        let args = Args::try_parse_from(["treer", "agent", "ls", "-R", "/research"]).unwrap();
+        let Some(Command::Agent { command }) = args.command else {
+            panic!("Agent ls")
+        };
+        let listed = run_agent_command(&client, command).await.unwrap();
+        assert_eq!(listed["folders"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["folders"][0]["path"], "/research/experiments");
+        assert_eq!(listed["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            listed["agents"][0]["path"],
+            "/research/experiments/reviewer"
+        );
+        assert!(expected.lock().await.is_empty());
+        server.abort();
+    }
+
+    #[test]
+    fn tree_paths_resolve_hierarchy_ids_and_ambiguity() {
+        let mut tree = WorkloadTree {
+            folders: vec![
+                WorkloadFolder {
+                    folder_id: "one".into(),
+                    name: "research".into(),
+                    parent_id: None,
+                },
+                WorkloadFolder {
+                    folder_id: "two".into(),
+                    name: "experiments".into(),
+                    parent_id: Some("one".into()),
+                },
+            ],
+            placements: vec![],
+        };
+        assert_eq!(
+            resolve_folder(&tree, "/research/./experiments/../experiments/").unwrap(),
+            Some("two".into())
+        );
+        assert_eq!(resolve_folder(&tree, "two").unwrap(), Some("two".into()));
+        assert_eq!(resolve_folder(&tree, "../../").unwrap(), None);
+        assert_eq!(
+            folder_path(&tree, Some("two")).unwrap(),
+            "/research/experiments"
+        );
+        assert!(resolve_folder(&tree, "/missing").is_err());
+        assert!(components("/invalid /x").is_err());
+        assert!(!within("/research", "/research2"));
+        tree.folders.push(WorkloadFolder {
+            folder_id: "duplicate".into(),
+            name: "research".into(),
+            parent_id: None,
+        });
+        assert!(resolve_folder(&tree, "/research").is_err());
+    }
+}

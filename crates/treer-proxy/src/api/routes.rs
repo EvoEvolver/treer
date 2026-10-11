@@ -27,6 +27,22 @@ pub fn router(
         config: ingress.clone(),
     };
     let agent_control = Router::new()
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree",
+            get(get_workload_tree),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree/folders",
+            post(create_workload_folder),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree/folders/{folder_id}",
+            patch(update_workload_folder).delete(delete_workload_folder),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/workload-tree/placements/{agent_id}",
+            axum::routing::put(set_workload_placement),
+        )
         .route("/agent/machine/identity", post(bind_machine_identity))
         .route(
             "/agent/workspaces/{workspace_id}/snapshot",

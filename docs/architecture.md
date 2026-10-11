@@ -243,10 +243,23 @@ recoverable after a new Host epoch or explicit restore, not an unbounded restart
 The workspace workload tree stores folders and placements in PostgreSQL.
 Agents and Apps share the same tree and lifecycle endpoints. Folder mutations
 serialize against the workspace row, validate parents and cycles, and require
-current workspace membership. Placement IDs must belong to active credentials
+current workspace membership for browser callers. Controller-forwarded Agent
+and operator calls use the machine/workload authentication path and distinct
+`agent.tree.read` / `agent.tree.manage` actions on the workspace's `agent.tree`
+resource. Placement IDs must belong to active credentials
 in that workspace. Deleting a folder promotes its children to its parent (or
 the workspace root); placement order is preserved. Organizing the tree does
 not change filesystem paths, machine ownership, process identity, or Policy.
+The Controller parses `treer agent mkdir/ls/mv/rmdir` and resolves tree paths;
+the thin CLI remains argv/I/O transport. New or renamed folders reject `/`,
+`.` and `..` names and duplicate sibling names under the workspace lock.
+Legacy ambiguous names remain addressable by folder ID. CLI `rmdir` sends
+`require_empty=true`, checked atomically; browser deletion retains child
+promotion. Agent control routes mirror the browser workload-tree routes under
+`/agent/workspaces/{workspace_id}/workload-tree`; the local API exposes
+`/api/workload-tree` with the same folder and placement suffixes.
+The browser refreshes visible trees every five seconds and on window focus,
+preserving open editors and ignoring background reads superseded by a mutation.
 
 `treer-agent-server restore --workspace ID` starts a saved machine installation
 without re-enrollment, then reconciles it. `treer runtime restore --all` handles

@@ -48,9 +48,17 @@ impl AuthStore {
         workspace: &str,
         request: CreateWorkloadFolderRequest,
     ) -> Result<WorkloadFolder, AuthFailure> {
-        let name = validate_resource_name(&request.name, "folder")?;
+        let name = validate_folder_name(&request.name)?;
         let mut tx = self.lock_workload_tree(workspace).await?;
         validate_parent(&mut tx, workspace, request.parent_id.as_deref(), None).await?;
+        validate_sibling_name(
+            &mut tx,
+            workspace,
+            request.parent_id.as_deref(),
+            &name,
+            None,
+        )
+        .await?;
         let result = WorkloadFolder {
             folder_id: format!("folder_{}", Uuid::new_v4().simple()),
             name,
@@ -70,12 +78,20 @@ impl AuthStore {
         let mut tx = self.lock_workload_tree(workspace).await?;
         let mut result = load_folder(&mut tx, workspace, id).await?;
         if let Some(name) = request.name {
-            result.name = validate_resource_name(&name, "folder")?;
+            result.name = validate_folder_name(&name)?;
         }
         if let Some(parent) = request.parent_id {
             validate_parent(&mut tx, workspace, parent.as_deref(), Some(id)).await?;
             result.parent_id = parent;
         }
+        validate_sibling_name(
+            &mut tx,
+            workspace,
+            result.parent_id.as_deref(),
+            &result.name,
+            Some(id),
+        )
+        .await?;
         sqlx::query("UPDATE workload_folders SET name=$3,parent_id=$4 WHERE workspace_id=$1 AND folder_id=$2").bind(workspace).bind(id).bind(&result.name).bind(&result.parent_id).execute(&mut *tx).await.map_err(AuthFailure::database)?;
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(result)
@@ -86,8 +102,27 @@ impl AuthStore {
         workspace: &str,
         id: &str,
     ) -> Result<(), AuthFailure> {
+        self.remove_workload_folder(workspace, id, false).await
+    }
+
+    pub async fn remove_workload_folder(
+        &self,
+        workspace: &str,
+        id: &str,
+        require_empty: bool,
+    ) -> Result<(), AuthFailure> {
         let mut tx = self.lock_workload_tree(workspace).await?;
         let result = load_folder(&mut tx, workspace, id).await?;
+        if require_empty {
+            let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workload_folders WHERE workspace_id=$1 AND parent_id=$2) OR EXISTS(SELECT 1 FROM workload_placements p JOIN agent_credentials a ON a.workspace_id=p.workspace_id AND a.agent_id=p.agent_id WHERE p.workspace_id=$1 AND p.folder_id=$2 AND a.revoked_at IS NULL)")
+                .bind(workspace).bind(id).fetch_one(&mut *tx).await.map_err(AuthFailure::database)?;
+            if occupied {
+                return Err(AuthFailure::bad_request(
+                    "folder_not_empty",
+                    "folder is not empty",
+                ));
+            }
+        }
         sqlx::query(
             "UPDATE workload_folders SET parent_id=$3 WHERE workspace_id=$1 AND parent_id=$2",
         )
@@ -140,6 +175,32 @@ impl AuthStore {
             position,
         })
     }
+}
+
+fn validate_folder_name(name: &str) -> Result<String, AuthFailure> {
+    let name = validate_resource_name(name, "folder")?;
+    if name.contains('/') || matches!(name.as_str(), "." | "..") {
+        return Err(invalid("folder names cannot contain / or equal . or .."));
+    }
+    Ok(name)
+}
+
+async fn validate_sibling_name(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: &str,
+    parent: Option<&str>,
+    name: &str,
+    excluding: Option<&str>,
+) -> Result<(), AuthFailure> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workload_folders WHERE workspace_id=$1 AND parent_id IS NOT DISTINCT FROM $2 AND name=$3 AND ($4::text IS NULL OR folder_id<>$4))")
+        .bind(workspace).bind(parent).bind(name).bind(excluding).fetch_one(&mut **tx).await.map_err(AuthFailure::database)?;
+    if exists {
+        return Err(AuthFailure::bad_request(
+            "folder_exists",
+            "a folder with this name already exists in the destination",
+        ));
+    }
+    Ok(())
 }
 
 async fn load_folder(
@@ -202,6 +263,37 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn workload_tree_unique_siblings_and_empty_removal() {
+        let store = setup().await;
+        let request = || CreateWorkloadFolderRequest {
+            name: "same".into(),
+            parent_id: None,
+        };
+        let (left, right) = tokio::join!(
+            store.create_workload_folder("one", request()),
+            store.create_workload_folder("one", request())
+        );
+        assert_ne!(left.is_ok(), right.is_ok());
+        let parent = left.or(right).unwrap();
+        let child = create(&store, "one", "nested", Some(&parent.folder_id)).await;
+        let error = store
+            .remove_workload_folder("one", &parent.folder_id, true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "folder_not_empty");
+        assert_eq!(store.workload_tree("one").await.unwrap().folders.len(), 2);
+        store
+            .remove_workload_folder("one", &child.folder_id, true)
+            .await
+            .unwrap();
+        store
+            .remove_workload_folder("one", &parent.folder_id, true)
+            .await
+            .unwrap();
+        assert!(store.workload_tree("one").await.unwrap().folders.is_empty());
     }
 
     #[tokio::test]

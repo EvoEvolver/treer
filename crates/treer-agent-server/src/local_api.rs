@@ -17,12 +17,13 @@ use tokio_tungstenite::tungstenite::Message as ProxyMessage;
 use treer_protocol::{
     AcknowledgeMessagesRequest, ApiError, BuildInfo, CreateAgentLaunchProfileRequest,
     CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
-    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, ImportMessagesRequest,
-    InputAgentRequest, LaunchAgentProfileRequest, ListMessagesQuery, MachineExecRequest,
-    PolicyProviderInvalidationRequest, PromptAgentRequest, ProtocolError, ReceiveMessagesRequest,
-    RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest, SetAgentStartupRequest,
-    TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
-    UpdateServiceIngressRequest, UploadMachineFileRequest, WorkloadIdentityTokenRequest,
+    CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, CreateWorkloadFolderRequest,
+    DeleteWorkloadFolderQuery, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
+    ListMessagesQuery, MachineExecRequest, PolicyProviderInvalidationRequest, PromptAgentRequest,
+    ProtocolError, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
+    SendMessageRequest, SetAgentStartupRequest, SetWorkloadPlacementRequest, TerminalServerMessage,
+    UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
+    UpdateWorkloadFolderRequest, UploadMachineFileRequest, WorkloadIdentityTokenRequest,
     AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
@@ -385,6 +386,16 @@ pub fn router(state: LocalApiState) -> Router {
         )
         .route("/api/local/agents", get(list_local_agents))
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route("/api/workload-tree", get(get_workload_tree))
+        .route("/api/workload-tree/folders", post(create_workload_folder))
+        .route(
+            "/api/workload-tree/folders/{folder_id}",
+            axum::routing::patch(update_workload_folder).delete(delete_workload_folder),
+        )
+        .route(
+            "/api/workload-tree/placements/{agent_id}",
+            axum::routing::put(set_workload_placement),
+        )
         .route(
             "/api/apps",
             get(list_app_deployments).post(create_app_deployment),

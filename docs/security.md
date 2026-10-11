@@ -143,8 +143,13 @@ bridge Agent and retain sender-asserted external metadata.
 
 ## Data Exposure
 
-Workspace folders and placements are presentation metadata, available only to
-current workspace members. Folder moves cannot change a workload's machine,
+Workspace folders and placements are presentation metadata, available to
+current workspace members and authenticated workspace-bound Agents/operators.
+Agent/operator tree reads require `agent.tree.read`; mutations require
+`agent.tree.manage`, both on the workspace's `agent.tree` resource. These
+permissions grant shared workspace organization, including peer placement,
+without process-control authority. Browser membership authorization is
+unchanged. Folder moves cannot change a workload's machine,
 credential, filesystem path, or Policy scope. They do not create an isolation
 boundary. The Proxy validates workspace ownership and rejects folder cycles.
 

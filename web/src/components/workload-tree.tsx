@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { api, machineName, type Agent, type AppDeployment, type Machine } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -25,14 +25,31 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   const [name, setName] = useState("")
   const [destination, setDestination] = useState("")
   const [reload, setReload] = useState(0)
+  const mutation = useRef(false)
+  const readGeneration = useRef(0)
   const base = `/api/workspaces/${encodeURIComponent(workspaceId ?? "")}/workload-tree`
   useEffect(() => {
     let active = true
     setTree({ folders: [], placements: [] }); setError(""); setEditor(null); setCollapsed(new Set())
     if (!workspaceId || preview) return
     setLoading(true)
-    api<Tree>(base).then((data) => { if (active) setTree(data) }).catch((reason) => { if (active) setError(String(reason)) }).finally(() => { if (active) setLoading(false) })
-    return () => { active = false }
+    let reading = false
+    async function refresh() {
+      if (reading || mutation.current) return
+      reading = true
+      const generation = ++readGeneration.current
+      try {
+        const data = await api<Tree>(base)
+        if (active && generation === readGeneration.current) setTree(data)
+      } catch (reason) {
+        if (active && generation === readGeneration.current) setError(String(reason))
+      } finally { reading = false; if (active) setLoading(false) }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { if (!document.hidden) void refresh() }, 5000)
+    const focus = () => void refresh()
+    window.addEventListener("focus", focus)
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", focus) }
   }, [base, workspaceId, preview, reload])
   const workloads = [...agents]
   for (const app of apps) {
@@ -61,13 +78,14 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     return names.join(" / ")
   }
   async function mutate(path: string, method: string, body?: unknown) {
-    if (!workspaceId || busy) return
+    if (!workspaceId || busy || mutation.current) return
+    mutation.current = true; readGeneration.current += 1
     setBusy(true); setError("")
     try {
       await api(`${base}${path}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
       const updated = await api<Tree>(base)
       setTree(updated); setEditor(null)
-    } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
+    } catch (reason) { setError(String(reason)) } finally { mutation.current = false; setBusy(false) }
   }
   function move(item: Item, folderId: string | null) {
     if (item.kind === "folder") {
