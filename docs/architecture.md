@@ -78,6 +78,25 @@ then uses the same Message implementation as the Agent routes.
 `TREER_ENABLE_CORE_MESSAGES` is a rollout switch, not an authorization or
 isolation boundary.
 
+### Bridge Agents
+
+The `bridge` Agent kind is a command-owned integration point for providers that
+are not running under Host control. Its command is started and supervised like
+an ordinary `command` Agent, but `prompt` requests are placed in a bounded
+Controller-local queue instead of being written to the process PTY. The bridge
+process consumes its own queue through the authenticated local endpoint
+`GET /api/agents/{agent_id}/prompt-queue` and can then invoke the normal
+`treer` CLI commands in its own process. Queue reads consume up to 100 entries
+at a time, each prompt is limited to 64 KiB, and the queue holds at most 256
+entries; the queue is intentionally ephemeral and should be paired with Core
+Message acknowledgement when delivery must survive a Controller restart.
+
+Bridge Agent output is not exposed through `read` or `transcript`; those calls
+return `agent_output_unavailable`. This keeps provider-owned transcripts out of
+the Host terminal contract while preserving ordinary `prompt` authorization and
+audit behavior. The queue endpoint accepts only the bridge Agent's own workload
+credential and rejects attempts to read another Agent's queue.
+
 ## App Identity
 
 An enabled workspace service uses its stable `service_id` as OAuth client ID.
@@ -134,10 +153,17 @@ principals.
 
 ## Policy
 
-One versioned JSONB Policy document exists per workspace. The Proxy compiles
-rules into action-indexed immutable structures and caches them briefly. Updates
-use optimistic revisions and PostgreSQL notification. Multi-recipient sends and
-multi-delivery acknowledgements evaluate one pinned revision.
+Workspace owners may select a private Managed App implementing
+`treer.policy-provider/v1`. The Proxy validates its manifest and initial bundle,
+then compiles action-indexed immutable structures and evaluates locally. Bundle
+fetches use a capability-gated, bounded Controller command that can address only
+the Managed App's machine-local loopback port. Revision invalidation is a typed
+App-to-Controller-to-Proxy route with runtime binding checks. Details and failure
+semantics are in the [Policy Provider protocol](policy-provider.md).
+
+Without a Provider, the legacy versioned JSONB Policy document remains the next
+evaluator. Multi-recipient sends and multi-delivery acknowledgements evaluate
+one pinned revision.
 
 Policy covers Agent discovery/control, launch profiles, machine exec and file
 write, machine/service/network mutation, workload identity, and Message

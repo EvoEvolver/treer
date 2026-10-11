@@ -535,6 +535,56 @@ fn explicit_command_agents_still_spawn_directly() {
 }
 
 #[test]
+fn bridge_agents_spawn_directly_and_keep_prompt_control_in_the_bridge() {
+    let request = CreateAgentRequest {
+        server_id: None,
+        kind: "bridge".to_string(),
+        name: "bridge".to_string(),
+        cwd: ".".to_string(),
+        args: vec!["./bridge".to_string(), "--serve".to_string()],
+        cols: 120,
+        rows: 36,
+        publish_ports: Vec::new(),
+        recipe: None,
+    };
+
+    let (kind, launch) = resolve_launch(&request).expect("resolve bridge launch");
+
+    assert_eq!(kind, "bridge");
+    assert_eq!(launch.command, "./bridge");
+    assert_eq!(launch.args, ["--serve"]);
+    assert!(launch.initial_writes.is_empty());
+}
+
+#[test]
+fn managed_apps_spawn_directly_with_explicit_service_registration() {
+    let request = CreateAgentRequest {
+        server_id: None,
+        kind: "app".to_string(),
+        name: "docs".to_string(),
+        cwd: ".".to_string(),
+        args: vec![
+            "python3".to_string(),
+            "-m".to_string(),
+            "http.server".to_string(),
+            "8080".to_string(),
+        ],
+        cols: 120,
+        rows: 36,
+        publish_ports: Vec::new(),
+        recipe: None,
+    };
+
+    let (kind, launch) = resolve_launch(&request).expect("resolve App launch");
+
+    assert_eq!(kind, "app");
+    assert_eq!(launch.command, "python3");
+    assert_eq!(launch.args, ["-m", "http.server", "8080"]);
+    assert!(launch.initial_writes.is_empty());
+    assert!(launch.publish_ports.is_empty());
+}
+
+#[test]
 fn empty_command_request_opens_an_unmodified_interactive_terminal() {
     let request = CreateAgentRequest {
         server_id: None,

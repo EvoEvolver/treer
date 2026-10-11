@@ -660,6 +660,19 @@ WebSocket upgrades remain supported. Treer consumes its gateway credentials and
 strips client-supplied Treer identity headers before forwarding. Legacy alias
 records can still be read; they no longer configure system DNS or traffic capture.
 
+Authorization is a separate Proxy subsystem. A workspace owner can select a
+private Managed App as its Policy Provider from Workspace settings. Without a
+selected Provider, the UI shows the effective stored policy or the explicit
+`Treer Default` monitor/allow baseline. Owners can choose an online machine and
+install the bundled default Policy App without a source checkout or network
+download on that machine. The App provides mode, JSON rule editing, atomic
+publication, cache sync status, and a decision simulator; deployment and state
+paths are documented in [`apps/policy`](../apps/policy/README.md). The Proxy
+validates and caches its versioned bundle, then evaluates
+subject/action/resource requests locally. Managed Agent requests carry their
+authenticated Agent identity; workload HTTP entries use the same subject and
+resolve service-name aliases to stable IDs before authorization.
+
 Managed Apps allocate their service and platform origin automatically:
 
 ```bash
@@ -754,6 +767,26 @@ treer agent read reviewer --lines 80
 treer agent transcript reviewer --page 0
 treer agent send-keys reviewer ctrl-c
 ```
+
+For a provider that runs outside the Host, launch a command-owned bridge:
+
+```bash
+treer agent admin create --machine build-machine --kind bridge \
+  --name provider-bridge --cwd . -- ./bridge --serve
+```
+
+The bridge receives other Agents' prompts from its authenticated local
+Controller endpoint:
+
+```text
+GET /api/agents/{bridge-agent-id}/prompt-queue
+```
+
+The endpoint consumes queued prompts and returns JSON. Bridge output is not
+available through `treer agent read` or `treer agent transcript`; the provider
+owns that transcript. The queue is bounded and in-memory, so a bridge that
+needs restart-safe delivery should use Core Messages and explicit
+acknowledgements as its durable handoff.
 
 `treer exec` runs one non-interactive argv vector directly on the selected
 machine and returns JSON containing stdout, stderr, exit code, duration,

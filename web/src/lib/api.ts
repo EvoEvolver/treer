@@ -131,6 +131,34 @@ export interface AppDeployment {
   updated_by: string
 }
 
+export interface WorkspacePolicyProvider {
+  workspace_id: string
+  app_id: string
+  service_id: string
+  failure_mode: "fail_closed" | "fail_open"
+  max_stale_seconds: number
+  revision_hint: number
+  updated_at: string
+  updated_by: string
+}
+
+export interface PolicyProviderStatus {
+  provider?: WorkspacePolicyProvider
+  app?: AppDeployment
+  fallback?: {
+    kind: "treer_default" | "workspace_policy"
+    name: string
+    mode: "monitor" | "enforce"
+    effect?: "allow"
+    revision?: number
+  }
+  cache: {
+    revision?: number
+    age_seconds?: number
+    last_error?: string
+  }
+}
+
 export interface Snapshot {
   revision: number
   workspace: Workspace

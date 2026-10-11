@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Treer Policy</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand"><span class="mark">P</span><span><strong>Treer Policy</strong><small id="workspace">Workspace</small></span></div>
+      <div class="header-status"><span class="status-dot" id="status-dot"></span><span id="server-status">Loading</span><span class="revision" id="header-revision">rev -</span></div>
+    </header>
+    <nav aria-label="Policy views">
+      <button class="nav-item active" data-view="overview">Overview</button>
+      <button class="nav-item" data-view="editor">Policy</button>
+      <button class="nav-item" data-view="simulator">Simulator</button>
+    </nav>
+    <main>
+      <section class="view active" id="view-overview">
+        <div class="page-heading"><div><p class="eyebrow">Runtime</p><h1>Policy server</h1></div><button class="secondary" id="sync-button">Retry sync</button></div>
+        <div class="metrics">
+          <div><small>Mode</small><strong id="metric-mode">-</strong></div>
+          <div><small>Revision</small><strong id="metric-revision">-</strong></div>
+          <div><small>Rules</small><strong id="metric-rules">-</strong></div>
+          <div><small>Proxy cache</small><strong id="metric-sync">-</strong></div>
+        </div>
+        <div class="section-row"><div><h2>Bundle endpoint</h2><p>Protocol and publication state exposed to Treer Proxy.</p></div><code>/v1/policy/bundle</code></div>
+        <div class="section-row"><div><h2>Last publish</h2><p id="published-at">-</p></div><span class="badge" id="protocol">treer.policy-provider/v1</span></div>
+        <div class="notice hidden" id="sync-error"></div>
+      </section>
+
+      <section class="view" id="view-editor">
+        <div class="page-heading"><div><p class="eyebrow">Bundle editor</p><h1>Workspace policy</h1></div><div class="actions"><button class="secondary" id="format-button">Format</button><button class="primary" id="publish-button">Publish</button></div></div>
+        <div class="mode-row"><span>Runtime mode</span><div class="segments" role="group" aria-label="Policy mode"><button data-mode="monitor" class="active">Monitor</button><button data-mode="enforce">Enforce</button></div></div>
+        <div class="editor-wrap">
+          <div class="editor-toolbar"><span>policy.json</span><span id="editor-state">Current revision</span></div>
+          <textarea id="policy-editor" spellcheck="false" aria-label="Policy JSON"></textarea>
+        </div>
+        <div class="notice hidden" id="editor-error"></div>
+      </section>
+
+      <section class="view" id="view-simulator">
+        <div class="page-heading"><div><p class="eyebrow">Local evaluator</p><h1>Decision simulator</h1></div><button class="primary" id="test-button">Evaluate</button></div>
+        <form id="test-form" class="test-grid">
+          <label>Subject kind<select id="subject-kind"><option>agent</option><option>human</option><option>machine</option><option>service</option></select></label>
+          <label>Subject ID<input id="subject-id" value="agent_example" required></label>
+          <label>Machine ID<input id="machine-id" value="machine_example"></label>
+          <label>Action<input id="action" value="agent.prompt" required></label>
+          <label>Resource kind<input id="resource-kind" value="agent" required></label>
+          <label>Resource ID<input id="resource-id" value="agent_target" required></label>
+        </form>
+        <div class="decision empty" id="decision"><span class="decision-mark">-</span><div><small>Decision</small><strong>Not evaluated</strong><p>Run the current published bundle against this request.</p></div></div>
+        <div class="notice hidden" id="test-error"></div>
+      </section>
+    </main>
+  </div>
+  <div class="toast hidden" id="toast" role="status"></div>
+  <script src="./app.js"></script>
+</body>
+</html>

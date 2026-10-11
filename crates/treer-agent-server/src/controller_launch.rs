@@ -3,7 +3,10 @@ use super::*;
 pub(super) fn resolve_launch(
     request: &CreateAgentRequest,
 ) -> Result<(String, AgentLaunch), ProtocolError> {
-    if !matches!(request.kind.as_str(), "shell" | "command" | "app") {
+    if !matches!(
+        request.kind.as_str(),
+        "shell" | "command" | "app" | "bridge"
+    ) {
         return Err(ProtocolError::new(
             "agent_kind_retired",
             "Provider-specific and auto Agent kinds are retired; select a launch profile or pass kind=command with an explicit executable and argv",

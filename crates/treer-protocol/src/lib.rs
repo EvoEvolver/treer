@@ -14,14 +14,18 @@ pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
 pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
 pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
+pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,
     CAPABILITY_MACHINE_EXEC,
     CAPABILITY_MACHINE_UPLOAD,
     CAPABILITY_RUNTIME_RESTORE,
+    CAPABILITY_SERVICE_HTTP_FETCH,
 ];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
+pub const POLICY_PROVIDER_PROTOCOL_V1: &str = "treer.policy-provider/v1";
+pub const POLICY_PROVIDER_BUNDLE_CAPABILITY_V1: &str = "policy.bundle.v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MESSAGE_SCHEMA_VERSION: u32 = 1;
@@ -342,6 +346,85 @@ pub struct WorkspacePolicy {
     pub document: WorkspacePolicyDocument,
     pub updated_at: DateTime<Utc>,
     pub updated_by: PolicyPrincipalRef,
+}
+
+/// Discovery document served by a Policy App at `/v1/manifest`.
+/// Unknown capabilities are ignored so providers can add optional features.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyProviderManifest {
+    pub protocol: String,
+    pub provider_name: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// Immutable policy snapshot served by a Policy App at `/v1/policy/bundle`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyProviderBundle {
+    pub protocol: String,
+    pub workspace_id: String,
+    pub revision: u64,
+    pub mode: PolicyMode,
+    pub document: WorkspacePolicyDocument,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyProviderFailureMode {
+    #[default]
+    FailClosed,
+    FailOpen,
+}
+
+impl PolicyProviderFailureMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FailClosed => "fail_closed",
+            Self::FailOpen => "fail_open",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePolicyProvider {
+    pub workspace_id: String,
+    pub app_id: String,
+    pub service_id: String,
+    pub failure_mode: PolicyProviderFailureMode,
+    pub max_stale_seconds: u64,
+    pub revision_hint: u64,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetWorkspacePolicyProviderRequest {
+    pub app_id: String,
+    #[serde(default)]
+    pub failure_mode: PolicyProviderFailureMode,
+    #[serde(default = "default_policy_provider_max_stale_seconds")]
+    pub max_stale_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallDefaultPolicyAppRequest {
+    pub server_id: String,
+}
+
+const fn default_policy_provider_max_stale_seconds() -> u64 {
+    300
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyProviderInvalidationRequest {
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyProviderInvalidationResponse {
+    pub accepted_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -968,6 +1051,20 @@ pub struct ReadAgentOutputResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPrompt {
+    pub prompt_id: String,
+    pub text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPromptQueueResponse {
+    pub agent_id: String,
+    pub prompts: Vec<AgentPrompt>,
+    pub remaining: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentServerSnapshot {
     pub server: ServerInfo,
     pub agents: Vec<AgentInfo>,
@@ -1025,6 +1122,14 @@ pub enum AgentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_agent_id: Option<String>,
     },
+    /// Fetches bounded JSON from a machine-local HTTP service. The Controller
+    /// always connects to loopback; the Proxy cannot supply an arbitrary host.
+    FetchServiceHttp {
+        port: u16,
+        path: String,
+        max_bytes: u32,
+        timeout_ms: u64,
+    },
     Exec {
         request: MachineExecRequest,
     },
@@ -1060,6 +1165,7 @@ impl AgentCommand {
             | Self::UploadChunk { .. }
             | Self::UploadCommit { .. }
             | Self::UploadAbort { .. } => Some(CAPABILITY_MACHINE_UPLOAD),
+            Self::FetchServiceHttp { .. } => Some(CAPABILITY_SERVICE_HTTP_FETCH),
             Self::Create { .. }
             | Self::Prompt { .. }
             | Self::Input { .. }
@@ -2067,11 +2173,60 @@ mod tests {
             Some(CAPABILITY_AGENT_STARTUP)
         );
         assert_eq!(
+            AgentCommand::FetchServiceHttp {
+                port: 8080,
+                path: "/v1/manifest".to_string(),
+                max_bytes: 4096,
+                timeout_ms: 3_000,
+            }
+            .required_capability(),
+            Some(CAPABILITY_SERVICE_HTTP_FETCH)
+        );
+        assert_eq!(
             AgentCommand::Stop {
                 agent_id: "ag_1".to_string()
             }
             .required_capability(),
             None
+        );
+    }
+
+    #[test]
+    fn policy_provider_v1_wire_shape_round_trips() {
+        let bundle = PolicyProviderBundle {
+            protocol: POLICY_PROVIDER_PROTOCOL_V1.to_string(),
+            workspace_id: "ws_1".to_string(),
+            revision: 12,
+            mode: PolicyMode::Enforce,
+            document: WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([("agent.prompt".to_string(), PolicyEffect::Deny)]),
+                groups: BTreeMap::new(),
+                rules: Vec::new(),
+            },
+            generated_at: Utc::now(),
+        };
+        let value = serde_json::to_value(&bundle).expect("serialize provider bundle");
+        assert_eq!(value["protocol"], POLICY_PROVIDER_PROTOCOL_V1);
+        assert_eq!(value["revision"], 12);
+        assert_eq!(
+            serde_json::from_value::<PolicyProviderBundle>(value)
+                .expect("deserialize provider bundle"),
+            bundle
+        );
+        let install = InstallDefaultPolicyAppRequest {
+            server_id: "server_1".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&install).expect("serialize default Policy App install"),
+            serde_json::json!({"server_id": "server_1"})
+        );
+        assert_eq!(
+            serde_json::from_value::<InstallDefaultPolicyAppRequest>(serde_json::json!({
+                "server_id": "server_1"
+            }))
+            .expect("deserialize default Policy App install"),
+            install
         );
     }
 
