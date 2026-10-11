@@ -254,51 +254,63 @@ async fn app_lifecycle_stopped_legacy_identity_is_preserved_and_not_deleted() {
 
 #[tokio::test]
 async fn app_lifecycle_stop_persists_intent_without_revoking_credential() {
-    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
-    auth.create_agent_credential("default", "machine-a", &app.app_id)
-        .await
-        .unwrap();
-    let agent = app_workload_agent(&app);
-    state.test_insert_agent(agent.clone()).await;
-    let task = tokio::spawn({
-        let state = state.clone();
-        let auth = auth.clone();
-        async move {
-            apply_workload_action(
-                &state,
-                &auth,
-                "default",
-                &agent,
-                WorkloadAction::Stop,
-                "owner",
-            )
+    for stop_error in [
+        None,
+        Some("agent_not_found"),
+        Some("process_not_running"),
+        Some("process_not_found"),
+    ] {
+        let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+        auth.create_agent_credential("default", "machine-a", &app.app_id)
             .await
-        }
-    });
-    let stop = next_lifecycle_command(&mut rx).await;
-    assert!(matches!(&stop.command,AgentCommand::Stop {agent_id} if agent_id == &app.app_id));
-    state
-        .complete_command(CommandResult::success(stop.command_id, json!({})))
-        .await;
-    task.await.unwrap().unwrap();
-    let intent: (bool, Option<String>) = sqlx::query_as(
-        "SELECT recovery_enabled,revoked_at FROM agent_credentials WHERE agent_id=$1",
-    )
-    .bind(&app.app_id)
-    .fetch_one(&auth.pool())
-    .await
-    .unwrap();
-    assert_eq!(intent, (false, None));
-    let stopped = auth
-        .resolve_app_deployment("default", &app.app_id)
+            .unwrap();
+        let agent = app_workload_agent(&app);
+        state.test_insert_agent(agent.clone()).await;
+        let task = tokio::spawn({
+            let state = state.clone();
+            let auth = auth.clone();
+            async move {
+                apply_workload_action(
+                    &state,
+                    &auth,
+                    "default",
+                    &agent,
+                    WorkloadAction::Stop,
+                    "owner",
+                )
+                .await
+            }
+        });
+        let stop = next_lifecycle_command(&mut rx).await;
+        assert!(matches!(&stop.command,AgentCommand::Stop {agent_id} if agent_id == &app.app_id));
+        let result = match stop_error {
+            Some(code) => CommandResult::failure(
+                stop.command_id,
+                ProtocolError::new(code, "target process is already absent"),
+            ),
+            None => CommandResult::success(stop.command_id, json!({})),
+        };
+        state.complete_command(result).await;
+        task.await.unwrap().unwrap();
+        let intent: (bool, Option<String>) = sqlx::query_as(
+            "SELECT recovery_enabled,revoked_at FROM agent_credentials WHERE agent_id=$1",
+        )
+        .bind(&app.app_id)
+        .fetch_one(&auth.pool())
         .await
         .unwrap();
-    assert_eq!(stopped.desired_state, AppDesiredState::Stopped);
-    assert_eq!(
-        stopped.runtime_agent_id.as_deref(),
-        Some(app.app_id.as_str())
-    );
-    assert!(state.resolve_agent("default", &app.app_id).await.is_ok());
+        assert_eq!(intent, (false, None));
+        let stopped = auth
+            .resolve_app_deployment("default", &app.app_id)
+            .await
+            .unwrap();
+        assert_eq!(stopped.desired_state, AppDesiredState::Stopped);
+        assert_eq!(
+            stopped.runtime_agent_id.as_deref(),
+            Some(app.app_id.as_str())
+        );
+        assert!(state.resolve_agent("default", &app.app_id).await.is_ok());
+    }
 }
 
 #[tokio::test]
@@ -352,6 +364,21 @@ async fn app_lifecycle_missing_restart_declares_without_spawning_then_restarts_o
 
 #[tokio::test]
 async fn app_lifecycle_delete_stops_even_a_cached_terminal_workload_before_revocation() {
+    assert_app_deletion_after_stop(None).await;
+}
+
+#[tokio::test]
+async fn app_lifecycle_delete_accepts_already_exited_or_missing_processes() {
+    for code in [
+        "agent_not_found",
+        "process_not_running",
+        "process_not_found",
+    ] {
+        assert_app_deletion_after_stop(Some(code)).await;
+    }
+}
+
+async fn assert_app_deletion_after_stop(stop_error: Option<&str>) {
     let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
     auth.create_agent_credential("default", "machine-a", &app.app_id)
         .await
@@ -381,9 +408,14 @@ async fn app_lifecycle_delete_stops_even_a_cached_terminal_workload_before_revoc
         .resolve_app_deployment("default", &app.app_id)
         .await
         .is_ok());
-    state
-        .complete_command(CommandResult::success(stop.command_id, json!({})))
-        .await;
+    let result = match stop_error {
+        Some(code) => CommandResult::failure(
+            stop.command_id,
+            ProtocolError::new(code, "target process is already absent"),
+        ),
+        None => CommandResult::success(stop.command_id, json!({})),
+    };
+    state.complete_command(result).await;
     task.await.unwrap().unwrap();
     let revoked: Option<String> =
         sqlx::query_scalar("SELECT revoked_at FROM agent_credentials WHERE agent_id=$1")
@@ -398,6 +430,44 @@ async fn app_lifecycle_delete_stops_even_a_cached_terminal_workload_before_revoc
         .is_err());
     assert!(state.resolve_agent("default", &app.app_id).await.is_err());
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn app_lifecycle_delete_preserves_identity_when_stop_state_is_unknown() {
+    for code in ["host_error", "terminal_error", "permission_denied"] {
+        let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+        auth.create_agent_credential("default", "machine-a", &app.app_id)
+            .await
+            .unwrap();
+        state.test_insert_agent(app_workload_agent(&app)).await;
+        let task = tokio::spawn({
+            let state = state.clone();
+            let auth = auth.clone();
+            let app = app.clone();
+            async move { remove_app_workload(&state, &auth, &app).await }
+        });
+        let stop = next_lifecycle_command(&mut rx).await;
+        state
+            .complete_command(CommandResult::failure(
+                stop.command_id,
+                ProtocolError::new(code, "cannot confirm process stopped"),
+            ))
+            .await;
+        assert!(task.await.unwrap().is_err(), "must propagate {code}");
+        let revoked: Option<String> =
+            sqlx::query_scalar("SELECT revoked_at FROM agent_credentials WHERE agent_id=$1")
+                .bind(&app.app_id)
+                .fetch_one(&auth.pool())
+                .await
+                .unwrap();
+        assert!(revoked.is_none(), "must preserve credential on {code}");
+        assert!(auth
+            .resolve_app_deployment("default", &app.app_id)
+            .await
+            .is_ok());
+        assert!(state.resolve_agent("default", &app.app_id).await.is_ok());
+        assert!(rx.try_recv().is_err());
+    }
 }
 
 #[tokio::test]

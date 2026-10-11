@@ -184,7 +184,7 @@ pub(crate) async fn delete_agent(
         .await
     {
         Ok(_) => {}
-        Err(error) if error.code == "agent_not_found" => {}
+        Err(error) if stop_target_is_absent(&error) => {}
         Err(error) => return Err(error.into()),
     }
     // Credential revocation below is authoritative for recovery. Do not send a

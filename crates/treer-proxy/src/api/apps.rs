@@ -275,7 +275,7 @@ pub(super) async fn stop_app_runtime(
         .await
     {
         Ok(_) => {}
-        Err(error) if error.code == "agent_not_found" => {}
+        Err(error) if stop_target_is_absent(&error) => {}
         Err(error) => return Err(error.into()),
     }
     Ok(())

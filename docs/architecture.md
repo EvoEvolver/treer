@@ -161,6 +161,10 @@ successful exits. Ordinary Agents recover after a Host epoch change or an
 explicit restore; normal successful completion disables automatic recovery.
 Explicit start remains available for stopped or completed workloads. The Proxy
 projects App status from Agent events and does not run a second App supervisor.
+Stop and deletion treat an already exited or missing Host process as stopped,
+including responses from older Controllers. Deletion then revokes the identity
+and removes Agent/App records; transport, authorization, and other stop failures
+still block deletion because the process state has not been confirmed.
 The CLI uses `treer agent start/stop/restart/read` for both kinds;
 `treer app` lifecycle commands and `treer agent admin` remain compatibility paths.
 

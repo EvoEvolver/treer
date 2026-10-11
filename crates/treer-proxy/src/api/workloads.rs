@@ -17,6 +17,16 @@ impl WorkloadAction {
     }
 }
 
+// Stop is complete when the Controller confirms there is no live target. Keep
+// transport, authorization, and terminal errors fatal so deletion cannot orphan
+// a process whose state is unknown. Accept Host codes from older Controllers too.
+pub(super) fn stop_target_is_absent(error: &ProtocolError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "agent_not_found" | "process_not_found" | "process_not_running"
+    )
+}
+
 pub(super) fn app_workload_agent(app: &AppDeployment) -> AgentInfo {
     AgentInfo {
         agent_id: app
@@ -201,7 +211,7 @@ pub(super) async fn apply_workload_action(
         .await;
     let result = match result {
         Ok(value) => value,
-        Err(error) if matches!(action, WorkloadAction::Stop) && error.code == "agent_not_found" => {
+        Err(error) if matches!(action, WorkloadAction::Stop) && stop_target_is_absent(&error) => {
             serde_json::to_value(agent)?
         }
         Err(error) => return Err(error.into()),
