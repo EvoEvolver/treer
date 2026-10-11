@@ -256,7 +256,7 @@ impl PolicyEngine {
         )
     }
 
-    pub fn durable_with_provider(
+    pub(crate) fn durable_with_provider(
         store: WorkspacePolicyStore,
         provider_store: PolicyProviderStore,
         auth: AuthStore,

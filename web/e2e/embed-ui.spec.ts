@@ -166,7 +166,8 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
   await expect(page.getByText("offline").first()).toBeVisible()
   await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
   await expect(page.getByRole("button", { name: "Copy restart-controller" })).toBeVisible()
-  await expect(page.getByRole("button", { name: "Copy start" })).toBeVisible()
+  await expect(page.getByText("treer-agent-server restore --workspace ws-1")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Copy restore" })).toBeVisible()
 })
 
 test("selecting a plain terminal agent shows the terminal pane, not an iframe", async ({ page }) => {
