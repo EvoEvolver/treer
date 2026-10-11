@@ -20,7 +20,6 @@ pub(super) async fn stream_workspace_events(
     let (mut outgoing, mut incoming) = socket.split();
     let mut events = state.subscribe();
     if let Ok(snapshot) = state.snapshot(&workspace_id).await {
-        let snapshot = visible_workspace_snapshot(snapshot);
         let initial = WorkspaceEvent {
             revision: snapshot.revision,
             workspace_id: workspace_id.clone(),
@@ -36,9 +35,6 @@ pub(super) async fn stream_workspace_events(
         tokio::select! {
             event = events.recv() => match event {
                 Ok(event) if event.workspace_id == workspace_id => {
-                    if is_internal_app_agent_event(&event) {
-                        continue;
-                    }
                     if send_event(&mut outgoing, &event).await.is_err() {
                         break;
                     }
@@ -46,7 +42,6 @@ pub(super) async fn stream_workspace_events(
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let Ok(snapshot) = state.snapshot(&workspace_id).await else { break };
-                    let snapshot = visible_workspace_snapshot(snapshot);
                     let event = WorkspaceEvent {
                         revision: snapshot.revision,
                         workspace_id: workspace_id.clone(),

@@ -16,9 +16,6 @@ pub(crate) async fn list_agents(
     .await?;
     let mut agents = Vec::new();
     for agent in snapshot.agents {
-        if agent.kind == "app" {
-            continue;
-        }
         if matches!(subject.as_ref(), Some(PolicySubject::Machine { server_id }) if server_id != &agent.server_id)
         {
             continue;
@@ -42,12 +39,13 @@ pub(crate) async fn list_agents(
 
 pub(crate) async fn get_agent(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -77,7 +75,7 @@ pub(crate) async fn rename_agent(
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<RenameRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -97,9 +95,18 @@ pub(crate) async fn rename_agent(
     let name = normalize_display_name(request.name)?;
     auth.set_agent_name(&workspace_id, &agent.agent_id, &name)
         .await?;
-    let renamed = state
+    let renamed = match state
         .rename_agent(&workspace_id, &agent.agent_id, name.clone())
-        .await?;
+        .await
+    {
+        Ok(agent) => agent,
+        Err(error) if error.code == "agent_not_found" => {
+            let mut agent = agent.clone();
+            agent.name = name.clone();
+            agent
+        }
+        Err(error) => return Err(error.into()),
+    };
     let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
     if let Err(error) = auth
         .record_workspace_audit(NewWorkspaceAuditEvent {
@@ -128,7 +135,7 @@ pub(crate) async fn delete_agent(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = state.resolve_agent(&workspace_id, &target).await?;
+    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -145,16 +152,40 @@ pub(crate) async fn delete_agent(
         agent_policy_resource(&agent),
     )
     .await?;
-    if !agent.status.is_terminal() {
-        state
-            .send_command(
-                &workspace_id,
-                &agent.server_id,
-                AgentCommand::Stop {
-                    agent_id: agent.agent_id.clone(),
-                },
-            )
-            .await?;
+    if let Some(app) = auth
+        .resolve_app_deployment_by_runtime(&workspace_id, &agent.agent_id)
+        .await?
+    {
+        remove_app_workload(&state, &auth, &app).await?;
+        publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
+        record_app_audit(
+            &auth,
+            session.as_deref(),
+            subject.as_ref(),
+            "app.deleted",
+            &app,
+        )
+        .await;
+        return Ok(Json(serde_json::to_value(agent)?));
+    }
+    let guard = auth
+        .workload_lifecycle_guard(&workspace_id, &agent.agent_id)
+        .await?;
+    auth.set_agent_recovery_enabled(&workspace_id, &agent.agent_id, false)
+        .await?;
+    match state
+        .send_command(
+            &workspace_id,
+            &agent.server_id,
+            AgentCommand::Stop {
+                agent_id: agent.agent_id.clone(),
+            },
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(error) if error.code == "agent_not_found" => {}
+        Err(error) => return Err(error.into()),
     }
     // Credential revocation below is authoritative for recovery. Do not send a
     // startup command here: older Controllers reject unknown command variants
@@ -168,6 +199,10 @@ pub(crate) async fn delete_agent(
     refresh_service_ingress_routes(&auth).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     let deleted = state.delete_agent(&workspace_id, &agent.agent_id).await?;
+    guard
+        .commit()
+        .await
+        .map_err(|error| ApiFailure::internal("lifecycle_lock_failed", &error.to_string()))?;
     let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
     if let Err(error) = auth
         .record_workspace_audit(NewWorkspaceAuditEvent {

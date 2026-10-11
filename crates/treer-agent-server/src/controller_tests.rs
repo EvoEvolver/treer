@@ -138,6 +138,8 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
     first.stop("stop-intent", "stopped").await.unwrap();
     assert!(!first.get_startup("stopped").unwrap().enabled);
     shutdown(&mut first_host).await;
+    first.inner.workload_proxies.remove("survivor");
+    first.inner.workload_proxies.remove("stopped");
     let saved = StartupStore::load(root.join("startup.json")).unwrap();
     assert!(
         saved.get("survivor").unwrap().spec.enabled,
@@ -146,6 +148,10 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
     assert!(!saved.get("stopped").unwrap().spec.enabled);
     let mut second_host = spawn_host();
     let second = connect(&socket, &root).await;
+    assert!(second
+        .list()
+        .iter()
+        .any(|agent| agent.agent_id == "stopped" && agent.status.is_terminal()));
     let active = vec!["survivor".to_string(), "stopped".to_string()];
     let (a, b) = tokio::join!(
         second.restore_runtime(&active),
@@ -203,6 +209,258 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let previous = second
+        .list()
+        .into_iter()
+        .find(|agent| agent.agent_id == "survivor")
+        .unwrap();
+    let restarted = second
+        .start("restart-survivor", "survivor", true)
+        .await
+        .unwrap();
+    assert_eq!(restarted.agent_id, previous.agent_id);
+    assert!(restarted.run_generation > previous.run_generation);
+    assert_ne!(restarted.pid, previous.pid);
+    let mut stale = processes[0].clone();
+    stale.running = false;
+    stale.exit_code = Some(0);
+    second.apply_process(stale);
+    let still_current = second
+        .list()
+        .into_iter()
+        .find(|agent| agent.agent_id == "survivor")
+        .unwrap();
+    assert_eq!(still_current.pid, restarted.pid);
+    assert!(!still_current.status.is_terminal());
+    assert!(second.get_startup("survivor").unwrap().enabled);
+    let (started, duplicate) = tokio::join!(
+        second.start("start-stopped-a", "stopped", false),
+        second.start("start-stopped-b", "stopped", false)
+    );
+    let started = started.unwrap();
+    let duplicate = duplicate.unwrap();
+    assert_eq!(started.pid, duplicate.pid);
+    assert_eq!(started.run_generation, duplicate.run_generation);
+    assert!(second.get_startup("stopped").unwrap().enabled);
+    let credential = second
+        .inner
+        .startup_store
+        .get("survivor")
+        .unwrap()
+        .workload_credential;
+    // Replacement Controller takes over the exact listener recorded by Host.
+    second.inner.workload_proxies.remove("survivor");
+    second.inner.workload_proxies.remove("stopped");
+    let hot = connect(&socket, &root).await;
+    let attached = hot
+        .list()
+        .into_iter()
+        .find(|agent| agent.agent_id == "survivor")
+        .unwrap();
+    assert_eq!(attached.pid, restarted.pid);
+    assert_eq!(attached.run_generation, restarted.run_generation);
+    assert_eq!(
+        hot.inner
+            .startup_store
+            .get("survivor")
+            .unwrap()
+            .workload_credential,
+        credential
+    );
+    let declaration = CreateAgentRequest {
+        server_id: None,
+        kind: "app".into(),
+        name: "declared app".into(),
+        cwd: ".".into(),
+        args: vec!["/bin/sleep".into(), "120".into()],
+        cols: 80,
+        rows: 24,
+        publish_ports: vec![],
+        recipe: None,
+    };
+    let declared = hot
+        .ensure_lifecycle(
+            "declare-stopped",
+            "declared".into(),
+            Some(new_workload_credential()),
+            declaration.clone(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(declared.status.is_terminal());
+    assert!(declared.pid.is_none());
+    assert_eq!(declared.run_generation, 0);
+    let configured = hot
+        .ensure_lifecycle(
+            "configure-only",
+            "configured".into(),
+            Some(new_workload_credential()),
+            declaration.clone(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(configured.pid.is_none());
+    assert_eq!(configured.run_generation, 0);
+    let once = hot
+        .start("restart-configured", "configured", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        once.run_generation, 1,
+        "declaration-only restart launches once"
+    );
+    let live_declared = hot
+        .ensure_lifecycle(
+            "declare-live-only",
+            "configured".into(),
+            None,
+            declaration.clone(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(live_declared.pid, once.pid);
+    assert!(!hot.get_startup("configured").unwrap().enabled);
+    assert!(hot
+        .restore_startup_agents(&["configured".into()])
+        .await
+        .is_empty());
+    let live_started = hot
+        .start("start-live-configured", "configured", false)
+        .await
+        .unwrap();
+    assert_eq!(live_started.pid, once.pid);
+    assert_eq!(live_started.run_generation, 1);
+    assert!(hot.get_startup("configured").unwrap().enabled);
+    hot.apply_stopped_startups(&["survivor".into()])
+        .await
+        .unwrap();
+    assert!(!hot.get_startup("survivor").unwrap().enabled);
+    assert!(
+        hot.list()
+            .into_iter()
+            .find(|agent| agent.agent_id == "survivor")
+            .unwrap()
+            .status
+            .is_terminal(),
+        "central stop stops surviving ordinary process"
+    );
+    let redeclared = hot
+        .ensure_lifecycle(
+            "redeclare",
+            "declared".into(),
+            None,
+            declaration,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(
+        redeclared.pid.is_none(),
+        "bootstrap never overrides persisted stop intent"
+    );
+    let started = hot
+        .start("explicit-start-declared", "declared", false)
+        .await
+        .unwrap();
+    assert!(started.pid.is_some());
+    assert_eq!(started.run_generation, 1);
+    let adopted = hot
+        .ensure_lifecycle(
+            "adopt",
+            "declared".into(),
+            None,
+            CreateAgentRequest {
+                server_id: None,
+                kind: "app".into(),
+                name: "ignored".into(),
+                cwd: ".".into(),
+                args: vec!["/bin/false".into()],
+                cols: 80,
+                rows: 24,
+                publish_ports: vec![],
+                recipe: None,
+            },
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(adopted.pid, started.pid);
+    assert_eq!(hot.get_startup("declared").unwrap().command, "/bin/sleep");
+    let stopped_by_declaration = hot
+        .ensure_lifecycle(
+            "declare-offline-stop",
+            "declared".into(),
+            None,
+            CreateAgentRequest {
+                server_id: None,
+                kind: "app".into(),
+                name: "declared".into(),
+                cwd: ".".into(),
+                args: vec!["/bin/sleep".into(), "120".into()],
+                cols: 80,
+                rows: 24,
+                publish_ports: vec![],
+                recipe: None,
+            },
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(stopped_by_declaration.status.is_terminal());
+    assert!(!hot.get_startup("declared").unwrap().enabled);
+    assert!(hot
+        .restore_startup_agents(&["declared".into()])
+        .await
+        .is_empty());
+    let app = hot
+        .create(
+            "create-app",
+            "app-unit".into(),
+            new_workload_credential(),
+            CreateAgentRequest {
+                server_id: None,
+                kind: "app".into(),
+                name: "app unit".into(),
+                cwd: ".".into(),
+                args: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+                cols: 80,
+                rows: 24,
+                publish_ports: vec![],
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !hot
+        .list()
+        .iter()
+        .any(|agent| agent.agent_id == "app-unit" && agent.status.is_terminal())
+    {
+        assert!(Instant::now() < deadline, "App did not exit");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        hot.get_startup("app-unit").unwrap().enabled,
+        "App success retains always-restart intent"
+    );
+    let recovered = hot.restore_startup_agents(&["app-unit".into()]).await;
+    assert!(recovered[0].1.as_ref().unwrap().run_generation > app.run_generation);
+    hot.stop("stop-app", "app-unit").await.unwrap();
+    assert!(!hot.get_startup("app-unit").unwrap().enabled);
+    assert!(hot
+        .restore_startup_agents(&["app-unit".into()])
+        .await
+        .is_empty());
     shutdown(&mut second_host).await;
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -396,8 +654,38 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
         first_revision: 1,
         next_revision: 1,
         bracketed_paste: false,
-        metadata: String::new(),
+        metadata: serde_json::to_string(&AgentMetadata {
+            agent_id: info.agent_id.clone(),
+            run_generation: info.run_generation,
+            workspace_id: info.workspace_id.clone(),
+            server_id: info.server_id.clone(),
+            kind: info.kind.clone(),
+            name: info.name.clone(),
+            cwd: info.cwd.clone(),
+            workload_credential: String::new(),
+            http_proxy_port: None,
+        })
+        .unwrap(),
     };
+    runtime
+        .inner
+        .startup_store
+        .update("recover", |entry| entry.spec.generation += 1)
+        .unwrap();
+    completed.exit_code = Some(0);
+    runtime.apply_process(completed.clone());
+    assert!(
+        runtime.get_startup("recover").unwrap().enabled,
+        "old exit after next-generation intent is persisted cannot cancel restart"
+    );
+    runtime
+        .inner
+        .startup_store
+        .update("recover", |entry| {
+            entry.spec.generation = info.run_generation
+        })
+        .unwrap();
+    completed.exit_code = Some(1);
     runtime.apply_process(completed.clone());
     assert!(
         runtime.get_startup("recover").unwrap().enabled,
@@ -490,6 +778,7 @@ fn workload_credentials_are_unique_and_compared_exactly() {
 fn host_metadata_preserves_the_workload_credential_for_controller_restarts() {
     let metadata = AgentMetadata {
         agent_id: "agent-a".to_string(),
+        run_generation: 1,
         workspace_id: "workspace-a".to_string(),
         server_id: "server-a".to_string(),
         kind: "command".to_string(),

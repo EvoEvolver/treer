@@ -143,6 +143,15 @@ pub(super) async fn restore_machine_runtime(
     Path((workspace_id, server_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let server = state.resolve_server(&workspace_id, &server_id).await?;
+    // Import legacy App declarations before the one Controller restore pass.
+    // This never creates a second runtime identity or a second recovery owner.
+    synchronize_app_lifecycles_for_server(
+        state.clone(),
+        auth.clone(),
+        workspace_id.clone(),
+        server.server_id.clone(),
+    )
+    .await;
     let mut report = state
         .send_command(
             &workspace_id,
@@ -151,16 +160,6 @@ pub(super) async fn restore_machine_runtime(
         )
         .await?;
     let previous = auth
-        .list_app_deployments_for_server(&workspace_id, &server.server_id)
-        .await?;
-    reconcile_app_deployments_for_server(
-        state.clone(),
-        auth.clone(),
-        workspace_id.clone(),
-        server.server_id.clone(),
-    )
-    .await;
-    let apps = auth
         .list_app_deployments_for_server(&workspace_id, &server.server_id)
         .await?;
     let items = report
@@ -172,32 +171,6 @@ pub(super) async fn restore_machine_runtime(
                 "Controller returned an invalid restoration report",
             )
         })?;
-    for app in apps {
-        let runtime = if let Some(id) = &app.runtime_agent_id {
-            state.resolve_agent(&workspace_id, id).await.ok()
-        } else {
-            None
-        };
-        let (status, message) = if app.desired_state == treer_protocol::AppDesiredState::Stopped {
-            ("skipped_stopped", None)
-        } else if let Some(error) = app.last_error.as_ref() {
-            ("failed", Some(error.clone()))
-        } else if runtime
-            .as_ref()
-            .is_some_and(|agent| !agent.status.is_terminal())
-        {
-            let attached = previous.iter().any(|old| {
-                old.app_id == app.app_id && old.runtime_agent_id == app.runtime_agent_id
-            });
-            (
-                if attached { "attached" } else { "started" },
-                Some("process running; application endpoint readiness is not verified".to_string()),
-            )
-        } else {
-            ("failed",Some("App reconciliation did not produce a running instance; inspect the machine runtime and retry restore".to_string()))
-        };
-        items.push(json!({"workload_id":app.app_id,"kind":"app","state":status,"message":message}));
-    }
     for service in auth
         .list_machine_services(&workspace_id)
         .await?

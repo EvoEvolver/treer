@@ -7,6 +7,63 @@ use treer_protocol::{AgentInfo, AgentStatus, CreateVirtualNetworkHostRequest, Se
 
 type EmailCapture = Arc<Mutex<Option<oneshot::Sender<(HeaderMap, Value)>>>>;
 
+#[tokio::test]
+async fn lifecycle_credential_rotation_is_scope_bound_and_never_revives_revoked_identity() {
+    let store = AuthStore::for_test("password").await;
+    store.seed_test_workspace("rotation").await;
+    let first = store
+        .create_agent_credential("rotation", "machine-a", "agent-a")
+        .await
+        .unwrap();
+    let hash: String =
+        sqlx::query_scalar("SELECT secret_hash FROM agent_credentials WHERE agent_id='agent-a'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert!(store
+        .rotate_agent_credential("other", "machine-a", "agent-a")
+        .await
+        .is_err());
+    assert!(store
+        .rotate_agent_credential("rotation", "machine-b", "agent-a")
+        .await
+        .is_err());
+    assert!(store
+        .rotate_agent_credential("rotation", "machine-a", "invented")
+        .await
+        .is_err());
+    let unchanged: String =
+        sqlx::query_scalar("SELECT secret_hash FROM agent_credentials WHERE agent_id='agent-a'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(unchanged, hash);
+    let second = store
+        .rotate_agent_credential("rotation", "machine-a", "agent-a")
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+    let rotated: String =
+        sqlx::query_scalar("SELECT secret_hash FROM agent_credentials WHERE agent_id='agent-a'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(rotated, fast_secret_hash(&second));
+    store.delete_agent("rotation", "agent-a").await.unwrap();
+    assert!(store
+        .rotate_agent_credential("rotation", "machine-a", "agent-a")
+        .await
+        .is_err());
+    let after: (String, Option<String>) = sqlx::query_as(
+        "SELECT secret_hash,revoked_at FROM agent_credentials WHERE agent_id='agent-a'",
+    )
+    .fetch_one(&store.pool)
+    .await
+    .unwrap();
+    assert_eq!(after.0, rotated);
+    assert!(after.1.is_some());
+}
+
 #[test]
 fn platform_service_hostnames_are_stable_and_dns_safe() {
     assert_eq!(
@@ -454,26 +511,44 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
         ServiceIngressAccess::Public
     );
 
-    let first = store
-        .claim_app_runtime("apps", &app.app_id, None, "appw_first", "reconciler")
-        .await
-        .expect("claim first runtime")
-        .expect("first runtime claim");
-    assert_eq!(first.restart_count, 0);
-    let second = store
-        .claim_app_runtime(
-            "apps",
-            &app.app_id,
-            Some("appw_first"),
-            "appw_second",
-            "reconciler",
-        )
-        .await
-        .expect("replace runtime")
-        .expect("replacement runtime claim");
-    assert_eq!(second.restart_count, 1);
+    let first = store.bind_app_workload("apps", &app.app_id).await.unwrap();
+    assert_eq!(first.runtime_agent_id.as_deref(), Some(app.app_id.as_str()));
+    let second = store.bind_app_workload("apps", &app.app_id).await.unwrap();
+    assert_eq!(second.runtime_agent_id, first.runtime_agent_id);
+    assert_eq!(second.restart_count, 0);
     assert_eq!(second.service_id, app.service_id);
     assert_eq!(second.hostname, app.hostname);
+    sqlx::query("UPDATE app_deployments SET runtime_agent_id='appw_legacy' WHERE app_id=$1")
+        .bind(&app.app_id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let legacy = store.bind_app_workload("apps", &app.app_id).await.unwrap();
+    assert_eq!(legacy.runtime_agent_id.as_deref(), Some("appw_legacy"));
+    let credential = store
+        .create_agent_credential("apps", "machine-a", "appw_legacy")
+        .await
+        .unwrap();
+    assert!(!credential.is_empty());
+    let active = store.bind_app_workload("apps", &app.app_id).await.unwrap();
+    assert_eq!(active.runtime_agent_id.as_deref(), Some("appw_legacy"));
+    sqlx::query("UPDATE agent_credentials SET revoked_at='old-stop' WHERE agent_id='appw_legacy'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let migrated = store.bind_app_workload("apps", &app.app_id).await.unwrap();
+    assert_eq!(
+        migrated.runtime_agent_id.as_deref(),
+        Some(app.app_id.as_str())
+    );
+    let repeated = store.bind_app_workload("apps", &app.app_id).await.unwrap();
+    assert_eq!(repeated.runtime_agent_id, migrated.runtime_agent_id);
+    let revoked: Option<String> =
+        sqlx::query_scalar("SELECT revoked_at FROM agent_credentials WHERE agent_id='appw_legacy'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(revoked.as_deref(), Some("old-stop"));
 
     let stopped = store
         .set_app_desired_state("apps", &app.app_id, AppDesiredState::Stopped, "owner")
@@ -2407,6 +2482,7 @@ async fn persisted_names_are_applied_to_controller_snapshots() {
             last_seen_at: now,
         },
         agents: vec![AgentInfo {
+            run_generation: 0,
             agent_id: "agent-a".to_string(),
             workspace_id: "workspace-a".to_string(),
             server_id: "server-a".to_string(),

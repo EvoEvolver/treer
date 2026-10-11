@@ -74,6 +74,7 @@ export interface MachineFileUpload {
 }
 
 export interface Agent {
+  run_generation?: number
   agent_id: string
   server_id: string
   name: string

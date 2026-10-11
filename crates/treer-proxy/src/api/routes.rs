@@ -169,6 +169,14 @@ pub fn router(
             post(stop_agent),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/start",
+            post(start_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/restart",
+            post(restart_agent),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/abort",
             post(abort_agent),
         )
@@ -337,6 +345,22 @@ pub fn router(
             get(list_app_deployments).post(create_app_deployment),
         )
         .route(
+            "/api/workspaces/{workspace_id}/workload-tree",
+            get(get_workload_tree),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/workload-tree/folders",
+            post(create_workload_folder),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/workload-tree/folders/{folder_id}",
+            patch(update_workload_folder).delete(delete_workload_folder),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/workload-tree/placements/{agent_id}",
+            axum::routing::put(set_workload_placement),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/apps/{app_id}",
             get(get_app_deployment).delete(delete_app_deployment),
         )
@@ -491,6 +515,14 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/stop",
             post(stop_agent),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/start",
+            post(start_agent),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/restart",
+            post(restart_agent),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/abort",

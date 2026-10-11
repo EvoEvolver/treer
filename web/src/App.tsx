@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { WorkloadTree } from "@/components/workload-tree"
 import type * as React from "react"
 import { Route, Routes, useLocation, useNavigate, useParams } from "react-router"
 import {
@@ -62,7 +63,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
@@ -87,7 +87,7 @@ const PREVIEW_PROFILES: AgentLaunchProfile[] = [
 const PREVIEW_INSTALL = "curl -fsSL 'https://treer.example/install.sh' | sh"
 const PREVIEW_CONNECT = "treer-agent-server connect --key 'enr_v1_…' --proxy 'https://treer.example/'"
 
-const activeStatuses = new Set(["starting", "working", "idle", "blocked"])
+const activeStatuses = new Set(["running", "starting", "working", "idle", "blocked"])
 
 function initials(value: string) {
   return value.trim().slice(0, 2).toUpperCase() || "T"
@@ -100,7 +100,7 @@ function replaceWorkspace(items: Workspace[], updated: Workspace) {
 }
 
 function visibleWorkspaceSnapshot(snapshot: Snapshot): Snapshot {
-  return { ...snapshot, agents: snapshot.agents.filter((agent) => agent.kind !== "app") }
+  return snapshot
 }
 
 function workspacePath(organizationId: string | null, workspaceId: string | null) {
@@ -857,14 +857,6 @@ function AppsView({ apps, machines, loading, onOpen, onSettings }: { apps: AppDe
   </div></div>
 }
 
-function AppItem({ app, machine, onSettings }: { app: AppDeployment; machine?: Machine; onSettings: () => void }) {
-  return <button type="button" aria-label={`Open ${app.name} settings`} onClick={onSettings} className="flex min-h-12 w-full min-w-0 items-center gap-2 rounded-[5px] px-2.5 py-2 text-left hover:bg-accent">
-    <span className="grid size-7 shrink-0 place-items-center rounded bg-emerald-100 text-emerald-800"><PanelsTopLeft className="size-3.5" /></span>
-    <span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{app.name}</span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{machineName(machine, app.server_id)}</span></span>
-    <Status value={app.status} />
-  </button>
-}
-
 function AppSettingsView({ app, machine, onOpen, onAccess, onAction, onDelete, onClose, onCopy }: { app?: AppDeployment; machine?: Machine; onOpen: (app: AppDeployment) => void; onAccess: (app: AppDeployment, access: "public" | "workspace") => void; onAction: (app: AppDeployment, action: "start" | "stop" | "restart") => void; onDelete: (app: AppDeployment) => void; onClose: () => void; onCopy: (value: string) => void }) {
   if (!app) return <div className="grid min-h-0 place-items-center p-8 text-sm text-muted-foreground">App not found.</div>
   const machineIsOnline = machine?.status === "online"
@@ -1204,7 +1196,7 @@ function WorkspaceApp() {
   workspaceIdRef.current = workspaceId
   const [loadedSnapshot, setSnapshot] = useState<Snapshot | null>(null)
   const snapshot = loadedSnapshot?.workspace.workspace_id === workspaceId ? loadedSnapshot : null
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("agents")
+  const [, setSidebarTab] = useState<SidebarTab>("agents")
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
@@ -1388,7 +1380,7 @@ function WorkspaceApp() {
           setSnapshot((current) => current?.workspace.workspace_id === updated.workspace_id ? { ...current, workspace: updated } : current)
         } else if (message.event === "agent.updated" && message.data) {
           const updated = message.data as Agent
-          if (updated.kind === "app") return
+          setApps((current) => current.map((app) => app.runtime_agent_id === updated.agent_id || app.app_id === updated.agent_id ? { ...app, name: updated.name === `app:${app.name}` ? app.name : updated.name } : app))
           setSnapshot((current) => {
             if (!current || current.workspace.workspace_id !== workspaceId) return current
             const agents = current.agents.some((agent) => agent.agent_id === updated.agent_id)
@@ -1398,6 +1390,7 @@ function WorkspaceApp() {
           })
         } else if (message.event === "agent.deleted" && message.data) {
           const removed = message.data as Agent
+          setApps((current) => current.filter((app) => app.runtime_agent_id !== removed.agent_id && app.app_id !== removed.agent_id))
           setSnapshot((current) => {
             if (!current || current.workspace.workspace_id !== workspaceId) return current
             return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents: current.agents.filter((agent) => agent.agent_id !== removed.agent_id) }
@@ -1427,10 +1420,11 @@ function WorkspaceApp() {
 
   useEffect(() => {
     const agents = snapshot?.agents ?? []
-    setSelectedAgentId((current) => current && agents.some((agent) => agent.agent_id === current) ? current : agents[0]?.agent_id ?? null)
-  }, [snapshot])
+    setSelectedAgentId((current) => current && (agents.some((agent) => agent.agent_id === current) || apps.some((app) => (app.runtime_agent_id ?? app.app_id) === current)) ? current : agents[0]?.agent_id ?? (apps[0] ? apps[0].runtime_agent_id ?? apps[0].app_id : null))
+  }, [snapshot, apps])
 
-  const selectedAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId)
+  const selectedAgentApp = apps.find((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
+  const selectedAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId) ?? (selectedAgentApp ? { agent_id: selectedAgentApp.runtime_agent_id ?? selectedAgentApp.app_id, server_id: selectedAgentApp.server_id, name: selectedAgentApp.name, kind: "app", status: selectedAgentApp.status } : undefined)
   const selectedAgentMachine = snapshot?.servers.find((machine) => machine.server_id === selectedAgent?.server_id)
   const selectedAgentMachineOnline = machineOnline(selectedAgentMachine)
   const selectedAgentInterface = selectedAgentMachineOnline && selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
@@ -1754,16 +1748,10 @@ function WorkspaceApp() {
   }, [loadApps, showError])
 
   useEffect(() => {
-    if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("apps")
+    if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("terminal")
   }, [mainView, selectedAppId, selectedApp, appsLoading])
 
   function openApps() {
-    setSidebarTab("apps")
-    setMainView("apps")
-    setMobileTerminalOpen(false)
-  }
-
-  function openAgents() {
     setSidebarTab("agents")
     setMainView("terminal")
     setMobileTerminalOpen(false)
@@ -1790,7 +1778,7 @@ function WorkspaceApp() {
   async function appLifecycle(app: AppDeployment, action: "start" | "stop" | "restart") {
     if (!workspaceId) return
     try {
-      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(app.app_id)}/${action}`, { method: "POST", body: "{}" })
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(app.runtime_agent_id ?? app.app_id)}/${action}`, { method: "POST", body: "{}" })
       await loadApps()
     } catch (reason) { showError(reason) }
   }
@@ -1801,7 +1789,7 @@ function WorkspaceApp() {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(deletingApp.app_id)}`, { method: "DELETE" })
       setDeletingApp(null)
       setSelectedAppId(null)
-      setMainView("apps")
+      setMainView("terminal")
       await loadApps()
     } catch (reason) { showError(reason) }
   }
@@ -2029,6 +2017,8 @@ function WorkspaceApp() {
     const resource = renameTarget.kind === "machine" ? "servers" : "agents"
     try {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/${resource}/${encodeURIComponent(renameTarget.id)}`, { method: "PATCH", body: JSON.stringify({ name: renameName }) })
+      if (workspaceIdRef.current !== workspaceId) return
+      if (renameTarget.kind === "agent") setApps((current) => current.map((app) => app.runtime_agent_id === renameTarget.id || app.app_id === renameTarget.id ? { ...app, name: renameName } : app))
       setRenameTarget(null); await refreshSnapshot()
     } catch (reason) { showError(reason) }
   }
@@ -2038,6 +2028,8 @@ function WorkspaceApp() {
     const resource = deleteTarget.kind === "machine" ? "servers" : "agents"
     try {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/${resource}/${encodeURIComponent(deleteTarget.id)}`, { method: "DELETE" })
+      if (workspaceIdRef.current !== workspaceId) return
+      if (deleteTarget.kind === "agent") setApps((current) => current.filter((app) => app.runtime_agent_id !== deleteTarget.id && app.app_id !== deleteTarget.id))
       setDeleteTarget(null); await refreshSnapshot()
     } catch (reason) { showError(reason) }
   }
@@ -2235,30 +2227,7 @@ function WorkspaceApp() {
           </div>
           <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
-        <Tabs value={sidebarTab} onValueChange={(value) => value === "apps" ? openApps() : openAgents()} className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <TabsList className="mx-2 grid h-auto grid-cols-2 bg-accent p-0.5">
-            <TabsTrigger value="agents" data-tour="agents-tab" className="h-8 gap-2 text-xs" onClick={openAgents}><TerminalSquare className="size-3.5" />Agents <span className="rounded-full bg-background px-1.5 text-[9px]">{snapshot?.agents.length ?? 0}</span></TabsTrigger>
-            <TabsTrigger value="apps" data-tour="apps-tab" className="h-8 gap-2 text-xs" onClick={openApps}><PanelsTopLeft className="size-3.5" />Apps <span className="rounded-full bg-background px-1.5 text-[9px]">{apps.length}</span></TabsTrigger>
-          </TabsList>
-          <TabsContent value="apps" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center px-4 text-[11px] font-medium text-muted-foreground"><span>Apps</span></div>
-              <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
-                {apps.map((app) => <AppItem key={app.app_id} app={app} machine={snapshot?.servers.find((machine) => machine.server_id === app.server_id)} onSettings={() => openAppSettings(app)} />)}
-                {!apps.length && <EmptyState icon={appsLoading ? <RotateCw className="animate-spin" /> : <PanelsTopLeft />} label={appsLoading ? "Loading Apps" : "No Apps in this workspace"} />}
-              </div>
-            </div>
-          </TabsContent>
-          <TabsContent value="agents" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="flex h-10 shrink-0 items-center justify-between px-4 text-[11px] font-medium text-muted-foreground"><span>Agents {snapshot && <span className="ml-1 font-mono text-[9px] text-zinc-400">rev {snapshot.revision}</span>}</span><span data-tour="create-agent"><Button variant="ghost" size="sm" className="h-7 px-2" aria-label={!preview && snapshot?.servers.length === 0 ? "Set up a machine before creating an agent" : undefined} title={!preview && snapshot?.servers.length === 0 ? "Add a machine in Workspace settings before creating an agent" : undefined} onClick={openCreateAgentOrMachineSetup} disabled={!workspaceId || (!preview && (!snapshot || (snapshot.servers.length > 0 && !onlineMachines.length)))}><Plus className="size-3.5" />New</Button></span></div>
-              <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
-                {snapshot?.agents.map((agent) => <AgentItem key={agent.agent_id} agent={agent} machine={snapshot.servers.find((item) => item.server_id === agent.server_id)} selected={mainView === "terminal" && agent.agent_id === selectedAgentId} onClick={() => showAgentTerminal(agent.agent_id)} onRename={() => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onStop={() => void stopAgent(agent.agent_id)} onDelete={() => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} />)}
-                {snapshot && !snapshot.agents.length && <EmptyState icon={<TerminalSquare />} label="No agents in this workspace" />}
-              </div>
-            </div>
-          </TabsContent>
-        </Tabs>
+        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} preview={preview} />
 
         <div className="shrink-0 border-t p-2">
           <DropdownMenu>
@@ -2503,11 +2472,6 @@ function MachineItem({ machine, machines = [], workspaceId, selected, onClick, o
   const buildTitle = `Controller ${machine.controller_build.version} (${machine.controller_build.git_commit})\nHost ${machine.host_build.version} (${machine.host_build.git_commit})`
   const commands = workspaceId ? machineRecoveryCommands(workspaceId) : null
   return <div className={cn("group flex min-h-[68px] items-start gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="flex min-w-0 flex-1 items-start gap-2 text-left"><span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-400", machine.status === "online" && "bg-emerald-500")} /><div className="min-w-0 flex-1"><div className="truncate text-xs font-medium">{machineDisplayName(machine, machines)}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{machine.root}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={buildTitle}>{builds}</div>{machine.status !== "online" && <div className="mt-1 text-[9px] uppercase text-red-600">offline</div>}</div></button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100" aria-label={`Actions for ${machineName(machine)}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem>{commands && machine.status !== "online" && <><DropdownMenuItem onSelect={() => onCopy(commands.restartController)}><Copy />Copy restart-controller</DropdownMenuItem><DropdownMenuItem onSelect={() => onCopy(commands.start)}><Copy />Copy restore</DropdownMenuItem><DropdownMenuSeparator /></>}<DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
-}
-
-function AgentItem({ agent, machine, selected, onClick, onRename, onStop, onDelete }: { agent: Agent; machine?: Machine; selected: boolean; onClick: () => void; onRename: () => void; onStop: () => void; onDelete: () => void }) {
-  const running = machineOnline(machine) && activeStatuses.has(agent.status)
-  return <div className={cn("group flex min-h-12 items-center gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-medium">{agent.name}</span><span className="mt-1 block truncate text-[9px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""} · {machineName(machine, agent.server_id)}</span></button><div className="flex shrink-0 flex-col items-end gap-0.5"><Status value={agentDisplayStatus(agent, machine)} /><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className={cn("size-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100", selected && "opacity-100")} aria-label={`Actions for ${agent.name}`}><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem><DropdownMenuItem disabled={!running} onSelect={onStop}><Square />Stop</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
 }
 
 export default function App() {

@@ -196,6 +196,7 @@ function ok(route: Route, body: unknown) {
 }
 
 async function mockApi(page: Page) {
+  const trees: Record<string, { folders: { folder_id: string; name: string; parent_id: string | null }[]; placements: { agent_id: string; folder_id: string | null; position: number }[] }> = {}
   let currentUser = { ...user }
   let currentApp: typeof managedApp = { ...managedApp }
   let policyInstalled = false
@@ -204,6 +205,18 @@ async function mockApi(page: Page) {
   await page.route("**/api/**", async (route: Route) => {
     const url = new URL(route.request().url())
     const path = url.pathname.replace(/^\/api/, "")
+    const treeMatch = path.match(/^\/workspaces\/([^/]+)\/workload-tree(?:\/(folders|placements)(?:\/([^/]+))?)?$/)
+    if (treeMatch) {
+      const [, ws, resource, id] = treeMatch
+      const tree = trees[ws] ??= { folders: [], placements: [] }
+      const method = route.request().method()
+      if (method === "GET") return ok(route, tree)
+      const body = method === "DELETE" ? {} : route.request().postDataJSON()
+      if (resource === "folders" && method === "POST") { const folder = { folder_id: `folder-${tree.folders.length + 1}`, name: body.name, parent_id: body.parent_id ?? null }; tree.folders.push(folder); return ok(route, { folder }) }
+      if (resource === "folders" && method === "PATCH") { const folder = tree.folders.find((entry) => entry.folder_id === id)!; Object.assign(folder, body); return ok(route, { folder }) }
+      if (resource === "folders" && method === "DELETE") { tree.folders = tree.folders.filter((entry) => entry.folder_id !== id); tree.folders.forEach((entry) => { if (entry.parent_id === id) entry.parent_id = null }); tree.placements.forEach((entry) => { if (entry.folder_id === id) entry.folder_id = null }); return ok(route, {}) }
+      if (resource === "placements") { const placement = { agent_id: id!, folder_id: body.folder_id, position: body.position }; tree.placements = [...tree.placements.filter((entry) => entry.agent_id !== id), placement]; return ok(route, { placement }) }
+    }
 
     if (path === "/auth/me") return ok(route, currentUser)
     if (path === "/auth/profile" && route.request().method() === "PATCH") {
@@ -293,8 +306,8 @@ test.beforeEach(async ({ page }) => {
 // name includes the machine name, root path and build label.
 const workstationRow = (page: Page) => page.getByRole("button", { name: /^workstation / })
 const cloudboxRow = (page: Page) => page.getByRole("button", { name: /^cloudbox / })
-const agentsTab = (page: Page) => page.getByRole("tab", { name: /Agents/ })
-const appsTab = (page: Page) => page.getByRole("tab", { name: /Apps/ })
+const agentsTab = (page: Page) => page.locator("aside").getByText("Workloads", { exact: true })
+const appsTab = agentsTab
 
 async function openWorkspaceSettings(page: Page) {
   await page.getByRole("button", { name: "Workspace settings" }).click()
@@ -307,17 +320,160 @@ test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1/workspaces/ws-1")
   await expect(page).toHaveTitle("Acme / Demo")
-  await expect(page.locator("aside [role=tab]").nth(0)).toContainText("Agents")
-  await expect(page.locator("aside [role=tab]").nth(1)).toContainText("Apps")
-
-  await appsTab(page).click()
-  await expect(page.locator("aside").getByRole("button", { name: "Open Soul Archive settings" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Apps" })).toBeVisible()
-
-  await agentsTab(page).click()
+  await expect(page.getByRole("tree", { name: "Workspace workloads" })).toBeVisible()
+  await expect(page.locator("aside [role=tab]")).toHaveCount(0)
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(1)
   await expect(page.getByRole("button", { name: /^api-server / })).toBeVisible()
   await expect(page.getByRole("button", { name: /^worker / })).toBeVisible()
   await expect(page.getByRole("button", { name: /^app:Soul Archive / })).toHaveCount(0)
+})
+
+test("mixed workloads use common lifecycle endpoints and logs", async ({ page }) => {
+  await page.goto("/")
+  for (const [name, id] of [["api-server", "ag-1"], ["Soul Archive", "appw-1"]]) {
+    for (const action of ["Start", "Stop", "Restart"]) {
+      await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
+      const request = page.waitForRequest((request) => request.url().endsWith(`/agents/${id}/${action.toLowerCase()}`) && request.method() === "POST")
+      await page.getByRole("menuitem", { name: action, exact: true }).click()
+      await request
+    }
+    await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
+    await page.getByRole("menuitem", { name: "Logs", exact: true }).click()
+    await expect(page.getByRole("treeitem", { name, exact: true })).toHaveAttribute("aria-selected", "true")
+  }
+})
+
+test("folder loading failure keeps workloads usable and supports retry", async ({ page }) => {
+  let fail = true
+  await page.route("**/api/workspaces/ws-1/workload-tree", async (route) => {
+    if (fail) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Temporarily unavailable" }) })
+    return ok(route, { folders: [{ folder_id: "restored", name: "Recovered folder", parent_id: null }], placements: [] })
+  })
+  await page.goto("/")
+  await expect(page.getByRole("alert")).toBeVisible()
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
+  fail = false
+  await page.getByRole("button", { name: "Reload folders", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Recovered folder", exact: true })).toBeVisible()
+  await expect(page.getByRole("alert")).toHaveCount(0)
+})
+
+test("an App missing from machine inventory remains visible with its stable runtime ID", async ({ page }) => {
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB] }))
+  await page.goto("/")
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(1)
+  await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Logs", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveAttribute("aria-selected", "true")
+  await expect(page.locator("header").getByText("Soul Archive", { exact: true })).toBeVisible()
+})
+
+test("shared App rename and delete update metadata without resurrecting a placeholder", async ({ page }) => {
+  let runtime = { ...appRuntimeAgent }
+  let deleted = false
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB, ...(deleted ? [] : [runtime])] }))
+  await page.route("**/api/workspaces/ws-1/agents/appw-1", async (route) => {
+    if (route.request().method() === "PATCH") runtime = { ...runtime, name: route.request().postDataJSON().name }
+    if (route.request().method() === "DELETE") deleted = true
+    return ok(route, runtime)
+  })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
+  await page.getByRole("dialog").getByRole("textbox").fill("Research Archive")
+  await page.getByRole("dialog").getByRole("button", { name: "Rename", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Research Archive", exact: true })).toBeVisible()
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(0)
+  await page.getByRole("button", { name: "Actions for Research Archive", exact: true }).click()
+  await page.getByRole("menuitem", { name: "App settings", exact: true }).click()
+  await expect(page.getByRole("heading", { name: "Research Archive", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Close", exact: true }).click()
+  await page.getByRole("button", { name: "Actions for Research Archive", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click()
+  await page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click()
+  await expect.poll(() => deleted).toBe(true)
+  await expect(page.getByRole("treeitem", { name: "Research Archive", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("treeitem")).toHaveCount(2)
+})
+
+test("remote App rename and delete events keep tree metadata synchronized", async ({ page }) => {
+  let events: { send: (message: string) => void } | undefined
+  await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, (socket) => { events = socket })
+  await page.goto("/")
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
+  await expect.poll(() => Boolean(events)).toBe(true)
+  events!.send(JSON.stringify({ event: "agent.updated", revision: 2, data: { ...appRuntimeAgent, name: "Remote Archive" } }))
+  await expect(page.getByRole("treeitem", { name: "Remote Archive", exact: true })).toBeVisible()
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(0)
+  events!.send(JSON.stringify({ event: "agent.deleted", revision: 3, data: appRuntimeAgent }))
+  await expect(page.getByRole("treeitem", { name: "Remote Archive", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("treeitem")).toHaveCount(2)
+})
+
+test("folders support persistent drag and keyboard moves, nesting, rename and deletion", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  const folder = page.getByRole("treeitem", { name: "Research", exact: true })
+  await expect(folder).toBeVisible()
+  const moved = page.waitForRequest((request) => request.url().endsWith("/workload-tree/placements/ag-1") && request.method() === "PUT")
+  await page.getByRole("treeitem", { name: "api-server", exact: true }).dragTo(folder.locator(":scope > div").first())
+  expect((await moved).postDataJSON()).toEqual({ folder_id: "folder-1", position: 0 })
+  await expect(folder.getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
+  await page.getByRole("combobox", { name: "Destination folder" }).selectOption("folder-1")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(folder.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Actions for Research", exact: true }).click()
+  await page.getByRole("menuitem", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("Models")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(folder.getByRole("treeitem", { name: "Models", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Actions for Research", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
+  await expect(page.getByRole("combobox", { name: "Destination folder" }).getByRole("option")).toHaveCount(1)
+  await page.getByRole("button", { name: "Cancel", exact: true }).click()
+  await page.reload()
+  await expect(folder.getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
+  await expect(folder.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Actions for Models", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("Experiments")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(folder.getByRole("treeitem", { name: "Experiments", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Actions for Experiments", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
+  await page.getByRole("combobox", { name: "Destination folder" }).selectOption("")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(folder.getByRole("treeitem", { name: "Experiments", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("treeitem", { name: "Experiments", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Actions for Research", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Research", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
+  await expect(page.getByRole("treeitem", { name: "Experiments", exact: true })).toBeVisible()
+})
+
+test("workload folders remain workspace scoped and mobile navigation returns to the tree", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("Private organization")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await page.getByRole("combobox", { name: "Organization" }).click()
+  await page.getByRole("option", { name: "Research", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Private organization", exact: true })).toHaveCount(0)
+  await page.getByRole("combobox", { name: "Organization" }).click()
+  await page.getByRole("option", { name: "Acme", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Private organization", exact: true })).toBeVisible()
+  await page.getByRole("treeitem", { name: "Soul Archive", exact: true }).getByRole("button", { name: /^Soul Archive / }).click()
+  await expect(page.getByRole("button", { name: "Close full-screen terminal", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Close full-screen terminal", exact: true }).click()
+  await expect(page.getByRole("tree", { name: "Workspace workloads" })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
 test("restores organization and workspace from the URL after reload", async ({ page }) => {
@@ -358,8 +514,7 @@ test("late snapshots from the previous workspace cannot replace the current inve
   releaseFirstSnapshot()
   await firstSnapshotResponse
   await page.waitForTimeout(100)
-  await expect(page.getByRole("tab", { name: /Apps 0/ })).toBeVisible()
-  await expect(page.getByRole("tab", { name: /Agents 0/ })).toBeVisible()
+  await expect(page.getByRole("treeitem")).toHaveCount(0)
   await expect(workstationRow(page)).toHaveCount(0)
   await expect(page.getByRole("button", { name: /^api-server / })).toHaveCount(0)
 })
@@ -500,14 +655,10 @@ test("workspace controls open a settings page with inline rename", async ({ page
 
 test("managed App settings control access and lifecycle without creation or Network UI", async ({ page }) => {
   await page.goto("/")
-  await appsTab(page).click()
-
-  await expect(page.locator("main > section").getByText("Soul Archive")).toBeVisible()
-  await expect(page.getByText("https://soul-app1.canary.apps.treer.ai/", { exact: true })).toBeVisible()
-  await expect(page.getByRole("button", { name: /New App|New$/ })).toHaveCount(0)
+  await page.getByRole("button", { name: "Actions for Soul Archive" }).click()
+  await page.getByRole("menuitem", { name: "App settings", exact: true }).click()
   await expect(page.getByRole("heading", { name: "Network" })).toHaveCount(0)
   await expect(page.getByText(/_human/)).toHaveCount(0)
-  await page.getByRole("button", { name: "Open Soul Archive settings" }).first().click()
   await expect(page.getByRole("heading", { name: "Soul Archive" })).toBeVisible()
   await expect(page.getByRole("combobox", { name: "App access" })).toHaveText("Workspace session required")
 
@@ -526,7 +677,7 @@ test("managed App settings control access and lifecycle without creation or Netw
   })
   await page.getByRole("button", { name: "Open Soul Archive", exact: true }).click()
   await expect.poll(() => page.locator("html").getAttribute("data-last-opened-url")).toBe("https://soul-app1.canary.apps.treer.ai/")
-  const restarting = page.waitForRequest((request) => request.url().includes("/apps/app-1/restart") && request.method() === "POST")
+  const restarting = page.waitForRequest((request) => request.url().includes("/agents/appw-1/restart") && request.method() === "POST")
   await page.getByRole("button", { name: "Restart" }).click()
   await restarting
 })
@@ -534,8 +685,8 @@ test("managed App settings control access and lifecycle without creation or Netw
 test("mobile App settings hide the sidebar and fit the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await appsTab(page).click()
-  await page.getByRole("button", { name: "Open Soul Archive settings" }).first().click()
+  await page.getByRole("button", { name: "Actions for Soul Archive" }).click()
+  await page.getByRole("menuitem", { name: "App settings", exact: true }).click()
 
   await expect(page.getByRole("heading", { name: "Soul Archive" })).toBeVisible()
   await expect(page.locator("aside")).toBeHidden()
@@ -672,7 +823,7 @@ test("machine overview only shows agents for the selected machine", async ({ pag
 
   // Only the agent on srv-a should appear in the overview agent list
   const agentsSection = page.locator("main section", { has: page.getByRole("heading", { name: "Agents on this machine" }) })
-  await expect(agentsSection.getByRole("button", { name: "Terminal" })).toBeVisible()
+  await expect(agentsSection.getByRole("button", { name: "Terminal", exact: true })).toHaveCount(2)
   await expect(agentsSection.getByText(/ag-1/)).toBeVisible()
   await expect(agentsSection.getByText(/ag-2/)).toBeHidden()
 
@@ -688,7 +839,7 @@ test("from a machine overview, clicking Terminal opens the agent terminal", asyn
   await page.goto("/")
   await openWorkspaceSettings(page)
   await workstationRow(page).click()
-  await page.getByRole("button", { name: "Terminal", exact: true }).click()
+  await page.getByRole("button", { name: "Terminal", exact: true }).first().click()
 
   // Returns to the terminal main view; header shows agent name
   await expect(page.locator("header").getByText("api-server")).toBeVisible()
@@ -762,7 +913,7 @@ test("terminal uses a browser-safe close code when output backlog exceeds its li
 test("create agent dialog offers profiles and explicit commands without provider installation", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New" }).click()
+  await page.getByRole("button", { name: "New", exact: true }).click()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await expect(page.getByRole("option", { name: "Terminal", exact: true })).toBeVisible()
   await expect(page.getByRole("option", { name: "Custom command", exact: true })).toBeVisible()
@@ -774,7 +925,7 @@ test("create agent dialog offers profiles and explicit commands without provider
 test("create agent custom command preserves argv without a provider installer", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New" }).click()
+  await page.getByRole("button", { name: "New", exact: true }).click()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Custom command", exact: true }).click()
   await page.getByRole("textbox", { name: "Command", exact: true }).fill('/opt/my-agent --label "two words"')
@@ -792,7 +943,7 @@ test("create agent custom command preserves argv without a provider installer", 
 test("create agent dialog lists an installed recipe launch profile", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New" }).click()
+  await page.getByRole("button", { name: "New", exact: true }).click()
   await expect(page.getByRole("dialog")).toBeVisible()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Codex Agent UI" }).click()
@@ -805,7 +956,7 @@ test("create agent dialog contains a long profile command on narrow screens", as
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New" }).click()
+  await page.getByRole("button", { name: "New", exact: true }).click()
   const dialog = page.getByRole("dialog")
   await dialog.getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Codex + UI" }).click()

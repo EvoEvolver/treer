@@ -793,6 +793,7 @@ mod handlers;
 mod machines;
 mod network;
 mod organizations;
+mod workload_tree;
 
 pub(crate) use handlers::*;
 #[derive(Debug)]
@@ -802,6 +803,10 @@ pub struct AuthFailure {
 }
 
 impl AuthFailure {
+    pub(crate) fn code(&self) -> &str {
+        &self.error.code
+    }
+
     pub(crate) fn not_found(code: &str, message: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, code, message)
     }

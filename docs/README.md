@@ -36,6 +36,10 @@ Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
 
+- [Unified App and Agent workloads](research/2026-10-11-unified-workloads.md):
+  stable identity and generation, one Controller lifecycle owner, shared CLI/UI
+  controls, persistent workspace folders, legacy migration, and Canary gates.
+
 - [Core simplification, explicit service forwarding, and recovery](research/2026-09-30-core-simplification-plan.md):
   target boundaries for a thin CLI, user-owned runtime environments, private/public
   port forwarding, platform-assigned service domains, and restart recovery. This

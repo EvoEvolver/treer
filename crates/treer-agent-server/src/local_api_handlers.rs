@@ -1164,3 +1164,37 @@ pub(super) async fn stop_agent(
             .await?,
     ))
 }
+
+pub(super) async fn start_agent(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("agents/{agent_id}/start"),
+                &json!({}),
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+pub(super) async fn restart_agent(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("agents/{agent_id}/restart"),
+                &json!({}),
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}

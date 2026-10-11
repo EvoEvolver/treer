@@ -78,6 +78,7 @@ impl AuthStore {
         agent_id: &str,
         name: &str,
     ) -> Result<(), AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query(
             "INSERT INTO agent_names(agent_id, workspace_id, name, updated_at) \
              VALUES($1, $2, $3, $4) \
@@ -89,9 +90,13 @@ impl AuthStore {
         .bind(workspace_id)
         .bind(name)
         .bind(Utc::now().to_rfc3339())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        sqlx::query("UPDATE app_deployments SET name = $3, updated_at = $4 WHERE workspace_id = $1 AND runtime_agent_id = $2")
+            .bind(workspace_id).bind(agent_id).bind(name).bind(Utc::now().to_rfc3339())
+            .execute(&mut *transaction).await.map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(())
     }
 
@@ -631,6 +636,34 @@ impl AuthStore {
             .write()
             .await
             .insert(agent_id.to_string(), record);
+        Ok(credential)
+    }
+
+    /// Recover a legacy App whose machine-local launch snapshot was lost. This
+    /// rotates only an existing, active identity on its enrolled machine.
+    pub async fn rotate_agent_credential(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        agent_id: &str,
+    ) -> Result<String, AuthFailure> {
+        let credential = format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let record = AgentCredentialRecord {
+            workspace_id: workspace_id.into(),
+            server_id: server_id.into(),
+            secret_hash: fast_secret_hash(&credential),
+            cached_at: Instant::now(),
+        };
+        let result = sqlx::query("UPDATE agent_credentials SET secret_hash = $4 WHERE workspace_id = $1 AND server_id = $2 AND agent_id = $3 AND revoked_at IS NULL")
+            .bind(workspace_id).bind(server_id).bind(agent_id).bind(&record.secret_hash)
+            .execute(&self.pool).await.map_err(AuthFailure::database)?;
+        if result.rows_affected() != 1 {
+            return Err(agent_auth_required());
+        }
+        self.agent_credentials
+            .write()
+            .await
+            .insert(agent_id.into(), record);
         Ok(credential)
     }
 

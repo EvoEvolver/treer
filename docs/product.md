@@ -50,6 +50,13 @@ In concrete terms:
    sleep and Proxy bounces reconnect without re-enrollment. One hostname in
    one workspace is one supervised Host.
 8. The central Proxy is open source and can be privately deployed.
+   The browser presents Agents and Apps together in a workspace workload tree.
+   Members can create nested folders, drag workloads or folders into them, or
+   use the Move to folder action on touch screens and keyboards. Folder names
+   and placements persist in the workspace; organizing the tree does not move
+   processes or files between machines. Both workload kinds provide Start,
+   Stop, Restart, and Logs actions, with App-specific access settings available
+   from the same row. Deleting a folder promotes its contents to its parent.
 9. Organization owners and administrators can review management activity.
    Every workspace member can inspect recent billable logical payload usage,
    classified by machine network, service ingress, virtual host, and Agent UI.

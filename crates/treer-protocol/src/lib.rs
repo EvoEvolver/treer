@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 pub mod cli;
 pub mod recovery;
 pub use recovery::*;
+mod workload_tree;
+pub use workload_tree::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ pub const PROTOCOL_MIN_VERSION: u32 = 4;
 pub const SERVICE_STREAM_EOF: &str = "treer-service-eof-v1";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
+pub const CAPABILITY_AGENT_LIFECYCLE: &str = "agent.lifecycle.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
 pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
 pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
@@ -20,6 +23,7 @@ pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,
+    CAPABILITY_AGENT_LIFECYCLE,
     CAPABILITY_MACHINE_EXEC,
     CAPABILITY_MACHINE_UPLOAD,
     CAPABILITY_RUNTIME_RESTORE,
@@ -31,6 +35,9 @@ pub const POLICY_PROVIDER_BUNDLE_CAPABILITY_V1: &str = "policy.bundle.v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MESSAGE_SCHEMA_VERSION: u32 = 1;
+fn default_start_missing() -> bool {
+    true
+}
 pub const MAX_MESSAGE_BODY_BYTES: usize = 32 * 1024;
 pub const MAX_MESSAGE_RECIPIENTS: usize = 32;
 pub const MAX_MESSAGE_CONTEXTS: usize = 32;
@@ -128,6 +135,8 @@ pub struct ServerInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub agent_id: String,
+    #[serde(default)]
+    pub run_generation: u64,
     pub workspace_id: String,
     pub server_id: String,
     pub kind: String,
@@ -1076,6 +1085,20 @@ pub struct AgentServerSnapshot {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AgentCommand {
     RestoreRuntime {},
+    EnsureLifecycle {
+        agent_id: String,
+        workload_credential: Option<String>,
+        request: CreateAgentRequest,
+        enabled: bool,
+        #[serde(default = "default_start_missing")]
+        start_missing: bool,
+    },
+    Start {
+        agent_id: String,
+    },
+    Restart {
+        agent_id: String,
+    },
     Create {
         agent_id: String,
         workload_credential: String,
@@ -1157,6 +1180,9 @@ pub enum AgentCommand {
 impl AgentCommand {
     pub fn required_capability(&self) -> Option<&'static str> {
         match self {
+            Self::EnsureLifecycle { .. } | Self::Start { .. } | Self::Restart { .. } => {
+                Some(CAPABILITY_AGENT_LIFECYCLE)
+            }
             Self::RestoreRuntime {} => Some(CAPABILITY_RUNTIME_RESTORE),
             Self::Abort { .. } => Some(CAPABILITY_AGENT_ABORT),
             Self::StartupSet { .. } | Self::StartupGet { .. } | Self::StartupClear { .. } => {
@@ -2023,6 +2049,24 @@ fn invalid_enrollment_key() -> ProtocolError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lifecycle_declaration_defaults_to_starting_missing_for_older_senders() {
+        let command: super::AgentCommand = serde_json::from_value(serde_json::json!({
+            "action": "ensure_lifecycle", "agent_id": "app", "workload_credential": null,
+            "enabled": true, "request": {"kind":"app", "name":"app", "cwd":".", "args":["/bin/true"], "cols":80,"rows":24}
+        })).unwrap();
+        assert!(matches!(
+            command,
+            super::AgentCommand::EnsureLifecycle {
+                start_missing: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            command.required_capability(),
+            Some(super::CAPABILITY_AGENT_LIFECYCLE)
+        );
+    }
     use super::*;
 
     #[test]

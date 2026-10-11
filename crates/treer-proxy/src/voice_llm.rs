@@ -1287,6 +1287,7 @@ mod tests {
     fn test_agent(id: &str, name: &str, server_id: &str) -> AgentInfo {
         let now = Utc::now();
         AgentInfo {
+            run_generation: 0,
             agent_id: id.to_string(),
             workspace_id: "default".to_string(),
             server_id: server_id.to_string(),

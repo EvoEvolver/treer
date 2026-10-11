@@ -134,6 +134,7 @@ async fn proxy_messages_broadcast_only_to_their_workspace() {
 fn test_agent(agent_id: &str, name: &str) -> AgentInfo {
     let now = Utc::now();
     AgentInfo {
+        run_generation: 0,
         agent_id: agent_id.to_string(),
         workspace_id: "alpha".to_string(),
         server_id: "server".to_string(),
@@ -1292,6 +1293,7 @@ async fn cluster_name_projections_survive_snapshot_replay_ordering() {
             snapshot: AgentServerSnapshot {
                 server: test_server(),
                 agents: vec![AgentInfo {
+                    run_generation: 0,
                     agent_id: "agent".to_string(),
                     workspace_id: "alpha".to_string(),
                     server_id: "server".to_string(),
@@ -1440,6 +1442,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
             AgentServerSnapshot {
                 server: destination,
                 agents: vec![AgentInfo {
+                    run_generation: 0,
                     agent_id: agent_id.clone(),
                     workspace_id: workspace_id.clone(),
                     server_id: destination_id.clone(),

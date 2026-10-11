@@ -82,6 +82,8 @@ struct AgentLaunch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentMetadata {
     agent_id: String,
+    #[serde(default)]
+    run_generation: u64,
     workspace_id: String,
     server_id: String,
     kind: String,
@@ -249,6 +251,13 @@ impl ControllerRuntime {
             process.next_revision = replay.next_revision;
             runtime.restore_process(process, replay)?;
         }
+        for entry in runtime.inner.startup_store.entries() {
+            if entry.workspace_id == runtime.inner.workspace_id
+                && entry.spec.server_id == runtime.inner.server_id
+            {
+                runtime.materialize_startup(&entry)?;
+            }
+        }
         let disconnected = events.disconnected.clone();
         runtime.start_event_tasks(events);
         runtime.start_idle_monitor();
@@ -393,6 +402,7 @@ impl ControllerRuntime {
         workload_credential: String,
         request: CreateAgentRequest,
     ) -> Result<AgentInfo, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
         if request.name.trim().is_empty() {
             return Err(ProtocolError::new(
                 "invalid_request",
@@ -408,7 +418,7 @@ impl ControllerRuntime {
         }
         // Persist the resolved launch, rather than a mutable profile reference,
         // before asking the Host to start the workload.
-        if kind != "app" && self.inner.startup_store.get(&agent_id).is_none() {
+        if self.inner.startup_store.get(&agent_id).is_none() {
             self.inner
                 .startup_store
                 .upsert(StoredAgentStartup {
@@ -439,6 +449,12 @@ impl ControllerRuntime {
                 .ensure(&agent_id, &workload_credential, None)?;
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
+            run_generation: self
+                .inner
+                .startup_store
+                .get(&agent_id)
+                .map(|entry| entry.spec.generation)
+                .unwrap_or(1),
             workspace_id: self.inner.workspace_id.clone(),
             server_id: self.inner.server_id.clone(),
             kind,
@@ -511,6 +527,254 @@ impl ControllerRuntime {
         self.process_response(response, AgentStatus::Working)
     }
 
+    fn materialize_startup(&self, entry: &StoredAgentStartup) -> Result<AgentInfo, ProtocolError> {
+        if let Ok(agent) = self.get(&entry.spec.agent_id) {
+            return agent
+                .lock()
+                .map(|agent| agent.info.clone())
+                .map_err(|_| ProtocolError::new("state_error", "agent lock poisoned"));
+        }
+        let now = Utc::now();
+        let info = AgentInfo {
+            agent_id: entry.spec.agent_id.clone(),
+            run_generation: entry.spec.generation,
+            workspace_id: entry.workspace_id.clone(),
+            server_id: entry.spec.server_id.clone(),
+            kind: entry.spec.kind.clone(),
+            name: entry.spec.name.clone(),
+            cwd: entry.spec.cwd.clone(),
+            status: AgentStatus::Exited,
+            pid: None,
+            started_at: now,
+            updated_at: now,
+            exited_at: None,
+            exit_code: None,
+            output_revision: 0,
+            interface: None,
+        };
+        self.inner
+            .agents
+            .write()
+            .map_err(|_| ProtocolError::new("state_error", "agent registry lock poisoned"))?
+            .insert(
+                info.agent_id.clone(),
+                Arc::new(Mutex::new(ControllerAgent {
+                    stream_epoch: String::new(),
+                    info: info.clone(),
+                    workload_credential: entry.workload_credential.clone(),
+                    text: String::new(),
+                    prompt_queue: VecDeque::new(),
+                    bracketed_paste: false,
+                    last_output: Instant::now(),
+                    last_metadata_event: Instant::now(),
+                })),
+            );
+        let _ = self.inner.events.send(info.clone());
+        Ok(info)
+    }
+
+    /// Declare a legacy workload without replacing its identity or live process.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ensure_lifecycle(
+        &self,
+        operation_id: &str,
+        agent_id: String,
+        workload_credential: Option<String>,
+        request: CreateAgentRequest,
+        enabled: bool,
+        start_missing: bool,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
+        let inventory = self
+            .inner
+            .host
+            .request(
+                HostCommand::Sync {
+                    cursors: Default::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| protocol_error("host_error", error))?;
+        if let HostResponse::Synced { processes, .. } = inventory {
+            for process in processes {
+                if process.process_id == agent_id && process.running {
+                    self.upsert_process(process, None)?;
+                }
+            }
+        }
+        let newly_declared = self.inner.startup_store.get(&agent_id).is_none();
+        if newly_declared {
+            let (kind, launch) = resolve_launch(&request)?;
+            let credential = self
+                .get(&agent_id)
+                .ok()
+                .and_then(|agent| {
+                    agent
+                        .lock()
+                        .ok()
+                        .map(|agent| agent.workload_credential.clone())
+                })
+                .or(workload_credential)
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        "lifecycle_credential_missing",
+                        "no saved or live workload credential",
+                    )
+                })?;
+            if !valid_workload_credential(&credential) {
+                return Err(ProtocolError::new(
+                    "invalid_workload_credential",
+                    "invalid lifecycle credential",
+                ));
+            }
+            self.inner
+                .startup_store
+                .upsert(StoredAgentStartup {
+                    spec: AgentStartupSpec {
+                        agent_id: agent_id.clone(),
+                        server_id: self.inner.server_id.clone(),
+                        kind,
+                        name: request.name.clone(),
+                        cwd: request.cwd.clone(),
+                        command: launch.command,
+                        args: launch.args,
+                        publish_ports: launch.publish_ports,
+                        enabled,
+                        generation: if start_missing { 1 } else { 0 },
+                    },
+                    workspace_id: self.inner.workspace_id.clone(),
+                    workload_credential: credential,
+                    last_host_epoch: self.inner.host_epoch.clone(),
+                    initial_writes: launch.initial_writes,
+                    cols: request.cols,
+                    rows: request.rows,
+                })
+                .map_err(startup_store_error)?;
+        }
+        if !start_missing {
+            // Explicit lifecycle requests declare first, then start/restart.
+            // Do not let the periodic supervisor launch between those commands.
+            self.inner
+                .startup_store
+                .update(&agent_id, |entry| entry.spec.enabled = false)
+                .map_err(startup_store_error)?;
+        }
+        if !enabled {
+            self.inner
+                .startup_store
+                .update(&agent_id, |entry| entry.spec.enabled = false)
+                .map_err(startup_store_error)?;
+            let running = self.get(&agent_id).is_ok_and(|agent| {
+                agent
+                    .lock()
+                    .is_ok_and(|agent| !agent.info.status.is_terminal())
+            });
+            if running {
+                let response = self
+                    .inner
+                    .host
+                    .request(
+                        HostCommand::Stop {
+                            process_id: agent_id.clone(),
+                        },
+                        Some(format!("{operation_id}:stop")),
+                    )
+                    .await
+                    .map_err(|error| protocol_error("host_error", error))?;
+                return self.process_response(response, AgentStatus::Exited);
+            }
+        }
+        if let Ok(agent) = self.get(&agent_id) {
+            let info = agent
+                .lock()
+                .map_err(|_| ProtocolError::new("state_error", "agent lock poisoned"))?
+                .info
+                .clone();
+            if !info.status.is_terminal() || !enabled {
+                return Ok(info);
+            }
+        }
+        let entry = self
+            .inner
+            .startup_store
+            .get(&agent_id)
+            .ok_or_else(|| ProtocolError::new("startup_not_found", &agent_id))?;
+        if !entry.spec.enabled || !enabled || !start_missing {
+            return self.materialize_startup(&entry);
+        }
+        let mut entry = entry;
+        if !newly_declared {
+            entry.spec.generation = entry.spec.generation.saturating_add(1);
+            self.inner
+                .startup_store
+                .upsert(entry.clone())
+                .map_err(startup_store_error)?;
+        }
+        self.spawn_startup(&entry).await
+    }
+
+    pub async fn start(
+        &self,
+        operation_id: &str,
+        agent_id: &str,
+        restart: bool,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
+        // Inventory is authoritative even when a previous spawn ACK was lost.
+        let response = self
+            .inner
+            .host
+            .request(
+                HostCommand::Sync {
+                    cursors: Default::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| protocol_error("host_error", error))?;
+        if let HostResponse::Synced { processes, .. } = response {
+            for process in processes {
+                if process.process_id == agent_id && process.running {
+                    let info = self.upsert_process(process, None)?;
+                    if !restart {
+                        self.inner
+                            .startup_store
+                            .update(agent_id, |entry| {
+                                entry.spec.enabled = true;
+                                entry.last_host_epoch.clone_from(&self.inner.host_epoch);
+                            })
+                            .map_err(startup_store_error)?;
+                        return Ok(info);
+                    }
+                    let response = self
+                        .inner
+                        .host
+                        .request(
+                            HostCommand::Stop {
+                                process_id: agent_id.to_string(),
+                            },
+                            Some(format!("{operation_id}:stop")),
+                        )
+                        .await
+                        .map_err(|error| protocol_error("host_error", error))?;
+                    self.process_response(response, AgentStatus::Exited)?;
+                }
+            }
+        }
+        let mut entry = self.inner.startup_store.get(agent_id).ok_or_else(|| {
+            ProtocolError::new("startup_not_found", "no saved launch for workload")
+        })?;
+        entry.spec.enabled = true;
+        entry.spec.generation = entry.spec.generation.saturating_add(1);
+        entry.last_host_epoch.clone_from(&self.inner.host_epoch);
+        self.inner
+            .startup_store
+            .upsert(entry.clone())
+            .map_err(startup_store_error)?;
+        self.spawn_startup(&entry).await
+    }
+
     pub fn set_startup(
         &self,
         agent_id: &str,
@@ -539,7 +803,7 @@ impl ControllerRuntime {
             .inner
             .startup_store
             .get(agent_id)
-            .map_or(1, |entry| entry.spec.generation.saturating_add(1));
+            .map_or(1, |entry| entry.spec.generation);
         let spec = AgentStartupSpec {
             agent_id: agent_id.to_string(),
             server_id: self.inner.server_id.clone(),
@@ -606,6 +870,14 @@ impl ControllerRuntime {
         Ok(())
     }
 
+    pub async fn apply_stopped_startups(&self, agent_ids: &[String]) -> Result<(), ProtocolError> {
+        for id in agent_ids {
+            self.stop(&format!("proxy-stopped:{}", uuid::Uuid::new_v4()), id)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn restore_startup_agents(
         &self,
         active_agent_ids: &[String],
@@ -629,6 +901,14 @@ impl ControllerRuntime {
                 for process in processes {
                     if process.running {
                         running_ids.insert(process.process_id.clone());
+                        if self.get(&process.process_id).is_ok_and(|agent| {
+                            agent.lock().is_ok_and(|agent| {
+                                agent.stream_epoch == process.stream_epoch
+                                    && !agent.info.status.is_terminal()
+                            })
+                        }) {
+                            continue;
+                        }
                     }
                     let _ = self.upsert_process(process, None);
                 }
@@ -706,6 +986,19 @@ impl ControllerRuntime {
         ids
     }
 
+    pub fn startup_validation_ids(&self) -> Vec<String> {
+        self.inner
+            .startup_store
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.workspace_id == self.inner.workspace_id
+                    && entry.spec.server_id == self.inner.server_id
+            })
+            .map(|entry| entry.spec.agent_id)
+            .collect()
+    }
+
     pub fn automatic_startup_candidate_ids(&self) -> Vec<String> {
         self.inner.startup_store.candidate_ids(
             &self.inner.workspace_id,
@@ -781,6 +1074,7 @@ impl ControllerRuntime {
                 .ensure(agent_id, &entry.workload_credential, None)?;
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
+            run_generation: entry.spec.generation,
             workspace_id: self.inner.workspace_id.clone(),
             server_id: self.inner.server_id.clone(),
             kind: entry.spec.kind.clone(),
@@ -1758,13 +2052,36 @@ impl ControllerRuntime {
         agent_id: &str,
     ) -> Result<AgentInfo, ProtocolError> {
         let _guard = self.inner.recovery_lock.lock().await;
-        if let Some(mut entry) = self.inner.startup_store.get(agent_id) {
-            entry.spec.enabled = false;
-            entry.spec.generation = entry.spec.generation.saturating_add(1);
-            self.inner
-                .startup_store
-                .upsert(entry)
-                .map_err(startup_store_error)?;
+        self.persist_stopped_startup(agent_id)?;
+        let inventory = self
+            .inner
+            .host
+            .request(
+                HostCommand::Sync {
+                    cursors: Default::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| protocol_error("host_error", error))?;
+        let mut running = false;
+        if let HostResponse::Synced { processes, .. } = inventory {
+            for process in processes {
+                if process.process_id == agent_id {
+                    running = process.running;
+                    self.upsert_process(process, None)?;
+                }
+            }
+        }
+        if !running {
+            if let Ok(agent) = self.get(agent_id) {
+                let info = agent
+                    .lock()
+                    .map_err(|_| ProtocolError::new("state_error", "agent lock poisoned"))?
+                    .info
+                    .clone();
+                return Ok(info);
+            }
         }
         let response = self
             .inner
@@ -1796,6 +2113,15 @@ impl ControllerRuntime {
     ) -> Result<AgentInfo, ProtocolError> {
         let metadata: AgentMetadata = serde_json::from_str(&process.metadata)
             .map_err(|error| protocol_error("invalid_host_metadata", error))?;
+        if let Ok(current) = self.get(&process.process_id) {
+            if let Ok(current) = current.lock() {
+                if current.info.run_generation > metadata.run_generation
+                    || (current.info.pid.is_some() && current.info.started_at > process.started_at)
+                {
+                    return Ok(current.info.clone());
+                }
+            }
+        }
         if metadata.workspace_id != self.inner.workspace_id
             || metadata.server_id != self.inner.server_id
         {
@@ -1837,6 +2163,7 @@ impl ControllerRuntime {
             .flatten();
         let info = AgentInfo {
             agent_id: metadata.agent_id.clone(),
+            run_generation: metadata.run_generation,
             workspace_id: metadata.workspace_id,
             server_id: metadata.server_id,
             kind: metadata.kind,
@@ -1868,13 +2195,15 @@ impl ControllerRuntime {
             .insert(metadata.agent_id, agent);
         if !process.running {
             self.remove_cached_interface(&info.agent_id);
-            if process.exit_code == Some(0) {
+            if process.exit_code == Some(0) && info.kind != "app" {
                 if let Some(mut entry) = self.inner.startup_store.get(&info.agent_id) {
-                    entry.spec.enabled = false;
-                    self.inner
-                        .startup_store
-                        .upsert(entry)
-                        .map_err(startup_store_error)?;
+                    if entry.spec.generation <= info.run_generation {
+                        entry.spec.enabled = false;
+                        self.inner
+                            .startup_store
+                            .upsert(entry)
+                            .map_err(startup_store_error)?;
+                    }
                 }
             }
         }
@@ -1990,17 +2319,46 @@ impl ControllerRuntime {
     }
 
     fn apply_process(&self, process: HostProcessInfo) {
+        let generation = serde_json::from_str::<AgentMetadata>(&process.metadata)
+            .map(|metadata| metadata.run_generation)
+            .unwrap_or(0);
+        // A restart persists the next generation before its spawn ACK/event.
+        // An old exit during that window must not cancel the new running intent.
+        if self
+            .inner
+            .startup_store
+            .get(&process.process_id)
+            .is_some_and(|entry| entry.spec.generation > generation)
+        {
+            return;
+        }
+        let mut new_run = false;
         if let Ok(agent) = self.get(&process.process_id) {
             if let Ok(agent) = agent.lock() {
-                if agent.info.started_at > process.started_at
+                if agent.info.run_generation > generation
+                    || (agent.info.pid.is_some() && agent.info.started_at > process.started_at)
                     || (agent.stream_epoch != process.stream_epoch
                         && agent.info.started_at == process.started_at)
                 {
                     return;
                 }
+                new_run = generation > agent.info.run_generation
+                    || (process.running && agent.stream_epoch != process.stream_epoch);
             }
         }
-        if !process.running && process.exit_code == Some(0) {
+        if new_run {
+            let _ = self.inner.process_events.send(process.clone());
+            let _ = self.upsert_process(process, None);
+            return;
+        }
+        if !process.running
+            && process.exit_code == Some(0)
+            && self
+                .inner
+                .startup_store
+                .get(&process.process_id)
+                .is_some_and(|entry| entry.spec.kind != "app")
+        {
             if let Some(mut entry) = self.inner.startup_store.get(&process.process_id) {
                 entry.spec.enabled = false;
                 if let Err(error) = self.inner.startup_store.upsert(entry) {

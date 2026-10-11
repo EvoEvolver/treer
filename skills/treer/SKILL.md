@@ -96,8 +96,26 @@ treer agent startup show
 treer agent startup clear
 ```
 
-This is self-only persistence. It does not restart the Agent after a normal
-exit, and `treer agent admin stop` disables it. Do not put secrets in argv.
+This is self-only persistence. It does not automatically restart an ordinary
+Agent after a successful exit, and `treer agent stop` disables it. Do not put
+secrets in argv. Explicit start can launch a stopped or completed workload again:
+
+```bash
+treer agent start reviewer
+treer agent stop reviewer
+treer agent restart reviewer
+treer agent read reviewer --lines 100
+```
+
+These lifecycle commands also accept managed App runtime IDs and unique names.
+`treer app start/stop/restart` and `treer agent admin start/stop/restart` remain
+compatibility commands. Restart keeps the Agent ID and workload credential;
+`run_generation` in Agent output increases for a replacement process. The
+Controller owns startup and recovery for both kinds, adopts surviving Host
+processes after a hot replacement, and validates identities before cold
+recovery. Enabled Apps retry exited processes; ordinary Agents do not restart
+automatically on the same Host. Stop prevents automatic recovery until an
+explicit start or restart.
 
 Names are workspace-visible labels; agent IDs and server IDs do not change.
 

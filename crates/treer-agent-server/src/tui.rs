@@ -688,6 +688,7 @@ mod tests {
         let mut app = App::new("default").expect("app");
         app.agents.push(AgentInfo {
             agent_id: "agent-a".to_string(),
+            run_generation: 0,
             workspace_id: "default".to_string(),
             server_id: "machine-a".to_string(),
             kind: "shell".to_string(),

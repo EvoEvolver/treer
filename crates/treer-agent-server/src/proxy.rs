@@ -262,9 +262,14 @@ impl ProxyClient {
         )
         .await?;
         let candidates = self.runtime.automatic_startup_candidate_ids();
-        if !candidates.is_empty() {
-            match self.validate_startup_agents(candidates).await {
+        let validation_ids = self.runtime.startup_validation_ids();
+        if !validation_ids.is_empty() {
+            match self.validate_startup_agents(validation_ids).await {
                 Ok(active) => {
+                    let active: Vec<_> = active
+                        .into_iter()
+                        .filter(|id| candidates.contains(id))
+                        .collect();
                     for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
                         match result {
                             Ok(_) => info!(%agent_id, "restored Agent startup command"),
@@ -311,6 +316,16 @@ impl ProxyClient {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     send(&mut outgoing, &AgentServerMessage::Heartbeat { sent_at: Utc::now() }).await?;
+                    let candidates = self.runtime.automatic_startup_candidate_ids();
+                    let validation_ids = self.runtime.startup_validation_ids();
+                    if !validation_ids.is_empty() {
+                        if let Ok(active) = self.validate_startup_agents(validation_ids).await {
+                            let active: Vec<_> = active.into_iter().filter(|id| candidates.contains(id)).collect();
+                            for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
+                                if let Err(error) = result { warn!(%agent_id, code = %error.code, "workload recovery failed"); }
+                            }
+                        }
+                    }
                     let kinds = self.runtime.available_agent_kinds();
                     let changed = self
                         .advertised_agents
@@ -654,11 +669,10 @@ impl ProxyClient {
             &agent_ids,
         )
         .await?;
-        for id in &response.stopped_agent_ids {
-            self.runtime
-                .persist_stopped_startup(id)
-                .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
-        }
+        self.runtime
+            .apply_stopped_startups(&response.stopped_agent_ids)
+            .await
+            .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
         Ok(response
             .active_agent_ids
             .into_iter()
@@ -683,6 +697,37 @@ impl ProxyClient {
         }
         let command_id = envelope.command_id;
         let result = match envelope.command {
+            AgentCommand::EnsureLifecycle {
+                agent_id,
+                workload_credential,
+                request,
+                enabled,
+                start_missing,
+            } => self
+                .runtime
+                .ensure_lifecycle(
+                    &command_id,
+                    agent_id,
+                    workload_credential,
+                    request,
+                    enabled,
+                    start_missing,
+                )
+                .await
+                .map(|agent| CommandResult::success(command_id.clone(), agent))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::Start { agent_id } => self
+                .runtime
+                .start(&command_id, &agent_id, false)
+                .await
+                .map(|agent| CommandResult::success(command_id.clone(), agent))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::Restart { agent_id } => self
+                .runtime
+                .start(&command_id, &agent_id, true)
+                .await
+                .map(|agent| CommandResult::success(command_id.clone(), agent))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
             AgentCommand::Create {
                 agent_id,
                 workload_credential,

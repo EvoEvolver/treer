@@ -11,9 +11,10 @@ use axum::extract::{Extension, Form, OriginalUri, Path, Query, State, WebSocketU
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, Version};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, patch, post};
 use axum::{Json, Router};
 use base64::Engine;
+#[cfg(test)]
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
@@ -36,8 +37,7 @@ use treer_protocol::{
     TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,
     UpdateServiceIngressRequest, UploadMachineFileRequest, UploadMachineFileResponse,
     ValidateAgentStartupRequest, ValidateAgentStartupResponse, VirtualNetworkHostsSnapshot,
-    WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, WorkspaceSnapshot,
-    AGENT_ID_HEADER,
+    WorkloadIdentityTokenRequest, WorkloadIdentityVerifyRequest, WorkspaceEvent, AGENT_ID_HEADER,
 };
 use url::Url;
 use uuid::Uuid;
@@ -291,6 +291,7 @@ impl BrowserAccess {
                 Method::GET,
                 Method::HEAD,
                 Method::POST,
+                Method::PUT,
                 Method::PATCH,
                 Method::DELETE,
             ])
@@ -337,11 +338,13 @@ mod network;
 mod policy_provider;
 mod routes;
 mod voice;
+mod workload_tree;
+mod workloads;
 mod workspaces;
 
 use agents::*;
 use app_identity::*;
-pub(crate) use apps::reconcile_app_deployments_for_server;
+pub(crate) use apps::synchronize_app_lifecycles_for_server;
 use apps::*;
 pub(crate) use errors::*;
 use events::*;
@@ -351,6 +354,8 @@ use network::*;
 pub(crate) use network::{spawn_network_metadata_refresh, virtual_network_hosts_snapshot};
 use policy_provider::*;
 use voice::*;
+use workload_tree::*;
+use workloads::*;
 use workspaces::*;
 
 #[allow(clippy::too_many_arguments)]

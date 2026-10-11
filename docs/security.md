@@ -57,6 +57,14 @@ state or execute an equivalent command.
 Apps do not create a security boundary. Managed Apps currently run through the
 same Host process runtime as command Agents, under the installing machine
 account. Externally managed Apps inherit their supervisor's authority.
+Both managed kinds share a stable workload identity and lifecycle. Stop keeps
+that identity and its credential while disabling recovery; deletion revokes it.
+Start requires `agent.create` on the owning machine, stop requires `agent.stop`
+on the workload, and restart requires both. Legacy App routes use these same
+checks. Reconnect adopts active legacy identities without rotating live secrets;
+only a missing local credential permits rotation of an active identity. An old
+App identity already revoked by the previous stop implementation migrates to
+the App's canonical identity rather than reviving the revoked credential.
 Treer Policy limits what authenticated requests Core accepts; it cannot stop an
 App from using other same-machine credentials or services it can reach. Run
 untrusted code under a separate user, container, VM, microVM, or stronger
@@ -116,7 +124,7 @@ is restricted or audited.
 | --- | --- |
 | Enrollment key | One workspace, ten minutes, single use |
 | Machine bearer credential | One enrolled machine and workspace; long-lived until rotation/removal |
-| Agent workload credential | One managed Agent process; same-account inspection remains possible |
+| Agent workload credential | One stable managed workload across process generations; same-account inspection remains possible |
 | Local operator credential | One Controller install; protects the local API but is not a same-account sandbox |
 | Workload identity token | One Agent/machine/service audience for 60 seconds |
 | Human App token | One user/workspace/service audience; verification rechecks membership and service |
@@ -134,6 +142,11 @@ authentication. Inbound Telegram Messages are authored by the authenticated
 bridge Agent and retain sender-asserted external metadata.
 
 ## Data Exposure
+
+Workspace folders and placements are presentation metadata, available only to
+current workspace members. Folder moves cannot change a workload's machine,
+credential, filesystem path, or Policy scope. They do not create an isolation
+boundary. The Proxy validates workspace ownership and rejects folder cycles.
 
 Proxy and database operators can read Message bodies, recipients, context
 edges, and acknowledgement state. Deployments must manage PostgreSQL backups,

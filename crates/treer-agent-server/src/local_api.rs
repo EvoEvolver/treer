@@ -468,6 +468,8 @@ pub fn router(state: LocalApiState) -> Router {
             get(read_agent_transcript),
         )
         .route("/api/agents/{agent_id}/stop", post(stop_agent))
+        .route("/api/agents/{agent_id}/start", post(start_agent))
+        .route("/api/agents/{agent_id}/restart", post(restart_agent))
         .route(
             "/api/messages",
             get(list_core_messages).post(send_core_message),

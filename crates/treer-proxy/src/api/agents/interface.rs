@@ -163,21 +163,17 @@ pub(crate) async fn stop_agent(
         &workspace_id,
     )
     .await?;
-    let agent = context.resolve_agent(&target).await?;
+    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
     context.authorize_agent(&agent, ACTION_AGENT_STOP).await?;
-    // Central intent wins even if the machine is offline or its stop ACK is lost.
-    auth.set_agent_recovery_enabled(&workspace_id, &agent.agent_id, false)
-        .await?;
-    let data = context
-        .state()
-        .send_command(
-            context.workspace_id(),
-            &agent.server_id,
-            AgentCommand::Stop {
-                agent_id: agent.agent_id.clone(),
-            },
-        )
-        .await?;
+    let data = apply_workload_action(
+        &state,
+        &auth,
+        &workspace_id,
+        &agent,
+        WorkloadAction::Stop,
+        app_mutation_actor(session.as_deref(), context.policy_subject()),
+    )
+    .await?;
     let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), context.policy_subject());
     if let Err(error) = auth
         .record_workspace_audit(NewWorkspaceAuditEvent {

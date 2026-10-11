@@ -88,7 +88,7 @@ impl StartupStore {
                 entry.workspace_id == workspace_id
                     && entry.spec.server_id == server_id
                     && entry.spec.enabled
-                    && entry.last_host_epoch != host_epoch
+                    && (entry.last_host_epoch != host_epoch || entry.spec.kind == "app")
             })
             .map(|entry| entry.spec.agent_id)
             .collect::<Vec<_>>();

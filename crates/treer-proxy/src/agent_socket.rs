@@ -321,7 +321,7 @@ async fn handle(
                     if let Err(error) = state.apply_snapshot(connection_id, snapshot).await {
                         send_error(&outgoing_tx, error);
                     } else {
-                        tokio::spawn(crate::api::reconcile_app_deployments_for_server(
+                        tokio::spawn(crate::api::synchronize_app_lifecycles_for_server(
                             state.clone(),
                             auth.clone(),
                             workspace_id,
@@ -367,32 +367,8 @@ async fn handle(
             }
             AgentServerMessage::AgentEvent { agent } => {
                 if identity_matches(&identity, &agent.workspace_id, &agent.server_id) {
-                    let reconcile = agent.kind == "app" && agent.status.is_terminal();
-                    let workspace_id = agent.workspace_id.clone();
-                    let server_id = agent.server_id.clone();
-                    let runtime_agent_id = agent.agent_id.clone();
                     if let Err(error) = state.apply_agent_event(connection_id, agent).await {
                         send_error(&outgoing_tx, error);
-                    } else if reconcile {
-                        let state = state.clone();
-                        let auth = auth.clone();
-                        tokio::spawn(async move {
-                            let restart_count = auth
-                                .resolve_app_deployment_by_runtime(&workspace_id, &runtime_agent_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .map_or(0, |app| app.restart_count);
-                            let delay = restart_count.clamp(1, 30);
-                            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                            crate::api::reconcile_app_deployments_for_server(
-                                state,
-                                auth,
-                                workspace_id,
-                                server_id,
-                            )
-                            .await;
-                        });
                     }
                 } else {
                     send_error(&outgoing_tx, identity_error());

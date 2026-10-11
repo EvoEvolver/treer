@@ -69,6 +69,7 @@ pub(super) async fn hydrate_app_deployment(state: &AppState, app: &mut AppDeploy
         {
             app.pid = agent.pid;
             app.exit_code = agent.exit_code;
+            app.restart_count = agent.run_generation.saturating_sub(1);
             app.status = if agent.status.is_terminal() {
                 AppDeploymentStatus::Exited
             } else {
@@ -239,93 +240,43 @@ pub(super) async fn launch_app_runtime(
     state: &AppState,
     auth: &AuthStore,
     app: &AppDeployment,
-    actor: &str,
+    _actor: &str,
 ) -> Result<AppDeployment, ApiFailure> {
-    let runtime_agent_id = format!("appw_{}", Uuid::new_v4().simple());
-    let Some(claimed) = auth
-        .claim_app_runtime(
-            &app.workspace_id,
-            &app.app_id,
-            app.runtime_agent_id.as_deref(),
-            &runtime_agent_id,
-            actor,
-        )
-        .await?
-    else {
-        return auth
-            .resolve_app_deployment(&app.workspace_id, &app.app_id)
-            .await
-            .map_err(Into::into);
-    };
-    let workload_credential = auth
-        .create_agent_credential(&app.workspace_id, &app.server_id, &runtime_agent_id)
+    let app = auth
+        .bind_app_workload(&app.workspace_id, &app.app_id)
         .await?;
-    let mut args = Vec::with_capacity(app.args.len() + 1);
-    args.push(app.command.clone());
-    args.extend(app.args.clone());
-    let result = state
-        .send_command(
-            &app.workspace_id,
-            &app.server_id,
-            AgentCommand::Create {
-                agent_id: runtime_agent_id.clone(),
-                workload_credential,
-                request: CreateAgentRequest {
-                    server_id: Some(app.server_id.clone()),
-                    kind: "app".to_string(),
-                    name: format!("app:{}", app.name),
-                    cwd: app.cwd.clone(),
-                    args,
-                    cols: 120,
-                    rows: 36,
-                    publish_ports: Vec::new(),
-                    recipe: None,
-                },
-            },
-        )
-        .await;
-    if let Err(error) = result {
-        auth.set_app_last_error(&app.workspace_id, &app.app_id, Some(&error.message))
-            .await?;
-        let _ = auth
-            .delete_agent(&app.workspace_id, &runtime_agent_id)
-            .await;
-        return Err(error.into());
-    }
-    Ok(claimed)
+    let guard = auth
+        .workload_lifecycle_guard(&app.workspace_id, app.runtime_agent_id.as_deref().unwrap())
+        .await?;
+    let app = ensure_app_workload(state, auth, &app, true).await?;
+    guard
+        .commit()
+        .await
+        .map_err(|error| ApiFailure::internal("lifecycle_lock_failed", &error.to_string()))?;
+    Ok(app)
 }
 
 pub(super) async fn stop_app_runtime(
     state: &AppState,
-    auth: &AuthStore,
+    _auth: &AuthStore,
     app: &AppDeployment,
 ) -> Result<(), ApiFailure> {
     let Some(runtime_agent_id) = app.runtime_agent_id.as_deref() else {
         return Ok(());
     };
-    let agent = state
-        .resolve_agent(&app.workspace_id, runtime_agent_id)
+    match state
+        .send_command(
+            &app.workspace_id,
+            &app.server_id,
+            AgentCommand::Stop {
+                agent_id: runtime_agent_id.to_string(),
+            },
+        )
         .await
-        .ok();
-    if let Some(agent) = agent.as_ref() {
-        if !agent.status.is_terminal() {
-            state
-                .send_command(
-                    &app.workspace_id,
-                    &app.server_id,
-                    AgentCommand::Stop {
-                        agent_id: runtime_agent_id.to_string(),
-                    },
-                )
-                .await?;
-        }
-    }
-    auth.delete_agent(&app.workspace_id, runtime_agent_id)
-        .await?;
-    if agent.is_some() {
-        let _ = state
-            .delete_agent(&app.workspace_id, runtime_agent_id)
-            .await;
+    {
+        Ok(_) => {}
+        Err(error) if error.code == "agent_not_found" => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
@@ -438,27 +389,18 @@ pub(super) async fn start_app_deployment(
     )
     .await?;
     let actor = app_mutation_actor(session.as_deref(), subject.as_ref());
-    let current = auth
-        .set_app_desired_state(
-            &workspace_id,
-            &current.app_id,
-            AppDesiredState::Running,
-            actor,
-        )
+    apply_workload_action(
+        &state,
+        &auth,
+        &workspace_id,
+        &app_workload_agent(&current),
+        WorkloadAction::Start,
+        actor,
+    )
+    .await?;
+    let mut app = auth
+        .resolve_app_deployment(&workspace_id, &current.app_id)
         .await?;
-    let running = if let Some(runtime_agent_id) = current.runtime_agent_id.as_deref() {
-        state
-            .resolve_agent(&workspace_id, runtime_agent_id)
-            .await
-            .is_ok_and(|agent| !agent.status.is_terminal())
-    } else {
-        false
-    };
-    let mut app = if running {
-        current
-    } else {
-        launch_app_runtime(&state, &auth, &current, actor).await?
-    };
     hydrate_app_deployment(&state, &mut app).await;
     record_app_audit(
         &auth,
@@ -497,19 +439,22 @@ pub(super) async fn stop_app_deployment(
         &workspace_id,
         subject.as_ref(),
         ACTION_AGENT_STOP,
-        PolicyResource::new(RESOURCE_MACHINE, &current.server_id),
+        agent_policy_resource(&app_workload_agent(&current)),
     )
     .await?;
     let actor = app_mutation_actor(session.as_deref(), subject.as_ref());
+    apply_workload_action(
+        &state,
+        &auth,
+        &workspace_id,
+        &app_workload_agent(&current),
+        WorkloadAction::Stop,
+        actor,
+    )
+    .await?;
     let mut app = auth
-        .set_app_desired_state(
-            &workspace_id,
-            &current.app_id,
-            AppDesiredState::Stopped,
-            actor,
-        )
+        .resolve_app_deployment(&workspace_id, &current.app_id)
         .await?;
-    stop_app_runtime(&state, &auth, &app).await?;
     hydrate_app_deployment(&state, &mut app).await;
     record_app_audit(
         &auth,
@@ -548,20 +493,30 @@ pub(super) async fn restart_app_deployment(
         &workspace_id,
         subject.as_ref(),
         ACTION_AGENT_STOP,
-        PolicyResource::new(RESOURCE_MACHINE, &current.server_id),
+        agent_policy_resource(&app_workload_agent(&current)),
     )
     .await?;
     let actor = app_mutation_actor(session.as_deref(), subject.as_ref());
-    let current = auth
-        .set_app_desired_state(
-            &workspace_id,
-            &current.app_id,
-            AppDesiredState::Running,
-            actor,
-        )
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_CREATE,
+        PolicyResource::new(RESOURCE_MACHINE, &current.server_id),
+    )
+    .await?;
+    apply_workload_action(
+        &state,
+        &auth,
+        &workspace_id,
+        &app_workload_agent(&current),
+        WorkloadAction::Restart,
+        actor,
+    )
+    .await?;
+    let mut app = auth
+        .resolve_app_deployment(&workspace_id, &current.app_id)
         .await?;
-    stop_app_runtime(&state, &auth, &current).await?;
-    let mut app = launch_app_runtime(&state, &auth, &current, actor).await?;
     hydrate_app_deployment(&state, &mut app).await;
     record_app_audit(
         &auth,
@@ -602,13 +557,10 @@ pub(super) async fn delete_app_deployment(
         &workspace_id,
         subject.as_ref(),
         ACTION_AGENT_DELETE,
-        PolicyResource::new(RESOURCE_MACHINE, &current.server_id),
+        agent_policy_resource(&app_workload_agent(&current)),
     )
     .await?;
-    stop_app_runtime(&state, &auth, &current).await?;
-    let app = auth
-        .delete_app_deployment(&workspace_id, &current.app_id)
-        .await?;
+    let app = remove_app_workload(&state, &auth, &current).await?;
     publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
     record_app_audit(
         &auth,
@@ -622,7 +574,7 @@ pub(super) async fn delete_app_deployment(
     Ok(Json(json!({ "app": response_app })))
 }
 
-pub(crate) async fn reconcile_app_deployments_for_server(
+pub(crate) async fn synchronize_app_lifecycles_for_server(
     state: AppState,
     auth: AuthStore,
     workspace_id: String,
@@ -638,67 +590,34 @@ pub(crate) async fn reconcile_app_deployments_for_server(
             return;
         }
     };
-    for mut app in apps {
-        if let Err(error) = reconcile_one_app_deployment(&state, &auth, &mut app).await {
-            tracing::warn!(?error, app_id = %app.app_id, "failed to reconcile App runtime");
+    for app in apps {
+        // Reconnect only supplies durable launch declarations, including old
+        // Apps lacking a local startup snapshot. Controller owns supervision.
+        if let Err(error) = synchronize_one_app_lifecycle(&state, &auth, &app).await {
+            tracing::warn!(?error, app_id = %app.app_id, "failed to synchronize App lifecycle");
         }
     }
 }
 
-async fn reconcile_one_app_deployment(
+async fn synchronize_one_app_lifecycle(
     state: &AppState,
     auth: &AuthStore,
-    app: &mut AppDeployment,
+    app: &AppDeployment,
 ) -> Result<(), ApiFailure> {
-    loop {
-        let runtime = if let Some(runtime_agent_id) = app.runtime_agent_id.as_deref() {
-            state
-                .resolve_agent(&app.workspace_id, runtime_agent_id)
-                .await
-                .ok()
-        } else {
-            None
-        };
-        if app.desired_state == AppDesiredState::Stopped {
-            if runtime
-                .as_ref()
-                .is_some_and(|agent| !agent.status.is_terminal())
-            {
-                stop_app_runtime(state, auth, app).await?;
-            }
-            return Ok(());
-        }
-        if runtime
-            .as_ref()
-            .is_some_and(|agent| !agent.status.is_terminal())
-        {
-            return Ok(());
-        }
-        let grace_remaining = app.updated_at + chrono::Duration::seconds(15) - Utc::now();
-        if runtime.is_none()
-            && app.runtime_agent_id.is_some()
-            && grace_remaining > chrono::Duration::zero()
-        {
-            // A new launch may still be in flight. Recheck after its grace
-            // period even if this machine sends no further snapshots/events.
-            tokio::time::sleep(
-                grace_remaining
-                    .to_std()
-                    .unwrap_or_default()
-                    .min(std::time::Duration::from_secs(1)),
-            )
-            .await;
-            // Reload intent and runtime ownership: stop/delete/replacement may
-            // have happened while waiting. The launch claim remains atomic.
-            *app = auth
-                .resolve_app_deployment(&app.workspace_id, &app.app_id)
-                .await?;
-            continue;
-        }
-        if app.runtime_agent_id.is_some() {
-            stop_app_runtime(state, auth, app).await?;
-        }
-        launch_app_runtime(state, auth, app, "reconciler").await?;
-        return Ok(());
+    let id = app.runtime_agent_id.as_deref().unwrap_or(&app.app_id);
+    let guard = auth.workload_lifecycle_guard(&app.workspace_id, id).await?;
+    // Reload inside the same lock used by start/stop/delete. A stale reconnect
+    // inventory must never overwrite a newer user decision.
+    let app = auth
+        .resolve_app_deployment(&app.workspace_id, &app.app_id)
+        .await?;
+    let app = ensure_app_workload(state, auth, &app, true).await?;
+    if app.desired_state == AppDesiredState::Stopped {
+        stop_app_runtime(state, auth, &app).await?;
     }
+    guard
+        .commit()
+        .await
+        .map_err(|error| ApiFailure::internal("lifecycle_lock_failed", &error.to_string()))?;
+    Ok(())
 }

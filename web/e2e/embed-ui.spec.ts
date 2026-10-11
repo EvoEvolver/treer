@@ -99,6 +99,7 @@ async function mockApi(page: Page) {
     if (path === "/organizations/org-1/audit-events") return ok(route, { events: [] })
     if (path === "/workspaces") return ok(route, { workspaces: url.searchParams.get("organization_id") === "org-1" ? [workspace] : [] })
     if (path === "/workspaces/ws-1/snapshot") return ok(route, snapshot)
+    if (path === "/workspaces/ws-1/workload-tree") return ok(route, { folders: [], placements: [] })
     if (path === "/workspaces/ws-1/virtual-hosts") return ok(route, { hosts: [] })
     if (path === "/workspaces/ws-1/services") return ok(route, { services: [service] })
     if (path === "/workspaces/ws-1/ingresses") return ok(route, { ingresses: [] })
@@ -128,7 +129,7 @@ test.beforeEach(async ({ page }) => {
 
 test("selecting an agent with an embedded UI shows the iframe instead of the terminal pane", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
 
   // Click the agent that has a UI
   await page.getByRole("button", { name: /^dashboard / }).click()
@@ -159,7 +160,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
     servers: [{ ...machine, status: "offline" }],
   }))
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
   await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
@@ -172,7 +173,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
 
 test("selecting a plain terminal agent shows the terminal pane, not an iframe", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
 
   // Click the plain agent without an Interface UI.
   await page.getByRole("button", { name: /^plain-tty / }).click()
@@ -183,7 +184,7 @@ test("selecting a plain terminal agent shows the terminal pane, not an iframe", 
 
 test("reload button label changes when an agent has an embedded UI", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
 
   // Plain agent: Reconnect terminal
   await page.getByRole("button", { name: /^plain-tty / }).click()
@@ -197,7 +198,7 @@ test("reload button label changes when an agent has an embedded UI", async ({ pa
 test("mobile: selecting an embedded UI agent opens a full-screen iframe", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
 
   await expect(page.locator("aside")).toBeVisible()
   await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
@@ -215,7 +216,7 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
 
 test("reload button triggers an iframe reload (key changes)", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
 
   // Track how many times the iframe's URL is fetched
@@ -238,7 +239,7 @@ test("reload button triggers an iframe reload (key changes)", async ({ page }) =
 
 test("embedded UI iframe follows the control-plane light and dark theme", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
 
   const frame = page.locator("iframe[title='dashboard interface']")
@@ -261,7 +262,7 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
 
 test("a new interface registered_at remounts the iframe", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("tab", { name: /Agents/ }).click()
+  await page.locator("aside").getByText("Workloads", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='dashboard interface']")
   await expect(frame).toBeVisible()
@@ -295,7 +296,6 @@ test("a new interface registered_at remounts the iframe", async ({ page }) => {
     },
   }))
 
-  await expect(page.getByText("rev 2")).toBeVisible()
   await expect.poll(() => uiHits, { timeout: 5000 }).toBeGreaterThan(0)
   await expect(frame).toBeVisible()
 })

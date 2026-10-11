@@ -36,6 +36,7 @@ async fn state_with_managed_agent() -> AppState {
         last_seen_at: now,
     };
     let agent = treer_protocol::AgentInfo {
+        run_generation: 0,
         agent_id: "agent-a".to_string(),
         workspace_id: "default".to_string(),
         server_id: "machine-a".to_string(),
@@ -74,149 +75,25 @@ async fn state_with_managed_agent() -> AppState {
 }
 
 #[tokio::test]
-async fn public_workspace_updates_hide_app_runtime_agents() {
+async fn public_workspace_snapshots_include_app_workloads() {
     let state = state_with_managed_agent().await;
-    let mut app_agent = state
-        .resolve_agent("default", "agent-a")
-        .await
-        .expect("resolve fixture agent");
-    app_agent.agent_id = "appw-test".to_string();
-    app_agent.name = "app:Docs".to_string();
-    app_agent.kind = "app".to_string();
-    state.test_insert_agent(app_agent.clone()).await;
-
-    let snapshot = state.snapshot("default").await.expect("workspace snapshot");
-    assert!(snapshot.agents.iter().any(|agent| agent.kind == "app"));
-
-    let visible = visible_workspace_snapshot(snapshot);
-    assert!(visible.agents.iter().all(|agent| agent.kind != "app"));
-    assert_eq!(visible.agents.len(), 2);
-
-    let event = WorkspaceEvent {
-        revision: 1,
-        workspace_id: "default".to_string(),
-        event: "agent.updated".to_string(),
-        data: serde_json::to_value(app_agent).expect("encode app agent"),
-    };
-    assert!(is_internal_app_agent_event(&event));
+    let mut app = state.resolve_agent("default", "agent-a").await.unwrap();
+    app.agent_id = "app_stable".into();
+    app.kind = "app".into();
+    app.name = "Docs".into();
+    state.test_insert_agent(app).await;
+    let snapshot = state.snapshot("default").await.unwrap();
+    assert_eq!(snapshot.agents.len(), 3);
+    assert!(snapshot
+        .agents
+        .iter()
+        .any(|agent| agent.agent_id == "app_stable"));
 }
 
-#[tokio::test]
-async fn app_reconcile_stops_a_runtime_left_running_while_the_machine_was_offline() {
-    let auth = AuthStore::for_test("admin-password").await;
-    auth.seed_test_workspace("default").await;
-    let app = auth
-        .create_app_deployment(
-            "default",
-            "owner",
-            "machine-a".to_string(),
-            CreateAppDeploymentRequest {
-                server_id: Some("machine-a".to_string()),
-                name: "Docs".to_string(),
-                command: "python3".to_string(),
-                args: vec!["-m".to_string(), "http.server".to_string()],
-                cwd: ".".to_string(),
-                port: 8080,
-                hostname: String::new(),
-                public: false,
-            },
-        )
-        .await
-        .expect("create App");
-    let runtime_id = "appw_offline_stop";
-    auth.claim_app_runtime("default", &app.app_id, None, runtime_id, "reconciler")
-        .await
-        .expect("claim runtime")
-        .expect("runtime claim");
-    auth.set_app_desired_state("default", &app.app_id, AppDesiredState::Stopped, "owner")
-        .await
-        .expect("persist stopped state");
-
-    let state = AppState::new();
-    let now = Utc::now();
-    let server = treer_protocol::ServerInfo {
-        server_id: "machine-a".to_string(),
-        workspace_id: "default".to_string(),
-        name: "machine-a".to_string(),
-        hostname: "machine-a".to_string(),
-        root: "/tmp".to_string(),
-        controller_build: treer_protocol::BuildInfo {
-            version: "test".to_string(),
-            git_commit: "test".to_string(),
-        },
-        host_build: treer_protocol::BuildInfo {
-            version: "test".to_string(),
-            git_commit: "test".to_string(),
-        },
-        supervision: None,
-        labels: Default::default(),
-        available_agents: None,
-        status: ServerStatus::Online,
-        connected_at: now,
-        last_seen_at: now,
-    };
-    let runtime = AgentInfo {
-        agent_id: runtime_id.to_string(),
-        workspace_id: "default".to_string(),
-        server_id: "machine-a".to_string(),
-        kind: "app".to_string(),
-        name: "app:Docs".to_string(),
-        cwd: ".".to_string(),
-        status: treer_protocol::AgentStatus::Idle,
-        pid: Some(42),
-        started_at: now,
-        updated_at: now,
-        exited_at: None,
-        exit_code: None,
-        output_revision: 0,
-        interface: None,
-    };
-    let connection_id = Uuid::new_v4();
-    let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
-    state
-        .register_server(server.clone(), connection_id, server_tx)
-        .await
-        .expect("register server");
-    state
-        .apply_snapshot(
-            connection_id,
-            treer_protocol::AgentServerSnapshot {
-                server,
-                agents: vec![runtime],
-            },
-        )
-        .await
-        .expect("apply snapshot");
-
-    let reconcile = tokio::spawn(reconcile_app_deployments_for_server(
-        state.clone(),
-        auth,
-        "default".to_string(),
-        "machine-a".to_string(),
-    ));
-    let command: ProxyMessage = match server_rx.recv().await.expect("stop command") {
-        SocketFrame::Text(value) => serde_json::from_str(&value).expect("decode command"),
-        _ => panic!("expected text command"),
-    };
-    let ProxyMessage::Command { envelope } = command else {
-        panic!("expected command envelope");
-    };
-    assert!(matches!(
-        envelope.command,
-        AgentCommand::Stop { ref agent_id } if agent_id == runtime_id
-    ));
-    state
-        .complete_command(CommandResult::success(envelope.command_id, json!({})))
-        .await;
-    reconcile.await.expect("join reconcile");
-    assert!(state.resolve_agent("default", runtime_id).await.is_err());
-}
-
-async fn pending_app_reconcile_fixture() -> (
+async fn app_lifecycle_fixture() -> (
     AuthStore,
     AppState,
     AppDeployment,
-    Uuid,
     tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
 ) {
     let auth = AuthStore::for_test("admin-password").await;
@@ -228,7 +105,7 @@ async fn pending_app_reconcile_fixture() -> (
             "machine-a".into(),
             CreateAppDeploymentRequest {
                 server_id: Some("machine-a".into()),
-                name: "Fresh App".into(),
+                name: "Docs".into(),
                 command: "python3".into(),
                 args: vec!["-m".into(), "http.server".into()],
                 cwd: ".".into(),
@@ -239,28 +116,48 @@ async fn pending_app_reconcile_fixture() -> (
         )
         .await
         .unwrap();
-    let app = auth
-        .claim_app_runtime("default", &app.app_id, None, "appw_before_reboot", "owner")
-        .await
-        .unwrap()
-        .unwrap();
+    assert_eq!(app.runtime_agent_id.as_deref(), Some(app.app_id.as_str()));
     let server = state_with_managed_agent()
         .await
         .resolve_server("default", "machine-a")
         .await
         .unwrap();
     let state = AppState::new();
-    let connection = Uuid::new_v4();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    state.register_server(server, connection, tx).await.unwrap();
-    (auth, state, app, connection, rx)
+    state
+        .register_server_instance_with_capabilities(
+            server,
+            Uuid::new_v4(),
+            "test-controller".into(),
+            vec![treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    (auth, state, app, rx)
+}
+
+async fn next_lifecycle_command(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+) -> treer_protocol::CommandEnvelope {
+    let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timely lifecycle command")
+        .expect("connected Controller");
+    let SocketFrame::Text(text) = frame else {
+        panic!("expected command frame")
+    };
+    let ProxyMessage::Command { envelope } = serde_json::from_str(&text).unwrap() else {
+        panic!("expected command")
+    };
+    envelope
 }
 
 #[tokio::test]
-async fn app_reconcile_retries_after_launch_grace_without_another_snapshot() {
-    let (auth, state, app, connection, mut rx) = pending_app_reconcile_fixture().await;
+async fn app_lifecycle_bootstrap_preserves_identity_and_serializes_declarations() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
     let start = || {
-        tokio::spawn(reconcile_app_deployments_for_server(
+        tokio::spawn(synchronize_app_lifecycles_for_server(
             state.clone(),
             auth.clone(),
             "default".into(),
@@ -269,92 +166,322 @@ async fn app_reconcile_retries_after_launch_grace_without_another_snapshot() {
     };
     let first = start();
     let second = start();
-    // Both reconcilers must wait for the old launch grace, then atomically
-    // claim just one replacement even though no new machine snapshot arrives.
-    let frame = tokio::time::timeout(Duration::from_secs(20), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let SocketFrame::Text(text) = frame else {
-        panic!("expected command");
-    };
-    let ProxyMessage::Command { envelope } = serde_json::from_str(&text).unwrap() else {
-        panic!("expected command");
-    };
-    let AgentCommand::Create { agent_id, .. } = &envelope.command else {
-        panic!("expected one launch");
-    };
-    let now = Utc::now();
-    let runtime = AgentInfo {
-        agent_id: agent_id.clone(),
-        workspace_id: "default".into(),
-        server_id: "machine-a".into(),
-        kind: "app".into(),
-        name: "app:Fresh App".into(),
-        cwd: ".".into(),
-        status: treer_protocol::AgentStatus::Idle,
-        pid: Some(42),
-        started_at: now,
-        updated_at: now,
-        exited_at: None,
-        exit_code: None,
-        output_revision: 0,
-        interface: None,
-    };
-    state
-        .apply_agent_event(connection, runtime.clone())
-        .await
-        .unwrap();
-    state
-        .complete_command(CommandResult::success(
-            envelope.command_id,
-            serde_json::to_value(runtime).unwrap(),
-        ))
-        .await;
+    for _ in 0..2 {
+        let envelope = next_lifecycle_command(&mut rx).await;
+        let AgentCommand::EnsureLifecycle {
+            agent_id,
+            request,
+            enabled,
+            ..
+        } = &envelope.command
+        else {
+            panic!("expected lifecycle declaration")
+        };
+        assert_eq!(agent_id, &app.app_id);
+        assert_eq!(request.kind, "app");
+        assert_eq!(request.args, vec!["python3", "-m", "http.server"]);
+        assert!(*enabled);
+        assert!(
+            rx.try_recv().is_err(),
+            "same workload declaration waits for prior acknowledgement"
+        );
+        state
+            .complete_command(CommandResult::success(envelope.command_id, json!({})))
+            .await;
+    }
     first.await.unwrap();
     second.await.unwrap();
-    let restored = auth
+    let persisted = auth
         .resolve_app_deployment("default", &app.app_id)
         .await
         .unwrap();
-    assert_eq!(
-        restored.runtime_agent_id.as_deref(),
-        Some(agent_id.as_str())
-    );
-    assert_eq!(restored.restart_count, 1);
-    assert!(
-        rx.try_recv().is_err(),
-        "concurrent retry must not create a second process"
-    );
+    assert_eq!(persisted.runtime_agent_id, app.runtime_agent_id);
+    assert_eq!(persisted.restart_count, 0);
+    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn app_reconcile_reloads_stopped_intent_after_waiting_for_launch_grace() {
-    let (auth, state, app, _, mut rx) = pending_app_reconcile_fixture().await;
-    let reconcile = tokio::spawn(reconcile_app_deployments_for_server(
-        state,
+async fn app_lifecycle_stopped_legacy_identity_is_preserved_and_not_deleted() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+    // Existing installations retain the identity that their local startup state owns.
+    sqlx::query("UPDATE app_deployments SET runtime_agent_id='appw_legacy' WHERE app_id=$1")
+        .bind(&app.app_id)
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    auth.set_app_desired_state("default", &app.app_id, AppDesiredState::Stopped, "owner")
+        .await
+        .unwrap();
+    let mut runtime = state_with_managed_agent()
+        .await
+        .resolve_agent("default", "agent-a")
+        .await
+        .unwrap();
+    runtime.agent_id = "appw_legacy".into();
+    runtime.kind = "app".into();
+    runtime.pid = Some(42);
+    state.test_insert_agent(runtime).await;
+    let task = tokio::spawn(synchronize_app_lifecycles_for_server(
+        state.clone(),
         auth.clone(),
         "default".into(),
         "machine-a".into(),
     ));
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    auth.set_app_desired_state("default", &app.app_id, AppDesiredState::Stopped, "owner")
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), reconcile)
-        .await
-        .unwrap()
-        .unwrap();
+    let declaration = next_lifecycle_command(&mut rx).await;
     assert!(
-        rx.try_recv().is_err(),
-        "stop during grace must prevent recovery"
+        matches!(&declaration.command,AgentCommand::EnsureLifecycle {agent_id,enabled:false,..} if agent_id == "appw_legacy")
+    );
+    state
+        .complete_command(CommandResult::success(declaration.command_id, json!({})))
+        .await;
+    let stop = next_lifecycle_command(&mut rx).await;
+    assert!(matches!(&stop.command,AgentCommand::Stop {agent_id} if agent_id == "appw_legacy"));
+    state
+        .complete_command(CommandResult::success(stop.command_id, json!({})))
+        .await;
+    task.await.unwrap();
+    assert!(
+        state.resolve_agent("default", "appw_legacy").await.is_ok(),
+        "Stop retains workload identity"
     );
     let stopped = auth
         .resolve_app_deployment("default", &app.app_id)
         .await
         .unwrap();
-    assert_eq!(stopped.runtime_agent_id, app.runtime_agent_id);
-    assert_eq!(stopped.restart_count, 0);
+    assert_eq!(stopped.runtime_agent_id.as_deref(), Some("appw_legacy"));
+    assert_eq!(stopped.desired_state, AppDesiredState::Stopped);
+}
+
+#[tokio::test]
+async fn app_lifecycle_stop_persists_intent_without_revoking_credential() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+    auth.create_agent_credential("default", "machine-a", &app.app_id)
+        .await
+        .unwrap();
+    let agent = app_workload_agent(&app);
+    state.test_insert_agent(agent.clone()).await;
+    let task = tokio::spawn({
+        let state = state.clone();
+        let auth = auth.clone();
+        async move {
+            apply_workload_action(
+                &state,
+                &auth,
+                "default",
+                &agent,
+                WorkloadAction::Stop,
+                "owner",
+            )
+            .await
+        }
+    });
+    let stop = next_lifecycle_command(&mut rx).await;
+    assert!(matches!(&stop.command,AgentCommand::Stop {agent_id} if agent_id == &app.app_id));
+    state
+        .complete_command(CommandResult::success(stop.command_id, json!({})))
+        .await;
+    task.await.unwrap().unwrap();
+    let intent: (bool, Option<String>) = sqlx::query_as(
+        "SELECT recovery_enabled,revoked_at FROM agent_credentials WHERE agent_id=$1",
+    )
+    .bind(&app.app_id)
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(intent, (false, None));
+    let stopped = auth
+        .resolve_app_deployment("default", &app.app_id)
+        .await
+        .unwrap();
+    assert_eq!(stopped.desired_state, AppDesiredState::Stopped);
+    assert_eq!(
+        stopped.runtime_agent_id.as_deref(),
+        Some(app.app_id.as_str())
+    );
+    assert!(state.resolve_agent("default", &app.app_id).await.is_ok());
+}
+
+#[tokio::test]
+async fn app_lifecycle_missing_restart_declares_without_spawning_then_restarts_once() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+    let agent = app_workload_agent(&app);
+    assert!(state.resolve_agent("default", &app.app_id).await.is_err());
+    let task = tokio::spawn({
+        let state = state.clone();
+        let auth = auth.clone();
+        async move {
+            apply_workload_action(
+                &state,
+                &auth,
+                "default",
+                &agent,
+                WorkloadAction::Restart,
+                "owner",
+            )
+            .await
+        }
+    });
+    let declaration = next_lifecycle_command(&mut rx).await;
+    assert!(
+        matches!(&declaration.command,AgentCommand::EnsureLifecycle {agent_id,enabled:true,start_missing:false,..} if agent_id == &app.app_id)
+    );
+    assert!(rx.try_recv().is_err());
+    state
+        .complete_command(CommandResult::success(declaration.command_id, json!({})))
+        .await;
+    let restart = next_lifecycle_command(&mut rx).await;
+    assert!(matches!(&restart.command,AgentCommand::Restart {agent_id} if agent_id == &app.app_id));
+    state
+        .complete_command(CommandResult::success(restart.command_id, json!({})))
+        .await;
+    task.await.unwrap().unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "restart must never emit Create or a second Restart"
+    );
+    let persisted = auth
+        .resolve_app_deployment("default", &app.app_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted.runtime_agent_id.as_deref(),
+        Some(app.app_id.as_str())
+    );
+    assert_eq!(persisted.restart_count, 0);
+}
+
+#[tokio::test]
+async fn app_lifecycle_delete_stops_even_a_cached_terminal_workload_before_revocation() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+    auth.create_agent_credential("default", "machine-a", &app.app_id)
+        .await
+        .unwrap();
+    let terminal = app_workload_agent(&app);
+    assert!(terminal.status.is_terminal());
+    state.test_insert_agent(terminal).await;
+    let task = tokio::spawn({
+        let state = state.clone();
+        let auth = auth.clone();
+        let app = app.clone();
+        async move { remove_app_workload(&state, &auth, &app).await }
+    });
+    let stop = next_lifecycle_command(&mut rx).await;
+    assert!(matches!(&stop.command,AgentCommand::Stop {agent_id} if agent_id == &app.app_id));
+    let revoked: Option<String> =
+        sqlx::query_scalar("SELECT revoked_at FROM agent_credentials WHERE agent_id=$1")
+            .bind(&app.app_id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
+    assert!(
+        revoked.is_none(),
+        "Controller must confirm Stop before identity revocation"
+    );
+    assert!(auth
+        .resolve_app_deployment("default", &app.app_id)
+        .await
+        .is_ok());
+    state
+        .complete_command(CommandResult::success(stop.command_id, json!({})))
+        .await;
+    task.await.unwrap().unwrap();
+    let revoked: Option<String> =
+        sqlx::query_scalar("SELECT revoked_at FROM agent_credentials WHERE agent_id=$1")
+            .bind(&app.app_id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
+    assert!(revoked.is_some());
+    assert!(auth
+        .resolve_app_deployment("default", &app.app_id)
+        .await
+        .is_err());
+    assert!(state.resolve_agent("default", &app.app_id).await.is_err());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn app_lifecycle_start_and_restart_enforce_each_policy_action_before_dispatch() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+    let store = WorkspacePolicyStore::new(auth.pool());
+    for (index, (restart, denied)) in [
+        (false, ACTION_AGENT_CREATE),
+        (true, ACTION_AGENT_STOP),
+        (true, ACTION_AGENT_CREATE),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let document = WorkspacePolicyDocument {
+            schema_version: POLICY_SCHEMA_VERSION,
+            defaults: BTreeMap::from([
+                (
+                    ACTION_AGENT_STOP.to_string(),
+                    if denied == ACTION_AGENT_STOP {
+                        PolicyEffect::Deny
+                    } else {
+                        PolicyEffect::Allow
+                    },
+                ),
+                (
+                    ACTION_AGENT_CREATE.to_string(),
+                    if denied == ACTION_AGENT_CREATE {
+                        PolicyEffect::Deny
+                    } else {
+                        PolicyEffect::Allow
+                    },
+                ),
+            ]),
+            groups: BTreeMap::new(),
+            rules: Vec::new(),
+        };
+        store
+            .replace(
+                "default",
+                index as u64,
+                PolicyMode::Enforce,
+                document,
+                PolicyPrincipalRef {
+                    kind: PolicyPrincipalKind::Human,
+                    id: "owner".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let machine = Some(Extension(MachineSession {
+            server_id: Some("machine-a".into()),
+            workspace_id: Some("default".into()),
+        }));
+        let result = if restart {
+            workloads::restart_agent(
+                State(state.clone()),
+                Extension(auth.clone()),
+                Extension(PolicyEngine::durable(store.clone())),
+                None,
+                machine,
+                HeaderMap::new(),
+                Path(("default".into(), app.app_id.clone())),
+            )
+            .await
+        } else {
+            workloads::start_agent(
+                State(state.clone()),
+                Extension(auth.clone()),
+                Extension(PolicyEngine::durable(store.clone())),
+                None,
+                machine,
+                HeaderMap::new(),
+                Path(("default".into(), app.app_id.clone())),
+            )
+            .await
+        };
+        let response = result.expect_err("denied lifecycle action").into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "denied {denied}");
+        assert!(
+            rx.try_recv().is_err(),
+            "authorization must precede all Controller commands"
+        );
+    }
 }
 
 fn test_config() -> BootstrapConfig {
@@ -1395,6 +1522,7 @@ async fn voice_command_turns_asr_text_into_agent_prompt() {
         last_seen_at: now,
     };
     let agent = treer_protocol::AgentInfo {
+        run_generation: 0,
         agent_id: "ag_reviewer".to_string(),
         workspace_id: "default".to_string(),
         server_id: "srv_mac".to_string(),

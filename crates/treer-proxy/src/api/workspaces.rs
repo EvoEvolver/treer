@@ -81,7 +81,7 @@ pub(super) async fn workspace_snapshot(
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let mut snapshot = visible_workspace_snapshot(state.snapshot(&workspace_id).await?);
+    let mut snapshot = state.snapshot(&workspace_id).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -116,14 +116,4 @@ pub(super) async fn workspace_snapshot(
         snapshot.agents = visible;
     }
     Ok(Json(serde_json::to_value(snapshot)?))
-}
-
-pub(super) fn visible_workspace_snapshot(mut snapshot: WorkspaceSnapshot) -> WorkspaceSnapshot {
-    snapshot.agents.retain(|agent| agent.kind != "app");
-    snapshot
-}
-
-pub(super) fn is_internal_app_agent_event(event: &WorkspaceEvent) -> bool {
-    event.event.starts_with("agent.")
-        && event.data.get("kind").and_then(Value::as_str) == Some("app")
 }

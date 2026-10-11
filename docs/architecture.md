@@ -133,17 +133,36 @@ Policy; it does not trust caller-supplied Agent IDs. New custom virtual-host
 writes are retired. HTTP origins are allocated from the stable service ID under
 the operator's wildcard base domain; legacy aliases are read-compatible only.
 
-The first runtime adapter launches `kind=app` through the existing Host process
-contract. The backing runtime receives its own workload credential and ordinary host-network endpoint, but is hidden from the
-ordinary Agent snapshot and list. App status is projected from that runtime;
-the durable App, service, and hostname never depend on its runtime ID.
+Apps use the same `kind=app` Host process contract and lifecycle commands as
+ordinary Agents. Each workload keeps its Agent ID and workload credential
+across process replacements; `AgentInfo.run_generation` identifies the process
+attempt. New Apps use that same ID for their durable App record. Existing Apps
+retain their established runtime Agent ID. Service IDs and origins stay stable.
 
-When an App runtime exits, the Proxy schedules a bounded-backoff replacement.
-When a Controller reconnects and publishes its first snapshot, the Proxy
-reconciles every desired-running App assigned to that machine. Compare-and-set
-runtime claims prevent concurrent reconcilers from intentionally launching the
-same generation. A future Host pipes supervisor can replace the PTY-backed
-adapter without changing the App API or durable ownership model.
+The Controller is the sole process recovery owner. The Proxy declares durable
+App launch metadata through capability-gated `EnsureLifecycle`; the Controller
+adopts a matching live Host process or saves its resolved launch. Start, stop,
+restart, bootstrap, and recovery share a Controller lock, consult Host inventory,
+and persist intent before spawning. A stopped workload remains in snapshots
+even when a cold Host has no process for it. Explicit start and restart reuse
+the saved launch and credential, and increment the persisted run generation
+before launching a replacement. Stale Host events cannot overwrite a later run.
+Explicit App start/restart first sends `EnsureLifecycle(start_missing=false)`
+to declare or adopt the workload without launching. This temporarily disables
+local recovery, including for a surviving process, until the following explicit
+start/restart command commits running intent. A lost acknowledgement leaves
+recovery suspended; retrying the explicit action completes the handshake.
+
+The Controller validates active identities with the Proxy before recovery.
+Reconnect and heartbeat validation also apply centrally stopped intent to
+surviving ordinary Agent and App processes before attempting recovery.
+Enabled Apps retry missing processes on its five-second heartbeat, including
+successful exits. Ordinary Agents recover after a Host epoch change or an
+explicit restore; normal successful completion disables automatic recovery.
+Explicit start remains available for stopped or completed workloads. The Proxy
+projects App status from Agent events and does not run a second App supervisor.
+The CLI uses `treer agent start/stop/restart/read` for both kinds;
+`treer app` lifecycle commands and `treer agent admin` remain compatibility paths.
 
 Managed Apps do not install packages, inject secrets, migrate App-owned data,
 or create a security boundary. Mail stores a local cookie-to-App-token mapping.
@@ -204,16 +223,26 @@ of the protocol-v4 baseline.
 Automatic mode starts the Host as a detached `nohup` process on Linux and
 macOS. Treer records the PID and process start identity and redirects output to
 its state directory so lifecycle commands can reject reused PIDs and manage the
-correct Host. Ordinary Agents save a resolved launch snapshot before process creation,
+correct Host. Both Agent and App workloads save a resolved launch snapshot before process creation,
 including stable Agent ID, argv, cwd, dimensions, credential, and desired state.
 Restore validates identity and durable stopped intent with the Proxy, synchronizes
 Host inventory, attaches surviving processes, and launches missing ones at most
-once per Host epoch. Manual restore can retry a failed start. Managed Apps use
-the existing Proxy desired-state reconciler and are excluded from Agent startup
-snapshots to avoid two competing process owners. Stop disables recovery in Proxy
+once per Host epoch. Manual restore can retry a failed start. The Controller
+alone owns recovery; enabled Apps retry exited processes on its five-second
+heartbeat. The Proxy supplies legacy launch declarations on reconnect and
+retains service metadata, without running a second process supervisor.
+Stop disables recovery in Proxy
 state before forwarding to the Controller; deletion/revocation prevents replay.
 A normal successful Agent exit disables its snapshot. Abnormal termination is
 recoverable after a new Host epoch or explicit restore, not an unbounded restart loop.
+
+The workspace workload tree stores folders and placements in PostgreSQL.
+Agents and Apps share the same tree and lifecycle endpoints. Folder mutations
+serialize against the workspace row, validate parents and cycles, and require
+current workspace membership. Placement IDs must belong to active credentials
+in that workspace. Deleting a folder promotes its children to its parent (or
+the workspace root); placement order is preserved. Organizing the tree does
+not change filesystem paths, machine ownership, process identity, or Policy.
 
 `treer-agent-server restore --workspace ID` starts a saved machine installation
 without re-enrollment, then reconciles it. `treer runtime restore --all` handles

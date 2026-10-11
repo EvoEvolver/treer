@@ -67,7 +67,8 @@ treer app create --machine build-machine --name docs --port 8080 \
 treer app create --public --machine build-machine --name public-docs --port 8081 \
   python3 -- -m http.server 8081
 treer app list
-treer app restart docs
+treer agent restart docs
+treer agent read docs --lines 80
 ```
 
 When wildcard ingress is configured, every Managed App receives a stable
@@ -551,15 +552,26 @@ public wildcard ingress, and traffic accounting. It writes a release manifest;
 Production accepts only that manifest through `just promote-production`. See
 [the release process](releases.md) and [Canary runbook](canary.md).
 
-Open the App URL to discover servers, create agents, and attach to
-their live terminals. The browser terminal supports ANSI colors, alternate
+Open the App URL to create Agents and manage Agents and Apps together in the
+workspace's Workloads tree. Each row offers Start, Stop, Restart, and Logs;
+App rows also offer App settings for access controls and the service URL.
+Use New folder to organize workloads into nested folders. Drag a workload or
+folder onto another folder, or use its Move to folder action to select a
+destination with a keyboard or touch screen. Drop onto Workspace root to move
+an item out of its folder. Folder names and placements persist for that
+workspace across reloads and devices. A folder cannot be moved into itself or
+one of its descendants; deleting a folder moves its contents to its parent
+(the workspace root for a top-level folder). These actions organize the control-plane view without moving processes,
+working directories, or files. Machines remain available in Workspace settings.
+
+The browser terminal supports ANSI colors, alternate
 screens, cursor movement, per-keystroke input, paste, and dynamic resize. PTY
 input, replay, and live output remain raw bytes from the Host through the
 Controller and Proxy to the browser. The Host socket uses length-prefixed binary
 frames, and both WebSocket hops use binary frames instead of Base64 JSON payloads.
-On mobile, the workspace opens on the machine and Agent lists without mounting
-a terminal. Selecting an Agent opens its terminal directly in full-screen mode;
-closing it returns to those lists.
+On mobile, the workspace opens on the Workloads tree without mounting a
+terminal. Selecting a workload opens its terminal or Agent Interface directly
+in full-screen mode; closing it returns to the tree.
 Agents inherit `TREER_WORKSPACE_ID`,
 `TREER_SERVER_ID`, `TREER_AGENT_ID`, `TREER_AGENT_SERVER_URL`, and a private
 workload credential; they can use the local agent server API to discover or
@@ -721,20 +733,18 @@ treer-agent-server restore --workspace WORKSPACE_ID
 treer runtime restore --all
 ```
 
-If a machine restarts immediately after creating an App, recovery waits out the
-15-second launch grace period and rechecks persisted intent without requiring
-another machine event or a second manual command. An App stopped during that
-wait remains stopped.
-
-Recovery reuses the existing installation without re-enrollment. Ordinary
-Agents save their actual launch snapshot before spawning. The Controller first
+Recovery reuses the existing installation without re-enrollment. Agents and
+Apps save their actual launch snapshot before spawning. The Controller first
 checks Host inventory, so a hot restart or repeated restore attaches surviving
 processes. Missing intended-running processes restart under their stable Agent
 ID after Proxy credential validation. Explicitly stopped/deleted/revoked items
 stay stopped. Normal successful Agent exit disables recovery; failed launches
-can be retried explicitly. Managed Apps are restored by their existing Proxy
-reconciler, not a duplicate local Agent snapshot. Service registrations and
-public mappings persist independently of process availability.
+can be retried explicitly. One Controller restore path owns process recovery
+for both Agents and Apps. On reconnect the Proxy can declare a legacy App's
+launch specification, but it does not run a competing process-restarter.
+Restart and recovery preserve the Agent ID; a new run generation identifies
+each replacement process. Service registrations and public mappings persist
+independently of process availability.
 
 A restore report distinguishes attached, started, skipped stopped, revoked,
 failed, and waiting endpoints. An unavailable executable, missing directory,
@@ -759,6 +769,9 @@ treer whoami
 treer status
 treer agent list
 treer agent show reviewer
+treer agent start reviewer
+treer agent stop reviewer
+treer agent restart reviewer
 treer agent admin rename reviewer code-reviewer
 treer machine rename self build-machine
 treer machine delete srv_obsolete
@@ -771,6 +784,11 @@ treer agent read reviewer --lines 80
 treer agent transcript reviewer --page 0
 treer agent send-keys reviewer ctrl-c
 ```
+
+The same `treer agent start`, `stop`, `restart`, and `read` commands accept App
+names or their stable Agent IDs. Restart retains the Agent ID and increments
+its run generation to identify the new process. App-specific deployment,
+service, access, and configuration commands remain under `treer app`.
 
 For a provider that runs outside the Host, launch a command-owned bridge:
 

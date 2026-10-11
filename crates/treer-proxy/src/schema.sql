@@ -330,6 +330,24 @@ CREATE INDEX IF NOT EXISTS agent_credentials_workspace_server
     ON agent_credentials(workspace_id, server_id) WHERE revoked_at IS NULL;
 ALTER TABLE agent_credentials ADD COLUMN IF NOT EXISTS recovery_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
+-- Workspace presentation metadata only; these folders have no filesystem effects.
+CREATE TABLE IF NOT EXISTS workload_folders (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    folder_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    parent_id TEXT,
+    PRIMARY KEY (workspace_id, folder_id),
+    FOREIGN KEY (workspace_id, parent_id) REFERENCES workload_folders(workspace_id, folder_id)
+);
+CREATE TABLE IF NOT EXISTS workload_placements (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agent_credentials(agent_id) ON DELETE CASCADE,
+    folder_id TEXT,
+    position BIGINT NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (workspace_id, agent_id),
+    FOREIGN KEY (workspace_id, folder_id) REFERENCES workload_folders(workspace_id, folder_id)
+);
+
 CREATE TABLE IF NOT EXISTS machine_names (
     server_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

@@ -1,5 +1,27 @@
 use super::*;
 
+// Reserve database capacity before opening a lifecycle lock transaction. Its
+// caller performs queries while holding that transaction, so allowing every
+// pool connection to become a lock holder or waiter would deadlock small pools.
+static LIFECYCLE_MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) struct WorkloadLifecycleGuard<'a> {
+    transaction: Transaction<'a, Postgres>,
+    local_guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl WorkloadLifecycleGuard<'_> {
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        let Self {
+            transaction,
+            local_guard,
+        } = self;
+        let result = transaction.commit().await;
+        drop(local_guard);
+        result
+    }
+}
+
 impl AuthStore {
     pub async fn list_agent_launch_profiles(
         &self,
@@ -321,8 +343,9 @@ impl AuthStore {
             updated_by: actor.to_string(),
         };
         let hostname = platform_service_hostname(&service.service_id, "internal")?;
+        let app_id = format!("app_{}", Uuid::new_v4().simple());
         let deployment = AppDeployment {
-            app_id: format!("app_{}", Uuid::new_v4().simple()),
+            app_id: app_id.clone(),
             workspace_id: workspace_id.to_string(),
             name,
             server_id,
@@ -335,7 +358,7 @@ impl AuthStore {
             public_url: None,
             access: None,
             desired_state: AppDesiredState::Running,
-            runtime_agent_id: None,
+            runtime_agent_id: Some(app_id),
             restart_count: 0,
             status: AppDeploymentStatus::Pending,
             pid: None,
@@ -381,7 +404,7 @@ impl AuthStore {
             "INSERT INTO app_deployments(app_id, workspace_id, name, server_id, command, args, cwd, \
              port, hostname, service_id, desired_state, runtime_agent_id, restart_count, last_error, \
              created_at, created_by, updated_at, updated_by) \
-             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', NULL, 0, NULL, $11, $12, $13, $14)",
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $1, 0, NULL, $11, $12, $13, $14)",
         )
         .bind(&deployment.app_id)
         .bind(&deployment.workspace_id)
@@ -412,34 +435,35 @@ impl AuthStore {
         Ok(deployment)
     }
 
-    pub async fn claim_app_runtime(
+    /// Legacy deployments retain active identities. Old stop implementations
+    /// revoked and tombstoned their runtime ID; migrate those once to the
+    /// canonical App ID without reviving the revoked identity.
+    pub async fn bind_app_workload(
         &self,
         workspace_id: &str,
         app_id: &str,
-        expected_runtime_agent_id: Option<&str>,
-        runtime_agent_id: &str,
-        actor: &str,
-    ) -> Result<Option<AppDeployment>, AuthFailure> {
-        let row = sqlx::query(
-            "UPDATE app_deployments SET runtime_agent_id = $1, \
-             restart_count = restart_count + CASE WHEN runtime_agent_id IS NULL THEN 0 ELSE 1 END, \
-             last_error = NULL, updated_at = $2, updated_by = $3 \
-             WHERE workspace_id = $4 AND app_id = $5 AND desired_state = 'running' \
-             AND runtime_agent_id IS NOT DISTINCT FROM $6 \
-             RETURNING app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
-             service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by",
-        )
-        .bind(runtime_agent_id)
-        .bind(Utc::now().to_rfc3339())
-        .bind(actor)
-        .bind(workspace_id)
-        .bind(app_id)
-        .bind(expected_runtime_agent_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        row.map(app_deployment_from_row).transpose()
+    ) -> Result<AppDeployment, AuthFailure> {
+        sqlx::query("UPDATE app_deployments app SET runtime_agent_id = app_id WHERE workspace_id = $1 AND app_id = $2 AND (runtime_agent_id IS NULL OR (runtime_agent_id <> app_id AND EXISTS (SELECT 1 FROM agent_credentials a WHERE a.agent_id=app.runtime_agent_id AND a.workspace_id=app.workspace_id AND a.server_id=app.server_id AND a.revoked_at IS NOT NULL)))")
+            .bind(workspace_id).bind(app_id).execute(&self.pool).await.map_err(AuthFailure::database)?;
+        self.resolve_app_deployment(workspace_id, app_id).await
+    }
+
+    pub async fn workload_lifecycle_guard(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+    ) -> Result<WorkloadLifecycleGuard<'_>, AuthFailure> {
+        let local_guard = LIFECYCLE_MUTATIONS.lock().await;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("treer:workload:{workspace_id}:{agent_id}"))
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        Ok(WorkloadLifecycleGuard {
+            transaction,
+            local_guard,
+        })
     }
 
     pub async fn set_app_desired_state(

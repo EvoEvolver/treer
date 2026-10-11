@@ -356,6 +356,12 @@ enum MessageCommand {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
+    #[command(about = "Start an Agent or App from its saved launch")]
+    Start { target: String },
+    #[command(about = "Stop an Agent or App")]
+    Stop { target: String },
+    #[command(about = "Restart an Agent or App preserving its identity")]
+    Restart { target: String },
     #[command(about = "List agents in the current workspace")]
     List,
     #[command(about = "Show one agent by unique name or id")]
@@ -437,6 +443,12 @@ enum AgentStartupCommand {
 
 #[derive(Debug, Subcommand)]
 enum AgentAdminCommand {
+    Start {
+        target: String,
+    },
+    Restart {
+        target: String,
+    },
     #[command(about = "Create an agent")]
     Create {
         #[arg(long)]
@@ -463,11 +475,18 @@ enum AgentAdminCommand {
         args: Vec<String>,
     },
     #[command(about = "Rename an agent")]
-    Rename { target: String, name: String },
+    Rename {
+        target: String,
+        name: String,
+    },
     #[command(about = "Stop an agent")]
-    Stop { target: String },
+    Stop {
+        target: String,
+    },
     #[command(about = "Stop and permanently remove an agent")]
-    Delete { target: String },
+    Delete {
+        target: String,
+    },
     #[command(about = "Manage reusable Agent launch profiles")]
     Profile {
         #[command(subcommand)]
@@ -1143,6 +1162,9 @@ async fn app_action(client: &ApiClient, target: &str, action: &str) -> anyhow::R
 
 async fn run_agent_command(client: &ApiClient, command: AgentCommand) -> anyhow::Result<Value> {
     match command {
+        AgentCommand::Start { target } => lifecycle_agent(client, &target, "start").await,
+        AgentCommand::Stop { target } => stop_agent(client, &target).await,
+        AgentCommand::Restart { target } => lifecycle_agent(client, &target, "restart").await,
         AgentCommand::List => client.value(Method::GET, "api/agents", None).await,
         AgentCommand::Show { target } => {
             Ok(serde_json::to_value(client.get_agent(&target).await?)?)
@@ -1220,6 +1242,8 @@ async fn run_agent_admin_command(
     command: AgentAdminCommand,
 ) -> anyhow::Result<Value> {
     match command {
+        AgentAdminCommand::Start { target } => lifecycle_agent(client, &target, "start").await,
+        AgentAdminCommand::Restart { target } => lifecycle_agent(client, &target, "restart").await,
         AgentAdminCommand::Create {
             machine,
             kind,
@@ -1259,6 +1283,17 @@ async fn run_agent_admin_command(
         AgentAdminCommand::Delete { target } => delete_agent(client, &target).await,
         AgentAdminCommand::Profile { command } => run_profile_command(client, command).await,
     }
+}
+
+async fn lifecycle_agent(client: &ApiClient, target: &str, action: &str) -> anyhow::Result<Value> {
+    let target = normalize_target(target)?;
+    client
+        .value(
+            Method::POST,
+            &format!("api/agents/{}/{action}", path_segment(&target)),
+            Some(json!({})),
+        )
+        .await
 }
 
 async fn run_message_command(client: &ApiClient, command: MessageCommand) -> anyhow::Result<Value> {
@@ -2297,6 +2332,12 @@ mod tests {
 
     #[test]
     fn agent_admin_commands_parse() {
+        for action in ["start", "stop", "restart"] {
+            Args::try_parse_from(["treer", "agent", action, "workload"])
+                .expect("unified lifecycle parses");
+            Args::try_parse_from(["treer", "agent", "admin", action, "workload"])
+                .expect("admin compatibility parses");
+        }
         let create = Args::try_parse_from([
             "treer",
             "agent",
