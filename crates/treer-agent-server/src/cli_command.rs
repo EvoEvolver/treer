@@ -291,7 +291,7 @@ enum MessageCommand {
         context_ids: Vec<String>,
         #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
-        #[arg(long, value_name = "PATH", conflicts_with = "body")]
+        #[arg(long, value_name = "PATH", conflicts_with = "body", hide = true)]
         body_file: Option<PathBuf>,
         #[arg(long)]
         idempotency_key: Option<String>,
@@ -313,7 +313,7 @@ enum MessageCommand {
         additional_context_ids: Vec<String>,
         #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
-        #[arg(long, value_name = "PATH", conflicts_with = "body")]
+        #[arg(long, value_name = "PATH", conflicts_with = "body", hide = true)]
         body_file: Option<PathBuf>,
         #[arg(long)]
         idempotency_key: Option<String>,
@@ -347,7 +347,7 @@ enum MessageCommand {
     Import {
         #[arg(long, default_value = "legacy-mail-v1")]
         format: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", hide = true)]
         body_file: Option<PathBuf>,
         #[arg(long)]
         operation_id: Option<String>,
@@ -642,7 +642,10 @@ impl ApiClient {
             None
         };
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("local API client"),
             base,
             source_agent_id,
             workload_credential,
@@ -675,19 +678,24 @@ impl ApiClient {
         }
         let response = request.send().await.context("request failed")?;
         let status = response.status();
-        let value: Value = response.json().await.context("invalid JSON response")?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to read API response")?;
         if !status.is_success() {
-            let failure = serde_json::from_value::<ApiError>(value)
+            let failure = serde_json::from_slice::<ApiError>(&bytes)
                 .map(|error| CliFailure {
                     code: error.error.code,
                     message: error.error.message,
                 })
                 .unwrap_or_else(|_| CliFailure {
                     code: "invalid_api_error".to_string(),
-                    message: format!("Treer API returned {status}"),
+                    message: format!("Treer API returned {status} without a valid JSON error"),
                 });
             return Err(failure.into());
         }
+        let value: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("Treer API returned {status} with invalid JSON"))?;
         serde_json::from_value(value).context("unexpected API response")
     }
 
@@ -808,18 +816,20 @@ async fn run_cli() -> anyhow::Result<()> {
         &command,
         Command::Message {
             command: MessageCommand::Send {
-                body_file: Some(_),
+                body_file: Some(path),
                 ..
             } | MessageCommand::Reply {
-                body_file: Some(_),
+                body_file: Some(path),
                 ..
             } | MessageCommand::Import {
-                body_file: Some(_),
+                body_file: Some(path),
                 ..
             }
-        }
+        } if path.as_os_str() != "-"
     ) {
-        bail!("--body-file is no longer supported; pipe the body to stdin instead");
+        bail!(
+            "client-local files cannot be read by the Controller; pipe the body to stdin instead"
+        );
     }
     if let Command::Network {
         command: NetworkCommand::Connect { host, port },
@@ -877,7 +887,7 @@ async fn run_cli() -> anyhow::Result<()> {
                     client
                         .value(
                             Method::POST,
-                            "api/ingresses",
+                            "api/publish",
                             Some(json!({"service_id":service,"access":access})),
                         )
                         .await?
@@ -902,7 +912,7 @@ async fn run_cli() -> anyhow::Result<()> {
                         )
                         .await?
                 } else {
-                    let value = client.value(Method::GET, "api/ingresses", None).await?;
+                    let value = client.value(Method::GET, "api/publish", None).await?;
                     let ingresses = value
                         .get("ingresses")
                         .and_then(Value::as_array)
@@ -918,7 +928,7 @@ async fn run_cli() -> anyhow::Result<()> {
                         client
                             .value(
                                 Method::DELETE,
-                                &format!("api/ingresses/{}", path_segment(id)),
+                                &format!("api/publish/{}", path_segment(id)),
                                 None,
                             )
                             .await?;
@@ -1010,8 +1020,10 @@ async fn whoami(client: &ApiClient) -> anyhow::Result<Value> {
 
 async fn status(client: &ApiClient) -> anyhow::Result<Value> {
     let snapshot: WorkspaceSnapshot = client.request(Method::GET, "api/discovery", None).await?;
-    let agent_id = std::env::var("TREER_AGENT_ID").ok();
-    let server_id = std::env::var("TREER_SERVER_ID").ok();
+    let agent_id = client.source_agent_id.clone();
+    let server_id = agent_id
+        .as_ref()
+        .and_then(|_| std::env::var("TREER_SERVER_ID").ok());
     discovery_value(snapshot, agent_id.as_deref(), server_id.as_deref())
 }
 
@@ -1400,7 +1412,7 @@ fn read_message_body(body: Option<String>, body_file: Option<PathBuf>) -> anyhow
         (Some(body), None) => Ok(body),
         (None, Some(path)) => read_text_file_or_stdin(&path),
         (None, None) if !std::io::stdin().is_terminal() => read_stdin_text(),
-        (None, None) => bail!("message body is required through --body, --body-file, or stdin"),
+        (None, None) => bail!("message body is required through --body or piped stdin"),
         (Some(_), Some(_)) => bail!("--body and --body-file cannot be used together"),
     }
 }
@@ -1573,12 +1585,16 @@ async fn run_profile_command(client: &ApiClient, command: ProfileCommand) -> any
             cwd,
         } => {
             let target = normalize_target(&target)?;
+            let server_id = match machine {
+                Some(machine) => Some(resolve_machine(client, &machine).await?.server_id),
+                None => None,
+            };
             client
                 .value(
                     Method::POST,
                     &format!("api/launch-profiles/{}/launch", path_segment(&target)),
                     Some(serde_json::to_value(LaunchAgentProfileRequest {
-                        server_id: machine,
+                        server_id,
                         agent_name: name,
                         cwd,
                         cols: 120,

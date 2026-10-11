@@ -154,7 +154,8 @@ so the full path stays inside `sockaddr_un` limits on macOS, where the default
 runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy. Registered service connections are multiplexed
 onto the destination Controller link, including cross-Proxy NATS routing. There
-is no source-side transparent interception or ordinary internet egress routing.
+is no source-side transparent interception. Explicit per-workload HTTP proxy
+entries can relay ordinary internet HTTP/HTTPS directly from the source machine.
 
 Machine exec and file upload reuse the authenticated Proxy-to-Controller
 command path. Exec is a non-interactive argv vector with a 30-second ceiling
@@ -237,9 +238,48 @@ The Controller opens only the endpoint named by an authenticated Proxy service
 request. TCP Data, WindowUpdate, HalfClose, and Reset preserve binary data,
 backpressure, and independent EOF. Disconnect cancels streams; transport epochs
 reject stale queued frames. Datagram, Direct, and source Open frames are retired.
-Neither OS DNS nor proxy environment variables are changed. A registered host
+OS DNS is unchanged. A registered host
 must be reachable from the Controller; external containers supply their own
 port mapping or reachable address.
+
+Each newly launched managed Agent or App runtime gets its own loopback HTTP
+proxy listener, owned by the Controller. Its port fixes the source Agent ID;
+callers cannot select an identity with request headers. Standard `http_proxy`,
+`https_proxy` (and uppercase equivalents), `no_proxy`, and `TREER_HTTP_PROXY`
+are injected into the process and inherited by its children. Loopback bypasses
+the proxy by default. This is explicit client cooperation, not network capture.
+
+`http://SERVICE_ID.treer/path` or `http://NAME.treer/path` is a proxy-only address
+for a registered service. Names are workspace-scoped and case-insensitive; use
+1-63 ASCII letters/digits with optional internal hyphens for a name address.
+Other display names remain accessible by ID. Names are resolved on each new
+request/CONNECT, without a name cache. HTTP uses the canonical token audience
+as its connect target, so a concurrent rename cannot separate identity from
+the destination. CONNECT resolves names before applying Policy to the stable ID.
+The proxy obtains a fresh service-audience identity token for each HTTP request,
+then opens the existing authenticated service stream. It injects
+`X-Treer-Identity-Token` and, if the caller supplied no application Authorization,
+`Authorization: Bearer ...`. Existing application Authorization is preserved.
+Calls from the entry and thin CLI to the local API bypass environment proxies;
+the workload credential travels only to the local API, never to the destination service.
+No new public API, custom host, or OS DNS record is needed.
+
+Other HTTP destinations connect directly without Treer token injection.
+CONNECT supports ordinary HTTPS and native TCP protocols, including SSH; a
+`SERVICE_ID.treer` or `NAME.treer` CONNECT target uses the registered endpoint
+regardless of the authority's port. Treer authenticates the stream, but cannot insert HTTP
+headers inside TLS or replace SSH authentication. WebSocket upgrades and
+streaming bodies pass through. A public App's HTTPS URL remains ordinary opaque
+CONNECT traffic; use its service ID address for automatic HTTP identity.
+
+Host process metadata stores the listener port alongside the workload identity.
+Controller replacement rebinds that same port for surviving processes; a bind
+conflict fails explicitly. Cold recovery launches with a freshly allocated
+entry and new inherited environment. Stop/exit removes the listener and cancels
+its connections. A running process created by an older Controller has no proxy
+metadata/environment and must be relaunched to opt in. User-owned isolated or
+externally supervised workloads must arrange proxy reachability/configuration
+themselves; loopback in a separate network namespace denotes a different host.
 
 The thin CLI sends raw argv and streams to authenticated `/api/cli/session`.
 The Controller runs its parser in a bounded child invocation with caller-specific

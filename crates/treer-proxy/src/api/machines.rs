@@ -274,14 +274,6 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "treer: unsupported platform $(uname -s)/$(uname -m)" >&2; exit 1 ;;
 esac
 
-case "$platform" in
-  linux-*)
-    if ! command -v unshare >/dev/null 2>&1; then
-      echo "treer: warning: transparent agent networking requires unshare(1) from util-linux" >&2
-    fi
-    ;;
-esac
-
 if command -v curl >/dev/null 2>&1; then
   fetch() {{ curl -fsSL "$1" -o "$2"; }}
 elif command -v wget >/dev/null 2>&1; then

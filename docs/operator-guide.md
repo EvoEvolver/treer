@@ -183,6 +183,17 @@ credential, create workspace configuration, register a service, or start a
 process. Override `TREER_INSTALL_DIR` or `TREER_AGENT_SERVER_INSTALL_DIR` when
 needed.
 
+Linux nohup startup requires a POSIX shell, coreutils, hostname, and `ps`
+from procps (Debian/Ubuntu: `apt-get install coreutils hostname procps`).
+`connect` checks startup dependencies before consuming its enrollment key.
+It does not require unshare or transparent-network tools.
+
+The CLI discovers local Controller configurations by their saved workspace and
+installation hostname. A single local installation needs no connection flags;
+use `treer --workspace WORKSPACE_ID …` when several workspaces are installed.
+Multiple matches require an explicit `--url` as well. Explicit Agent credentials
+never fall back to an installed operator credential.
+
 The separate connection command contains a 10-minute, single-use enrollment key:
 
 ```bash
@@ -600,8 +611,10 @@ Controller, which owns parsing, help, skills, and all command business logic.
 ## Workspace network
 
 Treer forwards explicitly registered TCP/HTTP endpoints. It does not capture
-outbound traffic, create network namespaces, change OS DNS, or inject proxy
-variables. Default network mode is `plain`. Old saved `transparent`,
+outbound traffic, create network namespaces, or change OS DNS. Newly launched
+managed Agents and Apps receive independent explicit HTTP proxy entries and
+standard proxy environment variables. Default network mode is `plain`; this
+does not enable transparent interception. Old saved `transparent`,
 `proxy-env`, and `native-experimental` settings fail with a migration message.
 After replacing dependencies on transparent routing, persist the mode with
 `TREER_NETWORK_MODE=plain treer-agent-server service --workspace WORKSPACE_ID repair`,
@@ -690,6 +703,11 @@ treer-agent-server restore --workspace WORKSPACE_ID
 # With an already-running Controller:
 treer runtime restore --all
 ```
+
+If a machine restarts immediately after creating an App, recovery waits out the
+15-second launch grace period and rechecks persisted intent without requiring
+another machine event or a second manual command. An App stopped during that
+wait remains stopped.
 
 Recovery reuses the existing installation without re-enrollment. Ordinary
 Agents save their actual launch snapshot before spawning. The Controller first
@@ -799,11 +817,10 @@ treer message list --limit 50
 printf '%s\n' 'Review is ready.' | \
   treer message send \
     --to coordinator \
-    --idempotency-key review-42-ready \
-    --body-file -
+    --idempotency-key review-42-ready
 
 printf '%s\n' 'I addressed the comments.' | \
-  treer message reply <message-id> --to sender --body-file -
+  treer message reply <message-id> --to sender
 
 treer message ack <delivery-id> --operation-id ack-review-42
 ```
@@ -851,7 +868,46 @@ account, container, VM, or stronger sandbox whenever its code is not trusted.
 
 ## Workload identity
 
-A managed Agent can request a short-lived Proxy-signed Bearer token for a
+New managed Agents and Apps automatically inherit a dedicated `http_proxy` /
+`https_proxy` entry. Use the service name or stable ID from `treer service list`
+as a proxy-only address; ordinary HTTP clients such as curl and Python urllib
+need no token code:
+
+```bash
+treer service register --name paper --protocol http --port 3000
+curl http://paper.treer/path
+# Stable-ID addresses also work:
+curl http://svc_YOUR_SERVICE_ID.treer/path
+python3 -c 'import urllib.request; print(urllib.request.urlopen("http://svc_YOUR_SERVICE_ID.treer/path").read())'
+```
+
+Names are unique within the workspace and resolved case-insensitively for each
+new request, so renaming immediately changes the name address; ID addresses keep
+working. Name addresses accept 1-63 ASCII letters/digits and internal hyphens.
+Use ID addresses for display names with spaces, Unicode, dots, or underscores.
+Replace the entire `svc_YOUR_SERVICE_ID` with the actual service ID. The proxy
+signs each request with that entry's Agent identity and the service audience.
+The destination receives `X-Treer-Identity-Token`, plus Bearer Authorization
+when the caller has not supplied its own application Authorization. It can
+verify the token with the endpoint below. Tokens are not injected into unrelated
+internet requests. Ports in `.treer` URLs do not override the registered endpoint.
+
+Loopback is in `no_proxy` by default; inherited bypass entries are retained.
+CONNECT also accepts `NAME.treer`, with the same workspace-scoped resolution.
+Clients that ignore proxy environment variables must explicitly use
+`TREER_HTTP_PROXY` or an explicit `treer service forward`. HTTPS CONNECT and
+CONNECT to registered TCP services work without TLS interception; they do not
+receive an injected HTTP token. For SSH, an installed HTTP CONNECT client may be
+used as `ProxyCommand`, or forward the registered SSH service to a local port
+and run ordinary SSH there. SSH keys and host-key checking remain SSH's job.
+
+Hot Controller restart reuses the entry port for surviving processes. Cold
+restore recreates entries and injects their addresses into restarted processes.
+Stop/exit closes the entry and its connections. Older already-running processes
+need relaunching to receive the new environment. These loopback entries are
+shared-machine conveniences, not access boundaries against other local code.
+
+A managed Agent can also request a short-lived Proxy-signed Bearer token for a
 registered machine service. The audience accepts a service ID or unique service
 name and is canonicalized to the stable `service_id`:
 
@@ -872,9 +928,9 @@ tokens locally, or submit a token and expected service ID to
 ```
 
 The verify endpoint returns `{"active":false}` for an invalid, expired, or
-wrong-audience token. Treer does not inject these credentials into network
-traffic; the Agent and target application explicitly participate in the
-authentication exchange.
+wrong-audience token. Manual tokens are useful for clients that do not use the
+managed HTTP entry. The proxy handles token acquisition for cooperating HTTP
+clients; receiving services still verify identity if their application needs it.
 
 On the machine running an Agent Server, `treer agent attach <target>` opens the
 agent's live PTY in the current native terminal. Input, colors, cursor control,

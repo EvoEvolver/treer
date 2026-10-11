@@ -119,10 +119,17 @@ async fn service_connect(
         .await
         .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
     if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-        return Err(LocalApiError::bad_gateway(format!(
-            "service connection denied: {}",
-            response.status()
-        )));
+        return Err(LocalApiError {
+            status: if response.status().is_client_error() || response.status().is_server_error() {
+                response.status()
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            error: ProtocolError::new(
+                "service_connection_denied",
+                "service connection denied or unavailable",
+            ),
+        });
     }
     let remote = response
         .upgrade()
@@ -149,9 +156,10 @@ async fn cli_session(
     ws: WebSocketUpgrade,
 ) -> Result<Response, LocalApiError> {
     let agent = validated_source_agent(&state, &headers)?;
-    let mut identity = match agent {
+    let identity = match agent {
         Some(agent) => vec![
             ("TREER_AGENT_ID".into(), agent.agent_id),
+            ("TREER_SERVER_ID".into(), state.server_id.clone()),
             (
                 "TREER_WORKLOAD_CREDENTIAL".into(),
                 agent.workload_credential,
@@ -166,7 +174,6 @@ async fn cli_session(
                 .to_owned(),
         )],
     };
-    identity.push(("TREER_SERVER_ID".into(), state.server_id.clone()));
     let base = state.runtime.agent_server_url().to_owned();
     Ok(ws.on_upgrade(move |socket| {
         crate::cli_session::serve(socket, base, state.workspace_id, identity)

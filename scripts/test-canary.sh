@@ -16,8 +16,6 @@ machine_a_service=${TREER_CANARY_MACHINE_A_SERVICE:-461c12b4-0333-46e3-b757-b022
 machine_b_service=${TREER_CANARY_MACHINE_B_SERVICE:-1a3d759e-02db-45a8-b68c-a2d2c45e1800}
 machine_a=${TREER_CANARY_MACHINE_A_NAME:-canary-a-20260820022530-70983}
 machine_b=${TREER_CANARY_MACHINE_B_NAME:-canary-b-20260820022530-70983}
-hostname="service-$run_id.internal"
-slug="canary-$run_id"
 workspace_id=canary-e2e
 test_email=canary-tester@treer.invalid
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/treer-canary.XXXXXX")
@@ -26,7 +24,6 @@ user_cookies="$tmp_dir/user.cookies"
 agent_ids=
 treer_service_id=
 ingress_id=
-virtual_host_created=0
 
 command -v railway >/dev/null 2>&1 || { echo "railway CLI is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
@@ -73,9 +70,6 @@ cleanup() {
         done
         if [ -n "$ingress_id" ]; then
             api DELETE "/api/workspaces/$workspace_id/ingresses/$ingress_id" >/dev/null 2>&1
-        fi
-        if [ "$virtual_host_created" = 1 ]; then
-            api DELETE "/api/workspaces/$workspace_id/virtual-hosts/$hostname" >/dev/null 2>&1
         fi
         if [ -n "$treer_service_id" ]; then
             api DELETE "/api/workspaces/$workspace_id/services/$treer_service_id" >/dev/null 2>&1
@@ -241,42 +235,50 @@ service_payload=$(jq -n --arg name "http-$run_id" --arg server_id "$server_b" \
 service_id=$(api POST "/api/workspaces/$workspace_id/services" "$service_payload" \
     | jq -er '.service.service_id')
 treer_service_id=$service_id
-host_payload=$(jq -n --arg hostname "$hostname" --arg service_id "$service_id" \
-    '{hostname: $hostname, service_id: $service_id}')
-api POST "/api/workspaces/$workspace_id/virtual-hosts" "$host_payload" >/dev/null
-virtual_host_created=1
 
 probe=$(api POST "/api/workspaces/$workspace_id/services/$service_id/probe")
 printf '%s' "$probe" | jq -e '.health.healthy == true' >/dev/null
 sleep 5
 
-virtual_success=0
-virtual_output=
+forward_success=0
+forward_output=
+forward_command='
+treer service forward "$1" --listen 127.0.0.1:18081 >/dev/null 2>/tmp/treer-canary-forward.log &
+bridge=$!
+trap '\''kill "$bridge" 2>/dev/null || true'\'' EXIT HUP INT TERM
+for retry in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS --max-time 3 http://127.0.0.1:18081/ 2>/dev/null; then
+        exit 0
+    fi
+    sleep 1
+done
+exit 1
+'
 for attempt in 1 2 3; do
     agent_payload=$(jq -n --arg server_id "$server_a" --arg name "network-$run_id-$attempt" \
-        --arg url "http://$hostname/" \
-        '{server_id: $server_id, kind: "command", name: $name, cwd: "", args: ["curl", "-fsS", "--max-time", "30", $url]}')
+        --arg service_id "$service_id" --arg command "$forward_command" \
+        '{server_id: $server_id, kind: "command", name: $name, cwd: "", args: ["sh", "-c", $command, "treer-canary-forward", $service_id]}')
     agent_id=$(api POST "/api/workspaces/$workspace_id/agents" "$agent_payload" | jq -er '.agent_id')
     agent_ids="$agent_ids $agent_id"
     deadline=$(( $(date +%s) + 45 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        virtual_output=$(api GET "/api/workspaces/$workspace_id/agents/$agent_id/output?lines=100" \
+        forward_output=$(api GET "/api/workspaces/$workspace_id/agents/$agent_id/output?lines=100" \
             | jq -r '.text')
-        if printf '%s' "$virtual_output" | jq -e --arg machine "$machine_b" \
+        if printf '%s' "$forward_output" | jq -e --arg machine "$machine_b" \
             'select(.machine == $machine and .service == "treer-canary")' >/dev/null 2>&1; then
-            virtual_success=1
+            forward_success=1
             break
         fi
         sleep 2
     done
-    [ "$virtual_success" = 1 ] && break
+    [ "$forward_success" = 1 ] && break
     sleep 5
 done
-if [ "$virtual_success" != 1 ]; then
-    printf 'Virtual network output did not match the target machine: %s\n' "$virtual_output" >&2
+if [ "$forward_success" != 1 ]; then
+    printf 'Service forward output did not match the target machine: %s\n' "$forward_output" >&2
     exit 1
 fi
-echo "Virtual network: passed ($machine_a -> $machine_b)"
+echo "Explicit service forward: passed ($machine_a -> $machine_b)"
 
 sleep 12
 traffic=$(api GET "/api/workspaces/$workspace_id/traffic?hours=1")
@@ -290,8 +292,8 @@ if [ "$skip_public" = 1 ]; then
     exit 0
 fi
 
-ingress_payload=$(jq -n --arg service_id "$service_id" --arg slug "$slug" \
-    '{service_id: $service_id, slug: $slug, access: "public"}')
+ingress_payload=$(jq -n --arg service_id "$service_id" \
+    '{service_id: $service_id, access: "public"}')
 ingress=$(api POST "/api/workspaces/$workspace_id/ingresses" "$ingress_payload")
 ingress_id=$(printf '%s' "$ingress" | jq -er '.ingress.ingress_id')
 ingress_url=$(printf '%s' "$ingress" | jq -er '.ingress.url')

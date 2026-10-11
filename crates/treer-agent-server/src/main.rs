@@ -10,6 +10,7 @@ mod proxy;
 mod service;
 mod startup_store;
 mod tui;
+mod workload_proxy;
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::SocketAddr;

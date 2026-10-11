@@ -114,5 +114,5 @@ class Handler(http.server.BaseHTTPRequestHandler):
 http.server.ThreadingHTTPServer(("127.0.0.1", 8081), Handler).serve_forever()
 PY
 
-export TREER_NETWORK_MODE=${TREER_NETWORK_MODE:-proxy-env}
+export TREER_NETWORK_MODE=${TREER_NETWORK_MODE:-plain}
 exec "$bin_dir/treer-agent-host" run --config "$state_dir/host.json"

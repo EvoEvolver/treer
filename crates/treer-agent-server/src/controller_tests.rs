@@ -496,10 +496,12 @@ fn host_metadata_preserves_the_workload_credential_for_controller_restarts() {
         name: "agent-a".to_string(),
         cwd: ".".to_string(),
         workload_credential: "wlc_secret".to_string(),
+        http_proxy_port: Some(19001),
     };
     let encoded = serde_json::to_string(&metadata).expect("encode metadata");
     let restored: AgentMetadata = serde_json::from_str(&encoded).expect("restore metadata");
     assert_eq!(restored.workload_credential, "wlc_secret");
+    assert_eq!(restored.http_proxy_port, Some(19001));
 }
 
 #[test]

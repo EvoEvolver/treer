@@ -23,6 +23,7 @@ RUN apt-get update \
         libssl-dev \
         openssh-client \
         pkg-config \
+        procps \
         protobuf-compiler \
         python3 \
         ripgrep \
@@ -50,7 +51,7 @@ RUN case "${TARGETARCH:-amd64}" in \
 
 ENV HOME=/workspace \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
-    TREER_NETWORK_MODE=proxy-env
+    TREER_NETWORK_MODE=plain
 
 COPY entrypoint.sh /usr/local/bin/treer-canary-machine
 RUN chmod 0755 /usr/local/bin/treer-canary-machine \

@@ -23,6 +23,15 @@ with the Agent's existing Policy subject. Core rechecks Policy for every
 operation; process isolation, secrets, configuration, state, upgrades, and
 network access remain deployment concerns.
 
+New Managed App runtimes also inherit their own `http_proxy`/`https_proxy` entry.
+HTTP calls to `http://NAME.treer/` or `http://SERVICE_ID.treer/` automatically
+carry that runtime's service-audience identity; Apps need no token
+acquisition/refresh code. This is the backing runtime's Agent identity, separate
+from the durable App/service ID.
+See [workload identity](../docs/operator-guide.md#workload-identity) for headers,
+CONNECT, recovery, and the limits of shared-machine identity attribution.
+Externally supervised Apps configure their own identity/transport explicitly.
+
 Every standalone App follows the [App guidelines](GUIDELINES.md): `/` negotiates
 between an Agent-readable GitHub Flavored Markdown manual and the human HTML
 interface, while data pages remain JSON. Agent Interfaces such as Codex UI and

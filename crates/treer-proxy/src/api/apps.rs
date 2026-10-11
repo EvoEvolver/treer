@@ -623,10 +623,22 @@ pub(crate) async fn reconcile_app_deployments_for_server(
             return;
         }
     };
-    for app in apps {
+    for mut app in apps {
+        if let Err(error) = reconcile_one_app_deployment(&state, &auth, &mut app).await {
+            tracing::warn!(?error, app_id = %app.app_id, "failed to reconcile App runtime");
+        }
+    }
+}
+
+async fn reconcile_one_app_deployment(
+    state: &AppState,
+    auth: &AuthStore,
+    app: &mut AppDeployment,
+) -> Result<(), ApiFailure> {
+    loop {
         let runtime = if let Some(runtime_agent_id) = app.runtime_agent_id.as_deref() {
             state
-                .resolve_agent(&workspace_id, runtime_agent_id)
+                .resolve_agent(&app.workspace_id, runtime_agent_id)
                 .await
                 .ok()
         } else {
@@ -637,32 +649,41 @@ pub(crate) async fn reconcile_app_deployments_for_server(
                 .as_ref()
                 .is_some_and(|agent| !agent.status.is_terminal())
             {
-                if let Err(error) = stop_app_runtime(&state, &auth, &app).await {
-                    tracing::warn!(?error, app_id = %app.app_id, "failed to stop an undesired App runtime");
-                }
+                stop_app_runtime(state, auth, app).await?;
             }
-            continue;
+            return Ok(());
         }
         if runtime
             .as_ref()
             .is_some_and(|agent| !agent.status.is_terminal())
         {
-            continue;
+            return Ok(());
         }
-        let pending = runtime.is_none()
+        let grace_remaining = app.updated_at + chrono::Duration::seconds(15) - Utc::now();
+        if runtime.is_none()
             && app.runtime_agent_id.is_some()
-            && Utc::now().signed_duration_since(app.updated_at) < chrono::Duration::seconds(15);
-        if pending {
+            && grace_remaining > chrono::Duration::zero()
+        {
+            // A new launch may still be in flight. Recheck after its grace
+            // period even if this machine sends no further snapshots/events.
+            tokio::time::sleep(
+                grace_remaining
+                    .to_std()
+                    .unwrap_or_default()
+                    .min(std::time::Duration::from_secs(1)),
+            )
+            .await;
+            // Reload intent and runtime ownership: stop/delete/replacement may
+            // have happened while waiting. The launch claim remains atomic.
+            *app = auth
+                .resolve_app_deployment(&app.workspace_id, &app.app_id)
+                .await?;
             continue;
         }
         if app.runtime_agent_id.is_some() {
-            if let Err(error) = stop_app_runtime(&state, &auth, &app).await {
-                tracing::warn!(?error, app_id = %app.app_id, "failed to clean up the previous App runtime");
-                continue;
-            }
+            stop_app_runtime(state, auth, app).await?;
         }
-        if let Err(error) = launch_app_runtime(&state, &auth, &app, "reconciler").await {
-            tracing::warn!(?error, app_id = %app.app_id, "failed to reconcile App runtime");
-        }
+        launch_app_runtime(state, auth, app, "reconciler").await?;
+        return Ok(());
     }
 }

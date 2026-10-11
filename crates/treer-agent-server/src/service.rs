@@ -1753,12 +1753,31 @@ fn nohup_executable() -> std::ffi::OsString {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn require_nohup() -> Result<()> {
     let executable = nohup_executable();
+    require_executable(
+        &executable,
+        "install coreutils before connecting this machine",
+    )?;
+    require_executable(
+        OsStr::new("sh"),
+        "install a POSIX shell before connecting this machine",
+    )?;
+    process_started_at(std::process::id())?
+        .context("ps did not return this process's start identity; install procps on Linux before connecting this machine")?;
+    require_executable(
+        OsStr::new("kill"),
+        "install procps on Linux before connecting this machine",
+    )?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_executable(executable: &OsStr, hint: &str) -> Result<()> {
     let path = Path::new(&executable);
     if path.components().count() > 1 {
         if path.is_file() {
             return Ok(());
         }
-        bail!("nohup executable was not found at {}", path.display());
+        bail!("executable was not found at {}; {hint}", path.display());
     }
     let found = env::var_os("PATH").is_some_and(|value| {
         env::split_paths(&value)
@@ -1768,7 +1787,7 @@ fn require_nohup() -> Result<()> {
     if found {
         Ok(())
     } else {
-        bail!("nohup was not found on PATH; install coreutils before connecting this machine")
+        bail!("{} was not found on PATH; {hint}", path.display())
     }
 }
 
@@ -1811,7 +1830,7 @@ fn process_started_at(pid: u32) -> Result<Option<String>> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .output()
-        .context("failed to inspect the nohup Host process with ps")?;
+        .context("failed to inspect the nohup Host process with ps; install procps on Linux before connecting this machine")?;
     if !output.status.success() {
         return Ok(None);
     }

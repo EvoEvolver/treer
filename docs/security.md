@@ -89,6 +89,20 @@ This enables a caller-provided isolation boundary to expose only the Agent's
 identity. It does not protect credentials from another process under the same
 unisolated account, or from the machine owner.
 
+Each managed Agent/App HTTP proxy entry attributes requests to its fixed runtime
+identity, independent of PID or caller-supplied headers. The proxy uses existing
+Agent credentials and service Policy; it strips local Treer credentials and
+untrusted identity headers, then issues audience-bound HTTP tokens for registered
+service addresses only. Service names resolve inside the authenticated workspace.
+HTTP pins the stream to the canonical token audience; CONNECT resolves its
+selector before checking Policy against the stable ID. Renaming changes a
+convenience address, not the identity or permission key. HTTP CONNECT carries opaque TLS/native protocol bytes,
+without injected target credentials. Ordinary external traffic is forwarded
+without Treer identity and is outside Core authorization/metering. A local
+process able to reach another workload's entry can use that identity. Entry ports
+are not secrets, and Treer does not prevent bypassing the proxy. Use external
+network/account isolation when reachability itself must separate identities.
+
 Service TCP connections are reauthorized periodically and closed when their
 identity, service, membership, mapping, or Policy no longer permits them.
 Polling and Policy caching mean revocation is not instantaneous. New anonymous

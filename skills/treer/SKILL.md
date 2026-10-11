@@ -216,8 +216,35 @@ launch profiles; they are not built-in Agent kinds.
 
 ## Authenticate to an identity-aware service
 
-When a registered service explicitly accepts Treer workload identity, request
-a short-lived Bearer token using its service ID or unique name:
+New managed Agents and Apps inherit a dedicated HTTP proxy entry. For ordinary
+HTTP code or curl, use a service name or stable ID from `treer service list`:
+
+```bash
+curl http://paper.treer/path
+# Or use the stable ID:
+curl http://svc_YOUR_SERVICE_ID.treer/path
+```
+
+Names are unique within the workspace, matched case-insensitively, and resolved
+for each new request. Renaming changes the name address while ID addresses keep
+working. Name addresses accept 1-63 ASCII letters/digits with internal hyphens;
+use the service ID for other display names. CONNECT accepts either form too.
+Replace the entire `svc_YOUR_SERVICE_ID` with the real ID. The proxy-only name
+needs no DNS setup. The proxy authenticates as this Agent and supplies a fresh
+service-audience token through `X-Treer-Identity-Token`, also setting Bearer
+Authorization if no application Authorization was supplied. Subprocesses inherit
+the same `http_proxy`/`https_proxy` environment; clients ignoring these variables
+must explicitly configure `TREER_HTTP_PROXY`. Localhost bypasses the proxy.
+External HTTP/HTTPS pass through without Treer credentials. CONNECT to a
+`SERVICE_ID.treer` or `NAME.treer` address tunnels its registered endpoint
+(including SSH/native TLS), but cannot inject headers inside TLS or replace
+native authentication. Use service forwarding when a client cannot use HTTP
+CONNECT. Entry ports are
+rebound on hot restart and recreated on cold restore; older running processes
+must be relaunched to receive the proxy environment.
+
+For a client that does not use this entry, request a short-lived Bearer token
+using the service ID or unique name:
 
 ```bash
 TOKEN="$(treer token create api)"
@@ -228,9 +255,8 @@ The token audience is the stable service ID even when the command uses a name.
 Use `treer token create api --json` only when the service ID or expiry metadata
 is needed. Do not print, log, persist, or send the injected
 `TREER_WORKLOAD_CREDENTIAL`; only the local Controller consumes it. Tokens
-expire after 60 seconds, so request one immediately before use. Treer does not
-automatically add the token to virtual-network requests, and services that do
-not implement Treer identity continue to work unchanged.
+expire after 60 seconds, so request one immediately before manual use. Services
+that do not implement Treer identity continue to work through the proxy.
 
 ## Exchange durable Messages
 
@@ -382,6 +408,8 @@ launching it, especially when another principal last updated it.
 Use `profile launch --cwd <relative-path>` to override the saved working
 directory for one Agent without changing the profile. The path is relative to
 the selected machine's Host root and must stay inside that root.
+`--machine` accepts a server ID or unique machine name, as with `agent admin
+create`, `app create`, and `exec`.
 
 Select an online machine from `treer status`, then create an explicit command
 Agent. Preserve the current working directory unless the task requires a

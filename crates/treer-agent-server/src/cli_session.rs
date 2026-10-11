@@ -64,6 +64,7 @@ async fn run(
         .arg("--execute-cli")
         .args(&request.argv)
         .env_remove("TREER_AGENT_ID")
+        .env_remove("TREER_SERVER_ID")
         .env_remove("TREER_WORKLOAD_CREDENTIAL")
         .env_remove("TREER_OPERATOR_CREDENTIAL")
         .env_remove("TREER_MACHINE_TOKEN")

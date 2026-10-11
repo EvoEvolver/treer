@@ -77,6 +77,7 @@ node scripts/check-docs.mjs
 | Host/Controller lifecycle | `just service-canary` plus idempotency and process-survival tests |
 | Managed App lifecycle | Stable service/vhost transaction, direct runtime launch, reconnect/restart behavior, CLI parse, and browser workflow |
 | Network or ingress | Authentication/header, streaming, WebSocket, endpoint ownership, Agent cross-owner denial, and Canary coverage |
+| Workload HTTP entries | Per-entry signed identity, inherited environment, credential/header stripping, denied opens, HTTP/WebSocket/CONNECT, name resolution/rename with stable Policy IDs, stop cleanup, and hot/cold restoration |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
 | Voice ASR or command | Proxy `voice` / `voice_llm` tests plus authenticated `/voice/command` route tests; optional `TREER_VOICE_LLM_LIVE_TEST=1` against a configured upstream |
@@ -96,6 +97,7 @@ Current focused transport and recovery checks:
 
 ```sh
 cargo test -p treer-agent-server network
+cargo test -p treer-agent-server workload_proxy
 cargo test -p treer-agent-server recovery
 cargo test -p treer-cli --test session
 cargo test -p treer-proxy network
@@ -108,6 +110,25 @@ cargo build -p treer-agent-host -p treer-agent-server -p treer-cli
 cargo test -p treer-agent-server recovery_real_host_cold_restart -- --ignored
 cargo test -p treer-cli --test controller -- --ignored
 ```
+
+The local Linux Docker regression uses real authentication, PostgreSQL, NATS,
+two Proxies, and non-root machines. It checks installation dependency preflight,
+installed CLI discovery, Agent messages, explicit service forwarding/publication,
+App access, per-workload HTTP identities, verified local HTTPS/CONNECT,
+WebSocket upgrades, listener cleanup, and hot/cold restoration:
+
+```sh
+docker build -t treer-local-e2e:fixed .
+node scripts/docker-core-e2e.mjs
+```
+
+Requires Node 20+ and Docker; `TREER_E2E_IMAGE` can select another freshly built
+image. The runner downloads Debian dependencies, binds host listeners only to
+loopback, and stops its own containers in a finalizer. It retains stopped test
+containers, the network, and logs/results in the printed temporary directory for
+inspection; `resources.json` lists their exact names. It does not deploy Canary
+or touch existing containers. Fixtures use Python services, without vendor Agent
+CLIs. Browser, public DNS/TLS, and OS boot-manager checks remain separate.
 
 Proxy persistence tests require an isolated `TREER_TEST_DATABASE_URL`. Set
 `TREER_TEST_NATS_URL` to an isolated broker for cross-Proxy tests; without it,

@@ -1263,12 +1263,8 @@ pub(super) async fn agent_connect_machine_service(
     let service = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
-    if service.service_id != service_id {
-        return Err(ApiFailure::bad_request(
-            "service_id_required",
-            "forwarding requires the stable service ID",
-        ));
-    }
+    // Names are convenience selectors only. Policy and the live stream retain
+    // the resolved stable service ID, just as for an explicit-ID request.
     let authorization = PolicyRequest::new(
         &workspace_id,
         subject,
@@ -2138,15 +2134,16 @@ mod explicit_service_tests {
     }
 
     #[tokio::test]
-    async fn private_service_socket_policy_revocation_closes_upgraded_connection() {
+    async fn private_service_socket_by_name_uses_stable_policy_id_and_revocation() {
         use crate::policy::{
             PolicyDecision, PolicyDenial, PolicyEvaluation, PolicyEvaluator, PolicyFuture,
         };
         use std::sync::atomic::{AtomicBool, Ordering};
-        struct Revocable(Arc<AtomicBool>);
+        struct Revocable(Arc<AtomicBool>, String);
         impl PolicyEvaluator for Revocable {
-            fn evaluate<'a>(&'a self, _: &'a PolicyRequest) -> PolicyFuture<'a> {
+            fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a> {
                 Box::pin(async move {
+                    assert_eq!(request.resource.id, self.1);
                     Ok(PolicyEvaluation::Decide(if self.0.load(Ordering::SeqCst) {
                         PolicyDecision::Deny(PolicyDenial::new("revoked", "revoked"))
                     } else {
@@ -2160,7 +2157,10 @@ mod explicit_service_tests {
         let revoked = Arc::new(AtomicBool::new(false));
         let policy = PolicyEngine::new(
             PolicyDecision::Allow,
-            vec![Arc::new(Revocable(revoked.clone()))],
+            vec![Arc::new(Revocable(
+                revoked.clone(),
+                service.service_id.clone(),
+            ))],
         );
         let app = Router::new()
             .route(
@@ -2176,7 +2176,8 @@ mod explicit_service_tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let url = format!(
             "http://{address}/workspaces/{}/services/{}/connect",
-            service.workspace_id, service.service_id
+            service.workspace_id,
+            service.name.to_uppercase()
         );
         let request = tokio::spawn(async move {
             reqwest::Client::new()

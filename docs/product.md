@@ -37,6 +37,8 @@ In concrete terms:
    across the workspace, and deploy supervised HTTP Apps. Public HTTP origins use
    platform-assigned domains and workspace authentication by default. Explicit
    anonymous publication is available for HTTP and configured raw TCP ports.
+   Managed Agents and Apps inherit one HTTP proxy entry each for automatic
+   identity on registered service requests; subprocesses share that identity.
 6. An Agent Interface Server can declare a browser UI path alongside its
    semantic capabilities. The control plane embeds that page in place of the
    Agent terminal, and transparently tunnels relative HTTP and WebSocket
@@ -79,7 +81,7 @@ collaboration databases or private Core integrations.
 ### User-owned execution environments
 
 Treer launches exact argv from editable profiles. Users own Agent installation,
-provider credentials, proxy variables, containers, VMs, and filesystem/network
+provider credentials, external proxy configuration, containers, VMs, and filesystem/network
 restrictions. Treer does not build or promise a sandbox backend. Its CLI uses a
 separate Agent credential so a user-provided isolation boundary can expose only
 that identity. Without such a boundary, processes under the same account are

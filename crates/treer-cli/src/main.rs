@@ -10,9 +10,12 @@ use treer_protocol::{
 };
 use url::Url;
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct Config {
     listen: String,
+    workspace: String,
+    #[serde(default)]
+    install_hostname: String,
     #[serde(default)]
     operator_credential: String,
 }
@@ -21,27 +24,66 @@ struct Connection {
     headers: Vec<(&'static str, String)>,
     argv: Vec<String>,
 }
-fn config_path(workspace: &str) -> Option<PathBuf> {
+fn config_directory() -> Option<PathBuf> {
     let root = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    let key: String = workspace
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    Some(
-        root.join("treer/agent-servers")
-            .join(format!("{key}-controller.json")),
-    )
+    Some(root.join("treer/agent-servers"))
+}
+fn installed_config(
+    directory: &std::path::Path,
+    workspace: Option<&str>,
+    explicit_url: Option<&str>,
+) -> anyhow::Result<Option<Config>> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("cannot inspect installed Controllers"),
+    };
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .context("cannot determine this machine's installation hostname")?;
+    anyhow::ensure!(hostname.status.success(), "hostname command failed");
+    let hostname = String::from_utf8(hostname.stdout)?;
+    let origin = explicit_url
+        .map(Url::parse)
+        .transpose()?
+        .map(|url| url.origin());
+    let mut matched = None;
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("-controller.json"))
+        {
+            continue;
+        }
+        let config: Config = serde_json::from_slice(&fs::read(&path)?).with_context(|| {
+            format!(
+                "invalid installed Controller configuration {}",
+                path.display()
+            )
+        })?;
+        if (!config.install_hostname.is_empty() && config.install_hostname != hostname.trim())
+            || workspace.is_some_and(|workspace| config.workspace != workspace)
+            || origin.as_ref().is_some_and(|origin| {
+                Url::parse(&format!("http://{}", config.listen))
+                    .map_or(true, |url| &url.origin() != origin)
+            })
+        {
+            continue;
+        }
+        anyhow::ensure!(
+            matched.is_none(),
+            "multiple installed Controllers match; select --workspace and, if necessary, --url"
+        );
+        matched = Some(config);
+    }
+    Ok(matched)
 }
 fn connection(raw: Vec<String>) -> anyhow::Result<Connection> {
-    let mut workspace = env::var("TREER_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+    let mut workspace = env::var("TREER_WORKSPACE_ID").ok();
     let mut explicit_url = env::var("TREER_AGENT_SERVER_URL").ok();
     let mut argv = Vec::new();
     let mut iter = raw.into_iter();
@@ -59,9 +101,9 @@ fn connection(raw: Vec<String>) -> anyhow::Result<Connection> {
         } else if let Some(value) = arg.strip_prefix("--url=") {
             explicit_url = Some(value.into());
         } else if arg == "--workspace" {
-            workspace = iter.next().context("--workspace requires an ID")?;
+            workspace = Some(iter.next().context("--workspace requires an ID")?);
         } else if let Some(value) = arg.strip_prefix("--workspace=") {
-            workspace = value.into();
+            workspace = Some(value.into());
         } else {
             literal = true;
             argv.push(arg);
@@ -72,12 +114,16 @@ fn connection(raw: Vec<String>) -> anyhow::Result<Connection> {
     let managed = agent.is_some()
         || workload.is_some()
         || env::var("TREER_IDENTITY_MODE").as_deref() == Ok("agent");
-    let config = if managed {
+    let operator = env::var("TREER_OPERATOR_CREDENTIAL")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let config = if managed || (operator.is_some() && explicit_url.is_some()) {
         None
     } else {
-        config_path(&workspace)
-            .and_then(|path| fs::read(path).ok())
-            .and_then(|data| serde_json::from_slice::<Config>(&data).ok())
+        config_directory()
+            .map(|path| installed_config(&path, workspace.as_deref(), explicit_url.as_deref()))
+            .transpose()?
+            .flatten()
     };
     let address = explicit_url
         .or_else(|| config.as_ref().map(|c| format!("http://{}", c.listen)))
@@ -93,8 +139,7 @@ fn connection(raw: Vec<String>) -> anyhow::Result<Connection> {
         headers.push((AGENT_ID_HEADER, agent));
         headers.push((WORKLOAD_CREDENTIAL_HEADER, workload));
     } else {
-        let credential = env::var("TREER_OPERATOR_CREDENTIAL")
-            .ok()
+        let credential = operator
             .or_else(|| config.map(|c| c.operator_credential))
             .filter(|v| !v.is_empty())
             .context("local operator credential is missing")?;
@@ -232,7 +277,7 @@ async fn forward(
             accepted = listener.accept() => {
                 let (mut local, _) = accepted?; let url = url.clone(); let headers = headers.clone();
                 connections.spawn(async move {
-                    let mut request = reqwest::Client::new().post(url).header("Connection", "upgrade").header("Upgrade", "treer-tcp");
+                    let mut request = reqwest::Client::builder().no_proxy().build()?.post(url).header("Connection", "upgrade").header("Upgrade", "treer-tcp");
                     for (key, value) in headers { request = request.header(key, value); }
                     let response = request.send().await?;
                     anyhow::ensure!(response.status() == reqwest::StatusCode::SWITCHING_PROTOCOLS, "forward denied: {}", response.status());
@@ -343,5 +388,54 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    #[test]
+    fn installed_machine_configs_resolve_workspace_hostname_and_ambiguity() {
+        let directory = env::temp_dir().join(format!("treer-cli-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let hostname = std::process::Command::new("hostname").output().unwrap();
+        let hostname = String::from_utf8(hostname.stdout).unwrap();
+        let write = |id: &str, workspace: &str, host: &str, port| {
+            fs::write(directory.join(format!("{id}-controller.json")), serde_json::to_vec(&serde_json::json!({
+                "workspace":workspace, "install_hostname":host.trim(), "listen":format!("127.0.0.1:{port}"), "operator_credential":id,
+            })).unwrap()).unwrap();
+        };
+        write("srv_one", "ws_one", &hostname, 8790);
+        write("srv_foreign", "ws_one", "another-machine", 8791);
+        assert_eq!(
+            installed_config(&directory, Some("ws_one"), None)
+                .unwrap()
+                .unwrap()
+                .operator_credential,
+            "srv_one"
+        );
+        assert!(installed_config(&directory, Some("missing"), None)
+            .unwrap()
+            .is_none());
+        assert!(
+            installed_config(&directory, None, Some("http://elsewhere:8790"))
+                .unwrap()
+                .is_none()
+        );
+        write("srv_two", "ws_two", &hostname, 8792);
+        assert!(installed_config(&directory, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple installed Controllers"));
+        assert_eq!(
+            installed_config(&directory, None, Some("http://127.0.0.1:8792"))
+                .unwrap()
+                .unwrap()
+                .workspace,
+            "ws_two"
+        );
+        write("srv_duplicate", "ws_one", &hostname, 8793);
+        assert!(installed_config(&directory, Some("ws_one"), None).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

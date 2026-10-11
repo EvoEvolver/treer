@@ -85,6 +85,8 @@ struct AgentMetadata {
     cwd: String,
     #[serde(default)]
     workload_credential: String,
+    #[serde(default)]
+    http_proxy_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,6 +141,7 @@ struct ControllerInner {
     process_events: broadcast::Sender<HostProcessInfo>,
     virtual_hosts: RwLock<Option<VirtualNetworkHostsSnapshot>>,
     proxy_link: RwLock<ProxyLinkStatus>,
+    workload_proxies: crate::workload_proxy::WorkloadProxies,
 }
 
 struct PendingUpload {
@@ -205,6 +208,9 @@ impl ControllerRuntime {
                 host,
                 workspace_id: config.workspace_id,
                 server_id: config.server_id,
+                workload_proxies: crate::workload_proxy::WorkloadProxies::new(
+                    config.agent_server_url.clone(),
+                ),
                 agent_server_url: config.agent_server_url,
                 treer_binary: config.treer_binary,
                 root: config.root,
@@ -422,6 +428,10 @@ impl ControllerRuntime {
                 })
                 .map_err(startup_store_error)?;
         }
+        let proxy_port =
+            self.inner
+                .workload_proxies
+                .ensure(&agent_id, &workload_credential, None)?;
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
             workspace_id: self.inner.workspace_id.clone(),
@@ -430,15 +440,17 @@ impl ControllerRuntime {
             name: request.name,
             cwd: request.cwd.clone(),
             workload_credential: workload_credential.clone(),
+            http_proxy_port: Some(proxy_port),
         };
-        let env = self.process_environment(Some((&agent_id, &workload_credential)));
+        let mut env = self.process_environment(Some((&agent_id, &workload_credential)));
+        crate::workload_proxy::inject_environment(&mut env, proxy_port);
         let response = self
             .inner
             .host
             .request(
                 HostCommand::Spawn {
                     request: HostSpawnRequest {
-                        process_id: agent_id,
+                        process_id: agent_id.clone(),
                         command: launch.command,
                         args: launch.args,
                         cwd: request.cwd,
@@ -452,7 +464,16 @@ impl ControllerRuntime {
                 Some(operation_id.to_string()),
             )
             .await
-            .map_err(|error| protocol_error("host_error", error))?;
+            .map_err(|error| {
+                if !self.get(&agent_id).is_ok_and(|agent| {
+                    agent
+                        .lock()
+                        .is_ok_and(|agent| !agent.info.status.is_terminal())
+                }) {
+                    self.inner.workload_proxies.remove(&agent_id);
+                }
+                protocol_error("host_error", error)
+            })?;
         let HostResponse::Process { process } = response else {
             return Err(ProtocolError::new(
                 "host_protocol_error",
@@ -749,6 +770,10 @@ impl ControllerRuntime {
             return Err(ProtocolError::new("startup_migration_required", "legacy namespace port publications cannot be restored; update the startup command and register an explicit machine service"));
         }
         let agent_id = &entry.spec.agent_id;
+        let proxy_port =
+            self.inner
+                .workload_proxies
+                .ensure(agent_id, &entry.workload_credential, None)?;
         let metadata = AgentMetadata {
             agent_id: agent_id.clone(),
             workspace_id: self.inner.workspace_id.clone(),
@@ -757,7 +782,10 @@ impl ControllerRuntime {
             name: entry.spec.name.clone(),
             cwd: entry.spec.cwd.clone(),
             workload_credential: entry.workload_credential.clone(),
+            http_proxy_port: Some(proxy_port),
         };
+        let mut env = self.process_environment(Some((agent_id, &entry.workload_credential)));
+        crate::workload_proxy::inject_environment(&mut env, proxy_port);
         let launch = AgentLaunch {
             command: entry.spec.command.clone(),
             args: entry.spec.args.clone(),
@@ -774,7 +802,7 @@ impl ControllerRuntime {
                         command: launch.command,
                         args: launch.args,
                         cwd: entry.spec.cwd.clone(),
-                        env: self.process_environment(Some((agent_id, &entry.workload_credential))),
+                        env,
                         cols: entry.cols,
                         rows: entry.rows,
                         metadata: serde_json::to_string(&metadata)
@@ -787,7 +815,16 @@ impl ControllerRuntime {
                 )),
             )
             .await
-            .map_err(|error| protocol_error("host_error", error))?;
+            .map_err(|error| {
+                if !self.get(agent_id).is_ok_and(|agent| {
+                    agent
+                        .lock()
+                        .is_ok_and(|agent| !agent.info.status.is_terminal())
+                }) {
+                    self.inner.workload_proxies.remove(agent_id);
+                }
+                protocol_error("host_error", error)
+            })?;
         let HostResponse::Process { process } = response else {
             return Err(ProtocolError::new(
                 "host_protocol_error",
@@ -1685,6 +1722,17 @@ impl ControllerRuntime {
                 "host process metadata belongs to another controller",
             ));
         }
+        if process.running {
+            if let Some(port) = metadata.http_proxy_port {
+                self.inner.workload_proxies.ensure(
+                    &metadata.agent_id,
+                    &metadata.workload_credential,
+                    Some(port),
+                )?;
+            }
+        } else {
+            self.inner.workload_proxies.remove(&metadata.agent_id);
+        }
         let text = restored_text.unwrap_or_default();
         let status = if process.running {
             detect_status(&text).unwrap_or_else(|| {
@@ -1778,6 +1826,7 @@ impl ControllerRuntime {
         drop(agent);
         if terminal {
             self.remove_cached_interface(&info.agent_id);
+            self.inner.workload_proxies.remove(&info.agent_id);
         }
         let _ = self.inner.events.send(info.clone());
         Ok(info)
@@ -1875,6 +1924,9 @@ impl ControllerRuntime {
                     warn!(%error, "failed to persist completed Agent state");
                 }
             }
+        }
+        if !process.running {
+            self.inner.workload_proxies.remove(&process.process_id);
         }
         let _ = self.inner.process_events.send(process.clone());
         let Ok(agent) = self.get(&process.process_id) else {

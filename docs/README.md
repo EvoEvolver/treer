@@ -41,8 +41,23 @@ the plan identifies every maintained document that must change at completion.
   replaces the native transparent-network expansion direction. The working-tree
   implementation and its validation/remaining deployment gates are tracked there.
 
+## Design proposals
+
+- [External Agent identity and remote CLI access](research/2026-09-30-external-agent-cli-plan.md):
+  proposed separation of identity from Host-managed processes, a public CLI
+  gateway backed by the existing Agent Server parser, and optional explicit
+  reverse service forwarding. Planning only; implementation is not authorized
+  by this document.
+
 ## Historical material
 
+- [Per-Agent/App HTTP proxy entries](research/2026-10-08-workload-http-proxy.md)
+  records explicit identity-bound listeners, inherited client configuration,
+  automatic service tokens, recovery behavior, and local Docker validation.
+- The [local Docker regression report](research/2026-10-08-local-docker-regression-report.md)
+  records current-source installation, two-Proxy communication, App deployment,
+  browser access, and cold recovery checks, identified install/CLI gaps, their
+  fixes, and the unattended Docker regression including recent-App cold recovery.
 - The [native macOS networking execution log](research/2026-09-05-macos-network-execution.md)
   preserves the previous parity plan and its evidence. Further network-capture
   development is superseded by the core simplification plan.

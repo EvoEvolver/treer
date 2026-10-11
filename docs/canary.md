@@ -90,12 +90,12 @@ canary evidence; those are separate future fixtures.
 3. Each machine downloads the deployed Host, Controller, and CLI artifacts,
    reuses its volume-backed machine identity, and serves a machine-specific HTTP
    response on its loopback interface.
-4. Register the second machine's HTTP server as a machine service and virtual
-   host, then run `curl` as a command Agent on the first machine.
+4. Register the second machine's HTTP server as a machine service, then run
+   `treer service forward` and `curl` as a command Agent on the first machine.
 5. Publish the same service through wildcard HTTPS and fetch the returned URL
    directly from the tester.
 6. Confirm the A-to-B payload appears in directional traffic accounting.
-7. Delete only the agents, machine service, virtual host, and ingress created by
+7. Delete only the agents, machine service, and platform-assigned ingress created by
    the run. The dedicated Railway services and Treer machine identities remain
    available for the next release.
 
@@ -106,6 +106,9 @@ mounts a persistent volume at `/workspace`; the Treer checkout, machine identity
 coding-agent state, and additional service data survive redeploys. Add complex
 fixture services to `canary/machine` and start them from its entrypoint so tests
 remain reproducible.
+
+The machine image uses plain networking. Its explicit forward test needs no
+transparent-network helper, DNS configuration, or user-selected hostname.
 
 First-party Apps are source under `apps/`, not extra Rust machine binaries. A
 dedicated deployment must use the exact source revision, provide

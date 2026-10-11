@@ -212,6 +212,151 @@ async fn app_reconcile_stops_a_runtime_left_running_while_the_machine_was_offlin
     assert!(state.resolve_agent("default", runtime_id).await.is_err());
 }
 
+async fn pending_app_reconcile_fixture() -> (
+    AuthStore,
+    AppState,
+    AppDeployment,
+    Uuid,
+    tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+) {
+    let auth = AuthStore::for_test("admin-password").await;
+    auth.seed_test_workspace("default").await;
+    let app = auth
+        .create_app_deployment(
+            "default",
+            "owner",
+            "machine-a".into(),
+            CreateAppDeploymentRequest {
+                server_id: Some("machine-a".into()),
+                name: "Fresh App".into(),
+                command: "python3".into(),
+                args: vec!["-m".into(), "http.server".into()],
+                cwd: ".".into(),
+                port: 8080,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    let app = auth
+        .claim_app_runtime("default", &app.app_id, None, "appw_before_reboot", "owner")
+        .await
+        .unwrap()
+        .unwrap();
+    let server = state_with_managed_agent()
+        .await
+        .resolve_server("default", "machine-a")
+        .await
+        .unwrap();
+    let state = AppState::new();
+    let connection = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    state.register_server(server, connection, tx).await.unwrap();
+    (auth, state, app, connection, rx)
+}
+
+#[tokio::test]
+async fn app_reconcile_retries_after_launch_grace_without_another_snapshot() {
+    let (auth, state, app, connection, mut rx) = pending_app_reconcile_fixture().await;
+    let start = || {
+        tokio::spawn(reconcile_app_deployments_for_server(
+            state.clone(),
+            auth.clone(),
+            "default".into(),
+            "machine-a".into(),
+        ))
+    };
+    let first = start();
+    let second = start();
+    // Both reconcilers must wait for the old launch grace, then atomically
+    // claim just one replacement even though no new machine snapshot arrives.
+    let frame = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let SocketFrame::Text(text) = frame else {
+        panic!("expected command");
+    };
+    let ProxyMessage::Command { envelope } = serde_json::from_str(&text).unwrap() else {
+        panic!("expected command");
+    };
+    let AgentCommand::Create { agent_id, .. } = &envelope.command else {
+        panic!("expected one launch");
+    };
+    let now = Utc::now();
+    let runtime = AgentInfo {
+        agent_id: agent_id.clone(),
+        workspace_id: "default".into(),
+        server_id: "machine-a".into(),
+        kind: "app".into(),
+        name: "app:Fresh App".into(),
+        cwd: ".".into(),
+        status: treer_protocol::AgentStatus::Idle,
+        pid: Some(42),
+        started_at: now,
+        updated_at: now,
+        exited_at: None,
+        exit_code: None,
+        output_revision: 0,
+        interface: None,
+    };
+    state
+        .apply_agent_event(connection, runtime.clone())
+        .await
+        .unwrap();
+    state
+        .complete_command(CommandResult::success(
+            envelope.command_id,
+            serde_json::to_value(runtime).unwrap(),
+        ))
+        .await;
+    first.await.unwrap();
+    second.await.unwrap();
+    let restored = auth
+        .resolve_app_deployment("default", &app.app_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.runtime_agent_id.as_deref(),
+        Some(agent_id.as_str())
+    );
+    assert_eq!(restored.restart_count, 1);
+    assert!(
+        rx.try_recv().is_err(),
+        "concurrent retry must not create a second process"
+    );
+}
+
+#[tokio::test]
+async fn app_reconcile_reloads_stopped_intent_after_waiting_for_launch_grace() {
+    let (auth, state, app, _, mut rx) = pending_app_reconcile_fixture().await;
+    let reconcile = tokio::spawn(reconcile_app_deployments_for_server(
+        state,
+        auth.clone(),
+        "default".into(),
+        "machine-a".into(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    auth.set_app_desired_state("default", &app.app_id, AppDesiredState::Stopped, "owner")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), reconcile)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "stop during grace must prevent recovery"
+    );
+    let stopped = auth
+        .resolve_app_deployment("default", &app.app_id)
+        .await
+        .unwrap();
+    assert_eq!(stopped.runtime_agent_id, app.runtime_agent_id);
+    assert_eq!(stopped.restart_count, 0);
+}
+
 fn test_config() -> BootstrapConfig {
     BootstrapConfig::new(
         Url::parse("https://treer.example/").expect("valid URL"),
@@ -1472,7 +1617,8 @@ fn installer_is_posix_shell_and_only_installs_binaries() {
     let script = render_install_script(&config.public_url);
     assert!(script.starts_with("#!/bin/sh\nset -eu\n"));
     assert!(script.contains("platform=linux-aarch64"));
-    assert!(script.contains("transparent agent networking requires unshare(1)"));
+    assert!(!script.contains("unshare"));
+    assert!(!script.contains("transparent agent networking"));
     assert!(script.contains("persistent proxy and agent host"));
     assert!(script.contains("container, or other sandbox"));
     assert!(script.contains(".local/libexec/treer"));

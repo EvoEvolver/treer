@@ -1,5 +1,5 @@
 //! Explicit service streams received over the authenticated Controller link.
-//! There is deliberately no local SOCKS listener, transparent capture, or egress proxy.
+//! No SOCKS listener or transparent capture; explicit HTTP entries live in workload_proxy.
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
