@@ -52,9 +52,8 @@ Externally supervised Apps configure their own identity/transport explicitly.
 
 Every standalone App follows the [App guidelines](GUIDELINES.md): `/` negotiates
 between an Agent-readable GitHub Flavored Markdown manual and the human HTML
-interface, while data pages remain JSON. Agent Interfaces such as Codex UI and
-Pi UI are embedded AIS surfaces rather than standalone App indexes and continue
-to expose their registered `ui_path`.
+interface, while data pages remain JSON. Agent Interfaces belong to the unified launcher, rather than this App index.
+They continue to expose their registered `ui_path`.
 
 - [`issues`](issues/README.md) is a shared human/Agent issue tracker with SQLite,
   hierarchy, dependencies, comments and expiring claims.
@@ -62,11 +61,6 @@ to expose their registered `ui_path`.
   summaries and links to recipient-bound Core Message conversations.
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
-- [`pi-ui`](pi-ui/README.md) is an Agent-scoped browser interface loaded inside
-  a Pi Agent.
-- [`agent-ui`](agent-ui/README.md) is Treer's single-Agent browser interface,
-  shared by every harness: native Codex and any ACP agent (Claude Code, Gemini,
-  Grok, Cursor, OpenCode, ...) through small adapters.
 - [`soul`](soul/README.md) is an experimental Managed App file server that
   uploads environment-bound state bundles and launches command Agents from them.
 - [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for
@@ -77,13 +71,6 @@ to expose their registered `ui_path`.
   editor with Yjs, inline review macros, and server-side PDF compilation.
 - [`policy`](policy/README.md) is a versioned workspace Policy Provider with a
   browser editor, publication status, cache invalidation, and decision simulator.
-- [`ais-kit`](ais-kit/README.md) is the shared Agent Interface helper library.
-- [`codex-ais`](codex-ais/README.md), [`opencode-ais`](opencode-ais/README.md),
-  [`dsh-ais`](dsh-ais/README.md), [`claude-ais`](claude-ais/README.md),
-  [`grok-ais`](grok-ais/README.md), and [`cursor-ais`](cursor-ais/README.md) are
-  per-Agent AIS sidecars over Codex app-server, OpenCode HTTP, DeepSeek Harness
-  session APIs, Claude Code stream-json, and Grok Build / Cursor ACP. They
-  register semantic capabilities without a bundled browser page.
 
 Each bundled App is source code, configuration schema, documentation, and
 tests. Managed Apps currently accept one command and one HTTP UI port; there is
