@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { get } from "node:http";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, readdirSync, writeFileSync, realpathSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -100,6 +101,23 @@ async function stop(child: ChildProcess) {
   child.kill("SIGTERM");
   await exited;
 }
+
+test("session archive HTTP route rejects browser origins and DNS-rebinding Hosts before touching native storage", async () => {
+  const server = await launchServer(temp());
+  try {
+    const denied: Record<string, string>[] = [{ origin: "https://untrusted.example" }, { origin: "null" }];
+    for (const headers of denied) {
+      assert.equal((await fetch(server.base + "/api/session/export", { headers })).status, 403);
+    }
+    const rebound = await new Promise<number | undefined>((resolve, reject) => {
+      get(server.base + "/api/session/export", { headers: { host: "untrusted.example" } }, (response) => { response.resume(); resolve(response.statusCode); }).on("error", reject);
+    });
+    assert.equal(rebound, 403);
+    // Fake Codex has no native UUID/file: a local client reaches the adapter,
+    // rather than being rejected by the browser-boundary guard.
+    assert.equal((await fetch(server.base + "/api/session/export")).status, 400);
+  } finally { await stop(server.child); }
+});
 
 test("read-only file HTTP routes reject traversal and outside symlinks and report truncated previews", async () => {
   const cwd = temp();
