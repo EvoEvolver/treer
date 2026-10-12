@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import readline from "node:readline";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const goalFile = join(process.cwd(), ".fake-codex-goal.json");
+let goal = null;
+try { goal = JSON.parse(readFileSync(goalFile, "utf8")); } catch { /* no goal */ }
 
 const turns = [0, 1].map((n) => ({
   id: `turn-${n}`, status: "completed", items: [
@@ -27,6 +31,17 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   if (process.env.FAKE_CODEX_CALLS) appendFileSync(process.env.FAKE_CODEX_CALLS, line + "\n");
   if (!request.id) continue;
   let result = {};
+  if (request.method.startsWith("thread/goal/")) {
+    if (process.env.FAKE_CODEX_NO_GOAL) { console.log(JSON.stringify({ id: request.id, error: { message: "Method not found" } })); continue; }
+    if (request.method === "thread/goal/set") {
+      const { origin, threadId: target, ...input } = request.params;
+      if (origin !== "user") throw new Error("Goal changes require user provenance");
+      goal = { objective: "", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, ...goal, ...input };
+      writeFileSync(goalFile, JSON.stringify(goal));
+    }
+    if (request.method === "thread/goal/clear") { goal = null; writeFileSync(goalFile, "null"); }
+    result = request.method === "thread/goal/clear" ? { cleared: true } : { goal };
+  }
   if (request.method === "model/list") result = { data: [] };
   if (request.method === "turn/start") result = { turn: { id: "turn-new" } };
   if (request.method === "thread/resume") {
@@ -50,6 +65,13 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     continue;
   }
   console.log(JSON.stringify({ id: request.id, result }));
+  if (request.method === "thread/goal/set" || request.method === "thread/goal/clear") console.log(JSON.stringify({ method: goal ? "thread/goal/updated" : "thread/goal/cleared", params: { threadId, goal } }));
+  if (request.method === "turn/start" && goal) {
+    goal = { ...goal, status: "complete", tokensUsed: 42, timeUsedSeconds: 2 };
+    writeFileSync(goalFile, JSON.stringify(goal));
+    console.log(JSON.stringify({ method: "thread/goal/updated", params: { threadId, turnId: "turn-new", goal } }));
+    console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: "turn-new", status: "completed", items: [] } } }));
+  }
   if (request.method === "thread/read" && process.env.FAKE_CODEX_PLAN) {
     console.log(JSON.stringify({ method: "turn/plan/updated", params: { threadId, turnId: "turn-1", explanation: "Checking the UI", plan: [{ step: "Tests", status: "completed" }, { step: "Screenshots", status: "in_progress" }] } }));
   }

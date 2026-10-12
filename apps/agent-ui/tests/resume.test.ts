@@ -127,7 +127,7 @@ test("read-only file HTTP routes reject traversal and outside symlinks and repor
 });
 
 test("goal contract exposes null when unsupported and mutations return 501", async () => {
-  const server = await launchServer(temp());
+  const server = await launchServer(temp(), { FAKE_CODEX_NO_GOAL: "1" });
   try {
     const state = await (await fetch(server.base + "/api/state")).json();
     assert.equal(state.goal, null);

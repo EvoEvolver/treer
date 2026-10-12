@@ -4,6 +4,8 @@ import { EventEmitter } from "node:events";
 import { JsonRpcClient } from "../jsonrpc.js";
 import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
+import type { Goal, GoalUpdate } from "../model.js";
+import { GoalError, mapGoal } from "../goals.js";
 import {
   fallbackModelOption,
   mapItem,
@@ -27,7 +29,8 @@ interface LiveItem {
 }
 
 export class CodexRuntime extends EventEmitter implements HarnessRuntime {
-  readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false, goal: null } };
+  readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false, goal: { pause: true, budget: true } } };
+  private goal: Goal | null = null;
   private child: ChildProcessWithoutNullStreams | null = null;
   private client: JsonRpcClient | null = null;
   private ready = false;
@@ -143,6 +146,13 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     }
     this.applyModelDefaults();
     await this.refresh().catch((error) => this.emit("log", `initial refresh skipped: ${error}`));
+    try {
+      this.goal = mapGoal((await client.request<{ goal: unknown }>("thread/goal/get", { threadId: this.thread.id })).goal);
+    } catch (error) {
+      if (!/method not found|unknown (?:method|variant)|not supported|unrecognized/i.test(String(error))) throw error;
+      this.harness.capabilities.goal = null;
+      this.emit("log", "This Codex version does not support goals");
+    }
     this.ready = true;
     this.emit("state");
   }
@@ -150,6 +160,12 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
   async prompt(text: string) {
     if (!this.client || !this.thread) {
       throw new Error("Codex is not ready");
+    }
+    const command = /^\/goal(?:\s+([\s\S]*))?$/.exec(text.trim());
+    if (command) {
+      if (command[1]?.trim() === "clear") await this.clearGoal();
+      else if (command[1]?.trim()) await this.updateGoal({ objective: command[1].trim() });
+      return;
     }
     const input = [{ type: "text", text, text_elements: [] }];
     if (this.thread.status === "running" && this.thread.activeTurnId) {
@@ -236,6 +252,22 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     this.ready = false;
   }
 
+  async updateGoal(input: GoalUpdate) {
+    if (!this.harness.capabilities.goal) throw new GoalError("Codex does not support goals", 501);
+    if (!this.client || !this.thread) throw new GoalError("Codex is not ready", 503);
+    const result = await this.client.request<{ goal: unknown }>("thread/goal/set", { threadId: this.thread.id, origin: "user", ...input });
+    this.goal = mapGoal(result.goal);
+    this.emit("state");
+  }
+
+  async clearGoal() {
+    if (!this.harness.capabilities.goal) throw new GoalError("Codex does not support goals", 501);
+    if (!this.client || !this.thread) throw new GoalError("Codex is not ready", 503);
+    await this.client.request("thread/goal/clear", { threadId: this.thread.id, origin: "user" });
+    this.goal = null;
+    this.emit("state");
+  }
+
   snapshot(historyLimit?: number) {
     const thread = this.thread && historyLimit !== undefined
       ? this.threadWithHistoryLimit(historyLimit)
@@ -245,7 +277,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       thread,
       models: this.models,
       backgroundTasks: [],
-      goal: null,
+      goal: this.goal,
     };
   }
 
@@ -429,6 +461,12 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
   private async onNotification(event: { method?: string; params?: Record<string, unknown> }) {
     const method = event.method ?? "";
     const params = event.params ?? {};
+    if (method === "thread/goal/updated" || method === "thread/goal/cleared") {
+      if (params.threadId !== this.thread?.id) return;
+      this.goal = method === "thread/goal/cleared" ? null : mapGoal(params.goal);
+      this.emit("state");
+      return;
+    }
     if (method === "turn/plan/updated" && typeof params.turnId === "string") {
       this.turnPlans.set(params.turnId, { id: `plan:${params.turnId}`, type: "plan",
         text: typeof params.explanation === "string" ? params.explanation : "Plan", plan: params.plan });

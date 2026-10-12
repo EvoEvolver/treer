@@ -13,6 +13,7 @@ import { threadStatePath } from "./thread-state.js";
 import { listFiles, previewFile, fileErrorStatus } from "./files.js";
 import { InvalidPromptMode, PromptQueue, promptMode } from "./prompt-queue.js";
 import { taskOutput } from "./task-output.js";
+import { GoalError, goalUpdate } from "./goals.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -278,8 +279,10 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (path === "/api/goal" && (method === "PUT" || method === "DELETE")) {
-      // Goal transport is reserved until adapters implement native goal semantics.
-      send(response, 501, { error: `${runtime.harness.name} does not support goals` });
+      if (!runtime.harness.capabilities.goal || !runtime.updateGoal || !runtime.clearGoal) throw new GoalError(`${runtime.harness.name} does not support goals`, 501);
+      if (method === "DELETE") await runtime.clearGoal();
+      else await runtime.updateGoal(goalUpdate(await readJson(request)));
+      send(response, 200, statePayload());
       return;
     }
     if (path.startsWith("/api/queue/") && method === "DELETE") {
@@ -341,7 +344,7 @@ const server = createServer(async (request, response) => {
     send(response, 404, { error: "not found" });
   } catch (error) {
     console.error(error);
-    send(response, error instanceof InvalidPromptMode ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
+    send(response, error instanceof GoalError ? error.status : error instanceof InvalidPromptMode ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
   }
 });
 

@@ -2,6 +2,7 @@
 import { createInterface } from "node:readline";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 const args = process.argv.slice(2);
 const arg = (name) => args[args.indexOf(name) + 1];
 const sessionId = args.includes("--resume") ? arg("--resume") : arg("--session-id");
@@ -25,7 +26,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (input.type === "control_request") {
     const subtype = input.request.subtype;
     const error = subtype === "initialize" && sessionId === "reject" ? "Cannot resume this session" : subtype === "set_model" && input.request.model === "invalid" ? "Invalid model" : null;
-    send({ type: "control_response", response: { subtype: error ? "error" : "success", request_id: input.request_id, ...(error ? { error } : { response: subtype === "initialize" ? { models: [{ value: "sonnet", displayName: "Sonnet" }, { value: "opus", displayName: "Opus" }] } : {} }) } });
+    send({ type: "control_response", response: { subtype: error ? "error" : "success", request_id: input.request_id, ...(error ? { error } : { response: subtype === "initialize" ? { commands: process.env.FAKE_CLAUDE_NO_GOAL ? [] : [{ name: "goal" }], models: [{ value: "sonnet", displayName: "Sonnet" }, { value: "opus", displayName: "Opus" }] } : {} }) } });
     if (subtype === "interrupt") { clearTimeout(timer); result(); }
     continue;
   }
@@ -35,6 +36,20 @@ for await (const line of createInterface({ input: process.stdin })) {
   system("session_state_changed", { state: "running" });
   // Real Claude does not echo ordinary user inputs to stdout, but saves them.
   persist({ ...input, uuid: input.uuid || `u${++sequence}`, timestamp: new Date().toISOString() });
+  const goalCommand = /^\/goal(?:\s+([\s\S]*))?$/.exec(value);
+  if (goalCommand) {
+    const args = goalCommand[1] || "";
+    const output = args === "clear" ? "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
+    const uuid = `goal-${randomUUID()}`;
+    persist({ type: "system", subtype: "local_command", uuid, content: `<local-command-stdout>${output}</local-command-stdout>`, commandRun: { command: "goal", args } });
+    send({ type: "assistant", uuid, message: { model: "<synthetic>", id: uuid, content: [{ type: "text", text: output }] }, local_command_source: `<local-command-stdout>${output}</local-command-stdout>`, local_command_run: { command: "goal", args } });
+    if (args && args !== "clear") {
+      message("assistant", [{ type: "text", text: "GOAL_DONE" }], undefined, {});
+      persist({ type: "system", subtype: "stop_hook_summary", uuid: `hook-${randomUUID()}`, hookInfos: [{ promptText: args }], hookErrors: [], hasOutput: args.includes("hold"), preventedContinuation: false });
+    }
+    result({ result: args && args !== "clear" ? "GOAL_DONE" : output, usage: { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 7 }, duration_ms: 1500 });
+    continue;
+  }
   if (hold) { message("assistant", [{ type: "text", text: `Steered: ${value}` }]); result(); continue; }
   if (value === "hold") { hold = true; continue; }
   if (value === "many-tasks") {

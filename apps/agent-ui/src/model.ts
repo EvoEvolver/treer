@@ -27,6 +27,12 @@ export interface Goal {
   timeUsedSeconds: number | null;
 }
 
+export interface GoalUpdate {
+  objective?: string;
+  status?: Goal["status"];
+  tokenBudget?: number | null;
+}
+
 export interface HistoryItem {
   id: string;
   kind:

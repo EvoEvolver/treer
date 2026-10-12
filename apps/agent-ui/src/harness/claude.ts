@@ -2,12 +2,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createReadStream } from "node:fs";
-import { readdir, realpath } from "node:fs/promises";
+import { readFile, readdir, realpath, writeFile, rename } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { mapPlanSteps, type BackgroundTask, type HistoryItem, type ModelOption, type TurnDto } from "../model.js";
-import { withHistoryLimit, type HarnessRuntime, type ThreadState } from "../runtime.js";
+import { mapPlanSteps, type BackgroundTask, type Goal, type GoalUpdate, type HistoryItem, type ModelOption, type TurnDto } from "../model.js";
+import { GoalError } from "../goals.js";
+import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import { unifiedDiff } from "./diff.js";
 
@@ -56,7 +57,15 @@ export function mapClaudeBlock(block: RecordValue, id: string, cwd: string): His
 }
 
 export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
-  readonly harness = { id: "claude", name: "Claude", capabilities: { steer: true, backgroundTasks: true, goal: null } };
+  readonly harness: HarnessInfo = { id: "claude", name: "Claude", capabilities: { steer: true, backgroundTasks: true, goal: { pause: false, budget: false } } };
+  private goal: Goal | null = null;
+  private goalKey = "";
+  private goalHistoryPath = "";
+  private goalHistorySeen = new Set<string>();
+  private goalHookSeen = new Set<string>();
+  private goalUsageSeen = new Set<string>();
+  private resultChain = Promise.resolve();
+  private goalCommandRunning = false;
   readonly taskOutputRoots: string[];
   private child: ChildProcessWithoutNullStreams | null = null;
   private ready = false;
@@ -89,7 +98,15 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     this.thread = { id: this.sessionId, title: "Claude", cwd: this.cwd, model: this.options.model ?? null,
       reasoningEffort: null, status: "idle", activeTurnId: null, lastError: null, createdAt: now, updatedAt: now, turns: this.turns, hasOlderItems: false };
     try {
+      this.goalHistoryPath = join(this.options.configDir || process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects", projectName(await realpath(this.cwd)), `${this.sessionId}.jsonl`);
       if (resumed) await this.loadHistory(resumed);
+      if (resumed && this.goal && this.options.stateFile) {
+        const saved = record(JSON.parse(await readFile(this.options.stateFile + ".goal-usage.json", "utf8").catch(() => "{}")));
+        if (saved.sessionId === this.sessionId && saved.goalKey === this.goalKey) {
+          this.goal.tokensUsed = typeof saved.tokensUsed === "number" ? saved.tokensUsed : null;
+          this.goal.timeUsedSeconds = typeof saved.timeUsedSeconds === "number" ? saved.timeUsedSeconds : null;
+        }
+      }
       const args = [...(this.options.args ?? []), "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json",
         "--include-partial-messages", "--dangerously-skip-permissions", ...(this.options.model ? ["--model", this.options.model] : []),
         ...(resumed ? ["--resume", resumed] : ["--session-id", this.sessionId])];
@@ -110,6 +127,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
         if (!this.stopping) { this.fail(new Error(`Claude exited (${code ?? signal})`)); this.emit("exit", { code, signal }); }
       });
       const initialized = await this.control({ subtype: "initialize" });
+      if (Array.isArray(initialized.commands) && !initialized.commands.some((command) => record(command).name === "goal")) this.harness.capabilities.goal = null;
       const models = Array.isArray(initialized.models) ? initialized.models : [];
       this.models = models.map((entry) => { const model = record(entry); const id = text(model.value) || text(model.id); return {
         id, model: id, displayName: text(model.displayName) || id, description: text(model.description), isDefault: id === "default",
@@ -153,8 +171,37 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     }
   }
 
+  async updateGoal(input: GoalUpdate) {
+    if (input.status !== undefined || input.tokenBudget !== undefined) throw new GoalError("Claude goals do not support pause/resume, explicit status, or token budgets", 501);
+    if (!input.objective?.trim()) throw new GoalError("objective is required");
+    // `clear` is a reserved native command, not an objective.
+    if (input.objective.trim() === "clear") throw new GoalError("clear is reserved by Claude; use Delete goal");
+    await this.goalCommand(input.objective.trim());
+  }
+
+  async clearGoal() { await this.goalCommand("clear"); }
+
+  private async goalCommand(args: string) {
+    if (!this.harness.capabilities.goal) throw new GoalError("This Claude version does not support goals", 501);
+    if (this.goalCommandRunning) throw new GoalError("A Claude goal command is already pending", 409);
+    this.goalCommandRunning = true;
+    let cleanup = () => {};
+    const accepted = new Promise<void>((resolve, reject) => {
+      const onCommand = (received: string) => { if (received === args) { cleanup(); resolve(); } };
+      const onError = (error: Error) => { cleanup(); reject(error); };
+      const timer = setTimeout(() => onError(new Error("Claude goal command timed out waiting for native acknowledgement")), 60_000);
+      cleanup = () => { clearTimeout(timer); this.off("goal-command", onCommand); this.off("goal-command-error", onError); };
+      this.on("goal-command", onCommand); this.on("goal-command-error", onError);
+    });
+    // Register a rejection handler before send/stop can reject the acknowledgement.
+    void accepted.catch(() => {});
+    try { await this.prompt(`/goal ${args}`); await accepted; }
+    finally { cleanup(); this.goalCommandRunning = false; }
+  }
+
   async stop() {
     this.stopping = true;
+    this.emit("goal-command-error", new Error("Claude stopped"));
     this.ready = false;
     this.rejectControls(new Error("Claude stopped"));
     const child = this.child;
@@ -170,7 +217,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
 
   snapshot(historyLimit?: number) {
     return { ready: this.ready, thread: this.thread && historyLimit !== undefined ? withHistoryLimit(this.thread, this.turns, historyLimit) : this.thread,
-      models: this.models, backgroundTasks: [...this.tasks.values()], goal: null };
+      models: this.models, backgroundTasks: [...this.tasks.values()], goal: this.goal };
   }
 
   private send(value: unknown): Promise<void> {
@@ -197,6 +244,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
 
   private fail(error: Error) {
     this.ready = false;
+    this.emit("goal-command-error", error);
     this.rejectControls(error);
     this.child?.kill("SIGTERM");
     if (this.thread) { this.thread.status = "error"; this.thread.lastError = error.message; this.thread.activeTurnId = null; }
@@ -227,6 +275,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
 
   private message(event: RecordValue, historical = false) {
     if (event.isSidechain) return;
+    if (!historical) this.goalEvent(event);
     const message = record(event.message);
     const blocks = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content.map(record) : [];
     const isUser = event.type === "user";
@@ -343,11 +392,80 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       this.stream(record(event.event));
     }
     if (event.type === "result") {
-      const turn = this.turns.at(-1);
-      if (text(event.result) && turn && !turn.items.some((item) => item.kind === "agentMessage" && item.text === event.result)) this.put({ id: text(event.uuid) || randomUUID(), kind: "agentMessage", text: text(event.result) });
-      this.finish(Boolean(event.is_error), text(event.result) || (Array.isArray(event.errors) ? event.errors.join("\n") : "Claude turn failed"));
+      this.resultChain = this.resultChain.then(async () => {
+        const turn = this.turns.at(-1);
+        if (text(event.result) && turn && !turn.items.some((item) => item.kind === "agentMessage" && item.text === event.result)) this.put({ id: text(event.uuid) || randomUUID(), kind: "agentMessage", text: text(event.result) });
+        // result.usage is per query; modelUsage is cumulative and must not be summed.
+        if (this.goal?.status === "active") {
+          const usage = record(event.usage);
+          const tokens = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].reduce((sum, key) => sum + (typeof usage[key] === "number" ? usage[key] as number : 0), 0);
+          this.goal.tokensUsed = (this.goal.tokensUsed ?? 0) + tokens;
+          if (this.goal.timeUsedSeconds !== null && typeof event.duration_ms === "number") this.goal.timeUsedSeconds += event.duration_ms / 1000;
+        }
+        await this.refreshGoalHistory();
+        await this.saveGoalUsage();
+        this.finish(Boolean(event.is_error), text(event.result) || (Array.isArray(event.errors) ? event.errors.join("\n") : "Claude turn failed"));
+        this.publish();
+      }).catch((error: Error) => this.fail(error));
+      return;
     }
     this.publish();
+  }
+
+  private goalEvent(event: RecordValue, historical = false) {
+    if (event.isSidechain || event.parent_tool_use_id) return;
+    const message = record(event.message);
+    const command = record(event.commandRun ?? event.local_command_run);
+    const local = event.type === "system" && event.subtype === "local_command" && command.command === "goal"
+      || event.type === "assistant" && message.model === "<synthetic>" && command.command === "goal" && typeof event.local_command_source === "string";
+    const key = text(event.uuid);
+    if (local && (!key || !this.goalHistorySeen.has(key))) {
+      if (key) this.goalHistorySeen.add(key);
+      const value = event.type === "system" ? text(event.content).replace(/^<local-command-stdout>|<\/local-command-stdout>$/g, "") : contentText(message.content);
+      const set = /^Goal set: ([\s\S]+)$/.exec(value.trim());
+      if (set) {
+        this.goal = { objective: set[1], status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: historical ? null : 0 };
+        this.goalKey = key;
+        this.goalUsageSeen.clear();
+      } else if (/^(?:Goal cleared|No goal set)/.test(value) && text(command.args).trim() === "clear") this.goal = null;
+      if (!historical) this.emit("goal-command", text(command.args).trim());
+    }
+    if (event.type === "system" && event.subtype === "stop_hook_summary") {
+      const hookKey = key || JSON.stringify(event);
+      if (this.goalHookSeen.has(hookKey)) return;
+      this.goalHookSeen.add(hookKey);
+      if (this.goal?.status !== "active") return;
+      const matching = Array.isArray(event.hookInfos) && event.hookInfos.some((hook) => record(hook).promptText === this.goal!.objective);
+      // Verified Claude 2.1.296: a successful condition check has no feedback,
+      // no hook errors, and does not prevent continuation. Block-cap overrides
+      // have hasOutput=true and must never count as goal completion.
+      if (matching && event.hasOutput === false && event.preventedContinuation === false && Array.isArray(event.hookErrors) && !event.hookErrors.length) this.goal.status = "complete";
+    }
+    if (historical && event.type === "assistant" && message.model !== "<synthetic>" && this.goal?.status === "active") {
+      const id = text(message.id) || key;
+      if (id && !this.goalUsageSeen.has(id)) {
+        this.goalUsageSeen.add(id);
+        const usage = record(message.usage);
+        this.goal.tokensUsed = (this.goal.tokensUsed ?? 0) + ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].reduce((sum, key) => sum + (typeof usage[key] === "number" ? usage[key] as number : 0), 0);
+      }
+    }
+  }
+
+  private async refreshGoalHistory() {
+    const history = await readFile(this.goalHistoryPath, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
+    for (const line of history.split("\n")) {
+      let event: RecordValue; try { event = record(JSON.parse(line)); } catch { continue; }
+      // Live usage comes only from result, never replay assistant usage twice.
+      if (event.type === "system") this.goalEvent(event);
+    }
+  }
+
+  private async saveGoalUsage() {
+    if (!this.options.stateFile || !this.goal) return;
+    const path = this.options.stateFile + ".goal-usage.json";
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify({ sessionId: this.sessionId, goalKey: this.goalKey, tokensUsed: this.goal.tokensUsed, timeUsedSeconds: this.goal.timeUsedSeconds }), { mode: 0o600 });
+    await rename(temporary, path);
   }
 
   private finish(failed: boolean, error = "") {
@@ -377,9 +495,11 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       path = matches[0];
     }
     const seen = new Set<string>();
+    this.goalHistoryPath = path;
     for await (const line of createInterface({ input: createReadStream(path), crlfDelay: Infinity })) {
       if (!line.trim()) continue;
       const event = record(JSON.parse(line));
+      this.goalEvent(event, true);
       if (event.type !== "user" && event.type !== "assistant") continue;
       if (event.uuid && seen.has(text(event.uuid))) continue;
       seen.add(text(event.uuid));

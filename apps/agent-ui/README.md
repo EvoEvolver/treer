@@ -221,9 +221,38 @@ State and WebSocket messages also include `goal` (a Goal or null), with
 `{objective, status, tokenBudget, tokensUsed, timeUsedSeconds}`. Status is
 `active|paused|blocked|usageLimited|budgetLimited|complete`; numeric metrics can
 be null. `harness.capabilities.goal` is null when unsupported, otherwise
-`{pause: boolean, budget: boolean}`. `PUT /api/goal` and `DELETE /api/goal` are
-reserved for native adapter goal support and currently return 501; the page
-must hide goal controls when the capability is null.
+`{pause: boolean, budget: boolean}`. `PUT /api/goal` accepts optional
+`objective`, `status`, and `tokenBudget` (a positive integer or null); at least
+one field is required. `DELETE /api/goal` clears the goal. Both return updated
+state. Unsupported adapters return 501 and hide goal controls.
+
+Codex uses native `thread/goal/set|get|clear`, with user provenance on mutations,
+and consumes `thread/goal/updated|cleared`. Resume fetches the native goal again.
+It supports pause/resume, explicit status, and token budgets. Older app-server
+versions without these methods disable the capability without blocking startup.
+
+Claude uses the native `/goal <condition>` and `/goal clear` local commands.
+Setting a goal starts work immediately. Plain chat `/goal ...` commands update
+the same state. Claude 2.1.296 has no pause/resume or token-budget controls:
+`/goal pause` and `/goal resume` set those literal words as new conditions,
+so the adapter rejects status/budget updates with 501 rather than simulating
+them. Goal commands sent during work may wait for the next native turn boundary.
+Acknowledgement comes from native synthetic local-command messages. Completion
+comes from a matching successful `stop_hook_summary` in the session JSONL
+(no output/errors and no prevented continuation), not from ordinary assistant
+prose or a successful result. A stop-hook block-cap override does not count as
+completion. Claude removes the native condition on success; the UI retains its
+completed record until clear or replacement. A bare `/goal` query does not erase
+that record. Resume rebuilds the record from native local-command and stop-hook
+history. Live usage sums per-result input/output/cache token counters and
+`duration_ms`, not cumulative `modelUsage`; a private usage checkpoint beside
+`agent-ui.json` preserves those totals across resume. Without that checkpoint,
+historical assistant usage is reconstructed and elapsed time is unknown (null).
+
+`npm run test:goal:live` runs both installed native CLIs in disposable directories,
+uses the real browser to set/complete/clear goals, and saves desktop/mobile
+screenshots in a temporary directory. It requires authenticated Codex and Claude
+installations and does not touch managed Agent processes or sessions.
 
 `GET /api/state` and WebSocket `state` messages include `harness.capabilities`
 (`steer`, `backgroundTasks`), `backgroundTasks`, and `queue`. Queue entries are
