@@ -20,7 +20,12 @@ async function stop(child: ChildProcess) {
 }
 test("AIS queue persists across launcher restart, exposes correlated results and uses only the fixture CLI for notifications", async (t) => {
   const cwd = await realpath(await mkdtemp(join(tmpdir(), "queue-http-")));
-  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const children: ChildProcess[] = [];
+  t.after(async () => {
+    // Hooks run in registration order: stop writers before deleting their journal.
+    for (const child of children) await stop(child);
+    await rm(cwd, { recursive: true, force: true });
+  });
   const home = join(cwd, "claude"), bin = join(cwd, "bin"), calls = join(cwd, "notifications");
   await mkdir(home); await mkdir(bin);
   await writeFile(join(bin, "treer"), `#!/usr/bin/env node\nimport fs from 'node:fs';\nlet body='';for await(const chunk of process.stdin)body+=chunk;fs.appendFileSync(process.env.FAKE_NOTIFY_CALLS,JSON.stringify({args:process.argv.slice(2),body,agent:process.env.TREER_AGENT_ID})+'\\n');\n`, { mode: 0o700 });
@@ -32,7 +37,7 @@ test("AIS queue persists across launcher restart, exposes correlated results and
       PATH: `${bin}:${process.env.PATH}`, FAKE_NOTIFY_CALLS: calls,
     }) });
     child.stdout.resume(); child.stderr.resume();
-    t.after(() => stop(child));
+    children.push(child);
     const base = await until(async () => `http://127.0.0.1:${Number(await readFile(portFile, "utf8"))}`, () => true);
     await until(() => fetch(base + "/api/state").then((response) => response.json()), (state) => state.ready === true);
     const headers = { "content-type": "application/json", host: "agent-interface", "x-treer-agent-id": "ag_fixture", "x-treer-interface-instance": "fixture-instance" };
