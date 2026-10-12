@@ -153,6 +153,14 @@ they add no sandbox or separate authentication scheme.
 
 ## Prompt queue and background-task contract
 
+State and WebSocket messages also include `goal` (a Goal or null), with
+`{objective, status, tokenBudget, tokensUsed, timeUsedSeconds}`. Status is
+`active|paused|blocked|usageLimited|budgetLimited|complete`; numeric metrics can
+be null. `harness.capabilities.goal` is null when unsupported, otherwise
+`{pause: boolean, budget: boolean}`. `PUT /api/goal` and `DELETE /api/goal` are
+reserved for native adapter goal support and currently return 501; the page
+must hide goal controls when the capability is null.
+
 `GET /api/state` and WebSocket `state` messages include `harness.capabilities`
 (`steer`, `backgroundTasks`), `backgroundTasks`, and `queue`. Queue entries are
 `{id, text, createdAt}`. `POST /api/prompt` accepts `{prompt, mode?: "steer"|"queue"}`;

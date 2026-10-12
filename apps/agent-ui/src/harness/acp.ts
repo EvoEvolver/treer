@@ -145,7 +145,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
     private readonly options: { sessionId?: string; stateFile?: string; name?: string } = {},
   ) {
     super();
-    this.harness = { id: "acp", name: options.name || "Agent", capabilities: { steer: false, backgroundTasks: false } };
+    this.harness = { id: "acp", name: options.name || "Agent", capabilities: { steer: false, backgroundTasks: false, goal: null } };
   }
 
   async start() {
@@ -297,7 +297,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
 
   snapshot(historyLimit?: number) {
     const thread = this.thread && historyLimit !== undefined ? withHistoryLimit(this.thread, this.turns, historyLimit) : this.thread;
-    return { ready: this.ready, thread, models: this.models, backgroundTasks: [] };
+    return { ready: this.ready, thread, models: this.models, backgroundTasks: [], goal: null };
   }
 
   private publish() {

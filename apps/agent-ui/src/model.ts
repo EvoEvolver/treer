@@ -19,6 +19,14 @@ export interface QueuedPrompt {
   createdAt: string;
 }
 
+export interface Goal {
+  objective: string;
+  status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+  tokenBudget: number | null;
+  tokensUsed: number | null;
+  timeUsedSeconds: number | null;
+}
+
 export interface HistoryItem {
   id: string;
   kind:

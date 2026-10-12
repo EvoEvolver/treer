@@ -126,6 +126,20 @@ test("read-only file HTTP routes reject traversal and outside symlinks and repor
   } finally { await stop(server.child); }
 });
 
+test("goal contract exposes null when unsupported and mutations return 501", async () => {
+  const server = await launchServer(temp());
+  try {
+    const state = await (await fetch(server.base + "/api/state")).json();
+    assert.equal(state.goal, null);
+    assert.equal(state.harness.capabilities.goal, null);
+    for (const method of ["PUT", "DELETE"]) {
+      const response = await fetch(server.base + "/api/goal", { method, ...(method === "PUT" ? { body: JSON.stringify({ objective: "test" }) } : {}) });
+      assert.equal(response.status, 501);
+      assert.match((await response.json()).error, /does not support goals/);
+    }
+  } finally { await stop(server.child); }
+});
+
 test("two dynamic listeners do not conflict and AIS transcript pages resumed turns", async () => {
   const first = await launchServer(temp(), { CODEX_UI_THREAD_ID: "original" });
   let second: Awaited<ReturnType<typeof launchServer>> | undefined;

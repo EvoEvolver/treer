@@ -125,6 +125,7 @@ function statePayload(historyLimit = initialHistoryLimit) {
     modelOptions: snapshot.models,
     backgroundTasks: snapshot.backgroundTasks,
     queue: prompts.entries,
+    goal: snapshot.goal,
     history: { limit: historyLimit },
   };
 }
@@ -270,6 +271,11 @@ const server = createServer(async (request, response) => {
     }
     if (path === "/api/state" && method === "GET") {
       send(response, 200, statePayload());
+      return;
+    }
+    if (path === "/api/goal" && (method === "PUT" || method === "DELETE")) {
+      // Goal transport is reserved until adapters implement native goal semantics.
+      send(response, 501, { error: `${runtime.harness.name} does not support goals` });
       return;
     }
     if (path.startsWith("/api/queue/") && method === "DELETE") {
