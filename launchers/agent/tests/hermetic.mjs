@@ -4,7 +4,7 @@
 export function hermeticEnv(extra = {}) {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!/^(AGENT_UI_|CODEX_UI_|TREER_)/.test(key) && key !== "CODEX_BIN") env[key] = value;
+    if (!/^(AGENT_UI_|CODEX_UI_|TREER_)/.test(key) && key !== "CODEX_BIN" && key !== "CLAUDE_BIN") env[key] = value;
   }
   return { ...env, ...extra };
 }

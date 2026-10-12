@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-APP_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+APP_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)"
 HARNESS="${AGENT_UI_HARNESS:-codex}"
 ACP_ARGS='[]'
 while [ "$#" -gt 0 ]; do
