@@ -3,6 +3,7 @@ import type { HarnessRuntime } from "./runtime.js";
 import type { QueuedPrompt } from "./model.js";
 
 export type PromptMode = "steer" | "queue";
+export class InvalidPromptMode extends Error {}
 
 /** Server-owned queue; a dispatch lock also covers asynchronous harness.prompt calls. */
 export class PromptQueue {
@@ -63,5 +64,5 @@ export class PromptQueue {
 export function promptMode(value: unknown): PromptMode {
   if (value === undefined) return "steer";
   if (value === "steer" || value === "queue") return value;
-  throw new Error("mode must be steer or queue");
+  throw new InvalidPromptMode("Delivery must be steer or queue");
 }

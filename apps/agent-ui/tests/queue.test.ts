@@ -38,7 +38,7 @@ test("server queues FIFO across turns, supports deletion, and steers only when c
   assert.equal(fallback.downgraded, true);
   assert.equal(fallback.mode, "queue");
   assert.equal(queue.entries[0].text, "unsupported");
-  assert.throws(() => promptMode("invalid"), /mode must/);
+  assert.throws(() => promptMode("invalid"), /must be steer or queue/);
 });
 
 test("dispatch lock prevents overlapping asynchronous queued sends", async () => {

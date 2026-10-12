@@ -7,10 +7,11 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { AcpRuntime } from "./harness/acp.js";
 import { CodexRuntime } from "./harness/codex.js";
+import { ClaudeRuntime } from "./harness/claude.js";
 import type { HarnessRuntime } from "./runtime.js";
 import { threadStatePath } from "./thread-state.js";
 import { listFiles, previewFile, fileErrorStatus } from "./files.js";
-import { PromptQueue, promptMode } from "./prompt-queue.js";
+import { InvalidPromptMode, PromptQueue, promptMode } from "./prompt-queue.js";
 import { taskOutput } from "./task-output.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
@@ -35,6 +36,9 @@ function createRuntime(): HarnessRuntime {
   if (harness === "codex") {
     return new CodexRuntime(process.env.CODEX_BIN || "codex", cwd, { threadId: resumeId, stateFile });
   }
+  if (harness === "claude") {
+    return new ClaudeRuntime(process.env.CLAUDE_BIN || "claude", cwd, { sessionId: resumeId, stateFile, model: process.env.CLAUDE_MODEL });
+  }
   if (harness === "acp") {
     const command = process.env.AGENT_UI_ACP_COMMAND;
     if (!command) throw new Error("AGENT_UI_ACP_COMMAND is required for the acp harness");
@@ -42,7 +46,7 @@ function createRuntime(): HarnessRuntime {
     if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) throw new Error("AGENT_UI_ACP_ARGS must be a JSON string array");
     return new AcpRuntime(command, args, cwd, { sessionId: resumeId, stateFile, name: process.env.AGENT_UI_NAME });
   }
-  throw new Error(`Unknown AGENT_UI_HARNESS ${harness}; expected codex or acp`);
+  throw new Error(`Unknown AGENT_UI_HARNESS ${harness}; expected codex, claude or acp`);
 }
 
 const runtime = createRuntime();
@@ -337,7 +341,7 @@ const server = createServer(async (request, response) => {
     send(response, 404, { error: "not found" });
   } catch (error) {
     console.error(error);
-    send(response, 500, { error: error instanceof Error ? error.message : String(error) });
+    send(response, error instanceof InvalidPromptMode ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
   }
 });
 

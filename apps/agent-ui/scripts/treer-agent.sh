@@ -2,12 +2,12 @@
 set -eu
 
 APP_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
-HARNESS=codex
+HARNESS="${AGENT_UI_HARNESS:-codex}"
 ACP_ARGS='[]'
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --harness)
-      if [ "$#" -lt 2 ] || [ -z "$2" ]; then echo "--harness requires codex or acp" >&2; exit 2; fi
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then echo "--harness requires codex, claude or acp" >&2; exit 2; fi
       HARNESS="$2"
       shift 2 ;;
     --session-id|--thread-id)
@@ -34,9 +34,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$HARNESS" in
-  codex) ;;
+  codex|claude) ;;
   acp) [ -n "${AGENT_UI_ACP_COMMAND:-}" ] || { echo "--harness acp requires --acp-command" >&2; exit 2; } ;;
-  *) echo "unknown harness: $HARNESS (expected codex or acp)" >&2; exit 2 ;;
+  *) echo "unknown harness: $HARNESS (expected codex, claude or acp)" >&2; exit 2 ;;
 esac
 export AGENT_UI_HARNESS="$HARNESS"
 export AGENT_UI_ACP_ARGS="$ACP_ARGS"
@@ -57,6 +57,9 @@ if command -v fnm >/dev/null 2>&1; then
 fi
 if [ -z "${CODEX_BIN:-}" ] && command -v codex >/dev/null 2>&1; then
   export CODEX_BIN="$(command -v codex)"
+fi
+if [ -z "${CLAUDE_BIN:-}" ] && command -v claude >/dev/null 2>&1; then
+  export CLAUDE_BIN="$(command -v claude)"
 fi
 
 if [ ! -f "$AGENT_UI_PUBLIC_DIR/index.html" ]; then

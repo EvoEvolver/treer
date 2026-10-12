@@ -6,9 +6,14 @@ REPO_ROOT="$(CDPATH= cd -- "$APP_ROOT/../.." && pwd)"
 NAME="${TREER_RECIPE_AGENT_NAME:-codex-ui}"
 ACP_COMMAND=""
 DISPLAY_NAME=""
+HARNESS=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --harness)
+      HARNESS="$2"
+      shift 2
+      ;;
     --name)
       NAME="$2"
       shift 2
@@ -28,8 +33,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-HARNESS_TOOL=codex
-if [ -n "$ACP_COMMAND" ]; then HARNESS_TOOL="$ACP_COMMAND"; fi
+if [ -z "$HARNESS" ]; then
+  if [ -n "$ACP_COMMAND" ]; then HARNESS=acp; else HARNESS=codex; fi
+fi
+case "$HARNESS" in
+  codex) HARNESS_TOOL="${CODEX_BIN:-codex}" ;;
+  claude) HARNESS_TOOL="${CLAUDE_BIN:-claude}" ;;
+  acp) [ -n "$ACP_COMMAND" ] || { echo "--harness acp requires --acp-command" >&2; exit 2; }; HARNESS_TOOL="$ACP_COMMAND" ;;
+  *) echo "unknown harness: $HARNESS (expected codex, claude or acp)" >&2; exit 2 ;;
+esac
 for command in treer npm "$HARNESS_TOOL" curl python3; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "$command is not on PATH" >&2
@@ -52,13 +64,15 @@ print(relative)
 ' "$REPO_ROOT" "$WHOAMI")"
 
 LAUNCH_ARGS="$(python3 -c 'import json, sys
-acp, display = sys.argv[1], sys.argv[2]
-args = ["--harness", "acp", "--acp-command", acp] if acp else []
+acp, display, harness = sys.argv[1], sys.argv[2], sys.argv[3]
+args = ["--harness", harness]
+if harness == "acp":
+    args += ["--acp-command", acp]
 if display:
     args += ["--name", display]
-print(json.dumps(args))' "$ACP_COMMAND" "$DISPLAY_NAME")"
+print(json.dumps(args))' "$ACP_COMMAND" "$DISPLAY_NAME" "$HARNESS")"
 
-python3 - "$APP_ROOT/treer-agent.json" "$AGENT_CWD" "$LAUNCH_ARGS" "$ACP_COMMAND" "$DISPLAY_NAME" <<'PY'
+python3 - "$APP_ROOT/treer-agent.json" "$AGENT_CWD" "$LAUNCH_ARGS" "$ACP_COMMAND" "$DISPLAY_NAME" "$HARNESS" <<'PY'
 import json, subprocess, sys
 
 meta = json.load(open(sys.argv[1]))
@@ -67,7 +81,11 @@ run = meta["run"]
 command = run["command"]
 args = (run.get("args") or []) + json.loads(sys.argv[3])
 acp, display = sys.argv[4], sys.argv[5]
-if acp:
+if sys.argv[6] == "claude":
+    label = display or "Claude"
+    name = f"{label} + UI"
+    description = f"One native {label} Code session with background tasks and the shared Agent UI."
+elif sys.argv[6] == "acp":
     label = display or acp
     name = f"{label} + UI"
     description = f"One {label} ACP session, one Treer Agent, and the shared Agent UI."

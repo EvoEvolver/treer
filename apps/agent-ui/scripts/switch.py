@@ -11,9 +11,9 @@ import tempfile
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--harness", choices=("codex", "acp"), default="codex")
+    parser.add_argument("--harness", choices=("codex", "claude", "acp"), default="codex")
     parser.add_argument("--session-id", "--thread-id", dest="session_id", required=True,
-                        help="native session to resume (Codex thread ID or ACP session ID)")
+                        help="native session to resume (Codex, Claude Code or ACP session ID)")
     parser.add_argument("--acp-command", help="ACP agent executable, required for --harness acp")
     parser.add_argument("--acp-arg", action="append", default=[], help="argument for the ACP agent; repeatable")
     parser.add_argument("--name", help="name shown in the UI")
@@ -34,7 +34,8 @@ def main():
     app = launcher.parent.parent
     if not os.access(launcher, os.X_OK) or not os.access(app / "node_modules/.bin/tsx", os.X_OK):
         raise RuntimeError(f"Agent UI launcher/dependencies missing; run npm ci in {app}")
-    for command in ("node", "curl", "codex" if args.harness == "codex" else args.acp_command):
+    tool = os.environ.get("CLAUDE_BIN", "claude") if args.harness == "claude" else "codex" if args.harness == "codex" else args.acp_command
+    for command in ("node", "curl", tool):
         if not shutil.which(command):
             raise RuntimeError(f"{command} is not on PATH")
     # startup --cwd is relative to the machine root, not to this Agent.

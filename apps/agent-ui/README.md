@@ -13,6 +13,7 @@ shared history model (`src/model.ts`):
 | Harness | Adapter | Talks to |
 | --- | --- | --- |
 | `codex` (default) | `src/harness/codex.ts` | the local `codex app-server` over stdio; native thread resume |
+| `claude` | `src/harness/claude.ts` | native Claude Code `--print` stream-json; native resume and background-task events |
 | `acp` | `src/harness/acp.ts` | any [Agent Client Protocol](https://agentclientprotocol.com) agent, such as `claude-agent-acp`, Gemini, Grok, Cursor, or OpenCode |
 
 Add a harness by implementing `HarnessRuntime`; do not copy the UI or server.
@@ -31,14 +32,16 @@ From a Treer-managed Agent in this checkout:
 
 ```bash
 ./apps/agent-ui/scripts/apply.sh --name codex-ui
-# An ACP agent, saved as the "Claude + UI" profile:
-./apps/agent-ui/scripts/apply.sh --name claude-ui --acp-command claude-agent-acp --display-name Claude
+# Native Claude Code, saved as the "Claude + UI" profile:
+./apps/agent-ui/scripts/apply.sh --harness claude --name claude-ui
+# Other agents can still use ACP:
+./apps/agent-ui/scripts/apply.sh --harness acp --name acp-ui --acp-command my-acp-agent --display-name Agent
 ```
 
 The script installs the local Node dependencies, saves the launch profile,
 creates the first command Agent, and waits for its verified Interface
 descriptor. Additional Agents can be created from that profile. The provider
-command (`codex`, or the ACP agent such as `claude-agent-acp`) must already be
+command (`codex`, `claude`, or the ACP agent) must already be
 installed and authenticated.
 
 For local development outside a managed Agent:
@@ -46,6 +49,7 @@ For local development outside a managed Agent:
 ```bash
 npm --prefix apps/agent-ui install
 AGENT_UI_CWD="$PWD" npm --prefix apps/agent-ui start
+AGENT_UI_HARNESS=claude AGENT_UI_CWD="$PWD" npm --prefix apps/agent-ui start
 AGENT_UI_HARNESS=acp AGENT_UI_ACP_COMMAND=claude-agent-acp AGENT_UI_CWD="$PWD" npm --prefix apps/agent-ui start
 ```
 
@@ -63,8 +67,7 @@ importing or summarizing its context:
 
 ```bash
 /absolute/path/to/apps/agent-ui/scripts/treer-agent.sh --session-id THREAD_ID
-/absolute/path/to/apps/agent-ui/scripts/treer-agent.sh --harness acp \
-  --acp-command claude-agent-acp --name Claude --session-id SESSION_ID
+/absolute/path/to/apps/agent-ui/scripts/treer-agent.sh --harness claude --session-id SESSION_ID
 # Equivalently: AGENT_UI_SESSION_ID=ID .../scripts/treer-agent.sh (--thread-id is an alias)
 ```
 
@@ -96,9 +99,8 @@ From **inside the Agent you intend to replace**, first inspect the plan:
 /absolute/path/to/apps/agent-ui/scripts/switch.sh --session-id THREAD_ID --dry-run
 # Then, only when ready to replace this process:
 /absolute/path/to/apps/agent-ui/scripts/switch.sh --session-id THREAD_ID
-# A Claude Code TUI Agent, resuming its own session through ACP:
-/absolute/path/to/apps/agent-ui/scripts/switch.sh --harness acp \
-  --acp-command claude-agent-acp --name Claude --session-id SESSION_ID
+# A Claude Code TUI Agent, resuming its own native session:
+/absolute/path/to/apps/agent-ui/scripts/switch.sh --harness claude --session-id SESSION_ID
 ```
 
 The script verifies its managed identity, saves a self-only startup command
@@ -113,6 +115,51 @@ reads identity and prints the plan; it does not save startup, write files, or
 restart. A successful restart request does not prove resume succeeded: inspect
 the replacement Agent's Interface and logs. The switching shell exits and the
 current Agent process is deliberately replaced.
+
+## Native Claude Code
+
+Select `AGENT_UI_HARNESS=claude` or `--harness claude` on the launcher, installer,
+or switch script. `CLAUDE_BIN` overrides the executable (default `claude`);
+`CLAUDE_MODEL` optionally selects the initial model. Claude must already be
+authenticated. This adapter talks directly to Claude Code, without ACP or the
+legacy `apps/claude-ais` sidecar. It shares the same HTTP server and page.
+
+The process uses `--print --verbose --output-format stream-json --input-format
+stream-json --include-partial-messages --dangerously-skip-permissions`, plus
+`--resume ID` for an existing session or `--session-id UUID` for a new one.
+Initialization, interrupt, and model changes use stream-json `control_request`
+messages (`initialize`, `interrupt`, `set_model`). New sessions are saved to
+`agent-ui.json` only when Claude emits `system/init` after the first prompt:
+before that, the UUID is reserved and no resumable native history exists yet.
+An existing saved or explicit ID is always resumed; missing, ambiguous, invalid,
+or rejected history fails clearly without creating a replacement session.
+
+Claude does not replay history over stdout on resume. The adapter reads
+`$CLAUDE_CONFIG_DIR/projects/<cwd encoding>/<session>.jsonl` (default
+`~/.claude/projects`), including user/assistant text, thinking, tool uses and
+results. When the working directory changes, an unambiguous session file in
+another project directory can be loaded. Thinking is reasoning, Bash is command
+execution, Edit/Write/MultiEdit are file changes with unified diffs, TodoWrite is
+a checklist, and other tools remain tool calls. Partial text/thinking/tool inputs
+update the same history items. Structured patches from tool results refine diffs.
+
+**Steering was tested with Claude Code 2.1.296 in disposable directories.** Sending
+an ordinary stream-json user message while a foreground Bash command ran caused
+it to be consumed at the next tool boundary, before the original final reply;
+the reply incorporated the mid-tool update in the same turn. A top-level
+`priority: "now"` experiment split this into two result envelopes and gave no
+earlier tool interruption. The adapter therefore sends standard user messages
+without undocumented priority fields and advertises `steer: true`. Steering
+does not interrupt an executing tool or guarantee immediate token-level changes.
+Use explicit interrupt to cancel; queue mode always waits for the turn's `result`.
+
+Background task state comes from `background_tasks_changed`, `task_started`,
+`task_updated`, and `task_notification`. All running tasks and the most recent
+100 finished tasks stay visible; none are restored after restart. Task outputs
+are read only from the working directory or this session's Claude task-output
+directory under the local temporary roots (`claude-<uid>/<encoded cwd>/<session>/tasks`).
+Model choices come from Claude's initialize response. Reasoning effort is not
+exposed by this adapter.
 
 ## Browser interface
 
@@ -181,8 +228,9 @@ must hide goal controls when the capability is null.
 `GET /api/state` and WebSocket `state` messages include `harness.capabilities`
 (`steer`, `backgroundTasks`), `backgroundTasks`, and `queue`. Queue entries are
 `{id, text, createdAt}`. `POST /api/prompt` accepts `{prompt, mode?: "steer"|"queue"}`;
-`POST /v1/prompts` accepts the same optional mode alongside `operation_id` and
-`text`. The default is `steer` for compatibility. Replies include `submission`
+`POST /v1/prompts` accepts optional `delivery: "steer"|"queue"` alongside
+`operation_id` and `text`; its existing Core `mode: "prompt"` field is ignored.
+The default delivery is `steer` for compatibility. Replies include `submission`
 with `disposition` (`sent`, `queued`, `steered`), effective `mode`, and `downgraded`.
 Unsupported steering becomes queueing with an `explanation`. An idle harness
 receives the prompt immediately; queued prompts are sent FIFO after each turn
@@ -204,11 +252,19 @@ non-regular files, and never accept an output path from a client.
 npm --prefix apps/agent-ui ci
 npm --prefix apps/agent-ui run check
 npm --prefix apps/agent-ui test
-# Unit tests cover both adapters (a fake Codex and a fake ACP agent).
+# Unit tests use fake Codex, ACP, and native Claude processes.
 # Browser regression and desktop/390px screenshots, with an isolated fake Codex.
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
 npm --prefix apps/agent-ui exec -- playwright install chromium
 CODEX_UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix apps/agent-ui run test:browser
+# Opt-in: real Claude credentials/inference, new sessions in a temporary cwd only.
+# Covers start/model, tool-boundary steer, queue, background output, interrupt,
+# JSONL resume/continuation, and missing-session rejection; no Treer mutations.
+npm --prefix apps/agent-ui run test:claude
+# Low-level protocol probes (also only new temporary sessions):
+node apps/agent-ui/tests/probe-claude.mjs
+CLAUDE_PROBE_PRIORITY=now node apps/agent-ui/tests/probe-claude.mjs
+CLAUDE_PROBE_BACKGROUND=1 node apps/agent-ui/tests/probe-claude.mjs
 # Opt-in: managed Treer environment, real Codex credentials/inference needed.
 # Creates two temporary Agents and a temporary Codex + UI recipe profile,
 # checks independent ports and restart/context recall, and removes both Agents

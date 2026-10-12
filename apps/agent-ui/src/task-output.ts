@@ -20,7 +20,7 @@ export async function taskOutput(task: BackgroundTask, roots: readonly string[],
   let allowed = false;
   for (const root of roots) {
     const canonicalRoot = await realpath(root).catch(() => null);
-    if (canonicalRoot && inside(resolve(root), path) && inside(canonicalRoot, canonical)) allowed = true;
+    if (canonicalRoot && (inside(resolve(root), path) || inside(canonicalRoot, path)) && inside(canonicalRoot, canonical)) allowed = true;
   }
   if (!allowed || (await lstat(path)).isSymbolicLink()) throw new Error("Task output path is outside trusted roots or is a symlink");
   const file = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);

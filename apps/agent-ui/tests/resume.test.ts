@@ -292,7 +292,7 @@ test("/v1/prompts accepts the body Treer's Controller sends, and delivery select
     const queued = await post({ operation_id: "op-queue", text: "later", delivery: "queue" });
     assert.equal(queued.status, 202, await queued.clone().text());
     const invalid = await post({ operation_id: "op-bad", text: "x", delivery: "now" });
-    assert.equal(invalid.status, 500);
-    assert.match(await invalid.text(), /mode must be steer or queue/);
+    assert.equal(invalid.status, 400);
+    assert.match(await invalid.text(), /must be steer or queue/);
   } finally { await stop(server.child); }
 });
