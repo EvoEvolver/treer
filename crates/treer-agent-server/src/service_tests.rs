@@ -1151,16 +1151,96 @@ fn staged_executable_is_validated_and_atomically_installed() {
     staged.install(&destination).expect("install executable");
 
     assert_eq!(fs::read(&destination).expect("read executable"), bytes);
-    assert_eq!(
-        fs::metadata(&destination)
-            .expect("executable metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o755
-    );
+    let mode = fs::metadata(&destination)
+        .expect("executable metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    // Respect the installing user's umask (e.g. 022 => 0755, 077 => 0700).
+    // Validation already executed it; never require broader public access.
+    assert_eq!(mode & 0o700, 0o700);
+    assert_eq!(mode & !0o755, 0);
     fs::remove_file(&destination).expect("remove executable");
     fs::remove_dir(&directory).expect("remove update test directory");
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_executable_supports_restrictive_umask_in_an_isolated_process() {
+    for mask in ["022", "077"] {
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg("umask \"$1\"; exec \"$2\" --exact service::tests::staged_executable_is_validated_and_atomically_installed")
+            .arg("treer-umask-test")
+            .arg(mask)
+            .arg(env::current_exe().unwrap())
+            .status()
+            .expect("run isolated staging test");
+        assert!(status.success(), "staging failed with umask {mask}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn executable_validation_retries_only_busy_errors_within_the_deadline() {
+    let mut attempts = 0;
+    let result = retry_busy_executable(
+        || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from_raw_os_error(libc::ETXTBSY))
+            } else {
+                Ok(())
+            }
+        },
+        Instant::now() + Duration::from_secs(1),
+    );
+    assert!(result.is_ok());
+    assert_eq!(attempts, 3);
+    for errno in [libc::ETXTBSY, libc::EACCES, libc::ENOEXEC] {
+        let mut attempts = 0;
+        let error = retry_busy_executable::<()>(
+            || {
+                attempts += 1;
+                Err(std::io::Error::from_raw_os_error(errno))
+            },
+            Instant::now()
+                + if errno == libc::ETXTBSY {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(1)
+                },
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(errno));
+        assert_eq!(attempts, 1);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_validation_waits_for_a_real_writable_handle_to_close() {
+    let directory = env::temp_dir().join(format!("treer-busy-executable-{}", Uuid::new_v4()));
+    fs::create_dir(&directory).unwrap();
+    let destination = directory.join("test-executable");
+    let staged = stage_executable(&destination, b"#!/bin/sh\nexit 0\n", "test", false).unwrap();
+    let writable = fs::OpenOptions::new()
+        .write(true)
+        .open(&staged.path)
+        .unwrap();
+    let error = Command::new(&staged.path)
+        .arg("--help")
+        .spawn()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
+    let closer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        drop(writable);
+    });
+    validate_executable(&staged.path, "test-executable").unwrap();
+    closer.join().unwrap();
+    drop(staged);
+    fs::remove_dir(directory).unwrap();
 }
 
 #[test]

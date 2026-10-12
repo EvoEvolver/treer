@@ -13,6 +13,14 @@ native Windows test covers argv, environment, input, resize, and process stop.
 
 ### Service environment and recovery validation
 
+Updater executable staging closes and syncs the writable file before executing
+validation. Unix validation retries only transient `ETXTBSY` within the existing
+ten-second validation budget; permission and format errors fail immediately.
+Linux regression coverage holds a real writable descriptor, confirms `ETXTBSY`,
+then closes it and verifies validation succeeds. Isolated subprocess tests cover
+both umask 022 and 077 without changing the Rust test runner's process-wide umask;
+installation preserves restrictive user permissions rather than forcing 0755.
+
 The shared `treer-platform` environment filter is used by nohup, foreground and
 Windows detached launchers, daemon entry points (including launchd/systemd),
 Host-spawned Controllers on crash/hot update, and PTY workload inheritance.

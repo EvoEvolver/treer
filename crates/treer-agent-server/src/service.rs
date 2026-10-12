@@ -1049,14 +1049,18 @@ fn stage_executable(
     let result = (|| -> Result<()> {
         use std::io::Write;
 
-        let mut file = options
-            .open(&temporary)
-            .with_context(|| format!("failed to stage {}", destination.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("failed to stage {}", destination.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync {}", temporary.display()))?;
-        drop(file);
+        {
+            // End the writable handle's scope before any validation process
+            // starts. Concurrent forks can still briefly inherit a CLOEXEC
+            // descriptor, so validation also handles transient ETXTBSY below.
+            let mut file = options
+                .open(&temporary)
+                .with_context(|| format!("failed to stage {}", destination.display()))?;
+            file.write_all(bytes)
+                .with_context(|| format!("failed to stage {}", destination.display()))?;
+            file.sync_all()
+                .with_context(|| format!("failed to sync {}", temporary.display()))?;
+        }
         if validate {
             validate_executable(&temporary, file_name)?;
         }
@@ -1070,14 +1074,15 @@ fn stage_executable(
 }
 
 fn validate_executable(path: &Path, file_name: &str) -> Result<()> {
-    let mut child = Command::new(path)
+    let deadline = Instant::now() + UPDATE_VALIDATION_TIMEOUT;
+    let mut command = Command::new(path);
+    command
         .arg("--help")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    let mut child = retry_busy_executable(|| command.spawn(), deadline)
         .with_context(|| format!("downloaded {file_name} is not executable on this machine"))?;
-    let deadline = Instant::now() + UPDATE_VALIDATION_TIMEOUT;
     loop {
         if let Some(status) = child
             .try_wait()
@@ -1094,6 +1099,30 @@ fn validate_executable(path: &Path, file_name: &str) -> Result<()> {
             );
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn retry_busy_executable<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+    deadline: Instant,
+) -> std::io::Result<T> {
+    loop {
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) => {
+                #[cfg(unix)]
+                if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline {
+                    std::thread::sleep(
+                        Duration::from_millis(50)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                    continue;
+                }
+                #[cfg(not(unix))]
+                let _ = deadline;
+                return Err(error);
+            }
+        }
     }
 }
 
