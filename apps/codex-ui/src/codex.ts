@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 
 import { JsonRpcClient } from "./jsonrpc.js";
+import { loadThreadId, saveThreadId } from "./thread-state.js";
 import {
   fallbackModelOption,
   mapItem,
@@ -52,11 +53,13 @@ export class CodexRuntime extends EventEmitter {
   constructor(
     private readonly command: string,
     private readonly cwd: string,
+    private readonly options: { threadId?: string; stateFile?: string } = {},
   ) {
     super();
   }
 
   async start() {
+    const threadId = this.options.threadId || loadThreadId(this.options.stateFile);
     const child = spawn(this.command, ["app-server", "--listen", "stdio://"], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: this.cwd,
@@ -64,6 +67,7 @@ export class CodexRuntime extends EventEmitter {
     this.child = child;
     const client = new JsonRpcClient(child.stdout, child.stdin);
     this.client = client;
+    child.on("error", (error) => { client.close(); this.emit("log", `Codex process failed: ${error.message}`); });
 
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString().trim();
@@ -98,19 +102,20 @@ export class CodexRuntime extends EventEmitter {
       },
       capabilities: { experimentalApi: true },
     });
-    this.ready = true;
+    client.notify("initialized");
     this.models = await this.loadModels().catch((error) => {
       this.emit("log", `model/list failed: ${error}`);
       return [] as ModelOption[];
     });
 
     const started = await client.request<{
-      thread: { id: string; name?: string | null; cwd?: string };
+      thread: { id: string; name?: string | null; cwd?: string; turns?: CodexTurn[] };
       model?: string;
       reasoningEffort?: string | null;
     }>(
-      "thread/start",
+      threadId ? "thread/resume" : "thread/start",
       {
+        ...(threadId ? { threadId } : {}),
         cwd: this.cwd,
         approvalPolicy: "never",
         sandbox: "danger-full-access",
@@ -118,7 +123,14 @@ export class CodexRuntime extends EventEmitter {
         persistExtendedHistory: true,
       },
       60_000,
-    );
+    ).catch((error) => {
+      throw new Error(`${threadId ? `Failed to resume Codex thread ${threadId}; no new thread was created` : "Failed to start Codex thread"}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (!started.thread?.id || (threadId && started.thread.id !== threadId)) {
+      throw new Error(`Codex returned an unexpected thread ID when ${threadId ? `resuming ${threadId}` : "starting"}`);
+    }
+    saveThreadId(this.options.stateFile, started.thread.id);
+    this.fullTurns = (started.thread.turns ?? []).map(mapTurn);
     const now = new Date().toISOString();
     const model = started.model ?? (started.thread as { model?: string }).model ?? null;
     const reasoningEffort = mapReasoningEffort(
@@ -135,7 +147,7 @@ export class CodexRuntime extends EventEmitter {
       lastError: null,
       createdAt: now,
       updatedAt: now,
-      turns: [],
+      turns: this.fullTurns,
       hasOlderItems: false,
     };
     if (this.models.length === 0) {
@@ -143,6 +155,7 @@ export class CodexRuntime extends EventEmitter {
     }
     this.applyModelDefaults();
     await this.refresh().catch((error) => this.emit("log", `initial refresh skipped: ${error}`));
+    this.ready = true;
     this.emit("state");
   }
 
@@ -384,7 +397,7 @@ export class CodexRuntime extends EventEmitter {
         preview?: string;
       };
       const statusType = record.status && typeof record.status === "object" ? record.status.type : null;
-      this.fullTurns = Array.isArray(record.turns) ? record.turns.map((turn) => mapTurn(turn)) : [];
+      if (Array.isArray(record.turns)) this.fullTurns = record.turns.map((turn) => mapTurn(turn));
       const active = this.fullTurns.find((turn) => turn.status === "inProgress");
       const running = statusType === "active" || active !== undefined;
       const activeTurnId = running

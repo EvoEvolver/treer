@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { CodexRuntime } from "./codex.js";
+import { threadStatePath } from "./thread-state.js";
 
 const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const publicDir = resolve(process.env.CODEX_UI_PUBLIC_DIR || join(appRoot, "public"));
-const port = Number(process.env.CODEX_UI_PORT || "4173");
+const port = Number(process.env.CODEX_UI_PORT ?? "0");
+if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("CODEX_UI_PORT must be a port from 0 to 65535");
 const cwd = resolve(process.env.CODEX_UI_CWD || process.cwd());
 const command = process.env.CODEX_BIN || "codex";
 const agentId = process.env.TREER_AGENT_ID || "";
@@ -17,7 +19,10 @@ const interfaceInstanceId = process.env.CODEX_UI_INSTANCE_ID || `codex-ui-${proc
 const interfaceCapabilities = ["prompt.submit", "transcript.read", "state.observe", "abort"];
 const initialHistoryLimit = 50;
 
-const runtime = new CodexRuntime(command, cwd);
+const runtime = new CodexRuntime(command, cwd, {
+  threadId: process.env.CODEX_UI_THREAD_ID,
+  stateFile: threadStatePath(cwd, agentId),
+});
 const sockets = new Set<{ socket: WebSocket; historyLimit: number }>();
 const completedOperations = new Map<string, number>();
 
@@ -301,9 +306,16 @@ server.on("upgrade", (request, socket, head) => {
   });
 });
 
+runtime.on("exit", () => { void runtime.stop().finally(() => process.exit(1)); });
 server.listen(port, "127.0.0.1", () => {
-  console.log(`Treer Codex UI listening on http://127.0.0.1:${port}`);
-  runtime.start().catch((error) => console.error("failed to start Codex app-server", error));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing listener address");
+  if (process.env.CODEX_UI_PORT_FILE) writeFileSync(process.env.CODEX_UI_PORT_FILE, String(address.port), { mode: 0o600 });
+  console.log(`Treer Codex UI listening on http://127.0.0.1:${address.port}`);
+  runtime.start().catch((error) => {
+    console.error("failed to start Codex app-server", error);
+    void runtime.stop().finally(() => process.exit(1));
+  });
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

@@ -4,6 +4,8 @@
   "version": "0.1.2",
   "type": "module",
   "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "test:live": "node tests/live.mjs",
     "build": "esbuild markdown.entry.js --bundle --format=esm --minify --legal-comments=inline --outfile=public/markdown.js",
     "check": "npm run typecheck && node --check public/app.js && node --check public/markdown.js",
     "start": "tsx src/index.ts",

@@ -53,6 +53,10 @@ export class JsonRpcClient extends EventEmitter {
     this.output.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
   }
 
+  notify(method: string) {
+    this.output.write(`${JSON.stringify({ jsonrpc: "2.0", method })}\n`);
+  }
+
   close() {
     if (this.closed) {
       return;
