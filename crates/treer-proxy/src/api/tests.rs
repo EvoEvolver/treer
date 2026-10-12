@@ -1044,16 +1044,23 @@ async fn trailing_slash_browser_tunnel_route_is_registered() {
         crate::updater::UpdaterClient::disabled(),
         crate::voice::VoiceServices::disabled(),
     );
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/workspaces/default/virtual-hosts/self.test/proxy/")
-                .body(Body::empty())
-                .expect("tunnel request"),
-        )
-        .await
-        .expect("route response");
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    for uri in [
+        "/api/workspaces/default/virtual-hosts/self.test/proxy/",
+        "/api/workspaces/default/apps/app-1/ui/",
+        "/api/workspaces/default/apps/app-1/ui/app.js",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("tunnel request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
 }
 
 #[tokio::test]

@@ -397,6 +397,14 @@ pub fn router(
             post(restart_app_deployment),
         )
         .route(
+            "/api/workspaces/{workspace_id}/apps/{app_id}/ui/",
+            any(proxy_app_ui_root),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/apps/{app_id}/ui/{*path}",
+            any(proxy_app_ui_path),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/policy-provider",
             get(get_policy_provider)
                 .put(set_policy_provider)

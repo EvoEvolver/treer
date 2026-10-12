@@ -100,6 +100,12 @@ Serve the human entry point as the HTML representation of `/`. Keep its
 scripts, stylesheets, fonts, images, and other browser assets at stable paths
 relative to the App root. Do not introduce a `/_human/` route family.
 
+Selecting a Managed App in the control plane embeds this HTML root through
+`/api/workspaces/WORKSPACE/apps/APP_ID/ui/`. That authenticated tunnel preserves
+relative paths and all CSP directives except `frame-ancestors`, which is set to
+allow the configured control-plane origin and the tunnel's own origin. It also
+removes conflicting `X-Frame-Options`. Direct App origins retain App-owned headers.
+
 Managed Apps receive a dedicated wildcard-ingress origin when the deployment
 configures `TREER_INGRESS_PUBLIC_URL`. The origin requires Workspace
 authentication by default. `treer app create --public` deliberately makes it

@@ -177,6 +177,14 @@ future billing rules remain explainable; workspace members can read those
 aggregates. It does not store payload content, request paths, headers, or NATS
 control-plane traffic in the usage ledger.
 
+The authenticated Managed App UI tunnel requires current workspace access and
+resolves the App within that workspace before forwarding. It replaces only CSP
+`frame-ancestors` with the configured control-plane origin and `'self'`, and
+removes conflicting `X-Frame-Options`, so the control plane can embed the human
+interface. Other CSP directives remain enforced; direct App origins and ordinary
+virtual-host tunnels retain their embedding policies. Embedded App content is
+trusted workspace code, not an isolation boundary.
+
 Self-hosted Compose gives the updater sidecar the host Docker socket and a
 read-only bind of `compose.yaml`. Compromise of that sidecar is host Docker
 compromise. Proxy, App, PostgreSQL, and NATS do not mount the socket. Hosted

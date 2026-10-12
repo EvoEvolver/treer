@@ -329,6 +329,7 @@ impl BrowserAccess {
 
 mod agents;
 mod app_identity;
+mod app_ui;
 mod apps;
 mod errors;
 mod events;
@@ -344,6 +345,7 @@ mod workspaces;
 
 use agents::*;
 use app_identity::*;
+use app_ui::*;
 pub(crate) use apps::synchronize_app_lifecycles_for_server;
 use apps::*;
 pub(crate) use errors::*;

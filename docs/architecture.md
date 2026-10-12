@@ -122,7 +122,16 @@ public API, Controller-local API, and `treer app` CLI. User-triggered lifecycle
 changes append workspace audit events.
 
 The human UI treats Managed Apps as Agent-owned deployments: it lists and
-operates existing Apps but does not offer App creation. Each App has a settings
+operates existing Apps but does not offer App creation. Selecting an App in the
+workload tree embeds its human HTML root through the authenticated
+`/api/workspaces/{workspace_id}/apps/{app_id}/ui/` browser tunnel, including on
+mobile. This tunnel uses the App's owned virtual host and adjusts only embedding
+headers to allow the configured control-plane origin and the Proxy's own origin;
+all other App CSP directives remain enforced. Public origins and ordinary
+virtual-host tunnels retain their original embedding headers.
+Stopped Apps and offline machines show their
+state instead. The workload menu's Logs action opens the runtime terminal, and
+App views can switch between their interface and logs. Each App has a settings
 view that changes only its owned ingress between `workspace` and `public`
 access. General service, virtual-host, and ingress editing is not exposed in
 the workspace UI.
@@ -260,6 +269,13 @@ promotion. Agent control routes mirror the browser workload-tree routes under
 `/api/workload-tree` with the same folder and placement suffixes.
 The browser refreshes visible trees every five seconds and on window focus,
 preserving open editors and ignoring background reads superseded by a mutation.
+Within each folder, workloads follow their persisted position; entries without
+a placement follow in natural name order, with Agent ID breaking ties. Folders
+sort by name. Dragging a workload onto the upper or lower half of another row
+inserts it before or after that row, including moves between folders. The Move
+up / Move down menu actions provide the same persisted ordering on mobile and
+for keyboard users. Refreshing the page or replacing machine inventory does not
+reset a saved order.
 
 `treer-agent-server restore --workspace ID` starts a saved machine installation
 without re-enrollment, then reconciles it. `treer runtime restore --all` handles

@@ -215,7 +215,18 @@ async function mockApi(page: Page) {
       if (resource === "folders" && method === "POST") { const folder = { folder_id: `folder-${tree.folders.length + 1}`, name: body.name, parent_id: body.parent_id ?? null }; tree.folders.push(folder); return ok(route, { folder }) }
       if (resource === "folders" && method === "PATCH") { const folder = tree.folders.find((entry) => entry.folder_id === id)!; Object.assign(folder, body); return ok(route, { folder }) }
       if (resource === "folders" && method === "DELETE") { tree.folders = tree.folders.filter((entry) => entry.folder_id !== id); tree.folders.forEach((entry) => { if (entry.parent_id === id) entry.parent_id = null }); tree.placements.forEach((entry) => { if (entry.folder_id === id) entry.folder_id = null }); return ok(route, {}) }
-      if (resource === "placements") { const placement = { agent_id: id!, folder_id: body.folder_id, position: body.position }; tree.placements = [...tree.placements.filter((entry) => entry.agent_id !== id), placement]; return ok(route, { placement }) }
+      if (resource === "placements") {
+        tree.placements = tree.placements.filter((entry) => entry.agent_id !== id)
+        for (const folderId of new Set(tree.placements.map((entry) => entry.folder_id))) {
+          tree.placements.filter((entry) => entry.folder_id === folderId).sort((a, b) => a.position - b.position).forEach((entry, position) => { entry.position = position })
+        }
+        const siblings = tree.placements.filter((entry) => entry.folder_id === body.folder_id)
+        const position = Math.min(body.position, siblings.length)
+        siblings.forEach((entry) => { if (entry.position >= position) entry.position++ })
+        const placement = { agent_id: id!, folder_id: body.folder_id, position }
+        tree.placements.push(placement)
+        return ok(route, { placement })
+      }
     }
 
     if (path === "/auth/me") return ok(route, currentUser)
@@ -306,7 +317,7 @@ test.beforeEach(async ({ page }) => {
 // name includes the machine name, root path and build label.
 const workstationRow = (page: Page) => page.getByRole("button", { name: /^workstation / })
 const cloudboxRow = (page: Page) => page.getByRole("button", { name: /^cloudbox / })
-const agentsTab = (page: Page) => page.locator("aside").getByText("Workloads", { exact: true })
+const agentsTab = (page: Page) => page.locator("aside").getByText("Tree", { exact: true })
 const appsTab = agentsTab
 
 async function openWorkspaceSettings(page: Page) {
@@ -454,6 +465,66 @@ test("remote App rename and delete events keep tree metadata synchronized", asyn
   await expect(page.getByRole("treeitem")).toHaveCount(2)
 })
 
+test("workloads start in name order independent of machine inventory order", async ({ page }) => {
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [...snapshot.agents].reverse() }))
+  await page.goto("/")
+  await expect(page.getByRole("treeitem")).toHaveCount(3)
+  await expect.poll(() => page.getByRole("treeitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("aria-label")))).toEqual(["api-server", "Soul Archive", "worker"])
+})
+
+test("dragging workloads before and after siblings saves order across reloads", async ({ page }) => {
+  await page.goto("/")
+  const row = (name: string) => page.getByRole("treeitem", { name, exact: true })
+  const names = () => page.getByRole("treeitem").evaluateAll((rows) => rows.map((item) => item.getAttribute("aria-label")))
+  await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
+  await row("worker").dragTo(row("api-server"), { targetPosition: { x: 20, y: 4 } })
+  await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
+  await page.reload()
+  await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
+  const bottom = (await row("Soul Archive").boundingBox())!.height - 4
+  await row("worker").dragTo(row("Soul Archive"), { targetPosition: { x: 20, y: bottom } })
+  await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
+  await page.reload()
+  await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
+})
+
+test("mobile workload menus move entries up and down and disable list boundaries", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  const names = () => page.getByRole("treeitem").evaluateAll((rows) => rows.map((item) => item.getAttribute("aria-label")))
+  await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
+  await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+  await expect(page.getByRole("menuitem", { name: "Move up", exact: true })).toHaveAttribute("aria-disabled", "true")
+  await page.getByRole("menuitem", { name: "Move down", exact: true }).click()
+  await expect.poll(names).toEqual(["Soul Archive", "api-server", "worker"])
+  await page.getByRole("button", { name: "Actions for worker", exact: true }).click()
+  await expect(page.getByRole("menuitem", { name: "Move down", exact: true })).toHaveAttribute("aria-disabled", "true")
+  await page.getByRole("menuitem", { name: "Move up", exact: true }).click()
+  await expect.poll(names).toEqual(["Soul Archive", "worker", "api-server"])
+  await page.reload()
+  await expect.poll(names).toEqual(["Soul Archive", "worker", "api-server"])
+})
+
+test("dragging into a folder inserts at the chosen sibling and preserves that order", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  const folder = page.getByRole("treeitem", { name: "Research", exact: true })
+  for (const name of ["worker", "Soul Archive"]) {
+    await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
+    await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
+    await page.getByRole("combobox", { name: "Destination folder" }).selectOption("folder-1")
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(folder.getByRole("treeitem", { name, exact: true })).toBeVisible()
+  }
+  await page.getByRole("treeitem", { name: "api-server", exact: true }).dragTo(folder.getByRole("treeitem", { name: "Soul Archive", exact: true }), { targetPosition: { x: 20, y: 4 } })
+  const names = () => folder.getByRole("treeitem").evaluateAll((rows) => rows.map((item) => item.getAttribute("aria-label")))
+  await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
+  await page.reload()
+  await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
+})
+
 test("folders support persistent drag and keyboard moves, nesting, rename and deletion", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: "New folder", exact: true }).click()
@@ -513,8 +584,8 @@ test("workload folders remain workspace scoped and mobile navigation returns to 
   await page.getByRole("option", { name: "Acme", exact: true }).click()
   await expect(page.getByRole("treeitem", { name: "Private organization", exact: true })).toBeVisible()
   await page.getByRole("treeitem", { name: "Soul Archive", exact: true }).getByRole("button", { name: /^Soul Archive / }).click()
-  await expect(page.getByRole("button", { name: "Close full-screen terminal", exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "Close full-screen terminal", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Close full-screen interface", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Close full-screen interface", exact: true }).click()
   await expect(page.getByRole("tree", { name: "Workspace workloads" })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })

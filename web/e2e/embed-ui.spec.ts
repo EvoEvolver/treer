@@ -59,6 +59,46 @@ const agentPlain = {
   status: "running",
 }
 
+const managedApp = {
+  app_id: "app-1",
+  workspace_id: "ws-1",
+  server_id: "srv-a",
+  name: "Soul Archive",
+  command: "python3",
+  args: ["soul.py"],
+  cwd: "/Users/test/soul",
+  port: 9420,
+  hostname: "soul.internal",
+  service_id: "svc-soul",
+  public_url: "https://soul.apps.example.com/",
+  access: "workspace",
+  desired_state: "running",
+  runtime_agent_id: "app-runtime",
+  restart_count: 0,
+  status: "running",
+  created_at: NOW,
+  updated_at: NOW,
+  created_by: "u1",
+  updated_by: "u1",
+}
+
+async function mockApp(page: Page, status = "running", runtimeAgentId = "app-runtime") {
+  await page.route("**/api/workspaces/ws-1/apps", (route) => ok(route, {
+    apps: [{ ...managedApp, status, runtime_agent_id: runtimeAgentId }],
+  }))
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
+    ...snapshot,
+    agents: [...snapshot.agents, { ...agentPlain, agent_id: runtimeAgentId, name: "app:Soul Archive", kind: "app", status }],
+  }))
+  await page.route("**/api/workspaces/ws-1/apps/app-1/ui/**", (route) => {
+    if (new URL(route.request().url()).pathname.endsWith("/app.js")) {
+      return route.fulfill({ contentType: "text/javascript", body: 'document.querySelector("h1").textContent = "Soul human interface"' })
+    }
+    expect(route.request().headers().accept).toContain("text/html")
+    return route.fulfill({ contentType: "text/html", body: '<!doctype html><html><body><h1>Loading</h1><script src="./app.js"></script></body></html>' })
+  })
+}
+
 const service = {
   service_id: "svc-1",
   name: "dashboard-app",
@@ -127,9 +167,72 @@ test.beforeEach(async ({ page }) => {
   await mockInterfaceUiContent(page)
 })
 
+for (const runtimeId of ["app-runtime", "app-1"]) {
+  test(`selecting a Managed App embeds its human root and retains logs (${runtimeId})`, async ({ page }) => {
+    await mockApp(page, "running", runtimeId)
+    await page.goto("/")
+    await page.getByRole("button", { name: /^Soul Archive / }).click()
+    const frame = page.locator("iframe[title='Soul Archive interface']")
+    await expect(frame).toBeVisible()
+    await expect(frame).toHaveAttribute("src", /\/apps\/app-1\/ui\/\?theme=light$/)
+    await expect(page.frameLocator("iframe[title='Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
+    await expect(page.locator(".xterm")).toBeHidden()
+
+    const reload = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/apps/app-1/ui/"))
+    await page.getByRole("button", { name: "Reload interface" }).click()
+    await reload
+    await page.getByRole("button", { name: "Show logs", exact: true }).click()
+    await expect(frame).toBeHidden()
+    await expect(page.locator(".xterm")).toBeVisible()
+    await page.getByRole("button", { name: "Show App", exact: true }).click()
+    await expect(frame).toBeVisible()
+
+    await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
+    await page.getByRole("menuitem", { name: "Logs", exact: true }).click()
+    await expect(frame).toBeHidden()
+    await expect(page.locator(".xterm")).toBeVisible()
+    await page.getByRole("button", { name: /^Soul Archive / }).click()
+    await expect(frame).toBeVisible()
+  })
+}
+
+test("mobile: selecting an App opens its human interface and closes back to workloads", async ({ page }) => {
+  await mockApp(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await expect(page.frameLocator("iframe[title='Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
+  await page.getByRole("button", { name: "Close full-screen interface" }).click()
+  await expect(page.locator("aside")).toBeVisible()
+  await expect(page.locator("iframe")).toBeHidden()
+})
+
+test("a stopped App shows its state without fetching the human interface", async ({ page }) => {
+  await mockApp(page, "stopped")
+  let appRequests = 0
+  page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
+  await page.goto("/")
+  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await expect(page.getByText("App is not running")).toBeVisible()
+  await expect(page.locator("iframe")).toHaveCount(0)
+  expect(appRequests).toBe(0)
+})
+
+test("an App on an offline machine shows recovery and lets mobile users return", async ({ page }) => {
+  await mockApp(page)
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [{ ...machine, status: "offline" }] }))
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/")
+  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await expect(page.getByText("Machine is offline")).toBeVisible()
+  await expect(page.locator("iframe")).toHaveCount(0)
+  await page.getByRole("button", { name: "Back to workloads" }).click()
+  await expect(page.locator("aside")).toBeVisible()
+})
+
 test("selecting an agent with an embedded UI shows the iframe instead of the terminal pane", async ({ page }) => {
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Click the agent that has a UI
   await page.getByRole("button", { name: /^dashboard / }).click()
@@ -160,7 +263,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
     servers: [{ ...machine, status: "offline" }],
   }))
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
   await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
@@ -173,7 +276,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
 
 test("selecting a plain terminal agent shows the terminal pane, not an iframe", async ({ page }) => {
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Click the plain agent without an Interface UI.
   await page.getByRole("button", { name: /^plain-tty / }).click()
@@ -184,7 +287,7 @@ test("selecting a plain terminal agent shows the terminal pane, not an iframe", 
 
 test("reload button label changes when an agent has an embedded UI", async ({ page }) => {
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Plain agent: Reconnect terminal
   await page.getByRole("button", { name: /^plain-tty / }).click()
@@ -198,7 +301,7 @@ test("reload button label changes when an agent has an embedded UI", async ({ pa
 test("mobile: selecting an embedded UI agent opens a full-screen iframe", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   await expect(page.locator("aside")).toBeVisible()
   await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
@@ -216,7 +319,7 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
 
 test("reload button triggers an iframe reload (key changes)", async ({ page }) => {
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
 
   // Track how many times the iframe's URL is fetched
@@ -239,7 +342,7 @@ test("reload button triggers an iframe reload (key changes)", async ({ page }) =
 
 test("embedded UI iframe follows the control-plane light and dark theme", async ({ page }) => {
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
 
   const frame = page.locator("iframe[title='dashboard interface']")
@@ -262,7 +365,7 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
 
 test("a new interface registered_at remounts the iframe", async ({ page }) => {
   await page.goto("/")
-  await page.locator("aside").getByText("Workloads", { exact: true }).click()
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='dashboard interface']")
   await expect(frame).toBeVisible()

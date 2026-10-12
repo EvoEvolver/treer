@@ -68,3 +68,5 @@ second manual.
    requested complete gate or release preparation.
 5. Keep generated artifacts, dependencies, and local research checkouts out of
    commits. Reference repositories belong under the ignored `.references/`.
+6. Commit completed, verified work promptly unless the user asks otherwise.
+   Commit only task-owned changes; leave concurrent unrelated work unstaged.

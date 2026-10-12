@@ -1198,6 +1198,7 @@ function WorkspaceApp() {
   const snapshot = loadedSnapshot?.workspace.workspace_id === workspaceId ? loadedSnapshot : null
   const [, setSidebarTab] = useState<SidebarTab>("agents")
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
+  const [showWorkloadLogs, setShowWorkloadLogs] = useState(false)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionState>("connecting")
@@ -1424,10 +1425,12 @@ function WorkspaceApp() {
   }, [snapshot, apps])
 
   const selectedAgentApp = apps.find((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
-  const selectedAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId) ?? (selectedAgentApp ? { agent_id: selectedAgentApp.runtime_agent_id ?? selectedAgentApp.app_id, server_id: selectedAgentApp.server_id, name: selectedAgentApp.name, kind: "app", status: selectedAgentApp.status } : undefined)
+  const selectedRuntimeAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId) ?? (selectedAgentApp ? { agent_id: selectedAgentApp.runtime_agent_id ?? selectedAgentApp.app_id, server_id: selectedAgentApp.server_id, name: selectedAgentApp.name, kind: "app", status: selectedAgentApp.status } : undefined)
+  const selectedAgent = selectedRuntimeAgent && selectedAgentApp ? { ...selectedRuntimeAgent, name: selectedAgentApp.name } : selectedRuntimeAgent
   const selectedAgentMachine = snapshot?.servers.find((machine) => machine.server_id === selectedAgent?.server_id)
   const selectedAgentMachineOnline = machineOnline(selectedAgentMachine)
-  const selectedAgentInterface = selectedAgentMachineOnline && selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
+  const selectedAgentInterface = !showWorkloadLogs && !selectedAgentApp && selectedAgentMachineOnline && selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
+  const showAppUi = Boolean(selectedAgentApp && !showWorkloadLogs)
   const onlineMachines = snapshot?.servers.filter((machine) => machine.status === "online") ?? []
   const selectedApp = apps.find((app) => app.app_id === selectedAppId)
   const selectedAppMachine = snapshot?.servers.find((machine) => machine.server_id === selectedApp?.server_id)
@@ -1447,6 +1450,12 @@ function WorkspaceApp() {
 
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
   const interfaceUiUrl = useMemo(() => {
+    if (workspaceId && selectedAgentApp && showAppUi && selectedAgentMachineOnline && selectedAgent?.status === "running") {
+      return withEmbedTheme(
+        proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(selectedAgentApp.app_id)}/ui/`),
+        theme,
+      )
+    }
     if (!workspaceId || !selectedAgent || !selectedAgentInterface) return null
     return withEmbedTheme(
       proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`),
@@ -1457,7 +1466,7 @@ function WorkspaceApp() {
     // and the iframe color-scheme style. A new registered_at is a new
     // registration and should rebuild the src.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, selectedAgent?.agent_id, selectedAgentInterface?.instance_id, selectedAgentInterface?.registered_at, interfaceUiRevision])
+  }, [workspaceId, selectedAgent?.agent_id, selectedAgent?.status, selectedAgentApp?.app_id, selectedAgentApp?.hostname, showAppUi, selectedAgentMachineOnline, selectedAgentInterface?.instance_id, selectedAgentInterface?.registered_at, interfaceUiRevision])
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
   const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)
@@ -1495,7 +1504,7 @@ function WorkspaceApp() {
   }
 
   function refreshAgentView() {
-    if (selectedAgentInterface) {
+    if (interfaceUiUrl) {
       setInterfaceUiRevision((value) => value + 1)
       return
     }
@@ -1536,8 +1545,9 @@ function WorkspaceApp() {
     setCtrlModifier(false)
   }, [isMobile, mobileTerminalOpen])
 
-  function showAgentTerminal(agentId: string) {
+  function showAgentTerminal(agentId: string, logs = false) {
     setSelectedAgentId(agentId)
+    setShowWorkloadLogs(logs)
     setSidebarTab("agents")
     setMainView("terminal")
     if (isMobile) setMobileTerminalOpen(true)
@@ -2243,23 +2253,32 @@ function WorkspaceApp() {
             {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
             <span className="hidden truncate sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
-            <IconButton label={selectedAgentInterface ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
+            <IconButton label={selectedAgentInterface || showAppUi ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
+            {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs((value) => !value)}>{showWorkloadLogs ? "Show App" : "Show logs"}</Button>}
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
             <IconButton label="Upload file" disabled={!selectedAgent || !selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton>
-            <IconButton label={selectedAgentInterface ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
+            <IconButton label={selectedAgentInterface || showAppUi ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
             <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={() => void stopAgent()}><Square /></IconButton>
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : mainView === "apps" ? <IconButton label="Refresh Apps" onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
         </header>
         {mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
           <div className="max-w-sm">
+            {mobileTerminalOpen && <Button variant="ghost" onClick={closeMobileSurface}>Back to workloads</Button>}
             <p className="text-sm font-medium text-zinc-800">Machine is offline</p>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">{machineName(selectedAgentMachine, selectedAgent.server_id)} is not connected to the control plane. It may be stopped, waking from sleep, or fenced as a duplicate.</p>
             {workspaceId && <MachineRecovery workspaceId={workspaceId} onCopy={copy} reason="Copy a recovery command and run it on that machine. restart-controller keeps Agents; start launches a stopped Host." />}
           </div>
-        </div> : mainView === "terminal" && selectedAgentInterface && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-background", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-background pt-[env(safe-area-inset-top)]")}>
+        </div> : mainView === "terminal" && showAppUi && !interfaceUiUrl ? <div className={cn("grid min-h-0 place-items-center bg-background px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-background pt-[env(safe-area-inset-top)]")}>
+          <div className="max-w-sm space-y-3">
+            <p className="text-sm font-medium">App is not running</p>
+            <p className="text-xs text-muted-foreground">Start this App from its workload menu to open its interface.</p>
+            <Button variant="outline" onClick={() => setShowWorkloadLogs(true)}>Show logs</Button>
+            {mobileTerminalOpen && <Button variant="ghost" onClick={closeMobileSurface}>Back to workloads</Button>}
+          </div>
+        </div> : mainView === "terminal" && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-background", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-background pt-[env(safe-area-inset-top)]")}>
           {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b bg-background px-3.5"><span className="truncate text-xs font-semibold text-foreground">{selectedAgent?.name ?? "Interface"}</span><div className="flex shrink-0 items-center gap-1"><IconButton label="Upload file" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div></div>}
-          <iframe ref={interfaceFrameRef} key={interfaceFrameKey(selectedAgent?.agent_id ?? "", selectedAgentInterface.instance_id, selectedAgentInterface.registered_at, interfaceUiRevision)} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" onLoad={() => postEmbedTheme(interfaceFrameRef.current, themeRef.current)} />
+          <iframe ref={interfaceFrameRef} key={interfaceFrameKey(selectedAgent?.agent_id ?? "", selectedAgentInterface?.instance_id ?? selectedAgentApp?.hostname ?? "", selectedAgentInterface?.registered_at ?? String(selectedAgent?.run_generation ?? ""), interfaceUiRevision)} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" onLoad={() => postEmbedTheme(interfaceFrameRef.current, themeRef.current)} />
         </div> : mainView === "terminal" ? mobileTerminalIdle ? null : <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobileTerminalOpen && "fixed inset-0 z-[100] h-[100dvh] max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
             <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <><IconButton label="Upload file" className="text-zinc-400 hover:bg-white/10 hover:text-zinc-100" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button></>}</div></div>
