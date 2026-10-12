@@ -176,6 +176,7 @@ test("two dynamic listeners do not conflict and AIS transcript pages resumed tur
 
 test("switch dry-run prints exact self startup argv without writing or restarting", () => {
   const cwd = temp();
+  symlinkSync(fake, join(cwd, "codex"));
   const bin = join(cwd, "treer");
   const log = join(cwd, "calls");
   writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nif [ "$1" = whoami ]; then printf '%s\\n' '{"agent":{"agent_id":"ag_test"}}'; else exit 99; fi\n`, { mode: 0o700 });
@@ -185,7 +186,7 @@ test("switch dry-run prints exact self startup argv without writing or restartin
   const plan = JSON.parse(result);
   assert.deepEqual(plan.startup_command, ["treer", "agent", "startup", "set", "--cwd", ".", "--", join(root, "scripts/treer-agent.sh"), "--harness", "codex", "--session-id", "original", "--cwd", cwd]);
   assert.equal(readFileSync(log, "utf8"), "whoami\n");
-  assert.deepEqual(readdirSync(cwd).sort(), ["calls", "treer"]);
+  assert.deepEqual(readdirSync(cwd).sort(), ["calls", "codex", "treer"]);
 });
 
 test("launcher CLI overrides env thread and registers the actual dynamic listener port", async () => {
@@ -236,6 +237,7 @@ test("failed resume exits launcher before interface registration", async () => {
 
 test("switch saves startup and detaches a self-only restart with private result/log files", async () => {
   const cwd = temp();
+  symlinkSync(fake, join(cwd, "codex"));
   const log = join(cwd, "calls");
   writeFileSync(join(cwd, "treer"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nif [ "$1" = whoami ]; then printf '%s\\n' '{"agent":{"agent_id":"ag_test"}}'; else printf '%s\\n' '{}'; fi\n`, { mode: 0o700 });
   const output = execFileSync(join(root, "scripts/switch.sh"), ["--thread-id", "original"], {
