@@ -1653,6 +1653,101 @@ impl ControllerRuntime {
         Ok(agent.info.clone())
     }
 
+    pub async fn submit_prompt_delivery(
+        &self,
+        operation_id: &str,
+        agent_id: &str,
+        request: treer_protocol::SubmitAgentPromptRequest,
+        sender: Option<treer_protocol::PromptSender>,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        use treer_protocol::{AgentInterfacePromptRequest, PromptDelivery};
+        if request.text.is_empty() {
+            return Err(ProtocolError::new(
+                "invalid_request",
+                "agent prompt cannot be empty",
+            ));
+        }
+        let interface = self.interface_for(agent_id, "prompt.queue")?;
+        let Some(interface) = interface else {
+            if request.delivery == PromptDelivery::Steer
+                && request.notify.is_none()
+                && !request.require_receipt
+            {
+                return serde_json::to_value(
+                    self.prompt(operation_id, agent_id, &request.text).await?,
+                )
+                .map_err(|error| ProtocolError::new("serialization_error", error.to_string()));
+            }
+            return Err(ProtocolError::new("queue_unsupported", "Target does not expose prompt.queue; use --steer explicitly for legacy terminal input"));
+        };
+        if request.notify.is_some() && self.interface_for(agent_id, "prompt.notify")?.is_none() {
+            return Err(ProtocolError::new(
+                "queue_unsupported",
+                "Target does not expose prompt.notify",
+            ));
+        }
+        if request.require_receipt && self.interface_for(agent_id, "prompt.queue.read")?.is_none() {
+            return Err(ProtocolError::new(
+                "queue_unsupported",
+                "Target does not expose prompt.queue.read required by --wait",
+            ));
+        }
+        let receipt = crate::agent_interface::submit_delivery(
+            agent_id,
+            &interface,
+            &AgentInterfacePromptRequest {
+                operation_id: operation_id.to_string(),
+                text: request.text,
+                mode: "prompt".into(),
+                delivery: request.delivery,
+                sender,
+                notify: request.notify,
+            },
+        )
+        .await?;
+        let info = self
+            .get(agent_id)?
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?
+            .info
+            .clone();
+        let mut value = serde_json::to_value(info)
+            .map_err(|error| ProtocolError::new("serialization_error", error.to_string()))?;
+        value["submission"] = serde_json::to_value(receipt.submission)
+            .map_err(|error| ProtocolError::new("serialization_error", error.to_string()))?;
+        Ok(value)
+    }
+
+    pub async fn interface_status(
+        &self,
+        agent_id: &str,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let interface = self
+            .interface_for(agent_id, "state.observe")?
+            .ok_or_else(|| {
+                ProtocolError::new("queue_unsupported", "Target does not expose state.observe")
+            })?;
+        serde_json::to_value(crate::agent_interface::status(agent_id, &interface).await?)
+            .map_err(|error| ProtocolError::new("serialization_error", error.to_string()))
+    }
+
+    pub async fn prompt_queue_request(
+        &self,
+        agent_id: &str,
+        submission_id: Option<&str>,
+        cancel: bool,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let interface = self
+            .interface_for(agent_id, "prompt.queue.read")?
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    "queue_unsupported",
+                    "Target does not expose prompt.queue.read",
+                )
+            })?;
+        crate::agent_interface::queue_request(agent_id, &interface, submission_id, cancel).await
+    }
+
     pub async fn prompt(
         &self,
         operation_id: &str,

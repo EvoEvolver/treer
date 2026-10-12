@@ -116,6 +116,48 @@ async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
     };
     let (runtime, _) =
         ControllerRuntime::from_sync(host.clone(), initial, events, config()).unwrap();
+    // Queue preflight must reject both terminal-only and legacy AIS Agents
+    // without writing to their PTY (this Host only accepts inventory Sync).
+    for capabilities in [vec![], vec!["prompt.submit".to_string()]] {
+        if !capabilities.is_empty() {
+            runtime
+                .get("command")
+                .unwrap()
+                .lock()
+                .unwrap()
+                .info
+                .interface = Some(AgentInterfaceDescriptor {
+                protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
+                instance_id: "legacy".into(),
+                port: 1,
+                capabilities,
+                ui_path: None,
+                registered_at: Utc::now(),
+            });
+        }
+        let error = runtime
+            .submit_prompt_delivery(
+                "queue-preflight",
+                "command",
+                treer_protocol::SubmitAgentPromptRequest {
+                    text: "must not insert".into(),
+                    delivery: treer_protocol::PromptDelivery::Queue,
+                    notify: None,
+                    require_receipt: false,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "queue_unsupported");
+    }
+    runtime
+        .get("command")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .info
+        .interface = None;
     for process in &processes {
         runtime.apply_process(process.clone());
         let before = runtime.read(&process.process_id, None).unwrap();

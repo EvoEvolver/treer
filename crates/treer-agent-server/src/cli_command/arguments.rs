@@ -317,8 +317,22 @@ pub(super) enum AgentCommand {
     Prompt {
         target: String,
         text: String,
+        /// Queue behind the current turn (the default).
+        #[arg(long, conflicts_with = "steer")]
+        queue: bool,
+        /// Insert into the current turn instead of queueing.
+        #[arg(long)]
+        steer: bool,
+        /// Notify the sending Agent when this submission finishes.
+        #[arg(long)]
+        notify: bool,
         #[command(flatten)]
         wait: PromptWaitArgs,
+    },
+    #[command(about = "List or cancel pending prompt submissions")]
+    Queue {
+        #[command(subcommand)]
+        command: AgentQueueCommand,
     },
     #[command(about = "Read recent terminal output")]
     Read {
@@ -560,12 +574,15 @@ pub(super) enum NetworkCommand {
     Connect { host: String, port: u16 },
 }
 
+#[derive(Debug, Subcommand)]
+pub(super) enum AgentQueueCommand {
+    Ls { target: String },
+    Cancel { target: String, id: String },
+}
+
 #[derive(Debug, clap::Args)]
 pub(super) struct PromptWaitArgs {
-    #[arg(
-        long,
-        help = "Wait for a matching status after observed agent activity"
-    )]
+    #[arg(long, help = "Wait for this prompt submission to finish")]
     pub(super) wait: bool,
     #[arg(long, value_enum, requires = "wait")]
     pub(super) until: Vec<WaitStatus>,

@@ -358,3 +358,21 @@ Core Message so the actual caller authors the canonical message. Emails contain
 only explicit summaries and links; operators and callers must keep secrets out
 of summaries and subjects. Optional Agent wake requires both administrator
 opt-in and `agent.prompt` Policy. Same-UID App isolation is still not promised.
+
+Queued prompt delivery uses the existing `agent.prompt` authorization. Public
+request bodies cannot supply sender identity: the Proxy resolves the verified
+caller to an Agent ID and canonical tree path, and the Controller supplies it
+only over the registered private AIS channel. Human/operator prompts have no
+Agent sender. Queue listing requires `agent.queue.read`; reading or cancelling
+one's own submission is allowed to its authenticated Agent sender. Reading
+another sender's receipt requires `agent.queue.read`, and cancelling another
+sender's pending item requires `agent.queue.cancel`. Ownership comes from the
+saved launcher receipt, never from request fields. Machine-scoped callers remain
+restricted to their machine. Running turns require abort instead of queue cancel.
+
+Completion notifications are authored by the target launcher's identity and
+remain subject to Core Message Policy and workspace membership. They carry
+bounded prompt/assistant previews; callers must avoid placing secrets in tasks
+intended for other Agents. Durable queue and outbox files are launcher-owned
+private state, not Core session storage. Missing queue/notification capabilities
+fail explicitly instead of falling back to disruptive terminal insertion.

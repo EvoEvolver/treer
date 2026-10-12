@@ -151,7 +151,7 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "treer-agent-server",
-        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS],
+        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY],
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
         "controller_epoch": state.controller_epoch,
@@ -1219,7 +1219,7 @@ pub(super) async fn prompt_agent(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
     Path(agent_id): Path<String>,
-    Json(request): Json<PromptAgentRequest>,
+    Json(request): Json<treer_protocol::SubmitAgentPromptRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
     let source_agent = validated_source_agent(&state, &headers)?;
     Ok(Json(
@@ -1230,6 +1230,48 @@ pub(super) async fn prompt_agent(
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
                 source_agent.as_ref(),
             )
+            .await?,
+    ))
+}
+
+pub(super) async fn read_prompt_queue(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(&format!("agents/{agent_id}/queue"), source.as_ref())
+            .await?,
+    ))
+}
+
+pub(super) async fn read_prompt_submission(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path((agent_id, id)): Path<(String, String)>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(
+                &format!("agents/{agent_id}/submissions/{id}"),
+                source.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+pub(super) async fn cancel_prompt_submission(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path((agent_id, id)): Path<(String, String)>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .delete_as(&format!("agents/{agent_id}/queue/{id}"), source.as_ref())
             .await?,
     ))
 }

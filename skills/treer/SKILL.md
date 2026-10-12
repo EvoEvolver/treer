@@ -254,9 +254,11 @@ with that page and transparently carries HTTP and WebSocket traffic to the same
 private Interface port. The page must use relative asset, fetch, and WebSocket
 URLs. No machine service, virtual host, or published port is required.
 
-When `prompt.submit` is present, `treer agent prompt` uses the interface instead
-of writing to the terminal. Interface failures after dispatch are returned and
-are never retried through PTY input. Read a structured interface transcript
+`treer agent prompt` defaults to `delivery:queue`: it sends immediately when
+idle and queues behind a busy turn. It requires `prompt.queue`; a terminal-only
+or older Interface returns `queue_unsupported` rather than inserting text.
+Use `--steer` explicitly for insertion (including legacy PTY input). Interface
+failures after dispatch are never retried through PTY input. Read a structured interface transcript
 with:
 
 ```bash
@@ -581,7 +583,7 @@ Native agent arguments go after `--`:
 treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex <agent-args...>
 ```
 
-Submit work by path and wait for a settled state:
+Submit work by path and wait for that submission to finish:
 
 ```bash
 treer agent prompt /reviewer \
@@ -589,18 +591,29 @@ treer agent prompt /reviewer \
   --wait --timeout 120000
 ```
 
-Without `--until`, `prompt --wait` settles on `idle`, `blocked`, `exited`, or
-`failed` after observed activity. Repeat `--until` when a workflow needs an
-exact state:
+Agent senders receive a Core Message on `done`, `failed`, or `interrupted`,
+including submission/turn IDs and a bounded assistant preview. `--notify`
+explicitly requests this behavior. Notifications use the target launcher's
+identity and normal Core Message Policy. Queue state and notification retries
+survive launcher restarts. Inspect or cancel pending work with:
+
+```bash
+treer agent queue ls /reviewer
+treer agent queue cancel /reviewer <submission-id>
+treer agent prompt /reviewer "Urgent correction" --steer
+```
+
+`prompt --wait` follows the returned submission ID until `done`, `failed`, or
+`interrupted`, even when other turns run first. `--timeout` is milliseconds;
+timing out leaves the submission queued/running. It requires receipt support
+and rejects `--until`. Use the separate lifecycle wait for status matching:
 
 ```bash
 treer agent wait /reviewer --until blocked --timeout 120000
 ```
 
-The wait observes lifecycle state and output revisions, not a correlated task
-or turn ID. If the target was already working, another active turn may satisfy
-the wait. Treat `idle` as terminal readiness, not proof that a specific task is
-correct or complete.
+`agent wait` observes lifecycle state/output revisions. It does not prove that
+a particular submission finished; `prompt --wait` does provide that correlation.
 
 Inspect the result after a wait, especially after `blocked` or `failed`:
 
@@ -645,7 +658,7 @@ validates every key before sending any bytes.
 - Read agent output before responding to an unexpected state.
 - Do not use `agent attach` from an automated agent workflow; it requires a
   human-operated TTY.
-- Do not claim strict turn correlation for terminal-oriented `prompt --wait`.
+- Terminal-only Agents support explicit `prompt --steer`, not queued receipts or `prompt --wait`.
 - Use `treer agent admin stop <target>` only when terminating that process is intended.
 - Use `treer agent admin delete <target>` only when permanent removal is intended.
 - Use `treer machine delete <server-id>` only when the user explicitly asks to

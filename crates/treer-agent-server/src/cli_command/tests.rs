@@ -1,6 +1,92 @@
 use super::*;
 
 #[test]
+fn prompt_delivery_and_queue_commands_parse() {
+    for flags in [
+        vec![],
+        vec!["--queue"],
+        vec!["--steer"],
+        vec!["--notify", "--wait", "--timeout", "1000"],
+    ] {
+        let mut argv = vec!["treer", "agent", "prompt", "/reviewer", "task"];
+        argv.extend(flags);
+        assert!(Args::try_parse_from(argv).is_ok());
+    }
+    assert!(Args::try_parse_from([
+        "treer", "agent", "prompt", "target", "task", "--queue", "--steer"
+    ])
+    .is_err());
+    let defaults = Args::try_parse_from(["treer", "agent", "prompt", "target", "task"]).unwrap();
+    assert!(matches!(
+        defaults.command,
+        Some(Command::Agent {
+            command: AgentCommand::Prompt {
+                steer: false,
+                notify: false,
+                ..
+            }
+        })
+    ));
+    assert!(Args::try_parse_from(["treer", "agent", "queue", "ls", "/reviewer"]).is_ok());
+    assert!(
+        Args::try_parse_from(["treer", "agent", "queue", "cancel", "/reviewer", "sub-1"]).is_ok()
+    );
+}
+
+#[tokio::test]
+async fn prompt_wait_follows_its_receipt_instead_of_unrelated_idle_state() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let polls = Arc::new(AtomicUsize::new(0));
+    let seen = polls.clone();
+    let app = axum::Router::new()
+        .route("/api/agents/{agent_id}/prompt", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+            assert_eq!(body["delivery"], "queue");
+            assert_eq!(body["require_receipt"], true);
+            axum::Json(json!({"submission":{"id":"sub-ours","disposition":"queued","position":2}}))
+        }))
+        .route("/api/agents/{agent_id}/submissions/{id}", axum::routing::get(move |axum::extract::Path((agent_id,id)): axum::extract::Path<(String,String)>| {
+            let seen = seen.clone();
+            async move {
+                assert_eq!(id, "sub-ours");
+                assert_eq!(agent_id, "ag_target");
+                let state = if seen.fetch_add(1, Ordering::SeqCst) == 0 { "running" } else { "done" };
+                axum::Json(json!({"submission":{"id":id,"sender":null,"created_at":"2026-10-12T00:00:00Z","position":null,"text_preview":"task","state":state,"turn_id":"turn-ours","assistant_preview":"done","error":null}}))
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ApiClient {
+        http: reqwest::Client::builder().no_proxy().build().unwrap(),
+        base: Url::parse(&format!("http://{address}/")).unwrap(),
+        source_agent_id: None,
+        workload_credential: None,
+        operator_credential: None,
+    };
+    let result = prompt_and_maybe_wait(
+        &client,
+        "ag_target",
+        "task".into(),
+        false,
+        false,
+        PromptWaitArgs {
+            wait: true,
+            until: vec![],
+            timeout: Some(5000),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["completion"]["id"], "sub-ours");
+    assert_eq!(result["completion"]["turn_id"], "turn-ours");
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[test]
 fn admin_startup_and_restart_argv_parse_without_shell_interpretation() {
     let set = Args::try_parse_from([
         "treer",

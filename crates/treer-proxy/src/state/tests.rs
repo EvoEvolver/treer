@@ -1,6 +1,56 @@
 use super::*;
 
 #[tokio::test]
+async fn old_controller_rejects_prompt_delivery_without_receiving_unknown_frames() {
+    let state = AppState::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            Uuid::new_v4(),
+            "old".into(),
+            vec![],
+            tx,
+        )
+        .await
+        .unwrap();
+    for command in [
+        AgentCommand::SubmitPrompt {
+            agent_id: "target".into(),
+            request: treer_protocol::SubmitAgentPromptRequest {
+                text: "task".into(),
+                delivery: treer_protocol::PromptDelivery::Queue,
+                notify: None,
+                require_receipt: false,
+            },
+            sender: None,
+        },
+        AgentCommand::QueueRead {
+            agent_id: "target".into(),
+        },
+        AgentCommand::SubmissionRead {
+            agent_id: "target".into(),
+            submission_id: "sub-1".into(),
+        },
+        AgentCommand::QueueCancel {
+            agent_id: "target".into(),
+            submission_id: "sub-1".into(),
+        },
+    ] {
+        let error = state
+            .send_command("alpha", "server", command)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "unsupported_command");
+        assert!(error
+            .message
+            .contains(treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY));
+        assert!(rx.try_recv().is_err());
+    }
+    assert_eq!(state.snapshot("alpha").await.unwrap().servers.len(), 1);
+}
+
+#[tokio::test]
 async fn legacy_controller_rejects_startup_admin_without_losing_connection() {
     let state = AppState::new();
     let (tx, mut rx) = mpsc::unbounded_channel();

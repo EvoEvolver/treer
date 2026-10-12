@@ -11,6 +11,226 @@ use treer_protocol::{
 };
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
+#[tokio::test]
+async fn prompt_queue_policy_denies_send_and_listing_before_dispatch() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let store = WorkspacePolicyStore::new(auth.pool());
+    store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([
+                    (ACTION_AGENT_PROMPT.into(), PolicyEffect::Deny),
+                    (
+                        crate::policy::ACTION_AGENT_QUEUE_READ.into(),
+                        PolicyEffect::Deny,
+                    ),
+                ]),
+                groups: BTreeMap::new(),
+                rules: vec![],
+            },
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let policy = PolicyEngine::durable(store);
+    let mut headers = HeaderMap::new();
+    headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+    let machine = Some(Extension(MachineSession {
+        server_id: Some("machine-a".into()),
+        workspace_id: Some("default".into()),
+    }));
+    let error = prompt_agent(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Extension(policy.clone()),
+        machine.clone(),
+        headers.clone(),
+        Path(("default".into(), "reviewer".into())),
+        Json(treer_protocol::SubmitAgentPromptRequest {
+            text: "task".into(),
+            delivery: treer_protocol::PromptDelivery::Queue,
+            notify: None,
+            require_receipt: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "policy_denied");
+    let error = read_prompt_queue(
+        State(state),
+        Extension(auth),
+        Extension(policy),
+        machine,
+        headers,
+        Path(("default".into(), "reviewer".into())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "policy_denied");
+}
+
+#[tokio::test]
+async fn prompt_queue_attests_sender_and_checks_cancel_ownership() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let server = state.resolve_server("default", "machine-a").await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server,
+            Uuid::new_v4(),
+            "queue-test".into(),
+            vec![treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let store = WorkspacePolicyStore::new(auth.pool());
+    store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([
+                    (
+                        crate::policy::ACTION_AGENT_QUEUE_READ.into(),
+                        PolicyEffect::Deny,
+                    ),
+                    (
+                        crate::policy::ACTION_AGENT_QUEUE_CANCEL.into(),
+                        PolicyEffect::Deny,
+                    ),
+                ]),
+                groups: BTreeMap::new(),
+                rules: vec![],
+            },
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let policy = PolicyEngine::durable(store);
+    let mut headers = HeaderMap::new();
+    headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+    let machine = Some(Extension(MachineSession {
+        server_id: Some("machine-a".into()),
+        workspace_id: Some("default".into()),
+    }));
+    let pending = tokio::spawn({
+        let (state, auth, policy, headers, machine) = (
+            state.clone(),
+            auth.clone(),
+            policy.clone(),
+            headers.clone(),
+            machine.clone(),
+        );
+        async move {
+            prompt_agent(
+                State(state),
+                Extension(auth),
+                Extension(policy),
+                machine,
+                headers,
+                Path(("default".into(), "reviewer".into())),
+                Json(treer_protocol::SubmitAgentPromptRequest {
+                    text: "task".into(),
+                    delivery: treer_protocol::PromptDelivery::Queue,
+                    notify: None,
+                    require_receipt: true,
+                }),
+            )
+            .await
+        }
+    });
+    let envelope = next_lifecycle_command(&mut rx).await;
+    match envelope.command {
+        AgentCommand::SubmitPrompt {
+            agent_id,
+            sender: Some(sender),
+            request,
+        } => {
+            assert_eq!(agent_id, "agent-b");
+            assert_eq!(sender.agent_id, "agent-a");
+            assert_eq!(sender.path, "/agent-a");
+            assert_eq!(sender.name, "agent-a");
+            assert_eq!(request.notify.unwrap().to.as_deref(), Some("agent-a"));
+            assert!(request.require_receipt);
+        }
+        command => panic!("unexpected command: {command:?}"),
+    }
+    state
+        .complete_command(CommandResult::success(
+            envelope.command_id,
+            json!({"submission":{"id":"sub-1","disposition":"queued","position":1}}),
+        ))
+        .await;
+    assert!(pending.await.unwrap().is_ok());
+    for sender in ["agent-b", "agent-a"] {
+        let pending = tokio::spawn({
+            let (state, auth, policy, headers, machine) = (
+                state.clone(),
+                auth.clone(),
+                policy.clone(),
+                headers.clone(),
+                machine.clone(),
+            );
+            async move {
+                cancel_prompt_submission(
+                    State(state),
+                    Extension(auth),
+                    Extension(policy),
+                    machine,
+                    headers,
+                    Path(("default".into(), "reviewer".into(), "sub-1".into())),
+                )
+                .await
+            }
+        });
+        let read = next_lifecycle_command(&mut rx).await;
+        assert!(matches!(read.command, AgentCommand::SubmissionRead { .. }));
+        state
+            .complete_command(CommandResult::success(
+                read.command_id,
+                json!({"submission":{"id":"sub-1","sender":{"agent_id":sender}}}),
+            ))
+            .await;
+        if sender == "agent-b" {
+            assert_eq!(
+                pending.await.unwrap().unwrap_err().error.code,
+                "policy_denied"
+            );
+            assert!(rx.try_recv().is_err());
+        } else {
+            let cancel = next_lifecycle_command(&mut rx).await;
+            assert!(matches!(cancel.command, AgentCommand::QueueCancel { .. }));
+            state
+                .complete_command(CommandResult::success(
+                    cancel.command_id,
+                    json!({"submission":{"id":"sub-1","state":"interrupted"}}),
+                ))
+                .await;
+            assert_eq!(
+                pending.await.unwrap().unwrap().0["submission"]["state"],
+                "interrupted"
+            );
+        }
+    }
+}
+
 #[test]
 fn original_startup_stays_self_only() {
     let source = PolicySubject::Agent {

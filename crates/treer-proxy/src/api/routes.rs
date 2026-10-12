@@ -177,6 +177,18 @@ pub fn router(
             post(prompt_agent),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/queue",
+            get(read_prompt_queue),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/queue/{submission_id}",
+            axum::routing::delete(cancel_prompt_submission),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/submissions/{submission_id}",
+            get(read_prompt_submission),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/input",
             post(input_agent),
         )
@@ -531,6 +543,18 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/prompt",
             post(prompt_agent),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/queue",
+            get(read_prompt_queue),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/queue/{submission_id}",
+            axum::routing::delete(cancel_prompt_submission),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/submissions/{submission_id}",
+            get(read_prompt_submission),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/input",

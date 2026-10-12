@@ -72,7 +72,32 @@ pub(crate) async fn get_agent(
         agent_policy_resource(&agent),
     )
     .await?;
-    Ok(Json(serde_json::to_value(agent)?))
+    let mut value = serde_json::to_value(&agent)?;
+    if agent
+        .interface
+        .as_ref()
+        .is_some_and(|interface| interface.supports("state.observe"))
+    {
+        match state
+            .send_command(
+                &workspace_id,
+                &agent.server_id,
+                AgentCommand::InterfaceStatus {
+                    agent_id: agent.agent_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(status) => {
+                value["busy"] = status["busy"].clone();
+                value["queue_length"] = status["queue_length"].clone();
+            }
+            Err(error) => {
+                value["activity_error"] = serde_json::to_value(error)?;
+            }
+        }
+    }
+    Ok(Json(value))
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn rename_agent(

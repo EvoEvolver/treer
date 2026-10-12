@@ -557,6 +557,19 @@ Shared Rust wire models live in `treer-protocol::prompt_delivery` (re-exported
 at crate root). This contract is implemented by launcher owners; Core does not
 persist launcher-owned harness sessions or task queues.
 
+Controller command capability `agent.prompt-delivery.v1` gates the distinct
+`submit_prompt`, `queue_read`, `submission_read`, `queue_cancel`, and
+`interface_status` wire variants. Old Controllers reject them before dispatch;
+the legacy `prompt` variant remains explicitly steering for older senders.
+The public prompt request accepts only `text`, `delivery`, `notify`, and
+`require_receipt`; unknown fields (including `sender`) are rejected. The Proxy
+resolves sender ID/name/canonical tree path from the authenticated Policy
+subject and Controller forwards that attestation over its private AIS link.
+Queued Agent-to-Agent requests default to completion notification; an explicit
+empty `notify.on` disables it. Explicit steering requests require `--notify`
+for notifications, preserving legacy terminal steering without receipt support.
+`require_receipt` preflights correlated wait support before any task is sent.
+
 An Agent may register one versioned Agent Interface Server (AIS) with its local
 Controller. AIS is a semantic adapter beside the Agent's native application
 server; it does not replace Host process ownership. Registration is authenticated

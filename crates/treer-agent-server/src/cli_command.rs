@@ -218,16 +218,6 @@ impl ApiClient {
         .await
     }
 
-    async fn prompt(&self, target: &str, text: String) -> anyhow::Result<AgentInfo> {
-        let target = workload_tree::resolve_target(self, target).await?;
-        self.request(
-            Method::POST,
-            &format!("api/agents/{}/prompt", path_segment(&target)),
-            Some(json!({ "text": text })),
-        )
-        .await
-    }
-
     async fn wait_for(
         &self,
         target: &str,

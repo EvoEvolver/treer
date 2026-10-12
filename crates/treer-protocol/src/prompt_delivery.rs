@@ -115,6 +115,40 @@ pub struct AgentQueueResponse {
 mod tests {
     use super::*;
     #[test]
+    fn public_prompt_defaults_to_queue_and_cannot_forge_sender() {
+        let request: SubmitAgentPromptRequest =
+            serde_json::from_value(serde_json::json!({"text":"task"})).unwrap();
+        assert_eq!(request.delivery, PromptDelivery::Queue);
+        assert!(!request.require_receipt);
+        assert!(serde_json::from_value::<SubmitAgentPromptRequest>(serde_json::json!({"text":"task","sender":{"agent_id":"victim","path":"/victim","name":"victim"}})).is_err());
+        for command in [
+            AgentCommand::SubmitPrompt {
+                agent_id: "target".into(),
+                request,
+                sender: None,
+            },
+            AgentCommand::QueueRead {
+                agent_id: "target".into(),
+            },
+            AgentCommand::SubmissionRead {
+                agent_id: "target".into(),
+                submission_id: "sub-1".into(),
+            },
+            AgentCommand::QueueCancel {
+                agent_id: "target".into(),
+                submission_id: "sub-1".into(),
+            },
+        ] {
+            assert_eq!(
+                command.required_capability(),
+                Some(CAPABILITY_AGENT_PROMPT_DELIVERY)
+            );
+            let decoded: AgentCommand =
+                serde_json::from_value(serde_json::to_value(&command).unwrap()).unwrap();
+            assert_eq!(decoded, command);
+        }
+    }
+    #[test]
     fn prompt_delivery_contract_round_trips() {
         let request = AgentInterfacePromptRequest {
             operation_id: "cmd-1".into(),

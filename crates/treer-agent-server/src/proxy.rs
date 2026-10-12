@@ -749,6 +749,46 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::SubmitPrompt {
+                agent_id,
+                request,
+                sender,
+            } => self
+                .runtime
+                .submit_prompt_delivery(&command_id, &agent_id, request, sender)
+                .await
+                .map(|data| CommandResult::success(command_id.clone(), data))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::InterfaceStatus { agent_id } => self
+                .runtime
+                .interface_status(&agent_id)
+                .await
+                .map(|data| CommandResult::success(command_id.clone(), data))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::QueueRead { agent_id } => self
+                .runtime
+                .prompt_queue_request(&agent_id, None, false)
+                .await
+                .map(|data| CommandResult::success(command_id.clone(), data))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::SubmissionRead {
+                agent_id,
+                submission_id,
+            } => self
+                .runtime
+                .prompt_queue_request(&agent_id, Some(&submission_id), false)
+                .await
+                .map(|data| CommandResult::success(command_id.clone(), data))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::QueueCancel {
+                agent_id,
+                submission_id,
+            } => self
+                .runtime
+                .prompt_queue_request(&agent_id, Some(&submission_id), true)
+                .await
+                .map(|data| CommandResult::success(command_id.clone(), data))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
             AgentCommand::Prompt { agent_id, text } => self
                 .runtime
                 .prompt(&command_id, &agent_id, &text)

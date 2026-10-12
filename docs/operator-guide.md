@@ -1199,10 +1199,27 @@ and terminal resize are passed through directly. Press `Ctrl-]` to detach
 without stopping the agent.
 
 Targets accept a stable Agent/App ID, tree path, sibling name, or `self`/`.` from inside a
-managed agent. `prompt --wait` waits for observed activity followed by `idle`,
-`blocked`, `exited`, or `failed` by default; repeat `--until STATUS` to select
-other states. It is state-based coordination, not strict per-prompt turn
-correlation.
+managed agent. `agent prompt TARGET TEXT` now defaults to queue delivery: idle
+targets start immediately; busy targets finish their current turn first.
+`--steer` explicitly inserts into the current turn. Missing `prompt.queue`
+capability (including PTY-only Agents) returns `queue_unsupported`; it never
+silently falls back to insertion. Older Controllers reject the negotiated
+`agent.prompt-delivery.v1` command without dropping their connection.
+
+`prompt --wait --timeout 120000` follows this submission's receipt until
+`done`, `failed`, or `interrupted`, rather than watching unrelated idle events.
+Timeout is in milliseconds and does not cancel the work. `--until` belongs to
+the separate `agent wait` command. `treer agent queue ls TARGET` lists pending
+items; `treer agent queue cancel TARGET ID` cancels a pending submission.
+`agent show` includes live `busy` and `queue_length` when the Interface supports
+status observation (or `activity_error` if status is unavailable).
+
+Agent-to-Agent submissions automatically request a completion Core Message;
+`--notify` makes the request explicit. Human/operator API callers must supply
+`notify.to` when requesting notification. Completion delivery uses the target
+launcher's identity and normal message authorization, with a durable outbox
+and idempotency key. Notification failure does not rerun the task. API clients
+can opt out with `notify:{on:[]}`.
 
 To create a peer:
 

@@ -330,6 +330,7 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
         .json()
         .await?;
     ensure_path_target_capability(&health)?;
+    ensure_prompt_delivery_capability(&health, &connection.argv)?;
     let mut url = connection.url.join("/api/cli/session")?;
     let scheme = match url.scheme() {
         "http" => "ws",
@@ -448,6 +449,21 @@ mod configuration_tests {
     }
 }
 
+fn ensure_prompt_delivery_capability(
+    health: &serde_json::Value,
+    argv: &[String],
+) -> anyhow::Result<()> {
+    if argv.first().is_some_and(|arg| arg == "agent")
+        && argv
+            .get(1)
+            .is_some_and(|arg| matches!(arg.as_str(), "prompt" | "queue"))
+    {
+        anyhow::ensure!(health["cli_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap == treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY)),
+            "queue_unsupported: Controller does not advertise agent.prompt-delivery.v1; upgrade it before using prompt/queue (no command was dispatched)");
+    }
+    Ok(())
+}
+
 fn ensure_path_target_capability(health: &serde_json::Value) -> anyhow::Result<()> {
     anyhow::ensure!(health["cli_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap == treer_protocol::CAPABILITY_AGENT_PATH_TARGETS)),
         "unsupported_command: Controller does not advertise agent.path-targets.v1; upgrade the Controller before using this CLI (no command was dispatched)");
@@ -456,6 +472,23 @@ fn ensure_path_target_capability(health: &serde_json::Value) -> anyhow::Result<(
 
 #[cfg(test)]
 mod path_capability_tests {
+    #[test]
+    fn old_interpreter_cannot_silently_steer_a_default_queue_prompt() {
+        let old = serde_json::json!({"cli_capabilities":["agent.path-targets.v1"]});
+        for command in ["prompt", "queue"] {
+            let argv = vec!["agent".into(), command.into(), "target".into()];
+            assert!(super::ensure_prompt_delivery_capability(&old, &argv)
+                .unwrap_err()
+                .to_string()
+                .contains("queue_unsupported"));
+            assert!(super::ensure_prompt_delivery_capability(
+                &serde_json::json!({"cli_capabilities":["agent.prompt-delivery.v1"]}),
+                &argv
+            )
+            .is_ok());
+        }
+        assert!(super::ensure_prompt_delivery_capability(&old, &["status".into()]).is_ok());
+    }
     #[test]
     fn old_controllers_fail_before_command_dispatch_without_breaking_a_session() {
         assert!(

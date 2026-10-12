@@ -4,19 +4,73 @@ pub(super) async fn prompt_and_maybe_wait(
     client: &ApiClient,
     target: &str,
     text: String,
+    steer: bool,
+    notify: bool,
     wait: PromptWaitArgs,
 ) -> anyhow::Result<Value> {
-    let submitted = client.prompt(target, text).await?;
-    if !wait.wait {
-        return Ok(serde_json::to_value(submitted)?);
+    if !wait.until.is_empty() {
+        bail!("prompt --wait waits for its submission; use agent wait for --until status matching");
     }
-    let until = default_wait_statuses(wait.until);
-    let baseline = Some((submitted.status, submitted.output_revision));
-    Ok(serde_json::to_value(
-        client
-            .wait_for(target, &until, wait.timeout, baseline)
-            .await?,
-    )?)
+    let target = workload_tree::resolve_target(client, target).await?;
+    let mut submitted = client
+        .value(
+            Method::POST,
+            &format!("api/agents/{}/prompt", path_segment(&target)),
+            Some(serde_json::to_value(
+                treer_protocol::SubmitAgentPromptRequest {
+                    text,
+                    delivery: if steer {
+                        treer_protocol::PromptDelivery::Steer
+                    } else {
+                        treer_protocol::PromptDelivery::Queue
+                    },
+                    notify: notify.then(treer_protocol::PromptNotify::default),
+                    require_receipt: wait.wait,
+                },
+            )?),
+        )
+        .await?;
+    if !wait.wait {
+        return Ok(submitted);
+    }
+    let id = submitted["submission"]["id"]
+        .as_str()
+        .context("Target did not return a submission receipt")?
+        .to_string();
+    let deadline = wait
+        .timeout
+        .map(|ms| Instant::now() + Duration::from_millis(ms));
+    loop {
+        let path = format!(
+            "api/agents/{}/submissions/{}",
+            path_segment(&target),
+            path_segment(&id)
+        );
+        let request = client.value(Method::GET, &path, None);
+        let result = match deadline {
+            Some(deadline) => {
+                tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), request)
+                    .await
+                    .with_context(|| {
+                        format!("Timed out waiting for submission {id}; it remains submitted")
+                    })??
+            }
+            None => request.await?,
+        };
+        let submission: treer_protocol::PromptSubmission =
+            serde_json::from_value(result["submission"].clone())?;
+        if submission.id != id {
+            bail!("Target returned a different submission while waiting for {id}");
+        }
+        if submission.state.is_terminal() {
+            submitted["completion"] = serde_json::to_value(submission)?;
+            return Ok(submitted);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            bail!("Timed out waiting for submission {id}; it remains submitted");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 pub(super) async fn read_agent(

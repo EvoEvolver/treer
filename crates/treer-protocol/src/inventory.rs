@@ -177,6 +177,8 @@ pub struct AgentInterfaceStatusResponse {
     pub status: AgentStatus,
     #[serde(default)]
     pub busy: bool,
+    #[serde(default)]
+    pub queue_length: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

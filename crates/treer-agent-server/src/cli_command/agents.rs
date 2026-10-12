@@ -29,13 +29,50 @@ pub(super) async fn run_agent_command(
             }
         }
         AgentCommand::Show { target } => {
-            Ok(serde_json::to_value(client.get_agent(&target).await?)?)
+            let target = workload_tree::resolve_target(client, &target).await?;
+            client
+                .value(
+                    Method::GET,
+                    &format!("api/agents/{}", path_segment(&target)),
+                    None,
+                )
+                .await
         }
         AgentCommand::Attach { .. } => {
             bail!("terminal attach requires the thin client session transport")
         }
-        AgentCommand::Prompt { target, text, wait } => {
-            prompt_and_maybe_wait(client, &target, text, wait).await
+        AgentCommand::Prompt {
+            target,
+            text,
+            queue: _,
+            steer,
+            notify,
+            wait,
+        } => prompt_and_maybe_wait(client, &target, text, steer, notify, wait).await,
+        AgentCommand::Queue { command } => {
+            let (target, id) = match command {
+                AgentQueueCommand::Ls { target } => (target, None),
+                AgentQueueCommand::Cancel { target, id } => (target, Some(id)),
+            };
+            let target = workload_tree::resolve_target(client, &target).await?;
+            let path = format!(
+                "api/agents/{}/queue{}",
+                path_segment(&target),
+                id.as_ref()
+                    .map(|id| format!("/{}", path_segment(id)))
+                    .unwrap_or_default()
+            );
+            client
+                .value(
+                    if id.is_some() {
+                        Method::DELETE
+                    } else {
+                        Method::GET
+                    },
+                    &path,
+                    None,
+                )
+                .await
         }
         AgentCommand::Read { target, lines } => read_agent(client, &target, lines).await,
         AgentCommand::Transcript {

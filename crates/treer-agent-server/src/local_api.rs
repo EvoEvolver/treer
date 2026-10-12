@@ -19,9 +19,9 @@ use treer_protocol::{
     CreateAgentRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
     CreateServiceIngressRequest, CreateVirtualNetworkHostRequest, CreateWorkloadFolderRequest,
     DeleteWorkloadFolderQuery, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
-    ListMessagesQuery, MachineExecRequest, PolicyProviderInvalidationRequest, PromptAgentRequest,
-    ProtocolError, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
-    SendMessageRequest, SetAgentStartupRequest, SetWorkloadPlacementRequest, TerminalServerMessage,
+    ListMessagesQuery, MachineExecRequest, PolicyProviderInvalidationRequest, ProtocolError,
+    ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest, SendMessageRequest,
+    SetAgentStartupRequest, SetWorkloadPlacementRequest, TerminalServerMessage,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
     UpdateWorkloadFolderRequest, UploadMachineFileRequest, WorkloadIdentityTokenRequest,
     AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
@@ -479,6 +479,15 @@ pub fn router(state: LocalApiState) -> Router {
         )
         .route("/api/agents/{agent_id}/terminal", get(agent_terminal))
         .route("/api/agents/{agent_id}/prompt", post(prompt_agent))
+        .route("/api/agents/{agent_id}/queue", get(read_prompt_queue))
+        .route(
+            "/api/agents/{agent_id}/queue/{submission_id}",
+            axum::routing::delete(cancel_prompt_submission),
+        )
+        .route(
+            "/api/agents/{agent_id}/submissions/{submission_id}",
+            get(read_prompt_submission),
+        )
         .route("/api/agents/{agent_id}/input", post(input_agent))
         .route("/api/agents/{agent_id}/output", get(read_agent))
         .route(

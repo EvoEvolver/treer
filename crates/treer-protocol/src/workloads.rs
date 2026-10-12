@@ -271,6 +271,19 @@ pub struct PromptAgentRequest {
     pub text: String,
 }
 
+/// Public delivery options. Sender identity is supplied only by the Proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitAgentPromptRequest {
+    pub text: String,
+    #[serde(default)]
+    pub delivery: PromptDelivery,
+    #[serde(default)]
+    pub notify: Option<PromptNotify>,
+    #[serde(default)]
+    pub require_receipt: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputAgentRequest {
     pub data: Vec<u8>,
@@ -341,6 +354,25 @@ pub enum AgentCommand {
     Prompt {
         agent_id: String,
         text: String,
+    },
+    SubmitPrompt {
+        agent_id: String,
+        request: SubmitAgentPromptRequest,
+        sender: Option<PromptSender>,
+    },
+    QueueRead {
+        agent_id: String,
+    },
+    InterfaceStatus {
+        agent_id: String,
+    },
+    SubmissionRead {
+        agent_id: String,
+        submission_id: String,
+    },
+    QueueCancel {
+        agent_id: String,
+        submission_id: String,
     },
     Input {
         agent_id: String,
@@ -414,6 +446,11 @@ pub enum AgentCommand {
 impl AgentCommand {
     pub fn required_capability(&self) -> Option<&'static str> {
         match self {
+            Self::SubmitPrompt { .. }
+            | Self::QueueRead { .. }
+            | Self::InterfaceStatus { .. }
+            | Self::SubmissionRead { .. }
+            | Self::QueueCancel { .. } => Some(CAPABILITY_AGENT_PROMPT_DELIVERY),
             Self::StartupAdminGet { .. }
             | Self::StartupAdminSet { .. }
             | Self::RestartWithStartup { .. } => Some(CAPABILITY_AGENT_STARTUP_ADMIN),

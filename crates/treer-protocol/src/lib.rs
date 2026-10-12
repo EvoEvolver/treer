@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 pub mod cli;
 pub mod recovery;
 pub use recovery::*;
-mod prompt_delivery;
+pub mod prompt_delivery;
 pub use prompt_delivery::*;
 mod targets;
 pub use targets::*;
@@ -22,6 +22,7 @@ pub const CAPABILITY_AGENT_PATH_TARGETS: &str = "agent.path-targets.v1";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
 pub const CAPABILITY_AGENT_STARTUP_ADMIN: &str = "agent.startup-admin.v1";
+pub const CAPABILITY_AGENT_PROMPT_DELIVERY: &str = "agent.prompt-delivery.v1";
 pub const CAPABILITY_AGENT_LIFECYCLE: &str = "agent.lifecycle.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
 pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
@@ -32,6 +33,7 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,
     CAPABILITY_AGENT_STARTUP_ADMIN,
+    CAPABILITY_AGENT_PROMPT_DELIVERY,
     CAPABILITY_AGENT_LIFECYCLE,
     CAPABILITY_MACHINE_EXEC,
     CAPABILITY_MACHINE_UPLOAD,
