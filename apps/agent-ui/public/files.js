@@ -93,11 +93,11 @@ export function setupFileBrowser(request) {
     tree.replaceChildren(children("", 0));
     if (focused !== null) [...tree.querySelectorAll("button")].find((button) => button.title === focused)?.focus();
   }
-  function open(show) {
+  function open(show, focus = true) {
     browser.hidden = !show;
     toggle.setAttribute("aria-expanded", String(show));
-    if (show) { void load(""); $("files-close").focus(); }
-    else toggle.focus();
+    if (show) { document.dispatchEvent(new CustomEvent("agent-ui:panel", { detail: "files" })); void load(""); if (focus) $("files-close").focus(); }
+    else if (focus) toggle.focus();
   }
   toggle.addEventListener("click", () => open(browser.hidden));
   $("files-close").addEventListener("click", () => open(false));
@@ -105,4 +105,5 @@ export function setupFileBrowser(request) {
   $("files-browse").addEventListener("click", () => previewTab(false));
   $("files-preview-tab").addEventListener("click", () => previewTab(true));
   browser.addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); open(false); } });
+  document.addEventListener("agent-ui:panel", (event) => { if (event.detail === "tasks" && matchMedia("(max-width: 720px)").matches) open(false, false); });
 }

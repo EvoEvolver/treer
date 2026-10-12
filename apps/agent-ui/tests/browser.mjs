@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { hermeticEnv } from "./hermetic.mjs";
+import { testRuntimeControls } from "./browser-controls.mjs";
 
 // An isolated listener and fake Codex: no inference, Treer mutations or Agent restart.
 const app = resolve(import.meta.dirname, "..");
@@ -87,6 +88,7 @@ try {
   await page.evaluate(() => document.querySelector("iframe").contentWindow.postMessage({ type: "treer:embed-theme", theme: "dark" }, "*"));
   await expect(frame.locator("html")).toHaveAttribute("data-theme", "dark");
   assert.deepEqual(errors, []);
+  await testRuntimeControls(browser, screenshots);
   console.log(`Browser checks passed (desktop 1440px / mobile 390px). Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();

@@ -116,6 +116,23 @@ current Agent process is deliberately replaced.
 
 ## Browser interface
 
+When supported by the harness, the header's **N running** button opens background
+tasks with their status, duration, exit code, and summary. Expand a task to load
+its output tail; running tasks refresh every three seconds while open. On narrow
+screens, tasks and the file explorer share the drawer. Task content renders as text.
+
+Enter sends a message when idle and steers the current run when busy. Tab queues
+a nonempty draft; Shift+Enter adds a newline. While running, separate **Steer**
+and **Queue** buttons support touch input. Harnesses without steering automatically
+queue messages and display a notice. Queued messages appear above the input and
+can be canceled. Failed submissions retain the draft for retry.
+
+Harnesses with Goal support show **Set goal**, or the current objective, status,
+token/time usage, and optional token budget progress. Edit, pause/resume (when
+supported), and clear controls appear on the goal bar; clearing requires inline
+confirmation. `/goal <objective>` sets a goal and `/goal clear` requests clearing
+instead of sending a chat message. Completed goals also produce a timeline notice.
+
 Use the **Browse files** button in the header to open the file explorer. Folders
 load only when expanded. Selecting a file opens a read-only text preview; on
 narrow screens the drawer has Browse/Preview tabs and a close button to return

@@ -161,3 +161,78 @@ h1 { overflow: hidden; margin: 0; font-size: 14px; line-height: 17px; text-overf
   .message-assistant { padding-right: 0; }
   .composer { width: calc(100% - 16px); margin-bottom: 8px; }
 }
+
+/* Runtime controls share the existing plain browser surface and theme tokens. */
+.tasks-toggle, .queue-send, .goal-bar button, .goal-actions button, .goal-confirm button, .task-refresh, .queued-prompt button, #goal-editor button {
+  min-height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); padding: 5px 9px; font: inherit; font-size: 12px;
+}
+.tasks-toggle { color: var(--accent); white-space: nowrap; }
+.tasks-idle { color: var(--muted); }
+.tasks-panel { display: flex; flex-direction: column; flex: 0 0 clamp(280px, 30vw, 420px); min-height: 0; min-width: 0; border-left: 1px solid var(--border); background: var(--panel); }
+.tasks-list { overflow: auto; min-height: 0; padding: 12px; }
+.tasks-empty { color: var(--muted); font-size: 13px; }
+.task-card { margin-bottom: 10px; border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 12px; }
+.task-heading { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; gap: 7px; cursor: pointer; list-style: none; }
+.task-heading::-webkit-details-marker { display: none; }
+.task-icon { color: var(--accent); font-family: ui-monospace, monospace; }
+.task-description, .task-summary { overflow-wrap: anywhere; white-space: pre-wrap; }
+.task-meta { color: var(--muted); font-size: 11px; margin: 7px 0; }
+.task-summary { margin: 7px 0 0; color: var(--muted); }
+.task-heading .task-meta, .task-heading .task-summary { grid-column: 2 / -1; }
+.task-status { color: var(--accent); white-space: nowrap; }
+.task-completed, .task-stopped { background: var(--soft); color: var(--muted); }
+.task-completed .task-status, .task-stopped .task-status { color: var(--muted); }
+.task-failed .task-status, .task-error { color: var(--danger); }
+.task-body { padding-top: 10px; }
+.task-output { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 10px; padding: 9px; border-radius: 4px; background: var(--soft); font: 12px/1.6 ui-monospace, monospace; }
+.send-actions { display: flex; align-items: center; gap: 0; }
+.send-actions:has(.queue-send:not([hidden])) { border: 1px solid var(--accent); border-radius: 6px; overflow: hidden; }
+.send-actions:has(.queue-send:not([hidden])) > button { border: 0; border-radius: 0; }
+.send-labeled { width: auto; padding: 0 10px; font-size: 12px !important; }
+.queue-send { height: 32px; color: var(--accent); }
+.prompt-shortcuts { grid-column: 1 / -1; margin: 0 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.prompt-queue { grid-column: 1 / -1; max-height: 125px; overflow: auto; display: grid; gap: 5px; }
+.queued-prompt { display: flex; align-items: center; gap: 8px; background: var(--soft); border-radius: 5px; padding: 6px 8px; font-size: 12px; }
+.queue-label { color: var(--muted); font-size: 10px; }
+.queued-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.goal-bar { grid-column: 1 / -1; border-bottom: 1px solid var(--border); padding: 3px 6px 10px; min-width: 0; }
+.goal-heading { display: flex; align-items: start; gap: 10px; justify-content: space-between; }
+.goal-objective { min-width: 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 72px; overflow: auto; }
+.goal-status { flex: 0 0 auto; font-size: 11px; border-radius: 4px; padding: 3px 6px; background: var(--soft); }
+.goal-status-active { color: var(--accent); }
+.goal-status-paused { color: var(--muted); }
+.goal-status-blocked { color: var(--danger); }
+.goal-status-usageLimited, .goal-status-budgetLimited { color: var(--amber); }
+.goal-status-complete { background: var(--accent); color: var(--panel); font-weight: 700; }
+.goal-metrics, .goal-budget { margin: 7px 0; color: var(--muted); font-size: 11px; }
+.goal-progress { width: min(100%, 220px); height: 8px; accent-color: var(--accent); margin-right: 8px; }
+.goal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
+.goal-confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; border: 1px solid var(--border); border-radius: 5px; padding: 8px; font-size: 12px; }
+.goal-confirm [data-action="confirm-clear"] { color: var(--danger); }
+.goal-completion { border: 1px solid var(--accent); border-left-width: 4px; border-radius: 6px; background: var(--panel); color: var(--accent); padding: 14px; margin: 14px 0; font-size: 14px; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.feedback-notice, [data-theme="dark"] .feedback-notice { color: var(--accent); background: var(--soft); border-color: var(--border); }
+#goal-editor { width: min(480px, calc(100% - 24px)); max-height: calc(100% - 32px); overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: inherit; padding: 20px; }
+#goal-editor::backdrop { background: rgb(0 0 0 / 40%); }
+#goal-editor header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#goal-editor h2 { font-size: 16px; margin: 0; }
+#goal-editor label { display: grid; gap: 8px; margin-top: 18px; font-size: 12px; }
+#goal-editor textarea, #goal-editor input { width: 100%; border: 1px solid var(--border); border-radius: 5px; padding: 9px; background: var(--soft); color: inherit; font: inherit; }
+#goal-error { color: var(--danger); font-size: 12px; }
+#goal-editor .goal-actions { justify-content: end; margin-top: 20px; }
+#goal-save { background: var(--accent) !important; color: var(--panel); }
+@media (max-width: 720px) {
+  .tasks-panel { position: absolute; inset: 0; z-index: 2; border-left: 0; }
+  .topbar { gap: 8px; }
+  .brand-mark { display: none; }
+  .identity { gap: 6px; }
+  .identity p { max-width: 18vw; }
+  .controls { gap: 4px; }
+  .select-wrap select { max-width: 100px; }
+  .tasks-toggle { padding-inline: 6px; font-size: 11px; }
+  .goal-heading { flex-wrap: wrap; gap: 5px; }
+  .composer { gap: 6px; padding: 8px; }
+  .composer textarea { padding-inline: 3px; }
+  .prompt-shortcuts { margin-inline: 3px; font-size: 10px; }
+  .tasks-list { padding: 12px; }
+  .task-refresh, .goal-actions button, .queued-prompt button, .goal-confirm button { min-height: 36px; }
+}

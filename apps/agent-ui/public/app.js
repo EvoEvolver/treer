@@ -1,6 +1,8 @@
 import { renderMarkdown } from "./markdown.js";
 import "./theme.js";
 import { setupFileBrowser } from "./files.js";
+import { setupTasks } from "./tasks.js";
+import { setupGoal } from "./goal.js";
 
 const elements = {
   composer: document.querySelector("#composer"),
@@ -12,6 +14,9 @@ const elements = {
   model: document.querySelector("#model"),
   prompt: document.querySelector("#prompt"),
   send: document.querySelector("#send"),
+  queueSend: document.querySelector("#queue-send"),
+  queue: document.querySelector("#prompt-queue"),
+  shortcuts: document.querySelector("#prompt-shortcuts"),
   status: document.querySelector("#status"),
   timeline: document.querySelector("#timeline"),
   title: document.querySelector("#title"),
@@ -29,6 +34,18 @@ let submitting = false;
 let loadingOlder = false;
 let settingsBusy = false;
 let localError = null;
+let localNotice = null;
+const renderTasks = setupTasks();
+const goal = setupGoal({
+  mutate: async (path, init) => {
+    const payload = await request(path, init);
+    snapshot = payload?.type === "state" || payload?.harness ? payload : await request("api/state");
+    localError = null;
+    render();
+  },
+  report: (message) => { localError = message; render(); },
+  clearPrompt,
+});
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -136,6 +153,16 @@ function renderTimeline(scrollAnchor) {
   const nearBottom = elements.timeline.scrollHeight - elements.timeline.scrollTop - elements.timeline.clientHeight < 120;
   const fragment = document.createDocumentFragment();
   if (snapshot?.thread?.hasOlderItems) fragment.append(loadOlderNode());
+  const shownGoals = new Set();
+  function goalNotices(turnId) {
+    for (const notice of goal.notices) {
+      if (shownGoals.has(notice) || (turnId != null && notice.afterTurn !== turnId)) continue;
+      const completion = node("section", "goal-completion", `✓ Goal complete: ${notice.objective}`);
+      completion.setAttribute("role", "status");
+      fragment.append(completion);
+      shownGoals.add(notice);
+    }
+  }
   for (const turn of snapshot?.thread?.turns ?? []) {
     for (const item of turn.items ?? []) {
       const rendered = itemNode(item);
@@ -146,7 +173,9 @@ function renderTimeline(scrollAnchor) {
       if (rendered) fragment.append(rendered);
     }
     if (turn.error) fragment.append(node("div", "turn-error", turn.error));
+    goalNotices(turn.id);
   }
+  goalNotices(null);
   if (snapshot?.thread?.status === "running") fragment.append(workingNode());
   elements.timeline.replaceChildren(fragment);
   if (!elements.timeline.childElementCount) {
@@ -210,8 +239,12 @@ function render(scrollAnchor) {
   elements.status.lastElementChild.textContent = state.charAt(0).toUpperCase() + state.slice(1);
   elements.interrupt.disabled = thread?.status !== "running";
   renderComposer();
-  elements.feedback.hidden = !localError;
-  elements.feedback.textContent = localError || "";
+  elements.feedback.hidden = !localError && !localNotice;
+  elements.feedback.classList.toggle("feedback-notice", !localError);
+  elements.feedback.textContent = localError || localNotice || "";
+  renderTasks(snapshot);
+  renderQueue();
+  goal.render(snapshot);
   renderSettings();
   renderTimeline(scrollAnchor);
 }
@@ -220,8 +253,50 @@ function renderComposer() {
   const canSend = !submitting && snapshot?.ready && elements.prompt.value.trim().length > 0;
   const steering = snapshot?.thread?.status === "running";
   elements.send.disabled = !canSend;
-  elements.send.setAttribute("aria-label", steering ? "Steer current run" : "Send message");
-  elements.send.title = steering ? "Steer current run" : "Send message";
+  const canSteer = Boolean(snapshot?.harness?.capabilities?.steer);
+  const label = steering ? canSteer ? "Steer current run" : "Queue message (steering unavailable)" : "Send message";
+  elements.send.setAttribute("aria-label", label);
+  elements.send.title = label;
+  elements.send.textContent = steering ? canSteer ? "Steer" : "Queue" : "↑";
+  elements.send.classList.toggle("send-labeled", steering);
+  elements.queueSend.hidden = !steering;
+  elements.queueSend.disabled = !canSend;
+  elements.shortcuts.textContent = steering
+    ? `${canSteer ? "Enter to steer" : "Enter to queue (steering unavailable)"} · Tab to queue · Shift+Enter for a new line`
+    : "Enter to send · Tab to queue · Shift+Enter for a new line";
+}
+
+function renderQueue() {
+  const queue = snapshot?.queue ?? [];
+  const focused = elements.queue.contains(document.activeElement) ? document.activeElement.dataset.queueId : null;
+  elements.queue.hidden = !queue.length;
+  elements.queue.replaceChildren();
+  for (const entry of queue) {
+    const row = node("div", "queued-prompt");
+    const cancel = node("button", "", "Cancel");
+    cancel.type = "button";
+    cancel.dataset.queueId = entry.id;
+    cancel.setAttribute("aria-label", `Cancel queued message: ${entry.text}`);
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      try {
+        const payload = await request(`api/queue/${encodeURIComponent(entry.id)}`, { method: "DELETE" });
+        snapshot = payload?.harness || payload?.type === "state" ? payload : await request("api/state");
+        localError = null;
+      } catch (error) { localError = error.message; }
+      render();
+    });
+    row.append(node("span", "queue-label", "Queued"), node("span", "queued-text", entry.text), cancel);
+    elements.queue.append(row);
+  }
+  if (focused) [...elements.queue.querySelectorAll("button")].find((button) => button.dataset.queueId === focused)?.focus();
+}
+
+function clearPrompt(expected) {
+  if (elements.prompt.value.trim() !== expected) return;
+  elements.prompt.value = "";
+  elements.prompt.style.height = "auto";
+  renderComposer();
 }
 
 async function request(path, init) {
@@ -229,8 +304,8 @@ async function request(path, init) {
     ...init,
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error?.message || payload.error || `HTTP ${response.status}`);
+  const payload = response.status === 204 ? null : await response.json();
+  if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
   return payload;
 }
 
@@ -259,30 +334,39 @@ elements.effort.addEventListener("change", () => {
   void updateSettings({ reasoningEffort: elements.effort.value || null });
 });
 
-elements.composer.addEventListener("submit", async (event) => {
-  event.preventDefault();
+async function submitPrompt(mode = "steer") {
   const prompt = elements.prompt.value.trim();
   if (!prompt || submitting || !snapshot?.ready) return;
   submitting = true;
   localError = null;
+  localNotice = null;
   render();
   try {
+    const command = await goal.intercept(prompt);
+    if (command) { if (command.clear) clearPrompt(prompt); return; }
+    const downgrade = mode === "steer" && snapshot?.thread?.status === "running" && !snapshot?.harness?.capabilities?.steer;
     snapshot = await request("api/prompt", {
       method: "POST",
-      body: JSON.stringify({ prompt, history_limit: snapshot?.history?.limit ?? 50 }),
+      body: JSON.stringify({ prompt, mode: downgrade ? "queue" : mode, history_limit: snapshot?.history?.limit ?? 50 }),
     });
-    elements.prompt.value = "";
-    elements.prompt.style.height = "auto";
+    if (downgrade || snapshot.submission?.downgraded) localNotice = "This harness does not support steering; your message was queued.";
+    clearPrompt(prompt);
   } catch (error) {
     localError = error.message;
   } finally {
     submitting = false;
     render();
   }
-});
+}
+elements.composer.addEventListener("submit", (event) => { event.preventDefault(); void submitPrompt(); });
+elements.queueSend.addEventListener("click", () => void submitPrompt("queue"));
 
 elements.prompt.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (event.isComposing) return;
+  if (event.key === "Tab" && !event.shiftKey && elements.prompt.value.trim()) {
+    event.preventDefault();
+    void submitPrompt("queue");
+  } else if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     elements.composer.requestSubmit();
   }
