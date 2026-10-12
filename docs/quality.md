@@ -6,6 +6,11 @@ touches Proxy persistence, authentication, membership, Policy, or Core Message.
 Do not start a database solely to satisfy a routine handoff; state which checks
 were run and whether database-backed coverage was omitted.
 
+Windows native artifact builds exercise ConPTY without an attached browser.
+The Host answers the initial cursor inheritance query required by portable-pty
+so child output can begin. The runtime tests cover split query bytes and the
+native Windows test covers argv, environment, input, resize, and process stop.
+
 Run the complete gate on demand or while preparing a release:
 
 ```sh
