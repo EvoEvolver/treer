@@ -1,356 +1,205 @@
 from __future__ import annotations
 
+import concurrent.futures
+import hashlib
 import http.client
+import io
 import json
 import os
-import subprocess
-import sys
+import sqlite3
 import tarfile
 import tempfile
-import time
 import unittest
 from pathlib import Path
+from urllib.parse import urlencode
+
+from fixture import servers, TOKENS, PRINCIPALS, sealed_environment
+from soul import SoulStore, SoulError, scan_secrets
 
 
-APP_ROOT = Path(__file__).resolve().parents[1]
-SERVER = APP_ROOT / "soul.py"
-CLIENT = APP_ROOT / "client.py"
+def bundle(content=b'remember me\n', name='Test soul', manifest=None):
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode='w') as archive:
+        for path, data in [('manifest.json', json.dumps(manifest or {'schema_version': 1, 'name': name, 'environment': {'SOUL_FILE': 'files/state.txt'}}).encode()), ('files/state.txt', content)]:
+            info = tarfile.TarInfo(path)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return stream.getvalue()
 
 
 class SoulServerTest(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-        self.port = free_port()
-        self.fake_treer = self.root / "fake-treer.py"
-        self.treer_argv = self.root / "treer-argv.json"
-        self.fake_treer.write_text(
-            """#!/usr/bin/env python3
-import json, os, sys
-json.dump(sys.argv[1:], open(os.environ['FAKE_TREER_ARGV'], 'w'))
-print(json.dumps({'agent_id': 'ag_reborn', 'name': 'reborn', 'status': 'running'}))
-""",
-            encoding="utf-8",
-        )
-        self.fake_treer.chmod(0o755)
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "SOUL_LISTEN": f"127.0.0.1:{self.port}",
-                "SOUL_PUBLIC_URL": f"http://127.0.0.1:{self.port}",
-                "SOUL_DATA_DIR": str(self.root / "data"),
-                "TREER_BIN": str(self.fake_treer),
-                "FAKE_TREER_ARGV": str(self.treer_argv),
-            }
-        )
-        self.process = subprocess.Popen(
-            [sys.executable, str(SERVER)],
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        wait_for_health(self.port, self.process)
+        self.root = Path(self.temporary.name) / 'data'
+        self.server, self.proxy = servers(self.root)
 
-    def tearDown(self) -> None:
-        self.process.terminate()
-        try:
-            self.process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.communicate(timeout=5)
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.proxy.shutdown()
+        self.proxy.server_close()
         self.temporary.cleanup()
 
-    def request(
-        self,
-        method: str,
-        path: str,
-        body: bytes | None = None,
-        content_type: str | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> tuple[int, bytes]:
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        request_headers = dict(headers or {})
-        if content_type:
-            request_headers["Content-Type"] = content_type
-        connection.request(method, path, body=body, headers=request_headers)
+    def request(self, method, path, body=None, token='owner', headers=None):
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=10)
+        hdrs = {} if token is None else {'X-Treer-Identity-Token': token}
+        if body:
+            hdrs['Content-Type'] = 'application/x-tar'
+        hdrs.update(headers or {})
+        connection.request(method, path, body=body, headers=hdrs)
         response = connection.getresponse()
-        payload = response.read()
-        status = response.status
+        raw = response.read()
         connection.close()
-        return status, payload
+        return response.status, json.loads(raw) if response.getheader('Content-Type', '').startswith('application/json') else raw
 
-    def soul_archive(self, manifest: dict[str, object] | None = None) -> bytes:
-        source = self.root / f"archive-{time.time_ns()}"
-        source.mkdir()
-        (source / "manifest.json").write_text(
-            json.dumps(
-                manifest
-                or {
-                    "schema_version": 1,
-                    "name": "Test soul",
-                    "environment": {"SOUL_TEST_FILE": "files/state.txt"},
-                }
-            ),
-            encoding="utf-8",
-        )
-        (source / "state.txt").write_text("remember me\n", encoding="utf-8")
-        archive_path = source / "soul.tar"
-        with tarfile.open(archive_path, "w") as archive:
-            archive.add(source / "manifest.json", arcname="manifest.json")
-            archive.add(source / "state.txt", arcname="files/state.txt")
-        return archive_path.read_bytes()
+    def upload(self, query='', content=b'remember me\n', token='owner', name='Test soul'):
+        status, record = self.request('POST', '/v1/souls' + query, bundle(content, name), token)
+        self.assertEqual(status, 201, record)
+        return record
 
-    def upload(self) -> dict[str, object]:
-        status, body = self.request(
-            "POST", "/v1/souls", self.soul_archive(), "application/x-tar"
-        )
-        self.assertEqual(status, 201, body)
-        return json.loads(body)
+    def test_private_workspace_readers_and_immutable_ownership(self):
+        private = self.upload()
+        self.assertEqual(private['owner'], 'ag_owner')
+        self.assertEqual(private['visibility'], 'private')
+        for suffix in ('', '/archive'):
+            self.assertEqual(self.request('GET', '/v1/souls/' + private['soul_id'] + suffix, token='other')[0], 404)
+        self.assertEqual(self.request('DELETE', '/v1/souls/' + private['soul_id'], token='other')[0], 404)
+        public = self.upload('?visibility=workspace')
+        self.assertEqual(self.request('GET', '/v1/souls/' + public['soul_id'], token='other')[0], 200)
+        self.assertEqual(self.request('DELETE', '/v1/souls/' + public['soul_id'], token='other')[0], 403)
+        readable = self.upload('?reader=ag_other')
+        self.assertEqual(self.request('GET', '/v1/souls/' + readable['soul_id'], token='other')[0], 200)
+        self.assertEqual(self.request('POST', '/v1/souls?reader=made_up', bundle())[0], 400)
+        self.assertEqual(self.request('POST', '/v1/souls?owner=ag_other', bundle())[0], 400)
+        self.assertEqual(self.request('GET', '/v1/souls', token='other')[1]['total'], 2)
 
-    def test_upload_list_download_and_run(self) -> None:
-        soul = self.upload()
-        soul_id = soul["soul_id"]
-        status, body = self.request("GET", "/v1/souls")
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["souls"][0]["soul_id"], soul_id)
-        command = [
-            sys.executable,
-            str(CLIENT),
-            "--server",
-            f"http://127.0.0.1:{self.port}",
-            "run",
-            soul_id,
-            "--",
-            sys.executable,
-            "-c",
-            "import os; print(open(os.environ['SOUL_TEST_FILE']).read().strip())",
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "remember me")
-
-    def test_installer_embeds_url_and_verified_client(self) -> None:
-        status, body = self.request("GET", "/install.sh")
-        self.assertEqual(status, 200)
-        script = body.decode()
-        self.assertIn(f"base_url=http://127.0.0.1:{self.port}", script)
-        self.assertIn("checksum mismatch", script)
-        self.assertIn("installed treer-soul", script)
-
-    def test_root_negotiates_agent_and_read_only_human_ui(self) -> None:
-        status, body = self.request("GET", "/")
-        self.assertEqual(status, 200)
-        manual = body.decode()
-        self.assertIn("This index is for Agents", manual)
-        self.assertIn("treer-soul capture-codex", manual)
-        self.assertNotIn("<!doctype html>", manual.lower())
-
-        status, body = self.request("GET", "/", headers={"Accept": "text/html"})
-        self.assertEqual(status, 200)
-        page = body.decode()
-        self.assertIn("Treer Soul", page)
-        self.assertIn('src="./app.js"', page)
-        self.assertNotIn("Upload", page)
-        self.assertNotIn("Incarnate", page)
-
-        status, body = self.request("GET", "/", headers={"User-Agent": "Mozilla/5.0"})
-        self.assertEqual(status, 200)
-        self.assertIn("Treer Soul", body.decode())
-
-        status, body = self.request(
-            "GET", "/", headers={"User-Agent": "Mozilla/5.0", "Accept": "text/markdown"}
-        )
-        self.assertEqual(status, 200)
-        self.assertIn("This index is for Agents", body.decode())
-
-        status, script = self.request("GET", "/app.js")
-        self.assertEqual(status, 200)
-        source = script.decode()
-        self.assertIn('fetch(applicationUrl("/v1/souls")', source)
-        self.assertNotIn('method: "POST"', source)
-
-        status, stylesheet = self.request("GET", "/app.css")
-        self.assertEqual(status, 200)
-        self.assertIn(b".workspace", stylesheet)
-
-        status, body = self.request("GET", "/_human/")
-        self.assertEqual(status, 404)
-        self.assertEqual(json.loads(body)["error"]["code"], "not_found")
-
-    def test_codex_capture_restores_rollout_and_uses_supported_resume_command(self) -> None:
-        session_id = "01234567-89ab-cdef-0123-456789abcdef"
-        source_home = self.root / "source-codex"
-        session_relative = Path("2026/08/24") / f"rollout-test-{session_id}.jsonl"
-        source_session = source_home / "sessions" / session_relative
-        source_session.parent.mkdir(parents=True)
-        source_session.write_text(
-            json.dumps(
-                {
-                    "type": "session_meta",
-                    "payload": {
-                        "id": session_id,
-                        "cwd": str(self.root),
-                        "cli_version": "0.149.0",
-                    },
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        shell_dir = source_home / "shell_snapshots"
-        shell_dir.mkdir()
-        (shell_dir / f"{session_id}.123.sh").write_text("export SOUL_TEST=1\n", encoding="utf-8")
-        capture_environment = os.environ.copy()
-        capture_environment["CODEX_HOME"] = str(source_home)
-        capture = subprocess.run(
-            [
-                sys.executable,
-                str(CLIENT),
-                "--server",
-                f"http://127.0.0.1:{self.port}",
-                "capture-codex",
-                "--session",
-                session_id,
-                "--include-shell-snapshot",
-            ],
-            cwd=self.root,
-            env=capture_environment,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        self.assertEqual(capture.returncode, 0, capture.stderr)
-        soul_id = json.loads(capture.stdout)["soul_id"]
-
-        target_home = self.root / "target-codex"
-        fake_codex = self.root / "fake-codex.py"
-        fake_codex.write_text(
-            "#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n",
-            encoding="utf-8",
-        )
-        fake_codex.chmod(0o755)
-        resume_environment = os.environ.copy()
-        resume_environment.update(
-            {
-                "CODEX_HOME": str(target_home),
-                "CODEX_BIN": str(fake_codex),
-                "TREER_SOUL_STATE_DIR": str(self.root / "incarnation-state"),
-            }
-        )
-        resume = subprocess.run(
-            [
-                sys.executable,
-                str(CLIENT),
-                "--server",
-                f"http://127.0.0.1:{self.port}",
-                "run",
-                soul_id,
-            ],
-            cwd=self.root,
-            env=resume_environment,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        self.assertEqual(resume.returncode, 0, resume.stderr)
-        resume_args = json.loads(resume.stdout)
-        self.assertEqual(resume_args[:2], ["resume", session_id])
-        self.assertIn("--dangerously-bypass-approvals-and-sandbox", resume_args)
-        restored = target_home / "sessions" / session_relative
-        self.assertEqual(restored.read_text(encoding="utf-8"), source_session.read_text(encoding="utf-8"))
-        self.assertTrue((target_home / "shell_snapshots" / f"{session_id}.123.sh").is_file())
-
-    def test_incarnation_invokes_treer_without_shelling_user_fields(self) -> None:
-        soul = self.upload()
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(CLIENT),
-                "--server",
-                f"http://127.0.0.1:{self.port}",
-                "incarnate",
-                soul["soul_id"],
-                "--machine",
-                "build-machine",
-                "--name",
-                "reborn",
-                "--cwd",
-                "project",
-                "--",
-                "sh",
-                "-c",
-                "cat \"$SOUL_TEST_FILE\"",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["agent"]["agent_id"], "ag_reborn")
-        argv = json.loads(self.treer_argv.read_text(encoding="utf-8"))
-        self.assertEqual(argv[:8], ["agent", "admin", "create", "--machine", "build-machine", "--kind", "command", "--name"])
-        self.assertIn("cat \"$SOUL_TEST_FILE\"", argv)
-
-    def test_rejects_path_traversal(self) -> None:
-        archive_path = self.root / "unsafe.tar"
-        payload = self.root / "payload"
-        payload.write_text("bad", encoding="utf-8")
-        with tarfile.open(archive_path, "w") as archive:
-            archive.add(payload, arcname="../payload")
-        status, body = self.request(
-            "POST", "/v1/souls", archive_path.read_bytes(), "application/x-tar"
-        )
-        self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body)["error"]["code"], "invalid_path")
-
-    def test_rejects_protected_environment_bindings(self) -> None:
-        status, body = self.request(
-            "POST",
-            "/v1/souls",
-            self.soul_archive(
-                {
-                    "schema_version": 1,
-                    "name": "Unsafe soul",
-                    "environment": {"TREER_WORKLOAD_CREDENTIAL": "files/state.txt"},
-                }
-            ),
-            "application/x-tar",
-        )
-        self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body)["error"]["code"], "invalid_environment")
-
-
-def free_port() -> int:
-    import socket
-
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
-
-
-def wait_for_health(port: int, process: subprocess.Popen[str]) -> None:
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            raise AssertionError(f"Soul server exited:\n{stdout}\n{stderr}")
+    def test_authentication_priority_and_browser_csrf(self):
+        for token in (None, '', 'forged', 'expired', 'wrong-audience'):
+            for method, path, body in [('GET', '/v1/souls', None), ('POST', '/v1/souls', bundle())]:
+                self.assertEqual(self.request(method, path, body, token, {'Authorization': 'Bearer owner', 'Cookie': 'soul_session=valid'})[0], 401 if token is not None else 200 if method == 'GET' else 201)
+        self.assertEqual(self.request('GET', '/v1/me', token=None)[0], 401)
+        # Header trumps bearer; false self-reported ID cannot affect verified principal.
+        status, result = self.request('GET', '/v1/me', token='other', headers={'X-Treer-Agent-Id':'ag_owner'})
+        self.assertEqual((status, result['principal']['id']), (200, 'ag_other'))
+        for headers in ({}, {'X-Soul-Request': '1', 'Origin':'null'}, {'X-Soul-Request':'1', 'Sec-Fetch-Site':'cross-site'}):
+            self.assertEqual(self.request('POST', '/v1/souls', bundle(), 'human', headers)[0], 403)
+        headers = {'X-Soul-Request':'1', 'Origin':self.server.public_url, 'Sec-Fetch-Site':'same-origin'}
+        status, record = self.request('POST', '/v1/souls', bundle(), 'human', headers)
+        self.assertEqual(status, 201, record)
+        self.assertEqual(record['owner'], 'u_human')
+        # Directory membership checked every time.
+        PRINCIPALS.remove(TOKENS['other'])
         try:
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
-            connection.request("GET", "/health")
-            response = connection.getresponse()
-            response.read()
-            connection.close()
-            if response.status == 200:
-                return
-        except OSError:
-            pass
-        time.sleep(0.05)
-    raise AssertionError("Soul server did not become healthy")
+            self.assertEqual(self.request('GET', '/v1/me', token='other')[0], 403)
+        finally:
+            PRINCIPALS.append(TOKENS['other'])
+
+    def test_scan_every_file_reject_or_acknowledge_without_leaks(self):
+        examples = [b'wlc_' + b'a'*64, b'enrollment_token="' + b'a'*32 + b'"', b'srv_abc.'+b'A'*32,
+                    b'sk-' + b'a'*24, b'ghp_' + b'A'*40, b'github_pat_'+b'Z'*30,
+                    b'Bearer '+b'z'*28, b'eyJabcdef.abcdef.signature', b'-----BEGIN RSA PRIVATE KEY-----',
+                    b'AKIA'+b'A'*16, b'password=hunter2', b'secret=abc123', b'api_key=abcdef']
+        for example in examples:
+            status, error = self.request('POST', '/v1/souls', bundle(example))
+            self.assertEqual(status, 422, (example, error))
+            self.assertTrue(error['error']['findings'])
+            self.assertNotIn(example.decode(), json.dumps(error))
+        record = self.upload('?allow_secrets=true', b'Bearer '+b'z'*28)
+        self.assertTrue(record['contains_secrets'])
+        self.assertEqual(record['secret_findings'], {'bearer':1})
+        self.assertEqual(self.request('POST', '/v1/souls?allow_secrets=1', bundle())[0], 400)
+        # Manifest name itself scanned, even if no environment binding.
+        self.assertEqual(self.request('POST','/v1/souls',bundle(name='ghp_'+ 'Q'*40))[0], 422)
+
+    def test_versions_latest_filters_pagination_and_parent(self):
+        first = self.upload('?harness=claude&label=work')
+        second = self.upload('?harness=claude&parent_soul_id='+first['soul_id'])
+        self.assertEqual((first['version'],second['version']), (1,2))
+        self.assertEqual(second['parent_soul_id'], first['soul_id'])
+        self.upload('?harness=codex', name='Different')
+        status, latest = self.request('GET', '/v1/souls/by-name/Test%20soul?version=latest&owner=ag_owner')
+        self.assertEqual(status,200)
+        self.assertEqual(latest['soul_id'], second['soul_id'])
+        self.assertEqual(self.request('GET','/v1/souls/by-name/Test%20soul?version=1')[1]['soul_id'],first['soul_id'])
+        status, listing = self.request('GET','/v1/souls?'+urlencode({'name':'Test soul','harness':'claude','owner':'ag_owner','limit':1}))
+        self.assertEqual((status,listing['total'],listing['next_offset']), (200,2,1))
+        self.assertEqual(self.request('GET', '/v1/souls?offset=1&limit=1')[1]['next_offset'], 2)
+        self.assertEqual(self.request('GET', '/v1/souls/by-name/Test%20soul',token='other')[0],404)
+        foreign = self.upload('?visibility=workspace',token='other')
+        self.assertEqual(self.request('POST','/v1/souls?parent_soul_id='+foreign['soul_id'], bundle())[0],403)
+        for query in ('limit=101','offset=-1','limit=latest','unknown=x','limit=2&limit=3'):
+            self.assertEqual(self.request('GET','/v1/souls?'+query)[0],400)
+
+    def test_quota_deletion_dedup_and_compatible_archive(self):
+        self.server.store.max_count = 2
+        first, second = self.upload(), self.upload()
+        self.assertEqual(len(list(self.server.store.blobs.iterdir())),2)
+        status, raw = self.request('GET','/v1/souls/'+first['soul_id']+'/archive')
+        self.assertEqual(status,200)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),first['archive_sha256'])
+        with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
+            self.assertEqual(archive.extractfile('files/state.txt').read(), b'remember me\n')
+        self.assertEqual(self.request('POST','/v1/souls',bundle())[0],409)
+        self.assertEqual(self.request('GET','/v1/me')[1]['usage']['count'],2)
+        self.assertEqual(self.request('DELETE','/v1/souls/'+first['soul_id'])[0],200)
+        self.assertEqual(len(list(self.server.store.blobs.iterdir())),2)
+        self.assertEqual(self.request('DELETE','/v1/souls/'+first['soul_id'])[0],200)
+        self.assertEqual(self.request('GET','/v1/souls/'+first['soul_id'])[0],404)
+        third = self.upload()
+        self.assertEqual(third['version'],3)
+        self.request('DELETE','/v1/souls/'+second['soul_id'])
+        self.request('DELETE','/v1/souls/'+third['soul_id'])
+        self.assertEqual(list(self.server.store.blobs.iterdir()),[])
+        self.server.store.max_bytes = 1
+        self.assertEqual(self.request('POST','/v1/souls',bundle())[0],409)
+        self.assertEqual(list(self.server.store.blobs.iterdir()),[])
+
+    def test_concurrent_version_and_quota(self):
+        self.server.store.max_count = 3
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(lambda _: self.request('POST','/v1/souls',bundle()), range(6)))
+        self.assertEqual(sorted(r[1]['version'] for r in results if r[0]==201), [1,2,3])
+        self.assertEqual(sum(r[0]==409 for r in results),3)
+
+    def test_incarnation_never_uses_server_authority_and_public_docs(self):
+        record = self.upload()
+        self.assertEqual(self.request('POST','/v1/souls/'+record['soul_id']+'/incarnations',b'{}')[0],410)
+        for accept, expected in [('text/html',b'<!doctype html>'), ('text/markdown',b'# Treer Soul')]:
+            status, body = self.request('GET','/',token=None,headers={'Accept':accept})
+            self.assertEqual(status,200)
+            self.assertTrue(body.startswith(expected))
+        self.assertEqual(self.request('GET','/unknown')[0],404)
+        self.assertEqual(self.request('GET','/health',token=None)[0],200)
+
+    def test_legacy_migration_full_backup_restart_and_rollback(self):
+        other_root = Path(self.temporary.name)/'old'
+        (other_root/'souls').mkdir(parents=True)
+        soul_id = 'soul_' + 'a'*32
+        archive = bundle(b'old state')
+        (other_root/'souls'/f'{soul_id}.tar').write_bytes(archive)
+        old = {'soul_id':soul_id,'created_at':'2025-01-01T00:00:00Z','manifest':{'name':'Test soul'}}
+        (other_root/'souls'/f'{soul_id}.json').write_text(json.dumps(old))
+        store = SoulStore(other_root)
+        backup = store.backup
+        self.assertEqual((backup/'souls'/f'{soul_id}.tar').read_bytes(), archive)
+        record = store.get(soul_id,{'id':'ag_other'})
+        self.assertEqual((record['owner'],record['visibility']),('legacy','workspace'))
+        with tarfile.open(fileobj=io.BytesIO(store.archive(soul_id,{'id':'ag_other'}))) as tar:
+            self.assertEqual(tar.extractfile('files/state.txt').read(),b'old state')
+        with self.assertRaises(SoulError):
+            store.delete(soul_id,{'id':'ag_other'})
+        store.close()
+        store = SoulStore(other_root)
+        self.assertIsNone(store.backup)
+        self.assertEqual(store.get(soul_id,{'id':'ag_other'})['soul_id'],soul_id)
+        store.close()
+        # Backup is a usable v1 directory, no v2 database or altered archive.
+        self.assertFalse((backup/'index.sqlite3').exists())
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    # No inherited managed-Agent environment affects configuration/test endpoints.
+    environment = sealed_environment()
+    os.environ.clear()
+    os.environ.update(environment)
     unittest.main()

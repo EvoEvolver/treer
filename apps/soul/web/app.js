@@ -9,6 +9,7 @@ const elements = {
 
 const state = {
   selectedId: null,
+  principal: null,
   souls: [],
 };
 
@@ -74,8 +75,8 @@ function renderList() {
     row.type = "button";
     row.classList.toggle("selected", soul.soul_id === state.selectedId);
     row.append(
-      element("strong", "", soul.manifest?.name || "Soul"),
-      element("span", "", `${adapterName(soul)} · ${formatDate(soul.created_at)}`),
+      element("strong", "", soul.name || soul.manifest?.name || "Soul"),
+      element("span", "", `v${soul.version} · ${soul.harness} · ${formatBytes(soul.size_bytes)} · ${soul.owner} · ${formatDate(soul.created_at)}${soul.contains_secrets ? " · Contains secrets" : ""}`),
     );
     row.addEventListener("click", () => {
       state.selectedId = soul.soul_id;
@@ -143,12 +144,16 @@ function renderDetail(soul) {
   const header = element("header", "detail-header");
   const titleRow = element("div", "detail-title-row");
   titleRow.append(
-    element("h2", "", soul.manifest?.name || "Soul"),
+    element("h2", "", soul.name || soul.manifest?.name || "Soul"),
     element("span", "badge", adapterName(soul)),
   );
   header.append(titleRow, element("p", "soul-id", soul.soul_id));
 
   const facts = element("dl", "facts");
+  addFact(facts, "Owner", soul.owner);
+  addFact(facts, "Version", String(soul.version));
+  addFact(facts, "Visibility", soul.visibility);
+  addFact(facts, "Secrets", soul.contains_secrets ? "Confirmed secrets present" : "None detected");
   addFact(facts, "Created", formatDate(soul.created_at));
   addFact(facts, "Archive", formatBytes(Number(soul.archive_size)));
   addFact(facts, "Files", String(Array.isArray(soul.files) ? soul.files.length : 0));
@@ -164,7 +169,41 @@ function renderDetail(soul) {
     element("p", "hash", soul.archive_sha256 || "Unknown"),
   );
   fragment.append(integrity);
+  const manifestBlock = element("section", "block");
+  manifestBlock.append(element("h3", "", "Manifest"), element("pre", "manifest", JSON.stringify(soul.manifest, null, 2)));
+  fragment.append(manifestBlock);
+  const command = `treer-soul incarnate ${soul.soul_id} --machine MACHINE`;
+  const commands = element("section", "block");
+  commands.append(element("h3", "", "Incarnate"), element("pre", "manifest", command));
+  const copy = element("button", "", "Copy command");
+  copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(command); copy.textContent = "Copied"; }
+    catch { showError(new Error("Copy the command shown above")); }
+  });
+  commands.append(copy);
+  if (soul.visibility === "private") commands.append(element("p", "muted", "A new Agent needs explicit reader access or a workspace-visible snapshot."));
+  if (soul.owner === state.principal?.id) {
+    const remove = element("button", "", "Delete soul");
+    remove.addEventListener("click", async () => {
+      if (!window.confirm("Permanently clean up this soul's files?")) return;
+      try { await api(`v1/souls/${soul.soul_id}`, {method: "DELETE", headers: {"X-Soul-Request": "1"}}); await load(); }
+      catch (error) { showError(error); }
+    });
+    commands.append(remove);
+  }
+  fragment.append(commands);
   elements.detail.replaceChildren(fragment);
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(applicationUrl(path), options);
+  const body = await response.json();
+  if (!response.ok) {
+    const error = new Error(body.error?.message || `Request failed (${response.status})`);
+    error.status = response.status; error.code = body.error?.code;
+    throw error;
+  }
+  return body;
 }
 
 async function load() {
@@ -172,19 +211,30 @@ async function load() {
   elements.refresh.disabled = true;
   elements.summary.textContent = "Loading";
   try {
-    const response = await fetch(applicationUrl("/v1/souls"), { headers: { Accept: "application/json" } });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Request failed (${response.status})`);
+    state.principal = (await api("v1/me")).principal;
+    document.querySelector("#login").hidden = true;
+    const all = [];
+    let offset = 0;
+    let body;
+    do {
+      body = await api(`v1/souls?limit=100&offset=${offset}`);
+      all.push(...body.souls);
+      offset = body.next_offset;
+    } while (offset !== null);
+    body.souls = all;
     state.souls = Array.isArray(body.souls) ? body.souls : [];
     if (!state.souls.some((soul) => soul.soul_id === state.selectedId)) {
       state.selectedId = state.souls[0]?.soul_id || null;
     }
     renderList();
+    elements.summary.textContent += ` · My usage: ${body.usage.count} souls / ${formatBytes(body.usage.bytes)}`;
     const selected = state.souls.find((soul) => soul.soul_id === state.selectedId);
     if (selected) renderDetail(selected);
+    else elements.detail.replaceChildren(element("p", "muted", "No soul selected"));
   } catch (error) {
     state.souls = [];
     renderList();
+    document.querySelector("#login").hidden = error.status !== 401 || error.code !== "authentication_required";
     showError(error);
     elements.summary.textContent = "Unavailable";
   } finally {

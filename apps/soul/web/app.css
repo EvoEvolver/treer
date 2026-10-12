@@ -429,3 +429,8 @@ button:focus-visible {
     background: #51431b;
   }
 }
+
+.manifest { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.detail h2 { overflow-wrap: anywhere; }
+.block button { margin: 8px 8px 0 0; }
+[hidden] { display: none !important; }

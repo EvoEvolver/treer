@@ -7,15 +7,20 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
+import io
+import sqlite3
+import threading
 import tarfile
 import tempfile
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs, unquote
+from http.cookies import SimpleCookie
+import subprocess
+from soul_auth import Auth, Error as AuthError
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -96,7 +101,7 @@ def validate_member_path(value: object) -> str:
     if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
         raise SoulError(400, "invalid_path", "archive paths must be non-empty POSIX paths")
     path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+    if any(part in {"", ".", ".."} for part in value.rstrip("/").split("/")) or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise SoulError(400, "invalid_path", f"unsafe archive path: {value}")
     return str(path)
 
@@ -122,37 +127,46 @@ def validate_manifest(value: object, archive_files: set[str]) -> dict[str, objec
         clean_environment[key] = clean_path
 
     adapter = value.get("adapter")
-    clean_adapter: dict[str, object] | None = None
+    clean_adapter = None
     if adapter is not None:
-        if not isinstance(adapter, dict) or adapter.get("name") != "codex":
-            raise SoulError(400, "invalid_adapter", "only the codex adapter is supported")
-        session_id = adapter.get("session_id")
-        if not isinstance(session_id, str) or not SESSION_ID_PATTERN.fullmatch(session_id):
-            raise SoulError(400, "invalid_adapter", "codex session_id must be a UUID")
-        session_file = validate_member_path(adapter.get("session_file"))
-        session_relative_path = validate_member_path(adapter.get("session_relative_path"))
-        if session_file not in archive_files or not session_relative_path.endswith(".jsonl"):
-            raise SoulError(400, "invalid_adapter", "codex session file is missing or invalid")
-        clean_adapter = {
-            "name": "codex",
-            "session_id": session_id,
-            "session_file": session_file,
-            "session_relative_path": session_relative_path,
-        }
-        for optional in ("cli_version", "cwd"):
-            item = adapter.get(optional)
-            if isinstance(item, str) and item:
-                clean_adapter[optional] = item
-        shell_file = adapter.get("shell_snapshot_file")
-        shell_name = adapter.get("shell_snapshot_name")
-        if shell_file is not None or shell_name is not None:
-            clean_shell_file = validate_member_path(shell_file)
-            if clean_shell_file not in archive_files:
-                raise SoulError(400, "invalid_adapter", "codex shell snapshot is missing")
-            if not isinstance(shell_name, str) or Path(shell_name).name != shell_name:
-                raise SoulError(400, "invalid_adapter", "codex shell snapshot name is invalid")
-            clean_adapter["shell_snapshot_file"] = clean_shell_file
-            clean_adapter["shell_snapshot_name"] = shell_name
+        if not isinstance(adapter, dict) or adapter.get('name') not in ('codex','claude','generic'):
+            raise SoulError(400, 'invalid_adapter', 'Adapter must be codex, claude or generic')
+        clean_adapter = {'name': adapter['name']}
+        if adapter['name'] != 'generic':
+            session_id = adapter.get('session_id')
+            if not isinstance(session_id, str) or not SESSION_ID_PATTERN.fullmatch(session_id):
+                raise SoulError(400, 'invalid_adapter', 'session_id must be a UUID')
+            clean_adapter['session_id'] = session_id
+            session_file = validate_member_path(adapter.get('session_file'))
+            if session_file not in archive_files:
+                raise SoulError(400, 'invalid_adapter', 'Session file is missing')
+            clean_adapter['session_file'] = session_file
+        for field in ('session_relative_path','shell_snapshot_file','project_instructions_file'):
+            if field in adapter:
+                path = validate_member_path(adapter[field])
+                if field != 'session_relative_path' and path not in archive_files:
+                    raise SoulError(400, 'invalid_adapter', 'Adapter file is missing')
+                clean_adapter[field] = path
+        if adapter['name'] == 'codex' and not clean_adapter.get('session_relative_path', '').endswith('.jsonl'):
+            raise SoulError(400, 'invalid_adapter', 'Codex session_relative_path must end in .jsonl')
+        if 'memory_files' in adapter:
+            memory = adapter['memory_files']
+            if not isinstance(memory, list) or len(memory) > 128:
+                raise SoulError(400, 'invalid_adapter', 'Invalid memory files')
+            clean_adapter['memory_files'] = []
+            for item in memory:
+                path = validate_member_path(item)
+                if path not in archive_files or not path.startswith('files/memory/'):
+                    raise SoulError(400, 'invalid_adapter', 'Memory file missing or outside files/memory')
+                clean_adapter['memory_files'].append(path)
+        for field in ('cli_version','cwd','shell_snapshot_name'):
+            if field in adapter:
+                text = adapter[field]
+                if not isinstance(text, str) or len(text) > 4096 or '\x00' in text:
+                    raise SoulError(400, 'invalid_adapter', 'Invalid adapter metadata')
+                if field == 'shell_snapshot_name' and Path(text).name != text:
+                    raise SoulError(400, 'invalid_adapter', 'Invalid snapshot name')
+                clean_adapter[field] = text
 
     clean: dict[str, object] = {
         "schema_version": 1,
@@ -168,7 +182,7 @@ def inspect_archive(path: Path) -> tuple[dict[str, object], list[dict[str, objec
     try:
         archive = tarfile.open(path, "r:*")
     except (tarfile.TarError, OSError) as error:
-        raise SoulError(400, "invalid_archive", f"cannot read tar archive: {error}") from error
+        raise SoulError(400, "invalid_archive", "cannot read tar archive") from error
     with archive:
         members = archive.getmembers()
         if len(members) > MAX_ARCHIVE_MEMBERS:
@@ -196,7 +210,7 @@ def inspect_archive(path: Path) -> tuple[dict[str, object], list[dict[str, objec
         try:
             manifest_value = json.loads(stream.read().decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise SoulError(400, "invalid_manifest", f"manifest.json is invalid: {error}") from error
+            raise SoulError(400, "invalid_manifest", "manifest.json is invalid") from error
         manifest = validate_manifest(manifest_value, set(files) - {"manifest.json"})
         file_records = [
             {"path": name, "size": member.size}
@@ -206,127 +220,302 @@ def inspect_archive(path: Path) -> tuple[dict[str, object], list[dict[str, objec
         return manifest, file_records
 
 
+# Scan raw bytes, including manifest and unbound files. Only aggregate counts escape.
+from soul_secrets import scan_secrets
+
+
 class SoulStore:
-    def __init__(self, root: Path) -> None:
+    """Single-process SQLite index plus immutable content-addressed file blobs."""
+    def __init__(self, root: Path, max_count=10000, max_bytes=10 * 1024**3):
+        import fcntl
         self.root = root
+        self.max_count, self.max_bytes = max_count, max_bytes
+        if max_count < 1 or max_bytes < 1:
+            raise ValueError("owner quotas must be positive")
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.lock_file = (root / ".server.lock").open("a+")
+        fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.lock = threading.RLock()
         self.souls = root / "souls"
         self.uploads = root / "uploads"
-        self.souls.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.uploads.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-    def temporary_upload(self) -> tuple[int, Path]:
-        return tempfile.mkstemp(prefix="upload-", suffix=".tar", dir=self.uploads)
-
-    def save(self, temporary: Path) -> dict[str, object]:
-        manifest, files = inspect_archive(temporary)
-        soul_id = f"soul_{uuid.uuid4().hex}"
-        archive_path = self.souls / f"{soul_id}.tar"
-        metadata_path = self.souls / f"{soul_id}.json"
-        metadata: dict[str, object] = {
-            "soul_id": soul_id,
-            "created_at": utc_now(),
-            "archive_size": temporary.stat().st_size,
-            "archive_sha256": sha256_file(temporary),
-            "manifest": manifest,
-            "files": files,
-        }
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, archive_path)
-        temporary_metadata = metadata_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        temporary_metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.chmod(temporary_metadata, 0o600)
-        os.replace(temporary_metadata, metadata_path)
-        return metadata
-
-    def get(self, soul_id: str) -> dict[str, object]:
-        if not SOUL_ID_PATTERN.fullmatch(soul_id):
-            raise SoulError(404, "soul_not_found", "soul not found")
-        path = self.souls / f"{soul_id}.json"
+        self.blobs = root / "blobs"
+        self.database = root / "index.sqlite3"
+        legacy = sorted(self.souls.glob("soul_*.json")) if self.souls.exists() else []
+        self.backup = None
+        if legacy and not self.database.exists():
+            self.backup = root.with_name(root.name + ".pre-v2-" + uuid.uuid4().hex)
+            shutil.copytree(root, self.backup)
+            print(f"Soul migration backup: {self.backup}", flush=True)
+        self.uploads.mkdir(exist_ok=True, mode=0o700)
+        self.blobs.mkdir(exist_ok=True, mode=0o700)
+        with self.connect() as db:
+            db.executescript('''
+                CREATE TABLE IF NOT EXISTS snapshots (
+                  id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
+                  version INTEGER NOT NULL, metadata TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+                  UNIQUE(owner,name,version));
+                CREATE TABLE IF NOT EXISTS refs (soul_id TEXT, digest TEXT, PRIMARY KEY(soul_id,digest));
+                CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE IF NOT EXISTS oauth (state TEXT PRIMARY KEY, verifier TEXT, expires REAL);
+                CREATE TABLE IF NOT EXISTS sessions (secret TEXT PRIMARY KEY, token TEXT, expires REAL);
+            ''')
+        os.chmod(self.database, 0o600)
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError as error:
-            raise SoulError(404, "soul_not_found", "soul not found") from error
+            with self.connect() as db:
+                if not db.execute("SELECT 1 FROM state WHERE key='migration_complete'").fetchone():
+                    db.execute("BEGIN IMMEDIATE")
+                    for metadata_path in legacy:
+                        old = json.loads(metadata_path.read_text())
+                        soul_id = old['soul_id']
+                        if not SOUL_ID_PATTERN.fullmatch(soul_id) or metadata_path.stem != soul_id:
+                            raise ValueError("invalid legacy metadata")
+                        self._save(db, self.souls / f"{soul_id}.tar", {'id': 'legacy'},
+                                   {'visibility': 'workspace', 'allow_secrets': True}, soul_id, old['created_at'])
+                    db.execute("INSERT INTO state VALUES('migration_complete','1')")
+        except Exception:
+            # Original archive/metadata files remain untouched on failed migration.
+            # The operator can restore the announced complete backup before retrying.
+            self.lock_file.close()
+            raise
+        # SQLite commit precedes removal: an interrupted cleanup is safe to resume.
+        for p in legacy:
+            p.unlink(missing_ok=True)
+            p.with_suffix('.tar').unlink(missing_ok=True)
+        self._gc()
+        for p in self.uploads.iterdir():
+            if p.is_file():
+                p.unlink()
 
-    def list(self) -> list[dict[str, object]]:
-        values = []
-        for path in self.souls.glob("soul_*.json"):
+    def connect(self):
+        db = sqlite3.connect(self.database, timeout=30)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA secure_delete=ON")
+        return db
+
+    def close(self):
+        self.lock_file.close()
+
+    def temporary_upload(self):
+        return tempfile.mkstemp(prefix='upload-', suffix='.tar', dir=self.uploads)
+
+    def _put_blob(self, data):
+        digest = hashlib.sha256(data).hexdigest()
+        path = self.blobs / digest
+        if not path.exists():
+            descriptor, tmp_name = tempfile.mkstemp(dir=self.blobs, prefix='.blob-')
             try:
-                values.append(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
-                continue
-        values.sort(key=lambda value: str(value.get("created_at", "")), reverse=True)
-        return values
+                with os.fdopen(descriptor, 'wb') as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(tmp_name, path)
+            finally:
+                Path(tmp_name).unlink(missing_ok=True)
+        return digest
 
-    def archive(self, soul_id: str) -> Path:
-        self.get(soul_id)
-        return self.souls / f"{soul_id}.tar"
+    def _record(self, db, soul_id, include_deleted=False):
+        row = db.execute('SELECT metadata, deleted FROM snapshots WHERE id=?', (soul_id,)).fetchone()
+        if not row or (row['deleted'] and not include_deleted):
+            raise SoulError(404, 'soul_not_found', 'soul not found')
+        return json.loads(row['metadata']), bool(row['deleted'])
 
+    @staticmethod
+    def visible(metadata, actor):
+        return (metadata['owner'] == actor['id'] or metadata['visibility'] == 'workspace'
+                or actor['id'] in metadata['readers'])
+
+    def _save(self, db, temporary, actor, options, soul_id=None, created_at=None):
+        manifest, files = inspect_archive(temporary)
+        name = options.get('name', manifest['name'])
+        parent = options.get('parent_soul_id')
+        if parent:
+            parent_record, _ = self._record(db, parent)
+            if not self.visible(parent_record, actor):
+                raise SoulError(404, 'soul_not_found', 'soul not found')
+            if parent_record['owner'] not in (actor['id'], 'legacy'):
+                raise SoulError(403, 'forbidden', 'Parent must belong to caller or legacy lineage')
+        contents, findings = [], {}
+        with tarfile.open(temporary, 'r:*') as archive:
+            for member in sorted(archive.getmembers(), key=lambda m: m.name):
+                if not member.isfile():
+                    continue
+                data = archive.extractfile(member).read()
+                for category, count in scan_secrets(data).items():
+                    findings[category] = findings.get(category, 0) + count
+                contents.append((validate_member_path(member.name), data))
+        if findings and not options.get('allow_secrets', False):
+            error = SoulError(422, 'secrets_detected', 'Upload contains possible secrets; redact or explicitly allow_secrets')
+            error.details = {'findings': findings, 'count': sum(findings.values())}
+            raise error
+        size = sum(len(data) for _, data in contents)
+        usage = self._usage(db, actor['id'])
+        if actor['id'] != 'legacy' and (usage['count'] >= self.max_count or usage['bytes'] + size > self.max_bytes):
+            raise SoulError(409, 'quota_exceeded', 'Owner snapshot quota exceeded')
+        version = db.execute('SELECT COALESCE(MAX(version),0)+1 FROM snapshots WHERE owner=? AND name=?',
+                             (actor['id'], name)).fetchone()[0]
+        adapter = manifest.get('adapter', {})
+        entries = [{'path': path, 'size': len(data), 'sha256': self._put_blob(data)} for path, data in contents]
+        metadata = dict(soul_id=soul_id or 'soul_' + uuid.uuid4().hex, name=name, version=version,
+                        owner=actor['id'], created_by=actor['id'], created_at=created_at or utc_now(),
+                        visibility=options.get('visibility', 'private'), readers=options.get('readers', []),
+                        parent_soul_id=parent, labels=options.get('labels', []),
+                        harness=options.get('harness', adapter.get('name', 'generic')),
+                        session_id=options.get('session_id', adapter.get('session_id')),
+                        source_machine=options.get('source_machine'), size_bytes=size,
+                        contains_secrets=bool(findings), secret_findings=findings,
+                        manifest=manifest, files=files, blob_entries=entries)
+        raw = self._archive_bytes(metadata)
+        metadata['archive_size'] = len(raw)
+        metadata['archive_sha256'] = hashlib.sha256(raw).hexdigest()
+        db.execute('INSERT INTO snapshots(id,owner,name,version,metadata) VALUES(?,?,?,?,?)',
+                   (metadata['soul_id'], actor['id'], name, version, json.dumps(metadata)))
+        db.executemany('INSERT INTO refs VALUES(?,?)', [(metadata['soul_id'], digest)
+                        for digest in {entry['sha256'] for entry in entries}])
+        return self.public(metadata)
+
+    @staticmethod
+    def public(metadata):
+        return {key: value for key, value in metadata.items() if key != 'blob_entries'}
+
+    def save(self, temporary, actor, options):
+        with self.lock:
+            try:
+                with self.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    return self._save(db, temporary, actor, options)
+            finally:
+                self._gc()
+
+    def get(self, soul_id, actor):
+        with self.lock, self.connect() as db:
+            metadata, _ = self._record(db, soul_id)
+            if not self.visible(metadata, actor):
+                raise SoulError(404, 'soul_not_found', 'soul not found')
+            return self.public(metadata)
+
+    def _usage(self, db, owner):
+        row = db.execute("SELECT COUNT(*), COALESCE(SUM(json_extract(metadata,'$.size_bytes')),0) FROM snapshots WHERE owner=? AND deleted=0", (owner,)).fetchone()
+        return dict(count=row[0], bytes=row[1], max_count=self.max_count, max_bytes=self.max_bytes)
+
+    def usage(self, actor):
+        with self.lock, self.connect() as db:
+            return self._usage(db, actor['id'])
+
+    def list(self, actor, filters):
+        with self.lock, self.connect() as db:
+            # Bound response size and never include invisible metadata/counts.
+            values = [json.loads(row[0]) for row in db.execute('SELECT metadata FROM snapshots WHERE deleted=0')]
+            values = [self.public(v) for v in values if self.visible(v, actor)
+                      and all(v.get(k) == filters[k] for k in ('name', 'harness', 'owner') if k in filters)]
+            values.sort(key=lambda v: (v['created_at'], v['soul_id']), reverse=True)
+            offset, limit = filters.get('offset', 0), filters.get('limit', 50)
+            return dict(souls=values[offset:offset+limit], total=len(values),
+                        next_offset=offset+limit if offset+limit < len(values) else None,
+                        usage=self._usage(db, actor['id']))
+
+    def by_name(self, actor, name, filters):
+        with self.lock, self.connect() as db:
+            values = [json.loads(row[0]) for row in db.execute('SELECT metadata FROM snapshots WHERE name=? AND deleted=0', (name,))]
+            values = [v for v in values if self.visible(v, actor)
+                      and ('owner' not in filters or v['owner'] == filters['owner'])]
+            version = filters.get('version', 'latest')
+            if version != 'latest':
+                values = [v for v in values if v['version'] == int(version)]
+            # Within each owner prefer highest version, then most recent among owners.
+            if version == 'latest':
+                latest = {}
+                for v in values:
+                    if v['owner'] not in latest or v['version'] > latest[v['owner']]['version']:
+                        latest[v['owner']] = v
+                values = list(latest.values())
+            if not values:
+                raise SoulError(404, 'soul_not_found', 'soul not found')
+            return self.public(max(values, key=lambda v: (v['created_at'], v['soul_id'])))
+
+    def _archive_bytes(self, metadata):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w', format=tarfile.PAX_FORMAT) as archive:
+            for entry in metadata['blob_entries']:
+                data = (self.blobs / entry['sha256']).read_bytes()
+                if hashlib.sha256(data).hexdigest() != entry['sha256']:
+                    raise SoulError(500, 'blob_corrupt', 'Snapshot integrity check failed')
+                info = tarfile.TarInfo(entry['path'])
+                info.size, info.mode, info.mtime = len(data), 0o600, 0
+                archive.addfile(info, io.BytesIO(data))
+        return stream.getvalue()
+
+    def archive(self, soul_id, actor):
+        # Materialize under the lock; deletion cannot race blob reads.
+        with self.lock, self.connect() as db:
+            metadata, _ = self._record(db, soul_id)
+            if not self.visible(metadata, actor):
+                raise SoulError(404, 'soul_not_found', 'soul not found')
+            return self._archive_bytes(metadata)
+
+    def _gc(self):
+        with self.connect() as db:
+            referenced = {row[0] for row in db.execute('SELECT DISTINCT digest FROM refs')}
+        for path in self.blobs.iterdir():
+            if path.name not in referenced:
+                path.unlink()
+
+    def delete(self, soul_id, actor):
+        with self.lock:
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                metadata, deleted = self._record(db, soul_id, True)
+                if metadata['owner'] != actor['id']:
+                    if deleted or not self.visible(metadata, actor):
+                        raise SoulError(404, 'soul_not_found', 'soul not found')
+                    raise SoulError(403, 'forbidden', 'Only owner may delete a Soul')
+                tombstone = {k: metadata[k] for k in ('soul_id', 'name', 'owner', 'version')}
+                tombstone['deleted_at'] = metadata.get('deleted_at', utc_now())
+                db.execute('UPDATE snapshots SET metadata=?,deleted=1 WHERE id=?', (json.dumps(tombstone), soul_id))
+                db.execute('DELETE FROM refs WHERE soul_id=?', (soul_id,))
+            self._gc()
+            return {'soul_id': soul_id, 'deleted': True}
 
 def validate_public_url(value: str) -> str:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
         raise ValueError("SOUL_PUBLIC_URL must be an http(s) URL without credentials")
-    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
-        raise ValueError("SOUL_PUBLIC_URL must contain only an origin")
+    if parsed.query or parsed.fragment:
+        raise ValueError("SOUL_PUBLIC_URL must not contain a query or fragment")
     return value.rstrip("/")
 
 
-def installer_script(public_url: str, client_sha256: str) -> str:
-    quoted_url = shlex.quote(public_url)
-    quoted_sha = shlex.quote(client_sha256)
-    return f"""#!/bin/sh
-set -eu
+def bundled_client(client_path, public_url):
+    """Serve one executable artifact, with small adapter modules embedded."""
+    prelude = '#!/usr/bin/env python3\nfrom __future__ import annotations\nimport sys, types, os\n'
+    for name in ('soul_secrets', 'soul_sessions'):
+        source = (APP_ROOT / (name + '.py')).read_text()
+        prelude += f'module = types.ModuleType({name!r})\nsys.modules[{name!r}] = module\nexec({source!r}, module.__dict__)\n'
+    prelude += f'os.environ.setdefault("TREER_SOUL_URL", {public_url!r})\n'
+    source = client_path.read_text().replace('from __future__ import annotations', '')
+    return (prelude + source).encode()
 
+
+def installer_script(public_url, client_sha256):
+    # Download atomically to a private temporary directory; installed file is standalone.
+    return f'''#!/bin/sh
+set -eu
 install_dir="${{TREER_SOUL_INSTALL_DIR:-${{HOME}}/.local/bin}}"
-libexec_dir="${{TREER_SOUL_LIBEXEC_DIR:-${{HOME}}/.local/libexec/treer-soul}}"
 temporary="$(mktemp -d "${{TMPDIR:-/tmp}}/treer-soul-install.XXXXXX")"
 trap 'rm -rf "$temporary"' EXIT INT TERM
-
-command -v curl >/dev/null 2>&1 || {{ echo 'curl is required' >&2; exit 1; }}
-command -v python3 >/dev/null 2>&1 || {{ echo 'python3 is required' >&2; exit 1; }}
-
-base_url={quoted_url}
-expected_sha={quoted_sha}
-curl -fsSL "$base_url/client.py" -o "$temporary/client.py"
-if command -v sha256sum >/dev/null 2>&1; then
-  actual_sha="$(sha256sum "$temporary/client.py" | awk '{{print $1}}')"
-elif command -v shasum >/dev/null 2>&1; then
-  actual_sha="$(shasum -a 256 "$temporary/client.py" | awk '{{print $1}}')"
-else
-  echo 'sha256sum or shasum is required' >&2
-  exit 1
-fi
-if [ "$actual_sha" != "$expected_sha" ]; then
-  echo 'treer-soul client checksum mismatch' >&2
-  exit 1
-fi
-
-mkdir -p "$install_dir" "$libexec_dir"
-chmod 700 "$libexec_dir"
-cp "$temporary/client.py" "$libexec_dir/client.py"
-chmod 755 "$libexec_dir/client.py"
-{{
-  echo '#!/bin/sh'
-  printf '%s\n' "DEFAULT_SOUL_URL=$base_url"
-  echo 'export TREER_SOUL_URL="${{TREER_SOUL_URL:-$DEFAULT_SOUL_URL}}"'
-  printf 'exec python3 "%s/client.py" "$@"\n' "$libexec_dir"
-}} > "$temporary/treer-soul"
+base_url={shlex.quote(public_url)}
+expected_sha={shlex.quote(client_sha256)}
+curl -fsSL "$base_url/client.py" -o "$temporary/treer-soul" </dev/null
+actual_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$temporary/treer-soul" </dev/null)"
+[ "$actual_sha" = "$expected_sha" ] || {{ echo 'Soul client checksum mismatch' >&2; exit 1; }}
+mkdir -p "$install_dir"
 chmod 755 "$temporary/treer-soul"
-mv "$temporary/treer-soul" "$install_dir/treer-soul"
-echo "installed treer-soul to $install_dir/treer-soul"
-"$install_dir/treer-soul" --version
-"""
-
-
-LAUNCH_SCRIPT = """set -eu
-base_url=$1
-soul_id=$2
-shift 2
-client_file=$(mktemp "${TMPDIR:-/tmp}/treer-soul-client.XXXXXX.py")
-trap 'rm -f "$client_file"' EXIT INT TERM
-curl -fsSL "$base_url/client.py" -o "$client_file"
-python3 "$client_file" --server "$base_url" run "$soul_id" -- "$@"
-"""
+# Same-directory temporary file makes the final rename atomic across filesystems.
+installed_tmp="$(mktemp "$install_dir/.treer-soul.XXXXXX")"
+cp "$temporary/treer-soul" "$installed_tmp"
+chmod 755 "$installed_tmp"
+mv "$installed_tmp" "$install_dir/treer-soul"
+"$install_dir/treer-soul" --version </dev/null
+'''
 
 
 class SoulHTTPServer(ThreadingHTTPServer):
@@ -343,16 +532,122 @@ class SoulHTTPServer(ThreadingHTTPServer):
     ) -> None:
         self.store = store
         self.public_url = public_url
+        self.explicit_public_url = bool(os.environ.get("SOUL_PUBLIC_URL"))
         self.client_path = client_path
         self.treer_bin = treer_bin
+        self.auth = None
+        self.auth_lock = threading.Lock()
         self.max_upload_bytes = max_upload_bytes
-        self.client_bytes = client_path.read_bytes()
+        self.client_bytes = bundled_client(client_path, public_url)
         self.client_sha256 = hashlib.sha256(self.client_bytes).hexdigest()
         super().__init__(address, SoulHandler)
+
+    def identity_provider(self):
+        with self.auth_lock:
+            if self.auth is None:
+                proxy = os.environ.get('SOUL_PROXY_URL') or os.environ.get('TREER_PROXY_URL')
+                service = os.environ.get('SOUL_SERVICE_ID')
+                workspace = os.environ.get('SOUL_WORKSPACE_ID') or os.environ.get('TREER_WORKSPACE_ID')
+                public_url = self.public_url
+                if not service:
+                    try:
+                        result = subprocess.run([self.treer_bin, 'app', 'list'], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=10, check=True)
+                        app = next(a for a in json.loads(result.stdout)['apps']
+                                   if a['runtime_agent_id'] == os.environ.get('TREER_AGENT_ID'))
+                        service, workspace = app['service_id'], app['workspace_id']
+                        public_url = os.environ.get('SOUL_PUBLIC_URL') or app.get('public_url') or (proxy.rstrip('/') +
+                            f"/api/workspaces/{workspace}/apps/{app['app_id']}/ui/")
+                    except (OSError, ValueError, KeyError, TypeError, StopIteration, subprocess.SubprocessError):
+                        raise SoulError(503, 'identity_not_configured', 'Configure Soul Proxy, service and workspace identity')
+                if not proxy or not workspace:
+                    raise SoulError(503, 'identity_not_configured', 'Configure Soul Proxy and workspace identity')
+                self.auth = Auth(self.store, proxy, service, workspace, public_url)
+                if not self.explicit_public_url:
+                    self.public_url = public_url.rstrip('/')
+                    self.client_bytes = bundled_client(self.client_path, self.public_url)
+                    self.client_sha256 = hashlib.sha256(self.client_bytes).hexdigest()
+            return self.auth
+
+    def server_close(self):
+        super().server_close()
+        self.store.close()
 
 
 class SoulHandler(BaseHTTPRequestHandler):
     server: SoulHTTPServer
+
+    def _actor(self, mutation=False):
+        auth = self.server.identity_provider()
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get('Cookie', ''))
+            raw = cookie['soul_session'].value if 'soul_session' in cookie else ''
+        except Exception:
+            raw = ''
+        token, principal, directory, cookie_auth = auth.authenticate(self.headers, raw)
+        if mutation:
+            auth.check_browser_mutation(self.headers, principal, cookie_auth)
+        return principal, directory
+
+    def _options(self, kind):
+        try:
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=100)
+        except ValueError:
+            raise SoulError(400, 'invalid_request', 'Too many query parameters')
+        allowed = {'upload': {'name','visibility','reader','label','parent_soul_id','harness','session_id','source_machine','allow_secrets'},
+                   'list': {'name','harness','owner','offset','limit'}, 'latest': {'version','owner'}}[kind]
+        if set(query) - allowed:
+            raise SoulError(400, 'invalid_request', 'Unknown query option')
+        result = {}
+        for key, values in query.items():
+            if key not in ('reader','label') and len(values) != 1:
+                raise SoulError(400, 'invalid_request', 'Duplicate query option')
+            if any(not v or len(v) > 256 for v in values):
+                raise SoulError(400, 'invalid_request', 'Query values must contain 1-256 characters')
+            result[key] = values if key in ('reader','label') else values[0]
+        if kind == 'upload':
+            if result.get('visibility', 'private') not in ('private','workspace'):
+                raise SoulError(400, 'invalid_request', 'Invalid visibility')
+            if result.get('allow_secrets', 'false') not in ('true','false'):
+                raise SoulError(400, 'invalid_request', 'allow_secrets must be true or false')
+            result['allow_secrets'] = result.get('allow_secrets') == 'true'
+            result['readers'] = sorted(set(result.pop('reader', [])))
+            result['labels'] = sorted(set(result.pop('label', [])))
+            if len(result['readers']) > 64 or len(result['labels']) > 32 or len(result.get('name', '')) > 120:
+                raise SoulError(400, 'invalid_request', 'Too many readers/labels or name too long')
+            if 'parent_soul_id' in result and not SOUL_ID_PATTERN.fullmatch(result['parent_soul_id']):
+                raise SoulError(400, 'invalid_request', 'Invalid parent Soul ID')
+        for key in ('offset','limit','version'):
+            if key in result and result[key] != 'latest':
+                try:
+                    result[key] = int(result[key])
+                    if result[key] < (0 if key == 'offset' else 1) or (key == 'limit' and result[key] > 100):
+                        raise ValueError()
+                except ValueError:
+                    raise SoulError(400, 'invalid_request', 'Invalid pagination/version')
+            elif key in result and key != 'version':
+                raise SoulError(400, 'invalid_request', 'Invalid pagination')
+        return result
+
+    def _redirect(self, target, cookie=None):
+        self.send_response(303)
+        self.send_header('Location', target)
+        if cookie:
+            self.send_header('Set-Cookie', cookie)
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def do_DELETE(self):
+        try:
+            actor, _ = self._actor(True)
+            match = re.fullmatch(r'/v1/souls/(soul_[0-9a-f]{32})/?', urlsplit(self.path).path)
+            if not match:
+                raise SoulError(404, 'not_found', 'route not found')
+            self._json(200, self.server.store.delete(match[1], actor))
+        except (SoulError, AuthError) as error:
+            self._error(error)
 
     def do_HEAD(self) -> None:  # noqa: N802
         self._dispatch(head=True)
@@ -371,10 +666,10 @@ class SoulHandler(BaseHTTPRequestHandler):
                 self._incarnate(match.group(1))
                 return
             raise SoulError(404, "not_found", "route not found")
-        except SoulError as error:
+        except (SoulError, AuthError) as error:
             self._error(error)
         except Exception as error:  # noqa: BLE001
-            print(f"soul request failed: {error}", file=sys.stderr)
+            print("soul request failed", file=sys.stderr)
             self._error(SoulError(500, "internal_error", "internal server error"))
 
     def _dispatch(self, head: bool) -> None:
@@ -396,6 +691,8 @@ class SoulHandler(BaseHTTPRequestHandler):
             if path == "/health":
                 self._json(200, {"ok": True}, head=head)
                 return
+            if path in ("/install.sh", "/client.py", "/client.py.sha256") and self.server.auth is None:
+                self.server.identity_provider()
             if path == "/install.sh":
                 self._bytes(
                     200,
@@ -410,25 +707,49 @@ class SoulHandler(BaseHTTPRequestHandler):
             if path == "/client.py.sha256":
                 self._bytes(200, f"{self.server.client_sha256}  client.py\n".encode(), "text/plain", head=head)
                 return
+            if path == '/api/auth/login':
+                self._redirect(self.server.identity_provider().start())
+                return
+            if path == '/api/auth/callback':
+                auth = self.server.identity_provider()
+                query = parse_qs(urlsplit(self.path).query)
+                raw, age = auth.finish(query.get('code', [''])[0], query.get('state', [''])[0])
+                cookie_path = urlsplit(auth.public_url).path.rstrip('/') + '/'
+                secure = '; Secure' if auth.public_url.startswith('https://') else ''
+                self._redirect(auth.public_url, f'soul_session={raw}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age={age}{secure}')
+                return
+            if path.startswith('/v1/'):
+                actor, _ = self._actor()
+            if path == '/v1/me':
+                self._json(200, {'principal': actor, 'usage': self.server.store.usage(actor)}, head=head)
+                return
+            if path.startswith('/v1/souls/by-name/'):
+                name = unquote(path[len('/v1/souls/by-name/'):])
+                self._json(200, self.server.store.by_name(actor, name, self._options('latest')), head=head)
+                return
             if path == "/v1/souls":
-                self._json(200, {"souls": self.server.store.list()}, head=head)
+                self._json(200, self.server.store.list(actor, self._options('list')), head=head)
                 return
             archive_match = re.fullmatch(r"/v1/souls/(soul_[0-9a-f]{32})/archive", path)
             if archive_match:
-                self._file(self.server.store.archive(archive_match.group(1)), "application/x-tar", head=head)
+                self._bytes(200, self.server.store.archive(archive_match.group(1), actor), "application/x-tar", head=head)
                 return
             soul_match = re.fullmatch(r"/v1/souls/(soul_[0-9a-f]{32})", path)
             if soul_match:
-                self._json(200, self.server.store.get(soul_match.group(1)), head=head)
+                self._json(200, self.server.store.get(soul_match.group(1), actor), head=head)
                 return
             raise SoulError(404, "not_found", "route not found")
-        except SoulError as error:
+        except (SoulError, AuthError) as error:
             self._error(error, head=head)
         except Exception as error:  # noqa: BLE001
-            print(f"soul request failed: {error}", file=sys.stderr)
+            print("soul request failed", file=sys.stderr)
             self._error(SoulError(500, "internal_error", "internal server error"), head=head)
 
     def _upload(self) -> None:
+        actor, directory = self._actor(True)
+        options = self._options('upload')
+        if not set(options['readers']) <= {p['id'] for p in directory}:
+            raise SoulError(400, 'reader_unavailable', 'Readers must be current workspace principals')
         if self.headers.get_content_type() not in {"application/x-tar", "application/octet-stream"}:
             raise SoulError(415, "unsupported_media_type", "upload an application/x-tar body")
         length = self._content_length(self.server.max_upload_bytes)
@@ -445,65 +766,15 @@ class SoulHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
                 stream.flush()
                 os.fsync(stream.fileno())
-            metadata = self.server.store.save(temporary)
+            metadata = self.server.store.save(temporary, actor, options)
         finally:
             temporary.unlink(missing_ok=True)
         self._json(201, metadata)
 
-    def _incarnate(self, soul_id: str) -> None:
-        metadata = self.server.store.get(soul_id)
-        body = self._read_json()
-        machine = body.get("machine", "self")
-        name = body.get("name", f"{metadata['manifest']['name']}-reborn")
-        cwd = body.get("cwd", ".")
-        command = body.get("command", [])
-        if not isinstance(machine, str) or not machine or len(machine) > 160:
-            raise SoulError(400, "invalid_request", "machine must be a non-empty string")
-        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
-            raise SoulError(400, "invalid_request", "name must contain 1-80 characters")
-        if not isinstance(cwd, str) or not cwd or len(cwd) > 4096:
-            raise SoulError(400, "invalid_request", "cwd must be a non-empty string")
-        if not isinstance(command, list) or len(command) > 128 or any(
-            not isinstance(item, str) or "\x00" in item or len(item) > 8192 for item in command
-        ):
-            raise SoulError(400, "invalid_request", "command must be an array of strings")
-        adapter = metadata.get("manifest", {}).get("adapter")
-        if not command and not (isinstance(adapter, dict) and adapter.get("name") == "codex"):
-            raise SoulError(400, "command_required", "generic souls require an incarnation command")
-        argv = [
-            self.server.treer_bin,
-            "agent",
-            "admin",
-            "create",
-            "--machine",
-            machine,
-            "--kind",
-            "command",
-            "--name",
-            name.strip(),
-            "--cwd",
-            cwd,
-            "--",
-            "sh",
-            "-c",
-            LAUNCH_SCRIPT,
-            "treer-soul-incarnation",
-            self.server.public_url,
-            soul_id,
-            *command,
-        ]
-        try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise SoulError(502, "incarnation_failed", f"failed to invoke treer: {error}") from error
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()[-2000:]
-            raise SoulError(502, "incarnation_failed", detail or "treer agent creation failed")
-        try:
-            agent = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise SoulError(502, "incarnation_failed", "treer returned invalid JSON") from error
-        self._json(201, {"soul_id": soul_id, "agent": agent})
+    def _incarnate(self, soul_id):
+        self._actor(True)
+        raise SoulError(410, 'incarnate_deprecated',
+                        'Use the v2 client: treer agent admin create must run with caller authority')
 
     def _content_length(self, limit: int) -> int:
         try:
@@ -562,7 +833,7 @@ class SoulHandler(BaseHTTPRequestHandler):
         self._bytes(status, (json.dumps(value, sort_keys=True) + "\n").encode(), "application/json", head=head)
 
     def _error(self, error: SoulError, head: bool = False) -> None:
-        self._json(error.status, {"error": {"code": error.code, "message": error.message}}, head=head)
+        self._json(error.status, {"error": {"code": error.code, "message": error.message, **getattr(error, "details", {})}}, head=head)
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"soul {self.address_string()} {format % args}", file=sys.stderr)
@@ -585,7 +856,8 @@ def main() -> None:
     client_path = Path(os.environ.get("SOUL_CLIENT_PATH", APP_ROOT / "client.py")).resolve()
     treer_bin = os.environ.get("TREER_BIN", "treer")
     max_upload_bytes = int(os.environ.get("SOUL_MAX_UPLOAD_BYTES", str(64 * 1024 * 1024)))
-    server = SoulHTTPServer(listen, SoulStore(data_dir), public_url, client_path, treer_bin, max_upload_bytes)
+    server = SoulHTTPServer(listen, SoulStore(data_dir, int(os.environ.get("SOUL_OWNER_MAX_COUNT", "10000")),
+                                        int(os.environ.get("SOUL_OWNER_MAX_BYTES", str(10 * 1024**3)))), public_url, client_path, treer_bin, max_upload_bytes)
     print(f"Treer Soul listening on http://{server.server_address[0]}:{server.server_address[1]}")
     print(f"workspace URL: {public_url}")
     try:

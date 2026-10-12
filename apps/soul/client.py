@@ -3,427 +3,444 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
-import time
-import uuid
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from soul_secrets import redact
+from soul_sessions import export_session, import_session, launcher_path
 
-VERSION = "0.1.0"
-SESSION_ID_PATTERN = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-)
-ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
-MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
-MAX_EXPANDED_BYTES = 128 * 1024 * 1024
-PROTECTED_ENVIRONMENT = {
-    "BASH_ENV",
-    "CODEX_HOME",
-    "ENV",
-    "HOME",
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "NODE_OPTIONS",
-    "PATH",
-    "PYTHONPATH",
-    "SHELL",
-    "TMPDIR",
-    "TREER_AGENT_ID",
-    "TREER_AGENT_SERVER_URL",
-    "TREER_BIN",
-    "TREER_SERVER_ID",
-    "TREER_SOUL_ID",
-    "TREER_SOUL_ROOT",
-    "TREER_WORKLOAD_CREDENTIAL",
-    "TREER_WORKSPACE_ID",
-}
+VERSION = '2.0.0'
+MAX_BYTES = 128 * 1024 * 1024
+ID = re.compile(r'soul_[0-9a-f]{32}')
+PROTECTED = {'PATH','HOME','CODEX_HOME','CLAUDE_CONFIG_DIR','LD_PRELOAD','LD_LIBRARY_PATH','PYTHONPATH','NODE_OPTIONS','BASH_ENV','ENV','SHELL','TMPDIR'}
 
 
-def request(server: str, method: str, path: str, body: bytes | None = None, content_type: str | None = None) -> bytes:
-    headers = {"Accept": "application/json"}
-    if content_type:
-        headers["Content-Type"] = content_type
-    target = f"{server.rstrip('/')}{path}"
+def treer(*argv):
+    result = subprocess.run([os.environ.get('TREER_BIN','treer'), *argv], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError('Treer command failed; check permissions and target availability')
+    return result.stdout
+
+
+def request(server, method, path, body=None):
+    headers = {'Accept':'application/json'}
+    # Every request acquires a fresh service token; never expose workload credentials.
+    service = os.environ.get('TREER_SOUL_SERVICE', 'soul')
+    token = treer('token','create',service).strip()
+    if not token or len(token) > 8192:
+        raise RuntimeError('Unable to acquire Soul service token')
+    headers['Authorization'] = 'Bearer ' + token
+    if body is not None:
+        headers['Content-Type'] = 'application/x-tar'
+    if method != 'GET':
+        headers['X-Soul-Request'] = '1'
     try:
-        with urlopen(Request(target, data=body, headers=headers, method=method), timeout=60) as response:
-            length = response.headers.get("Content-Length")
-            if length and int(length) > MAX_DOWNLOAD_BYTES:
-                raise RuntimeError("response exceeds client download limit")
-            result = response.read(MAX_DOWNLOAD_BYTES + 1)
-            if len(result) > MAX_DOWNLOAD_BYTES:
-                raise RuntimeError("response exceeds client download limit")
-            return result
+        with urlopen(Request(server.rstrip('/')+'/'+path.lstrip('/'), data=body, headers=headers, method=method), timeout=60) as response:
+            data = response.read(MAX_BYTES+1)
+            if len(data)>MAX_BYTES:
+                raise RuntimeError('Soul response exceeds limit')
+            return data
     except HTTPError as error:
-        detail = error.read().decode("utf-8", "replace")
-        raise RuntimeError(f"Soul server returned HTTP {error.code}: {detail}") from error
+        # Server reports sanitized categories only. No raw error bodies in output.
+        try:
+            detail = json.loads(error.read(65536))['error']
+        except (ValueError,KeyError):
+            detail = {'code':'request_failed'}
+        raise RuntimeError(f"Soul HTTP {error.code}: {detail.get('code')}; findings={detail.get('findings', {})}") from error
 
 
-def print_json(value: object) -> None:
+def api(server, method, path, body=None):
+    return json.loads(request(server,method,path,body))
+
+
+def print_json(value):
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
-def validate_archive_path(value: str) -> str:
-    if not value or "\\" in value or "\x00" in value:
-        raise RuntimeError(f"invalid archive path: {value}")
-    path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise RuntimeError(f"unsafe archive path: {value}")
-    return str(path)
+def archive_path(value):
+    if not isinstance(value,str) or not value or '\\' in value or '\x00' in value or value.startswith('/') or any(p in ('','.','..') for p in value.split('/')):
+        raise RuntimeError('Unsafe archive path')
+    return value
 
 
-def upload_archive(server: str, archive: Path) -> dict[str, object]:
-    return json.loads(request(server, "POST", "/v1/souls", archive.read_bytes(), "application/x-tar"))
+def create_archive(root, manifest, files):
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream,mode='w') as archive:
+        contents = [('manifest.json',json.dumps(manifest,sort_keys=True).encode())]
+        contents.extend((archive_path(path), (root/path).read_bytes()) for path in files)
+        if sum(len(data) for _,data in contents)>MAX_BYTES:
+            raise RuntimeError('Capture exceeds size limit')
+        for name,data in contents:
+            info=tarfile.TarInfo(name)
+            info.size,info.mode=len(data),0o600
+            archive.addfile(info,io.BytesIO(data))
+    return stream.getvalue()
 
 
-def command_upload(args: argparse.Namespace) -> None:
-    manifest_path = Path(args.manifest).resolve()
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    mappings: list[tuple[str, Path]] = []
-    for mapping in args.file:
-        archive_path, separator, local_path = mapping.partition("=")
-        if not separator:
-            raise RuntimeError("--file must be ARCHIVE_PATH=LOCAL_PATH")
-        mappings.append((validate_archive_path(archive_path), Path(local_path).resolve()))
-    with tempfile.NamedTemporaryFile(suffix=".tar") as temporary:
-        with tarfile.open(fileobj=temporary, mode="w") as archive:
-            encoded = json.dumps(manifest, sort_keys=True).encode()
-            info = tarfile.TarInfo("manifest.json")
-            info.size = len(encoded)
-            archive.addfile(info, __import__("io").BytesIO(encoded))
-            for archive_path, local_path in mappings:
-                if not local_path.is_file():
-                    raise RuntimeError(f"upload file does not exist: {local_path}")
-                archive.add(local_path, arcname=archive_path, recursive=False)
-        temporary.flush()
-        print_json(upload_archive(args.server, Path(temporary.name)))
+def upload_options(args):
+    options=[]
+    for option,attr in [('name','name'),('parent_soul_id','parent'),('visibility','visibility')]:
+        if getattr(args,attr,None):
+            options.append((option,getattr(args,attr)))
+    options.extend(('reader',v) for v in getattr(args,'reader',[]))
+    options.extend(('label',v) for v in getattr(args,'label',[]))
+    if getattr(args,'allow_secrets',False):
+        options.append(('allow_secrets','true'))
+    return options
 
 
-def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
-
-
-def session_metadata(path: Path) -> dict[str, object]:
-    with path.open("r", encoding="utf-8") as stream:
-        first = json.loads(stream.readline())
-    if first.get("type") != "session_meta" or not isinstance(first.get("payload"), dict):
-        raise RuntimeError(f"Codex rollout has no session_meta header: {path}")
-    return first["payload"]
-
-
-def current_codex_ui_session() -> str | None:
-    port = os.environ.get("CODEX_UI_PORT", "4173")
-    try:
-        with urlopen(f"http://127.0.0.1:{port}/api/state", timeout=1) as response:
-            value = json.load(response)
-        session_id = value.get("thread", {}).get("id")
-        return session_id if isinstance(session_id, str) and SESSION_ID_PATTERN.fullmatch(session_id) else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def find_codex_session(requested: str | None) -> tuple[Path, dict[str, object]]:
-    sessions = codex_home() / "sessions"
-    session_id = requested or current_codex_ui_session()
-    candidates = list(sessions.rglob("*.jsonl")) if sessions.exists() else []
-    if session_id:
-        matches = [path for path in candidates if session_id in path.name]
-        if len(matches) != 1:
-            raise RuntimeError(f"expected one Codex rollout for session {session_id}, found {len(matches)}")
-        return matches[0], session_metadata(matches[0])
-    cwd = str(Path.cwd().resolve())
-    matching: list[tuple[float, Path, dict[str, object]]] = []
-    for path in candidates:
-        try:
-            metadata = session_metadata(path)
-        except (OSError, json.JSONDecodeError, RuntimeError):
-            continue
-        if metadata.get("cwd") == cwd:
-            matching.append((path.stat().st_mtime, path, metadata))
-    if not matching:
-        raise RuntimeError("no Codex session found for the current working directory; pass --session")
-    _, path, metadata = max(matching, key=lambda item: item[0])
-    return path, metadata
-
-
-def add_bytes(archive: tarfile.TarFile, name: str, value: bytes) -> None:
-    import io
-
-    info = tarfile.TarInfo(name)
-    info.size = len(value)
-    archive.addfile(info, io.BytesIO(value))
-
-
-def stable_snapshot(source: Path, destination: Path) -> None:
-    for _attempt in range(5):
-        before = source.stat()
-        shutil.copyfile(source, destination)
-        after = source.stat()
-        if before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns:
-            if destination.stat().st_size:
-                with destination.open("rb") as snapshot:
-                    snapshot.seek(-1, os.SEEK_END)
-                    if snapshot.read(1) != b"\n":
-                        raise RuntimeError(f"Codex session ends with a partial JSONL record: {source}")
-            return
-        time.sleep(0.05)
-    raise RuntimeError(f"Codex session changed continuously while being captured: {source}")
-
-
-def command_capture_codex(args: argparse.Namespace) -> None:
-    rollout, metadata = find_codex_session(args.session)
-    session_id = str(metadata.get("id", ""))
-    if not SESSION_ID_PATTERN.fullmatch(session_id):
-        raise RuntimeError("Codex session metadata contains an invalid id")
-    sessions_root = codex_home() / "sessions"
-    relative = rollout.relative_to(sessions_root).as_posix()
-    environment = {"CODEX_SOUL_SESSION_FILE": "files/session.jsonl"}
-    adapter: dict[str, object] = {
-        "name": "codex",
-        "session_id": session_id,
-        "session_file": "files/session.jsonl",
-        "session_relative_path": relative,
-        "cli_version": str(metadata.get("cli_version", "unknown")),
-        "cwd": str(metadata.get("cwd", "")),
-    }
-    shell_snapshot = None
-    if args.include_shell_snapshot:
-        shell_candidates = list((codex_home() / "shell_snapshots").glob(f"{session_id}.*.sh"))
-        if shell_candidates:
-            shell_snapshot = max(shell_candidates, key=lambda path: path.stat().st_mtime)
-            environment["CODEX_SOUL_SHELL_SNAPSHOT"] = "files/shell_snapshot.sh"
-            adapter["shell_snapshot_file"] = "files/shell_snapshot.sh"
-            adapter["shell_snapshot_name"] = shell_snapshot.name
-    manifest = {
-        "schema_version": 1,
-        "name": args.name or f"Codex {session_id[:8]}",
-        "environment": environment,
-        "adapter": adapter,
-    }
-    with tempfile.TemporaryDirectory(prefix="treer-soul-codex-") as temporary_name:
-        temporary_root = Path(temporary_name)
-        rollout_snapshot = temporary_root / "session.jsonl"
-        stable_snapshot(rollout, rollout_snapshot)
-        shell_snapshot_copy = temporary_root / "shell_snapshot.sh"
-        if shell_snapshot:
-            shutil.copyfile(shell_snapshot, shell_snapshot_copy)
-        archive_path = temporary_root / "soul.tar"
-        with tarfile.open(archive_path, mode="w") as archive:
-            add_bytes(archive, "manifest.json", json.dumps(manifest, sort_keys=True).encode())
-            archive.add(rollout_snapshot, arcname="files/session.jsonl", recursive=False)
-            if shell_snapshot:
-                archive.add(shell_snapshot_copy, arcname="files/shell_snapshot.sh", recursive=False)
-        print_json(upload_archive(args.server, archive_path))
-
-
-def safe_extract(archive_path: Path, destination: Path) -> dict[str, object]:
-    destination.mkdir(parents=True, exist_ok=False, mode=0o700)
-    manifest: dict[str, object] | None = None
-    expanded_size = 0
-    with tarfile.open(archive_path, "r:*") as archive:
-        for member in archive.getmembers():
-            name = validate_archive_path(member.name)
-            target = destination.joinpath(*PurePosixPath(name).parts)
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True, mode=0o700)
+def redact_json(value, counts):
+    if isinstance(value, dict):
+        clean = {}
+        for key, item in value.items():
+            if re.fullmatch(r'(?i)(password|secret|api[_-]?key|enrollment[_-]?token|machine[_-]?token)', key):
+                if item:
+                    counts['secret_assignment'] = counts.get('secret_assignment', 0) + 1
                 continue
-            if not member.isfile():
-                raise RuntimeError(f"archive entry is not a regular file: {name}")
-            expanded_size += member.size
-            if expanded_size > MAX_EXPANDED_BYTES:
-                raise RuntimeError("expanded soul archive exceeds the client limit")
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            source = archive.extractfile(member)
-            if source is None:
-                raise RuntimeError(f"cannot read archive entry: {name}")
-            with target.open("xb") as output:
-                shutil.copyfileobj(source, output)
+            clean[key] = redact_json(item, counts)
+        return clean
+    if isinstance(value, list):
+        return [redact_json(item, counts) for item in value]
+    if isinstance(value, str):
+        data, findings = redact(value.encode())
+        for category, count in findings.items():
+            counts[category] = counts.get(category, 0) + count
+        return data.decode('utf-8')
+    return value
+
+
+def redact_file(path, counts):
+    if path.suffix == '.jsonl':
+        with path.open('r', encoding='utf-8') as stream:
+            records = [json.dumps(redact_json(json.loads(line), counts), ensure_ascii=False) + '\n' for line in stream]
+        path.write_text(''.join(records), encoding='utf-8')
+    else:
+        data, findings = redact(path.read_bytes())
+        path.write_bytes(data)
+        for category, count in findings.items():
+            counts[category] = counts.get(category, 0) + count
+
+
+def command_save(args):
+    # No provider credential files or original files are modified.
+    with tempfile.TemporaryDirectory(prefix='treer-soul-save-') as temp:
+        root=Path(temp)
+        root.chmod(0o700)
+        adapter=export_session(args.harness,args.session,args.cwd,root)
+        who=json.loads(treer('whoami'))
+        source_machine=who.get('machine',{}).get('server_id')
+        manifest={'schema_version':1,'name':args.name or f"{args.harness} {adapter['session_id'][:8]}",
+                  'environment':{},'adapter':adapter}
+        files=sorted(p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file())
+        counts={}
+        if args.redact:
+            for path in files:
+                redact_file(root/path, counts)
+        options=upload_options(args)+[('harness',args.harness),('session_id',adapter['session_id'])]
+        if source_machine:
+            options.append(('source_machine',source_machine))
+        record=api(args.server,'POST','v1/souls?'+urlencode(options),create_archive(root,manifest,files))
+        record['redaction']={'enabled':args.redact,'findings':counts,'count':sum(counts.values())}
+        # created_by is authoritative server metadata, not self-reported upload input.
+        print_json(record)
+
+
+def command_upload(args):
+    manifest=json.loads(Path(args.manifest).read_text())
+    with tempfile.TemporaryDirectory(prefix='treer-soul-upload-') as temp:
+        root=Path(temp)
+        files=[]
+        for mapping in args.file:
+            path,separator,source=mapping.partition('=')
+            if not separator:
+                raise RuntimeError('--file requires ARCHIVE_PATH=LOCAL_PATH')
+            path=archive_path(path)
+            if path in files or path=='manifest.json':
+                raise RuntimeError('Duplicate archive path')
+            target=root/path
+            target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            from soul_sessions import copy_snapshot
+            copy_snapshot(Path(source),target)
+            files.append(path)
+        print_json(api(args.server,'POST','v1/souls?'+urlencode(upload_options(args)),create_archive(root,manifest,files)))
+
+
+def resolve(server,target):
+    value,separator,version=target.rpartition('@')
+    if not separator:
+        value,version=target,'latest'
+    if ID.fullmatch(value):
+        record=api(server,'GET','v1/souls/'+value)
+        if version!='latest' and str(record['version'])!=version:
+            raise RuntimeError('Soul ID has a different version')
+        return record
+    return api(server,'GET','v1/souls/by-name/'+quote(value,safe='')+'?'+urlencode({'version':version}))
+
+
+# The target probe is read-only and never opens auth/config credential files.
+PREFLIGHT = '''import json,os,shutil,subprocess,sys
+from pathlib import Path
+harness=sys.argv[1]
+exe=shutil.which('python3' if harness=='generic' else harness)
+version=''
+if exe:
+    try:
+        r=subprocess.run([exe,'--version'],stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=10)
+        import re
+        m=re.search(r"[0-9]+\\.[0-9]+(?:\\.[0-9]+)?",r.stdout)
+        version=m.group(0) if m and r.returncode==0 else ''
+    except Exception: pass
+home=Path.home()
+if harness=='generic':
+    logged_in=True
+elif harness=='codex':
+    config=Path(os.environ.get('CODEX_HOME',home/'.codex'))
+    logged_in=(config/'auth.json').is_file() or bool(os.environ.get('OPENAI_API_KEY'))
+else:
+    config=Path(os.environ.get('CLAUDE_CONFIG_DIR',home/'.claude'))
+    logged_in=(config/'.credentials.json').is_file() or (home/'.claude.json').is_file() or bool(os.environ.get('ANTHROPIC_API_KEY'))
+root=Path(os.environ.get('TREER_AGENT_INSTALL_ROOT',Path(os.environ.get('TREER_MACHINE_ROOT',str(home)))/'.treer/launchers/agent'))/'current'
+candidates=[Path(os.environ['TREER_AGENT_LAUNCHER'])] if os.environ.get('TREER_AGENT_LAUNCHER') else [root/p for p in ['launchers/agent/scripts/treer-agent.sh','scripts/treer-agent.sh','treer-agent.sh']]
+launcher=next((str(p.resolve()) for p in candidates if p.is_file() and os.access(p,os.X_OK)),None)
+print(json.dumps(dict(executable=bool(exe),version=version,logged_in=logged_in,launcher=launcher,free_bytes=shutil.disk_usage(home).free)))
+'''
+
+
+def preflight(machine,harness,size):
+    probe=json.loads(treer('exec','--machine',machine,'--cwd','.','--timeout','20000','--','python3','-c',PREFLIGHT,harness))
+    problems=[]
+    if not probe.get('executable'): problems.append('Install '+harness)
+    if not probe.get('logged_in'): problems.append('Log in to '+harness+' on target machine')
+    if harness!='generic' and not probe.get('launcher'): problems.append('Install unified treer-agent launcher on target machine')
+    version=probe.get('version','')
+    try:
+        parsed=tuple(int(p) for p in version.split('.'))
+        minimum=(0,149,0) if harness=='codex' else (2,0,0) if harness=='claude' else (3,9,0)
+        if parsed<minimum: problems.append('Upgrade '+harness+' to '+'.'.join(map(str,minimum))+' or later')
+    except ValueError:
+        problems.append('Could not determine harness version')
+    if probe.get('free_bytes',0)<max(size*3,64*1024*1024): problems.append('Free disk space on target machine')
+    return probe,problems
+
+
+BOOTSTRAP = '''set -eu
+base=$1
+soul=$2
+shift 2
+client=$(mktemp "${TMPDIR:-/tmp}/treer-soul.XXXXXX")
+trap 'rm -f "$client"' EXIT INT TERM
+curl -fsSL "$base/client.py" -o "$client"
+python3 "$client" --server "$base" run "$soul" "$@"
+'''
+
+
+def command_incarnate(args):
+    record=resolve(args.server,args.target)
+    # A new Agent cannot inherit the current caller's private read authority.
+    if record['visibility']!='workspace':
+        raise RuntimeError('New Agent cannot read this private Soul; save a new --visibility workspace snapshot first')
+    adapter=record.get('manifest',{}).get('adapter',{})
+    harness=adapter.get('name','generic')
+    if harness not in ('claude','codex','generic'):
+        raise RuntimeError('Unsupported harness adapter')
+    if harness == 'generic' and not args.command:
+        raise RuntimeError('Generic Soul needs an explicit command after --')
+    probe,problems=preflight(args.machine,harness,record['size_bytes'])
+    if problems and not args.force:
+        raise RuntimeError('Preflight refused creation: '+'; '.join(problems)+'; --force explicitly overrides')
+    if problems:
+        print(json.dumps({'preflight_warnings':problems}),file=sys.stderr)
+    name=args.name or f"{harness}-reborn-{record['soul_id'][-8:]}"
+    argv=['agent','admin','create','--machine',args.machine,'--kind','command','--name',name,'--cwd','.']
+    if args.folder:
+        argv.extend(['--folder',args.folder])
+    argv.extend(['--','sh','-c',BOOTSTRAP,'treer-soul',args.server,record['soul_id'], '--', *args.command])
+    print_json({'soul_id':record['soul_id'],'version':record['version'],'agent':json.loads(treer(*argv)), 'preflight':probe})
+
+
+def safe_extract(raw,destination):
+    destination.mkdir(parents=True,exist_ok=False,mode=0o700)
+    total=0
+    seen=set()
+    with tarfile.open(fileobj=io.BytesIO(raw),mode='r:*') as archive:
+        members=archive.getmembers()
+        if len(members)>256: raise RuntimeError('Too many archive entries')
+        for member in members:
+            path=archive_path(member.name.rstrip('/') if member.isdir() else member.name)
+            if path in seen: raise RuntimeError('Duplicate archive entry')
+            seen.add(path)
+            if member.isdir():
+                (destination/path).mkdir(parents=True,exist_ok=True,mode=0o700)
+                continue
+            if not member.isfile(): raise RuntimeError('Archive contains non-regular files')
+            total+=member.size
+            if total>MAX_BYTES: raise RuntimeError('Expanded archive exceeds limit')
+            target=destination/path
+            target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            with target.open('xb') as output:
+                shutil.copyfileobj(archive.extractfile(member),output)
             target.chmod(0o600)
-            if name == "manifest.json":
-                manifest = json.loads(target.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict):
-        raise RuntimeError("archive has no manifest.json")
+    manifest=json.loads((destination/'manifest.json').read_text())
+    if manifest.get('schema_version')!=1: raise RuntimeError('Unsupported manifest schema')
+    adapter=manifest.get('adapter',{})
+    for field in ('session_file','session_relative_path','shell_snapshot_file','project_instructions_file'):
+        if field in adapter: archive_path(adapter[field])
+    for field in adapter.get('memory_files',[]):
+        if not archive_path(field).startswith('files/memory/'): raise RuntimeError('Invalid memory file')
     return manifest
 
 
-def same_file(left: Path, right: Path) -> bool:
-    def digest(path: Path) -> bytes:
-        value = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                value.update(chunk)
-        return value.digest()
-
-    return left.stat().st_size == right.stat().st_size and digest(left) == digest(right)
-
-
-def install_codex_session(root: Path, adapter: dict[str, object]) -> str:
-    session_id = str(adapter.get("session_id", ""))
-    if not SESSION_ID_PATTERN.fullmatch(session_id):
-        raise RuntimeError("Codex soul has an invalid session id")
-    source = root / validate_archive_path(str(adapter.get("session_file", "")))
-    relative = validate_archive_path(str(adapter.get("session_relative_path", "")))
-    target = codex_home() / "sessions" / Path(relative)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if target.exists() and not same_file(source, target):
-        raise RuntimeError(f"target Codex session already exists with different content: {target}")
-    if not target.exists():
-        shutil.copy2(source, target)
-        target.chmod(0o600)
-    shell_file = adapter.get("shell_snapshot_file")
-    shell_name = adapter.get("shell_snapshot_name")
-    if isinstance(shell_file, str) and isinstance(shell_name, str) and Path(shell_name).name == shell_name:
-        shell_source = root / validate_archive_path(shell_file)
-        shell_target = codex_home() / "shell_snapshots" / shell_name
-        shell_target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if not shell_target.exists():
-            shutil.copy2(shell_source, shell_target)
-            shell_target.chmod(0o600)
-    return session_id
-
-
-def command_run(args: argparse.Namespace) -> None:
-    state_root = Path(
-        os.environ.get("TREER_SOUL_STATE_DIR", Path.home() / ".local/state/treer-soul")
-    ).expanduser().resolve()
-    state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    incarnation_root = state_root / "incarnations" / uuid.uuid4().hex
-    with tempfile.NamedTemporaryFile(suffix=".tar") as archive:
-        archive.write(request(args.server, "GET", f"/v1/souls/{args.soul_id}/archive"))
-        archive.flush()
-        manifest = safe_extract(Path(archive.name), incarnation_root)
-    environment = os.environ.copy()
-    bindings = manifest.get("environment", {})
-    if not isinstance(bindings, dict):
-        raise RuntimeError("soul environment is invalid")
-    for name, path in bindings.items():
-        if not isinstance(name, str) or not ENV_NAME_PATTERN.fullmatch(name) or not isinstance(path, str):
-            raise RuntimeError("soul environment binding is invalid")
-        if name in PROTECTED_ENVIRONMENT or name.startswith("TREER_"):
-            raise RuntimeError(f"soul attempts to replace protected environment variable: {name}")
-        target = incarnation_root / validate_archive_path(path)
-        if not target.is_file():
-            raise RuntimeError(f"soul environment file is missing: {path}")
-        environment[name] = str(target)
-    environment["TREER_SOUL_ID"] = args.soul_id
-    environment["TREER_SOUL_ROOT"] = str(incarnation_root)
-    command = list(args.command)
-    if command and command[0] == "--":
-        command = command[1:]
-    adapter = manifest.get("adapter")
-    if not command and isinstance(adapter, dict) and adapter.get("name") == "codex":
-        session_id = install_codex_session(incarnation_root, adapter)
-        command = [
-            environment.get("CODEX_BIN", "codex"),
-            "resume",
-            session_id,
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-C",
-            str(Path.cwd()),
-        ]
-    if not command:
-        raise RuntimeError("generic soul requires a command after --")
-    os.execvpe(command[0], command, environment)
-
-
-def command_list(args: argparse.Namespace) -> None:
-    print_json(json.loads(request(args.server, "GET", "/v1/souls")))
-
-
-def command_show(args: argparse.Namespace) -> None:
-    print_json(json.loads(request(args.server, "GET", f"/v1/souls/{args.soul_id}")))
-
-
-def command_incarnate(args: argparse.Namespace) -> None:
-    command = list(args.command)
-    if command and command[0] == "--":
-        command = command[1:]
-    body = json.dumps(
-        {"machine": args.machine, "name": args.name, "cwd": args.cwd, "command": command}
-    ).encode()
-    print_json(
-        json.loads(
-            request(
-                args.server,
-                "POST",
-                f"/v1/souls/{args.soul_id}/incarnations",
-                body,
-                "application/json",
-            )
-        )
-    )
-
-
-def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Upload and incarnate Agent soul bundles")
-    result.add_argument("--version", action="version", version=f"treer-soul {VERSION}")
-    result.add_argument("--server", default=os.environ.get("TREER_SOUL_URL", "http://soul.internal"))
-    commands = result.add_subparsers(dest="subcommand", required=True)
-
-    upload = commands.add_parser("upload", help="upload a manifest and named files")
-    upload.add_argument("--manifest", required=True)
-    upload.add_argument("--file", action="append", default=[], metavar="ARCHIVE_PATH=LOCAL_PATH")
-    upload.set_defaults(function=command_upload)
-
-    capture = commands.add_parser("capture-codex", help="upload a Codex rollout as a soul")
-    capture.add_argument("--session", help="Codex session UUID; defaults to the current Codex UI thread")
-    capture.add_argument("--name")
-    capture.add_argument(
-        "--include-shell-snapshot",
-        action="store_true",
-        help="include Codex's shell snapshot, which may contain sensitive environment data",
-    )
-    capture.set_defaults(function=command_capture_codex)
-
-    listing = commands.add_parser("list", help="list uploaded souls")
-    listing.set_defaults(function=command_list)
-
-    show = commands.add_parser("show", help="show soul metadata")
-    show.add_argument("soul_id")
-    show.set_defaults(function=command_show)
-
-    incarnate = commands.add_parser("incarnate", help="create a Treer Agent from a soul")
-    incarnate.add_argument("soul_id")
-    incarnate.add_argument("--machine", default="self")
-    incarnate.add_argument("--name", required=True)
-    incarnate.add_argument("--cwd", default=".")
-    incarnate.set_defaults(function=command_incarnate, command=[])
-
-    run = commands.add_parser("run", help=argparse.SUPPRESS)
-    run.add_argument("soul_id")
-    run.add_argument("command", nargs=argparse.REMAINDER)
-    run.set_defaults(function=command_run)
-    return result
-
-
-def main() -> None:
-    arguments = sys.argv[1:]
-    incarnation_command: list[str] | None = None
-    if "incarnate" in arguments:
-        subcommand_index = arguments.index("incarnate")
-        try:
-            divider = arguments.index("--", subcommand_index + 1)
-        except ValueError:
-            pass
+def command_run(args):
+    actor=os.environ.get('TREER_AGENT_ID')
+    if not actor or not re.fullmatch(r'[A-Za-z0-9_-]{1,160}',actor):
+        raise RuntimeError('Restore requires managed Agent identity')
+    base=Path(os.environ.get('TREER_SOUL_STATE_DIR',Path.home()/'.local/state/treer-soul')).expanduser().resolve()
+    root=base/actor
+    root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    # Prevent concurrent startup of a restore into the same Agent's state.
+    import fcntl
+    with (root/'.restore.lock').open('a+') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        marker=root/'restored.json'
+        workspace=root/'workspace'
+        if marker.exists():
+            state=json.loads(marker.read_text())
+            if state['soul_id']!=args.soul_id: raise RuntimeError('Agent already restored from a different Soul')
         else:
-            incarnation_command = arguments[divider + 1 :]
-            arguments = arguments[:divider]
-    args = parser().parse_args(arguments)
-    if args.subcommand == "incarnate" and incarnation_command is not None:
-        args.command = incarnation_command
+            record=resolve(args.server,args.soul_id)
+            raw=request(args.server,'GET','v1/souls/'+record['soul_id']+'/archive')
+            if len(raw)!=record['archive_size'] or hashlib.sha256(raw).hexdigest()!=record['archive_sha256']:
+                raise RuntimeError('Soul archive checksum mismatch')
+            with tempfile.TemporaryDirectory(prefix='treer-soul-restore-',dir=root) as temp:
+                bundle=Path(temp)/'bundle'
+                manifest=safe_extract(raw,bundle)
+                adapter=manifest.get('adapter',{})
+                if adapter.get('name', 'generic') == 'generic':
+                    adapter = {'name': 'generic'}
+                    files_root = root / 'generic'
+                    if files_root.exists():
+                        shutil.rmtree(files_root)
+                    shutil.copytree(bundle, files_root)
+                    workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    environment = {}
+                    for key, path in manifest.get('environment', {}).items():
+                        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', key) or key in PROTECTED or key.startswith('TREER_'):
+                            raise RuntimeError('Protected environment binding')
+                        path = archive_path(path)
+                        if not (files_root / path).is_file():
+                            raise RuntimeError('Missing environment binding file')
+                        environment[key] = str((files_root / path).resolve())
+                else:
+                    environment=import_session(bundle,adapter,workspace,root)
+                state=dict(soul_id=args.soul_id,adapter=adapter,environment=environment)
+            temporary=marker.with_suffix('.tmp')
+            temporary.write_text(json.dumps(state))
+            temporary.chmod(0o600)
+            os.replace(temporary,marker)
+    environment=os.environ.copy()
+    environment.update(state['environment'])
+    # Restart never downloads/reimports the snapshot or overwrites learned memory.
+    adapter=state['adapter']
+    if adapter['name'] == 'generic':
+        argv = args.command
+        if argv and argv[0] == '--': argv = argv[1:]
+        if not argv: raise RuntimeError('Generic Soul requires a command after --')
+    else:
+        argv=[str(launcher_path()),'--harness',adapter['name'],'--session-id',adapter['session_id'],'--cwd',str(workspace)]
+    os.chdir(workspace)
+    os.execvpe(argv[0],argv,environment)
+
+
+def parser():
+    p=argparse.ArgumentParser(description='Save and restore private immutable harness sessions')
+    p.add_argument('--version',action='version',version='treer-soul '+VERSION)
+    p.add_argument('--server',default=os.environ.get('TREER_SOUL_URL','http://soul.treer'))
+    sub=p.add_subparsers(dest='subcommand',required=True)
+    def sharing(command):
+        command.add_argument('--name')
+        command.add_argument('--parent')
+        command.add_argument('--visibility',choices=['private','workspace'],default='private')
+        command.add_argument('--reader',action='append',default=[])
+        command.add_argument('--label',action='append',default=[])
+        command.add_argument('--allow-secrets',action='store_true')
+    save=sub.add_parser('save')
+    save.add_argument('--harness',choices=['claude','codex'],required=True)
+    save.add_argument('--session',default='self')
+    save.add_argument('--cwd',default=str(Path.cwd()))
+    save.add_argument('--redact',action=argparse.BooleanOptionalAction,default=True)
+    sharing(save)
+    save.set_defaults(function=command_save)
+    capture=sub.add_parser('capture-codex',help='compatibility alias for save --harness codex')
+    capture.add_argument('--session',default='self')
+    capture.add_argument('--cwd',default=str(Path.cwd()))
+    capture.add_argument('--redact',action=argparse.BooleanOptionalAction,default=True)
+    capture.add_argument('--include-shell-snapshot',action='store_true',help='now included and redacted by save')
+    sharing(capture)
+    capture.set_defaults(harness='codex',function=command_save)
+    upload=sub.add_parser('upload')
+    upload.add_argument('--manifest',required=True)
+    upload.add_argument('--file',action='append',default=[])
+    sharing(upload)
+    upload.set_defaults(function=command_upload)
+    for name in ('show','delete'):
+        command=sub.add_parser(name)
+        command.add_argument('target')
+        command.set_defaults(function=command_show if name=='show' else command_delete)
+    listing=sub.add_parser('list')
+    for name in ('name','harness','owner'): listing.add_argument('--'+name)
+    listing.add_argument('--limit',type=int,default=50)
+    listing.add_argument('--offset',type=int,default=0)
+    listing.set_defaults(function=command_list)
+    incarnation=sub.add_parser('incarnate')
+    incarnation.add_argument('target')
+    incarnation.add_argument('--machine',default='self')
+    incarnation.add_argument('--name')
+    incarnation.add_argument('--folder')
+    incarnation.add_argument('--force',action='store_true')
+    incarnation.set_defaults(function=command_incarnate, command=[])
+    run=sub.add_parser('run',help=argparse.SUPPRESS)
+    run.add_argument('soul_id')
+    run.add_argument('command', nargs=argparse.REMAINDER)
+    run.set_defaults(function=command_run)
+    return p
+
+
+def command_show(args): print_json(resolve(args.server,args.target))
+def command_delete(args):
+    record=resolve(args.server,args.target)
+    print_json(api(args.server,'DELETE','v1/souls/'+record['soul_id']))
+def command_list(args):
+    query={k:getattr(args,k) for k in ('name','harness','owner','limit','offset') if getattr(args,k) is not None}
+    print_json(api(args.server,'GET','v1/souls?'+urlencode(query)))
+
+
+def main():
+    arguments = sys.argv[1:]
+    command = []
+    if 'incarnate' in arguments and '--' in arguments[arguments.index('incarnate')+1:]:
+        divider = arguments.index('--', arguments.index('incarnate')+1)
+        command = arguments[divider+1:]
+        arguments = arguments[:divider]
+    args=parser().parse_args(arguments)
+    if args.subcommand == 'incarnate': args.command = command
     try:
         args.function(args)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
-        print(f"treer-soul: {error}", file=sys.stderr)
+    except (OSError,RuntimeError,ValueError,KeyError,tarfile.TarError) as error:
+        print('treer-soul: '+str(error),file=sys.stderr)
         raise SystemExit(1) from error
 
 
-if __name__ == "__main__":
-    main()
+if __name__=='__main__': main()
