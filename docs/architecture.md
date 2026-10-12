@@ -40,6 +40,9 @@ ID.
 private modules group inventory, Policy, identity, messages, Apps, workloads,
 binary frames, network services, events, transport, and enrollment models.
 Existing callers continue to import these types from the crate root.
+Controller CLI composition remains in `cli_command.rs`; `cli_command/` owns
+argument models and the App, Agent, message, profile, machine, service, and
+Agent I/O command groups. The existing CLI transport contract is unchanged.
 
 `treer-platform` contains machine-local transport, user paths, private-file
 permissions and replacement, and Windows process ownership. Host framing stays
