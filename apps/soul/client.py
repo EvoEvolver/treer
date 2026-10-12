@@ -179,7 +179,7 @@ def self_session(harness, cwd=None):
         with build_opener(ProxyHandler({})).open(f'http://127.0.0.1:{port}/api/state', timeout=5) as response:
             state = json.loads(response.read(2 * 1024 * 1024))
         actual = state.get('harness', {})
-        actual = actual.get('name') if isinstance(actual, dict) else actual
+        actual = actual.get('id') if isinstance(actual, dict) else actual
         if actual != harness:
             raise RuntimeError('Current Agent Interface harness differs from requested capture')
         session = state.get('thread', {}).get('id')

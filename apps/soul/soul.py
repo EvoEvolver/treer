@@ -287,9 +287,13 @@ class SoulStore:
                   UNIQUE(owner,name,version));
                 CREATE TABLE IF NOT EXISTS refs (soul_id TEXT, digest TEXT, PRIMARY KEY(soul_id,digest));
                 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
-                CREATE TABLE IF NOT EXISTS oauth (state TEXT PRIMARY KEY, verifier TEXT, expires REAL);
+                CREATE TABLE IF NOT EXISTS oauth (state TEXT PRIMARY KEY, verifier TEXT, expires REAL, browser TEXT);
                 CREATE TABLE IF NOT EXISTS sessions (secret TEXT PRIMARY KEY, token TEXT, expires REAL);
             ''')
+        with self.connect() as db:
+            if 'browser' not in {row[1] for row in db.execute('PRAGMA table_info(oauth)')}:
+                db.execute('ALTER TABLE oauth ADD COLUMN browser TEXT')
+                db.execute('DELETE FROM oauth')  # Unbound pre-upgrade flows are unsafe.
         os.chmod(self.database, 0o600)
         try:
             with self.connect() as db:
@@ -661,6 +665,20 @@ class SoulHandler(BaseHTTPRequestHandler):
                 raise SoulError(400, 'invalid_request', 'Invalid pagination')
         return result
 
+    def _cookie(self, name, value, age):
+        public_url = self.server.auth.public_url if self.server.auth is not None else self.server.public_url
+        path = urlsplit(public_url).path.rstrip('/') + '/'
+        secure = '; Secure' if public_url.startswith('https://') else ''
+        return f'{name}={value}; Path={path}; HttpOnly; SameSite=Lax; Max-Age={age}{secure}'
+
+    def _cookie_value(self, name):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get('Cookie', ''))
+            return cookie[name].value if name in cookie else ''
+        except Exception:
+            return ''
+
     def _redirect(self, target, cookie=None):
         self.send_response(303)
         self.send_header('Location', target)
@@ -739,15 +757,21 @@ class SoulHandler(BaseHTTPRequestHandler):
                 self._bytes(200, f"{self.server.client_sha256}  client.py\n".encode(), "text/plain", head=head)
                 return
             if path == '/api/auth/login':
-                self._redirect(self.server.identity_provider().start())
+                target, browser = self.server.identity_provider().start()
+                self._redirect(target, self._cookie('soul_oauth', browser, 600))
                 return
             if path == '/api/auth/callback':
                 auth = self.server.identity_provider()
                 query = parse_qs(urlsplit(self.path).query)
-                raw, age = auth.finish(query.get('code', [''])[0], query.get('state', [''])[0])
-                cookie_path = urlsplit(auth.public_url).path.rstrip('/') + '/'
-                secure = '; Secure' if auth.public_url.startswith('https://') else ''
-                self._redirect(auth.public_url, f'soul_session={raw}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age={age}{secure}')
+                raw, age = auth.finish(query.get('code', [''])[0], query.get('state', [''])[0],
+                                       self._cookie_value('soul_oauth'))
+                self.send_response(303)
+                self.send_header('Location', auth.public_url)
+                self.send_header('Set-Cookie', self._cookie('soul_session', raw, age))
+                self.send_header('Set-Cookie', self._cookie('soul_oauth', '', 0))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
                 return
             if path.startswith('/v1/'):
                 actor, _ = self._actor()
@@ -856,6 +880,8 @@ class SoulHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if urlsplit(self.path).path.rstrip('/') == '/api/auth/callback' and status >= 400:
+            self.send_header('Set-Cookie', self._cookie('soul_oauth', '', 0))
         self.end_headers()
         if not head:
             self.wfile.write(body)

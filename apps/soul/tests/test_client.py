@@ -277,8 +277,9 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import threading
         class State(BaseHTTPRequestHandler):
+            harness='claude'
             def do_GET(self):
-                data=json.dumps({'harness':{'name':'claude'},'thread':{'id':SID}}).encode()
+                data=json.dumps({'harness':{'id':self.harness,'name':self.harness.title()},'thread':{'id':SID}}).encode()
                 self.send_response(200); self.end_headers(); self.wfile.write(data)
             def log_message(self,*_): pass
         server=ThreadingHTTPServer(('127.0.0.1',0),State)
@@ -288,6 +289,8 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
                 self.assertEqual(client.self_session('claude'),SID)
                 cli.assert_called_once_with('interface','show')
                 with self.assertRaises(RuntimeError): client.self_session('codex')
+                State.harness='codex'
+                self.assertEqual(client.self_session('codex'),SID)
             with patch.object(client,'treer',return_value='null'):
                 self.assertIsNone(client.self_session('codex'))
         finally:

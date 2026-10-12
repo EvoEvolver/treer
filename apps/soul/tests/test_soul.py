@@ -202,9 +202,11 @@ class SoulServerTest(unittest.TestCase):
         connection.request('GET','/api/auth/login')
         response = connection.getresponse()
         self.assertEqual(response.status,303)
-        redirect=response.getheader('Location'); response.read()
+        redirect=response.getheader('Location')
+        browser_cookie=response.getheader('Set-Cookie').split(';',1)[0]
+        response.read()
         state=parse_qs(urlsplit(redirect).query)['state'][0]
-        connection.request('GET','/api/auth/callback?code=test&state='+quote(state))
+        connection.request('GET','/api/auth/callback?code=test&state='+quote(state),headers={'Cookie':browser_cookie})
         response=connection.getresponse()
         self.assertEqual(response.status,303)
         cookie=response.getheader('Set-Cookie').split(';',1)[0]
@@ -229,6 +231,43 @@ class SoulServerTest(unittest.TestCase):
             status,_=self.request('POST','/v1/souls',raw)
             self.assertIn(status,(400,413))
         self.assertEqual(list(self.server.store.blobs.iterdir()),[])
+
+    def test_oauth_two_browsers_missing_wrong_cookie_expiry_and_replay(self):
+        from urllib.parse import urlsplit, parse_qs, quote
+        def browser(path,cookie=None):
+            connection=http.client.HTTPConnection('127.0.0.1',self.server.server_port)
+            connection.request('GET',path,headers={'Cookie':cookie} if cookie else {})
+            response=connection.getresponse(); response.read()
+            result=(response.status,response.getheaders());connection.close();return result
+        def start():
+            status,headers=browser('/api/auth/login')
+            self.assertEqual(status,303)
+            headers=dict(headers)
+            cookie=headers['Set-Cookie']
+            self.assertIn('HttpOnly',cookie);self.assertIn('SameSite=Lax',cookie);self.assertIn('Max-Age=600',cookie)
+            state=parse_qs(urlsplit(headers['Location']).query)['state'][0]
+            return state,cookie.split(';',1)[0]
+        state_a,cookie_a=start()
+        state_b,cookie_b=start()
+        callback_a='/api/auth/callback?code=test&state='+quote(state_a)
+        for cookie in (None,'soul_oauth=wrong',cookie_b):
+            status,headers=browser(callback_a,cookie)
+            self.assertEqual(status,401)
+            self.assertFalse(any(k=='Set-Cookie' and v.startswith('soul_session=') for k,v in headers))
+            self.assertTrue(any(k=='Set-Cookie' and 'Max-Age=0' in v for k,v in headers))
+        # Failed callbacks did not consume either originating browser's valid flow.
+        status,headers=browser(callback_a,cookie_a)
+        self.assertEqual(status,303)
+        self.assertTrue(any(k=='Set-Cookie' and v.startswith('soul_session=') for k,v in headers))
+        self.assertTrue(any(k=='Set-Cookie' and v.startswith('soul_oauth=') and 'Max-Age=0' in v for k,v in headers))
+        self.assertEqual(browser(callback_a,cookie_a)[0],401)
+        self.assertEqual(browser('/api/auth/callback?code=test&state='+quote(state_b),cookie_b)[0],303)
+        expired,cookie=start()
+        with self.server.store.connect() as db:
+            db.execute('UPDATE oauth SET expires=0')
+        self.assertEqual(browser('/api/auth/callback?code=test&state='+quote(expired),cookie)[0],401)
+        with self.server.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM oauth').fetchone()[0],0)
 
 
 if __name__ == '__main__':

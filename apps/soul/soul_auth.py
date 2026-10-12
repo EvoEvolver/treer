@@ -120,22 +120,27 @@ class Auth:
         return self.request('GET', f'/api/apps/{self.service_id}/directory', token)['principals']
 
     def start(self):
-        state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
+        state, verifier, browser = secrets.token_urlsafe(32), secrets.token_urlsafe(48), secrets.token_urlsafe(32)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
         with self.store.connect() as db:
             db.execute('DELETE FROM oauth WHERE expires <= ?', (time.time(),))
-            db.execute('INSERT INTO oauth VALUES(?,?,?)', (digest(state), verifier, time.time() + 600))
+            db.execute('INSERT INTO oauth(state,verifier,expires,browser) VALUES(?,?,?,?)',
+                       (digest(state), verifier, time.time() + 600, digest(browser)))
         query = urllib.parse.urlencode({'response_type': 'code', 'client_id': self.service_id,
                  'redirect_uri': self.public_url + 'api/auth/callback', 'state': state,
                  'code_challenge': challenge, 'code_challenge_method': 'S256'})
-        return self.proxy_url + 'api/apps/oauth/authorize?' + query
+        return self.proxy_url + 'api/apps/oauth/authorize?' + query, browser
 
-    def finish(self, code, state):
+    def finish(self, code, state, browser):
+        if not browser or len(browser) > 256 or not state or len(state) > 256:
+            raise Error(401, 'oauth_state_invalid', 'OAuth browser correlation is missing or invalid')
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT * FROM oauth WHERE state=? AND expires>?',
-                             (digest(state), time.time())).fetchone()
-            db.execute('DELETE FROM oauth WHERE state=?', (digest(state),))
+            row = db.execute('SELECT * FROM oauth WHERE state=? AND browser=? AND expires>?',
+                             (digest(state), digest(browser), time.time())).fetchone()
+            if row:
+                db.execute('DELETE FROM oauth WHERE state=? AND browser=?', (digest(state), digest(browser)))
+            db.execute('DELETE FROM oauth WHERE expires<=?', (time.time(),))
         if not row:
             raise Error(401, 'oauth_state_invalid', 'OAuth state invalid or expired')
         result = self.request('POST', '/api/apps/oauth/token', form={
