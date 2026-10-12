@@ -334,7 +334,9 @@ export function WorkspaceApp() {
 
   const terminalActive = Boolean(selectedAgent && activeStatuses.has(selectedAgent.status))
   const interfaceUiUrl = useMemo(() => {
-    if (workspaceId && selectedAgentApp && showAppUi && selectedAgentMachineOnline && selectedAgent?.status === "running") {
+    // App status carries desired state; the runtime record carries Agent
+    // lifecycle states (idle, working, ...), never "running".
+    if (workspaceId && selectedAgentApp && showAppUi && selectedAgentMachineOnline && selectedAgentApp.status === "running" && selectedAgent && activeStatuses.has(selectedAgent.status)) {
       return withEmbedTheme(
         proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(selectedAgentApp.app_id)}/ui/`),
         theme,
@@ -350,7 +352,7 @@ export function WorkspaceApp() {
     // and the iframe color-scheme style. A new registered_at is a new
     // registration and should rebuild the src.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, selectedAgent?.agent_id, selectedAgent?.status, selectedAgentApp?.app_id, selectedAgentApp?.hostname, showAppUi, selectedAgentMachineOnline, selectedAgentInterface?.instance_id, selectedAgentInterface?.registered_at, interfaceUiRevision])
+  }, [workspaceId, selectedAgent?.agent_id, selectedAgent?.status, selectedAgentApp?.app_id, selectedAgentApp?.status, selectedAgentApp?.hostname, showAppUi, selectedAgentMachineOnline, selectedAgentInterface?.instance_id, selectedAgentInterface?.registered_at, interfaceUiRevision])
   const setTerminalState = useCallback((value: TerminalState) => setTerminalStatus(value), [])
   const currentRole = organization?.role ?? "member"
   const canManageMembers = ["owner", "admin"].includes(currentRole)

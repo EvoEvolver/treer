@@ -82,13 +82,14 @@ const managedApp = {
   updated_by: "u1",
 }
 
-async function mockApp(page: Page, status = "running", runtimeAgentId = "app-runtime") {
+async function mockApp(page: Page, status = "running", runtimeAgentId = "app-runtime", runtimeStatus = status === "running" ? "idle" : "exited") {
   await page.route("**/api/workspaces/ws-1/apps", (route) => ok(route, {
     apps: [{ ...managedApp, status, runtime_agent_id: runtimeAgentId }],
   }))
+  // The Controller reports Agent lifecycle states for the runtime, never "running".
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
     ...snapshot,
-    agents: [...snapshot.agents, { ...agentPlain, agent_id: runtimeAgentId, name: "app:Soul Archive", kind: "app", status }],
+    agents: [...snapshot.agents, { ...agentPlain, agent_id: runtimeAgentId, name: "app:Soul Archive", kind: "app", status: runtimeStatus }],
   }))
   await page.route("**/api/workspaces/ws-1/apps/app-1/ui/**", (route) => {
     if (new URL(route.request().url()).pathname.endsWith("/app.js")) {
@@ -209,6 +210,17 @@ test("mobile: selecting an App opens its human interface and closes back to work
 
 test("a stopped App shows its state without fetching the human interface", async ({ page }) => {
   await mockApp(page, "stopped")
+  let appRequests = 0
+  page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
+  await page.goto("/")
+  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await expect(page.getByText("App is not running")).toBeVisible()
+  await expect(page.locator("iframe")).toHaveCount(0)
+  expect(appRequests).toBe(0)
+})
+
+test("a running App whose runtime exited shows its state without fetching the human interface", async ({ page }) => {
+  await mockApp(page, "running", "app-runtime", "exited")
   let appRequests = 0
   page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
   await page.goto("/")
