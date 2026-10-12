@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Issues · Treer</title><link rel="stylesheet" href="./app.css"><script src="./app.js" defer></script></head>
+<body><header><a class="brand" href="./">Issues <span>Treer workspace</span></a><div><span id="identity"></span> <button id="theme" type="button">Theme</button> <a id="login" href="./api/auth/start">Sign in with Treer</a></div></header>
+<main><p id="notice" role="status" aria-live="polite">Connecting to workspace…</p><section id="tracker" hidden>
+<div class="toolbar"><h1>Workspace issues</h1><button id="new">New issue</button></div>
+<div class="filters"><label>Status<select id="filter-status" aria-label="Status filter"><option value="">All statuses</option><option>open</option><option>in_progress</option><option>blocked</option><option>done</option><option>closed</option></select></label><label>Assignee<select id="filter-assignee" aria-label="Assignee filter"><option value="">Anyone</option></select></label><label>Label<input id="filter-label" placeholder="Filter by label"></label><label>View<select id="view" aria-label="View"><option value="list">List</option><option value="tree">Hierarchy tree</option></select></label><button id="refresh">Refresh</button></div>
+<div class="workspace"><section id="collection" aria-label="Issue list"><div id="list"></div><button id="more" hidden>Load more</button></section><section id="detail" aria-label="Issue detail"><p class="empty">Select an issue to see its description, children and activity.</p></section></div>
+</section></main></body></html>

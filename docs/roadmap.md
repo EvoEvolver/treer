@@ -122,6 +122,11 @@ Issue: why the work matters
 This model supports human supervision, Agent handoff, retries, scheduling, and
 history without pretending that terminal status proves task completion.
 
+The ordinary [Issues App](../apps/issues/README.md) now supplies the Issue
+layer for small workspace teams, including hierarchy, assignment, comments and
+coordination leases. It owns its SQLite state and uses Core Message for compact
+notifications; it introduces no Core work objects, Tasks, Runs or scheduler.
+
 ### Event and messaging plane
 
 NATS is a transport and routing substrate, not the source of product semantics.

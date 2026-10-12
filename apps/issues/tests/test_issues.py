@@ -1,0 +1,144 @@
+import concurrent.futures
+import json
+import os
+import subprocess
+import sys
+import time
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+from hermetic import hermetic_env
+
+ROOT = Path(__file__).resolve().parents[1]
+# In-process imports, CLI subprocesses and fixture all receive a sealed environment.
+clean = hermetic_env(); os.environ.clear(); os.environ.update(clean)
+sys.path.insert(0,str(ROOT))
+from store import Store
+from auth import Error
+import tempfile
+
+
+class IssuesTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.process = subprocess.Popen([sys.executable,str(ROOT/'tests/fixture.py')],env=hermetic_env(),
+                                       stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        config=json.loads(cls.process.stdout.readline());cls.base=config['url'];cls.proxy=config['proxy']
+    @classmethod
+    def tearDownClass(cls):
+        cls.process.terminate();cls.process.communicate(timeout=5)
+    def req(self,path,method='GET',body=None,token='agent-a',extra=None,base=None):
+        headers={'Content-Type':'application/json',**({'X-Treer-Identity-Token':token} if token else {}),**(extra or {})}
+        r=urllib.request.Request((base or self.base)+path,method=method,headers=headers,data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r,timeout=10) as response:return response.status,json.load(response)
+        except urllib.error.HTTPError as exc:return exc.code,json.load(exc)
+    def create(self,**values):
+        status,result=self.req('v1/issues','POST',dict(title='Test issue',**values));self.assertEqual(status,201,result);return result['issue']['id']
+    def test_identity_and_permissions(self):
+        for token in (None,'forged','wrong-audience','wrong-workspace','removed-agent'):
+            status,_=self.req('v1/issues',token=token);self.assertIn(status,(401,403))
+        id=self.create()
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'title':'Attack'},'agent-b')[0],403)
+        self.assertEqual(self.req('v1/issues','POST',{'title':'Forged','creator':'ag_b'})[0],400)
+        self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'body':'Collaborative'},'agent-b')[0],200)
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'assignee':'made-up'})[0],400)
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'title':'Admin edit'},'admin')[0],200)
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'title':'Stale','version':1})[0],409)
+        # Forged identity headers never override the verified principal.
+        _,result=self.req('v1/issues','POST',{'title':'Verified creator'},extra={'X-Treer-Agent-Id':'ag_b'})
+        self.assertEqual(result['issue']['creator'],'ag_a')
+    def test_claim_concurrency_expiry_and_ownership(self):
+        id=self.create()
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            results=list(pool.map(lambda token:self.req(f'v1/issues/{id}/claim','POST',{'seconds':1},token), ['agent-a','agent-b']))
+        self.assertEqual(sorted(r[0] for r in results),[200,409])
+        holder=next(r[1]['issue']['claim']['holder'] for r in results if r[0]==200)
+        token='agent-a' if holder=='ag_a' else 'agent-b';other='agent-b' if token=='agent-a' else 'agent-a'
+        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'renew','seconds':1},token)[0],200)
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'in_progress'},other)[0],409)
+        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'release'},other)[0],409)
+        time.sleep(1.1)
+        self.assertIsNone(self.req(f'v1/issues/{id}')[1]['issue']['claim'])
+        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{},other)[0],200)
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'in_progress'},other)[0],200)
+        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'release'},other)[0],200)
+        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'renew'},other)[0],409)
+        assigned=self.create(assignee='ag_a')
+        self.assertEqual(self.req(f'v1/issues/{assigned}/claim','POST',{},'agent-b')[0],409)
+    def test_hierarchy_and_dependencies(self):
+        parent=self.create();child=self.create(parent_id=parent);leaf=self.create(parent_id=child,status='done')
+        progress=self.req(f'v1/issues/{parent}')[1]['issue']['progress']
+        self.assertEqual((progress['total'],progress['completed']),(2,1))
+        self.assertEqual(self.req(f'v1/issues/{parent}','PATCH',{'parent_id':leaf})[0],400)
+        dependent=self.create(blocked_by=[child])
+        self.assertEqual(self.req(f'v1/issues/{dependent}/claim','POST',{})[0],409)
+        self.assertEqual(self.req(f'v1/issues/{dependent}','PATCH',{'status':'done'})[0],409)
+        self.assertEqual(self.req(f'v1/issues/{child}','PATCH',{'blocked_by':[dependent]})[0],400)
+        self.req(f'v1/issues/{child}','PATCH',{'status':'done'})
+        self.assertEqual(self.req(f'v1/issues/{dependent}/claim','POST',{})[0],200)
+        self.assertEqual(self.req(f'v1/issues/{parent}/children')[1]['issues'][0]['id'],child)
+    def test_notification_degradation_and_summary(self):
+        self.req('test/disable',base=self.proxy)
+        id=self.create(assignee='ag_b',description='SECRET FULL BODY')
+        _,result=self.req(f'v1/issues/{id}/comment','POST',{'body':'SECRET COMMENT'})
+        self.assertEqual(result['notification']['status'],'disabled')
+        self.assertEqual(result['activity'][0]['notification']['status'],'disabled')
+        self.req('test/enable',base=self.proxy)
+        _,result=self.req(f'v1/issues/{id}','PATCH',{'status':'in_progress'})
+        self.assertEqual(result['notification']['status'],'sent')
+        message=self.req('test/messages',base=self.proxy)[1]['messages'][-1]
+        self.assertEqual(message['recipients'],['ag_b']);self.assertIn(f'#issue={id}',message['body'])
+        self.assertNotIn('SECRET',message['body']);self.assertTrue(message['idempotency_key'].startswith('issues-event-'))
+        self.req('test/disable',base=self.proxy)
+    def test_validation_pagination_and_cli(self):
+        for body in ({'title':'x','labels':'bad'},{'title':'x','status':'wat'},{'title':'x','parent_id':999999},{'title':'x','blocked_by':[True]}):
+            self.assertIn(self.req('v1/issues','POST',body)[0],(400,404))
+        self.assertEqual(self.req('v1/issues?limit=101')[0],400)
+        self.assertEqual(self.req('v1/issues?evil=1')[0],400)
+        label='unique-label';id=self.create(labels=[label])
+        self.assertEqual(self.req('v1/issues?label='+label)[1]['total'],1)
+        # Use a local test proxy that injects service identity, as Treer's managed entry does.
+        import http.server,threading
+        target=self.base
+        class Inject(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*_):pass
+            def do_GET(self): self.forward()
+            def do_POST(self):self.forward()
+            def do_PATCH(self):self.forward()
+            def forward(self):
+                path=urllib.parse.urlsplit(self.path).path
+                query=urllib.parse.urlsplit(self.path).query
+                body=self.rfile.read(int(self.headers.get('Content-Length',0)))
+                request=urllib.request.Request(target+path.lstrip('/')+('?' + query if query else ''),data=body if body else None,method=self.command,headers={'X-Treer-Identity-Token':'agent-a','Content-Type':'application/json'})
+                with urllib.request.urlopen(request) as r: content=r.read();self.send_response(r.status);self.end_headers();self.wfile.write(content)
+        proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Inject);threading.Thread(target=proxy.serve_forever,daemon=True).start()
+        try:
+            env=hermetic_env({'http_proxy':f'http://127.0.0.1:{proxy.server_port}'})
+            for command in (['list','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli']):
+                r=subprocess.run([sys.executable,str(ROOT/'issues'),*command],env=env,capture_output=True,text=True,timeout=10)
+                self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIsInstance(json.loads(r.stdout),dict)
+        finally:proxy.shutdown();proxy.server_close()
+    def test_representations_oauth_csrf(self):
+        for headers,media in (({},'text/markdown'),({'Accept':'text/html'},'text/html'),({'User-Agent':'Mozilla/test'},'text/html'),({'Accept':'text/html;q=.1,text/markdown;q=.9'},'text/markdown')):
+            with urllib.request.urlopen(urllib.request.Request(self.base,headers=headers)) as r:
+                self.assertTrue(r.headers['Content-Type'].startswith(media));self.assertEqual(r.headers['Vary'],'Accept, User-Agent')
+        with urllib.request.urlopen(self.base+'api/auth/start') as r:
+            self.assertTrue(r.headers['Content-Type'].startswith('text/markdown'))
+            # urllib does not retain cookies, so explicit callback test uses a cookie jar below.
+        import http.cookiejar
+        jar=http.cookiejar.CookieJar();opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        opener.open(self.base+'api/auth/start').close()
+        cookie='; '.join(f'{c.name}={c.value}' for c in jar)
+        self.assertTrue(cookie)
+        self.assertEqual(self.req('v1/me',token=None,extra={'Cookie':cookie})[1]['principal']['id'],'usr_a')
+        self.assertEqual(self.req('v1/issues','POST',{'title':'CSRF'},token=None,extra={'Cookie':cookie})[0],403)
+        self.assertEqual(self.req('v1/issues','POST',{'title':'Browser'},token=None,extra={'Cookie':cookie,'X-Issues-Request':'1'})[0],201)
+        self.assertEqual(self.req('v1/issues','POST',{'title':'CSRF'},token=None,extra={'Cookie':cookie,'X-Issues-Request':'1','Origin':'https://evil.test'})[0],403)
+        self.assertEqual(self.req('api/auth/callback?code=x&state=forged')[0],401)
+        self.assertEqual(self.req('v1/missing')[0],404)
+        self.assertEqual(self.req('missing')[0],404)
+
+
+if __name__ == '__main__':unittest.main()
