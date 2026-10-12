@@ -15,6 +15,13 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
 
 ## Supported Claims
 
+- Controller hot updates authenticate the signed release channel and manifest
+  against a preconfigured local Ed25519 public key, then verify both binary
+  lengths and SHA256 hashes before executing either binary, including `--help`.
+  Missing signatures, keys, invalid metadata, or corrupt binaries fail closed.
+  The trust key is never obtained from the download server. This does not cover
+  bootstrap installers, Windows in-place updates, or replay/downgrade protection.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
@@ -244,8 +251,8 @@ security control.
    grow an owned sandbox implementation.
 4. Add credential rotation, retention/deletion workflows, quotas, and incident
    diagnostics.
-5. Enforce signed release manifests and downgrade protection in installed
-   updaters.
+5. Add signed-channel freshness and downgrade protection to installed updaters;
+   signature and binary digest checks are already enforced for Controller updates.
 
 Relevant source boundaries are `crates/treer-proxy/src/auth.rs`,
 `identity.rs`, `policy.rs`, `message_store.rs`, `updater.rs`,

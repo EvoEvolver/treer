@@ -11,6 +11,7 @@ base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+ed25519-dalek = { workspace = true, features = ["pem"] }
 futures-util.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -20,6 +21,7 @@ ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 strip-ansi-escapes.workspace = true
 subtle.workspace = true
 tokio.workspace = true

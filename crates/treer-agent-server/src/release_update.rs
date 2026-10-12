@@ -1,0 +1,266 @@
+//! Consumer of the signed wire format published by scripts/release-r2.mjs.
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use ed25519_dalek::{
+    pkcs8::{DecodePublicKey, EncodePublicKey},
+    Signature, VerifyingKey,
+};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use url::Url;
+
+const MAX_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_BINARY_BYTES: usize = 128 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct DetachedSignature {
+    schema_version: u32,
+    algorithm: String,
+    key_id: String,
+    signature: String,
+}
+
+#[derive(Deserialize)]
+struct Channel {
+    schema_version: u32,
+    channel: String,
+    version: String,
+    manifest_path: String,
+    manifest_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct Manifest {
+    schema_version: u32,
+    version: String,
+    signing_key_id: String,
+    artifacts: Vec<Artifact>,
+}
+
+#[derive(Deserialize)]
+struct Artifact {
+    binary: String,
+    platform: String,
+    path: String,
+    sha256: String,
+    size: usize,
+}
+
+/// Constructed only after authenticating metadata and matching the binary digest.
+pub(super) struct VerifiedBinary(Vec<u8>);
+
+impl VerifiedBinary {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+pub(super) fn load_public_key(path: &Path) -> Result<VerifyingKey> {
+    let pem = std::fs::read_to_string(path).with_context(|| format!(
+        "cannot read trusted release public key {}; provision the publisher's SPKI PEM public key locally or use --public-key (TREER_RELEASE_PUBLIC_KEY)", path.display()
+    ))?;
+    VerifyingKey::from_public_key_pem(&pem)
+        .context("release public key must be an Ed25519 SPKI PEM key")
+}
+
+fn key_id(key: &VerifyingKey) -> Result<String> {
+    // Node's publisher hashes the full SPKI DER, not the raw 32-byte key.
+    Ok(digest(key.to_public_key_der()?.as_bytes())[..16].to_owned())
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn verify_signed(bytes: &[u8], signature: &[u8], key: &VerifyingKey) -> Result<()> {
+    let detached: DetachedSignature =
+        serde_json::from_slice(signature).context("invalid release signature document")?;
+    if detached.schema_version != 1
+        || detached.algorithm != "ed25519"
+        || detached.key_id != key_id(key)?
+    {
+        bail!("release signature format or signing key does not match the trusted key");
+    }
+    let raw = STANDARD
+        .decode(&detached.signature)
+        .context("invalid base64 release signature")?;
+    let signature = Signature::from_slice(&raw).context("invalid Ed25519 signature length")?;
+    key.verify_strict(bytes, &signature)
+        .context("release signature verification failed")
+}
+
+fn validate_channel_name(channel: &str) -> Result<()> {
+    if !channel.starts_with(|c: char| c.is_ascii_lowercase())
+        || !channel
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        bail!("invalid release channel; expected lowercase letters, digits and hyphens");
+    }
+    Ok(())
+}
+
+fn validate_channel(channel: &Channel, expected: &str) -> Result<()> {
+    let version = &channel.version;
+    if channel.schema_version != 1
+        || channel.channel != expected
+        || !version.starts_with('v')
+        || !version.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+        || !version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
+        || channel.manifest_path != format!("releases/{version}/manifest.json")
+    {
+        bail!("signed release channel has an invalid version, path or channel binding");
+    }
+    Ok(())
+}
+
+fn select_artifact<'a>(
+    manifest: &'a Manifest,
+    channel: &Channel,
+    key: &VerifyingKey,
+    platform: &str,
+    binary: &str,
+) -> Result<&'a Artifact> {
+    if manifest.schema_version != 2
+        || manifest.version != channel.version
+        || manifest.signing_key_id != key_id(key)?
+    {
+        bail!("signed release manifest does not match the channel or trusted key");
+    }
+    let mut matches = manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.platform == platform && artifact.binary == binary);
+    let artifact = matches
+        .next()
+        .with_context(|| format!("signed manifest does not contain {platform}/{binary}"))?;
+    if matches.next().is_some()
+        || artifact.path != format!("releases/{}/{platform}/{binary}", channel.version)
+        || artifact.size == 0
+        || artifact.size > MAX_BINARY_BYTES
+        || artifact.sha256.len() != 64
+        || !artifact
+            .sha256
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
+        bail!("signed manifest has an invalid or duplicate {platform}/{binary} artifact");
+    }
+    Ok(artifact)
+}
+
+pub(super) fn normalize_base_url(mut base: Url) -> Result<Url> {
+    let loopback = match base.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    if base.scheme() != "https" && !(base.scheme() == "http" && loopback) {
+        bail!("release distributor must use HTTPS (HTTP is allowed only for loopback tests)");
+    }
+    if !base.username().is_empty() || base.password().is_some() {
+        bail!("release URL must not contain credentials");
+    }
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
+    }
+    base.set_query(None);
+    base.set_fragment(None);
+    Ok(base)
+}
+
+async fn fetch(client: &reqwest::Client, url: Url, limit: usize) -> Result<Vec<u8>> {
+    let mut response = client
+        .get(url.clone())
+        .header("cache-control", "no-cache")
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch signed release object {url}"))?;
+    if !response.status().is_success() {
+        bail!("signed release object {url} returned {}; unsigned Proxy artifacts cannot be used for updates", response.status());
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        bail!("release object {url} exceeds its size limit");
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
+            bail!("release object {url} exceeds its size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        bail!("release object {url} is empty");
+    }
+    Ok(bytes)
+}
+
+async fn fetch_signed(
+    client: &reqwest::Client,
+    base: &Url,
+    path: &str,
+    key: &VerifyingKey,
+) -> Result<Vec<u8>> {
+    let (bytes, signature) = tokio::try_join!(
+        fetch(client, base.join(path)?, MAX_METADATA_BYTES),
+        fetch(
+            client,
+            base.join(&format!("{path}.sig"))?,
+            MAX_METADATA_BYTES
+        ),
+    )?;
+    verify_signed(&bytes, &signature, key)?;
+    Ok(bytes)
+}
+
+async fn fetch_binary(
+    client: &reqwest::Client,
+    base: &Url,
+    artifact: &Artifact,
+) -> Result<VerifiedBinary> {
+    let bytes = fetch(client, base.join(&artifact.path)?, artifact.size).await?;
+    if bytes.len() != artifact.size || digest(&bytes) != artifact.sha256 {
+        bail!("{} failed signed size/SHA256 verification", artifact.binary);
+    }
+    Ok(VerifiedBinary(bytes))
+}
+
+pub(super) async fn download(
+    client: &reqwest::Client,
+    base: Url,
+    channel_name: &str,
+    key: &VerifyingKey,
+    platform: &str,
+) -> Result<(VerifiedBinary, VerifiedBinary)> {
+    let base = normalize_base_url(base)?;
+    validate_channel_name(channel_name)?;
+    let channel_bytes =
+        fetch_signed(client, &base, &format!("channels/{channel_name}.json"), key).await?;
+    let channel: Channel =
+        serde_json::from_slice(&channel_bytes).context("invalid signed release channel")?;
+    validate_channel(&channel, channel_name)?;
+    let manifest_bytes = fetch_signed(client, &base, &channel.manifest_path, key).await?;
+    if digest(&manifest_bytes) != channel.manifest_sha256 {
+        bail!("release manifest SHA256 does not match the signed channel");
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).context("invalid signed release manifest")?;
+    let controller = select_artifact(&manifest, &channel, key, platform, "treer-agent-server")?;
+    let cli = select_artifact(&manifest, &channel, key, platform, "treer")?;
+    tokio::try_join!(
+        fetch_binary(client, &base, controller),
+        fetch_binary(client, &base, cli)
+    )
+}
+
+#[cfg(test)]
+#[path = "release_update_tests.rs"]
+mod tests;

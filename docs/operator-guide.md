@@ -163,10 +163,14 @@ is rejected. Uploads use Wrangler v4 and its authenticated account. Override
 `TREER_RELEASE_BUCKET`, `TREER_RELEASE_BASE_URL`, `TREER_CLOUDFLARE_PROFILE`, or
 `TREER_WRANGLER` when publishing to another R2 environment.
 
-The current installed Controller updater still downloads the Proxy's flat
-`/artifacts/<platform>/...` endpoints. Signed channel consumption and remote
-rollout orchestration are separate follow-up work; publishing an R2 release does
-not yet change running machines.
+The installed Controller updater consumes these signed channels and manifests.
+Before its first update, provision the publisher's SPKI Ed25519 public key from
+a trusted source at `~/.config/treer/release-signing-key.pub.pem` (under
+`XDG_CONFIG_HOME` when set), or pass `--public-key` / `TREER_RELEASE_PUBLIC_KEY`.
+It never downloads its trust key from the distributor. No release key is bundled
+in the repository, and missing keys or unsigned releases fail closed.
+Publishing an R2 release does not automatically update running machines;
+operators invoke `treer-agent-server update` separately.
 
 Open the web UI, select a workspace, and choose **Add machine**. The dialog
 separates installation from workspace enrollment. The installation command is
@@ -306,17 +310,30 @@ treer-agent-server connect \
   --non-interactive --accept-risk --name 'build-machine'
 ```
 
+### Controller hot updates
+
 Pull and hot-activate the latest Controller and agent-facing CLI with one command:
 
 ```bash
 treer-agent-server update
-treer-agent-server update --proxy https://proxy.canary.treer.ai/
+treer-agent-server update --channel canary --public-key /trusted/release-key.pub.pem
+# Self-hosted signed distributor:
+treer-agent-server update --release-base-url https://releases.example/ --public-key /trusted/release-key.pub.pem
 ```
 
-`update` downloads the current platform's `treer-agent-server` and `treer`
-artifacts, validates both executables, and replaces them atomically. `--proxy`
-selects an explicit download source; without it, the updater orders the
-machine's installed services by server ID and uses the first service's Proxy.
+`update` defaults to the `stable` channel at `https://releases.treer.ai/`.
+`--channel` / `TREER_RELEASE_CHANNEL` and `--release-base-url` /
+`TREER_RELEASE_BASE_URL` select another signed release channel and distributor.
+`--proxy` remains an alias for `--release-base-url`; the old unsigned Proxy
+`/artifacts/` endpoints are no longer accepted as an update source. HTTPS is
+required except for loopback test distributors, and redirects are rejected.
+The updater verifies the channel and manifest Ed25519 signatures using the
+local trust key, checks the manifest digest bound by the channel, and verifies
+both platform binaries' byte lengths and SHA256 against the signed manifest.
+Only after both pass does it execute their `--help` checks and atomically replace
+the installed files. Verification failures leave installed binaries and running
+services untouched. A valid signature authenticates a release, but does not yet
+prevent replay of an older signed channel or enforce a minimum version.
 From a normal host shell it asks every installed stable Host to restart its
 Controller. From a managed Agent context it restarts only that Agent's
 Controller and checks the new epoch through `TREER_AGENT_SERVER_URL`; the shared

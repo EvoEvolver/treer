@@ -21,7 +21,6 @@ mod platforms;
 use platforms::platform;
 
 const FIRST_AUTOMATIC_PORT: u16 = 8790;
-const MAX_UPDATE_BINARY_BYTES: usize = 128 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const UPDATE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROLLER_START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -789,12 +788,16 @@ pub fn restart_controller(workspace: &str) -> Result<()> {
     restart_controller_at(&paths, &config.host_socket)
 }
 
-pub async fn update(proxy_override: Option<Url>) -> Result<()> {
+pub async fn update(
+    release_base_url: Url,
+    channel: String,
+    public_key: Option<PathBuf>,
+) -> Result<()> {
     if cfg!(windows) {
         bail!("Windows in-place updates are not supported; stop Treer, reinstall the binaries, then run restore");
     }
     let services = installed_services()?;
-    let (paths, source_config) = services.first().context(
+    let (paths, _) = services.first().context(
         "no agent-server services are installed on this host; connect a machine before updating",
     )?;
     let activation_services = activation_services(&services)?;
@@ -805,34 +808,44 @@ pub async fn update(proxy_override: Option<Url>) -> Result<()> {
         )
     })?;
     let platform = artifact_platform(std::env::consts::OS, std::env::consts::ARCH)?;
-    let proxy = resolve_update_proxy(proxy_override, source_config)?;
-    let controller_url = artifact_url(&proxy, platform, "treer-agent-server")?;
-    let treer_url = artifact_url(&proxy, platform, "treer")?;
+    let public_key_path = public_key.unwrap_or(
+        config_dir()?
+            .parent()
+            .context("configuration directory has no parent")?
+            .join("release-signing-key.pub.pem"),
+    );
+    let key = crate::release_update::load_public_key(&public_key_path)?;
     let client = reqwest::Client::builder()
         .timeout(UPDATE_DOWNLOAD_TIMEOUT)
-        // Agent terminals inherit Treer's socks5h proxy. Updating the
+        // Agent terminals inherit Treer's workload HTTP proxy. Updating the
         // Controller must not depend on the data plane it is replacing.
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("failed to create update client")?;
 
-    println!("treer: downloading latest {platform} Controller and CLI from {proxy}");
-    let (controller_bytes, treer_bytes) = tokio::try_join!(
-        download_binary(&client, controller_url, "treer-agent-server"),
-        download_binary(&client, treer_url, "treer"),
-    )?;
+    println!(
+        "treer: downloading signed {channel} {platform} Controller and CLI from {release_base_url}"
+    );
+    // Both signatures and both binary digests must pass before staging can
+    // execute either downloaded program, including its --help smoke check.
+    let (controller, cli) =
+        crate::release_update::download(&client, release_base_url, &channel, &key, platform)
+            .await?;
+    let controller_bytes = controller.bytes();
+    let treer_bytes = cli.bytes();
     let installed_controller = fs::read(&paths.executable)
         .with_context(|| format!("failed to read {}", paths.executable.display()))?;
     let installed_treer = fs::read(&treer_executable)
         .with_context(|| format!("failed to read {}", treer_executable.display()))?;
-    let controller_changed = installed_controller != controller_bytes;
-    let treer_changed = installed_treer != treer_bytes;
+    let controller_changed = installed_controller.as_slice() != controller_bytes;
+    let treer_changed = installed_treer.as_slice() != treer_bytes;
 
     let staged_controller = controller_changed
-        .then(|| stage_executable(&paths.executable, &controller_bytes, "update", true))
+        .then(|| stage_executable(&paths.executable, controller_bytes, "update", true))
         .transpose()?;
     let staged_treer = treer_changed
-        .then(|| stage_executable(&treer_executable, &treer_bytes, "update", true))
+        .then(|| stage_executable(&treer_executable, treer_bytes, "update", true))
         .transpose()?;
     let mut rollback_controller = controller_changed
         .then(|| stage_executable(&paths.executable, &installed_controller, "rollback", false))
@@ -899,17 +912,6 @@ pub async fn update(proxy_override: Option<Url>) -> Result<()> {
         println!("treer: update activated; Host and running agents were preserved");
     }
     Ok(())
-}
-
-fn resolve_update_proxy(proxy_override: Option<Url>, source_config: &ServiceConfig) -> Result<Url> {
-    let proxy = proxy_override.map_or_else(
-        || Url::parse(&source_config.proxy).context("invalid Proxy URL in service config"),
-        Ok,
-    )?;
-    if !matches!(proxy.scheme(), "http" | "https") {
-        bail!("update Proxy URL must use http or https");
-    }
-    Ok(proxy)
 }
 
 async fn activate_controllers(
@@ -985,39 +987,6 @@ fn artifact_platform(os: &str, arch: &str) -> Result<&'static str> {
         ("macos", "aarch64") => Ok("darwin-aarch64"),
         _ => bail!("automatic updates are not supported on {os}/{arch}"),
     }
-}
-
-fn artifact_url(proxy: &Url, platform: &str, binary: &str) -> Result<Url> {
-    proxy
-        .join(&format!("artifacts/{platform}/{binary}"))
-        .with_context(|| format!("failed to build the {binary} artifact URL"))
-}
-
-async fn download_binary(client: &reqwest::Client, url: Url, binary: &str) -> Result<Vec<u8>> {
-    let response = client
-        .get(url.clone())
-        .send()
-        .await
-        .with_context(|| format!("failed to download {binary} from {url}"))?
-        .error_for_status()
-        .with_context(|| format!("failed to download {binary} from {url}"))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_UPDATE_BINARY_BYTES as u64)
-    {
-        bail!("downloaded {binary} exceeds the 128 MiB update limit");
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("failed to read downloaded {binary}"))?;
-    if bytes.is_empty() {
-        bail!("downloaded {binary} is empty");
-    }
-    if bytes.len() > MAX_UPDATE_BINARY_BYTES {
-        bail!("downloaded {binary} exceeds the 128 MiB update limit");
-    }
-    Ok(bytes.to_vec())
 }
 
 #[derive(Debug)]

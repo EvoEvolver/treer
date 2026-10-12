@@ -72,6 +72,15 @@ Proxy that carries the candidate artifact tree. Existing fallback release
 servers must supply `SHA256SUMS-<platform>` as well as the three binaries;
 Windows installation fails closed if that checksum asset is absent.
 
+Installed Controller hot updates consume the separately signed R2 channel and
+version manifest rather than these unsigned flat Proxy endpoints. Provision
+the publisher's SPKI Ed25519 public key locally before updating. Both signatures,
+the channel's manifest SHA256, and both binaries' signed sizes/SHA256 must pass
+before any downloaded code runs. See [signed artifact distribution](operator-guide.md#publish-signed-r2-releases)
+for publishing and [machine updates](operator-guide.md#controller-hot-updates)
+for invocation. Local/unsigned candidate artifacts remain available to initial
+installers and Canary tests; they cannot bypass the updater's signature checks.
+
 After the workflow succeeds, collect the exact commit into the ignored local
 artifact tree:
 

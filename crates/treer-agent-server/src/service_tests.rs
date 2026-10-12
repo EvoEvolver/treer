@@ -1027,47 +1027,26 @@ fn update_platforms_match_release_artifact_names() {
 }
 
 #[test]
-fn update_artifact_urls_are_relative_to_the_proxy_root() {
-    let proxy = Url::parse("https://treer.example/").unwrap();
+fn update_distributor_urls_preserve_the_directory_prefix() {
+    let base = crate::release_update::normalize_base_url(
+        Url::parse("https://treer.example/releases-root").unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        artifact_url(&proxy, "darwin-aarch64", "treer-agent-server")
-            .unwrap()
-            .as_str(),
-        "https://treer.example/artifacts/darwin-aarch64/treer-agent-server"
+        base.join("channels/stable.json").unwrap().as_str(),
+        "https://treer.example/releases-root/channels/stable.json"
     );
 }
 
 #[test]
-fn explicit_update_proxy_overrides_the_installed_source() {
-    let config = ServiceConfig {
-        proxy: "https://stable.treer.example/".to_string(),
-        workspace: "default".to_string(),
-        server_id: "srv_test".to_string(),
-        machine_token: "srv_test.secret".to_string(),
-        operator_credential: "op_test".to_string(),
-        root: PathBuf::from("/tmp"),
-        listen: "127.0.0.1:8790".to_string(),
-        host_socket: PathBuf::from("/tmp/host.sock"),
-        install_hostname: current_hostname().expect("local hostname"),
-        network_mode: None,
-        service_manager: default_service_manager(),
-        service_fallback_reason: None,
-    };
-    let explicit = Url::parse("https://canary.treer.example/").unwrap();
-
-    assert_eq!(
-        resolve_update_proxy(Some(explicit), &config)
-            .unwrap()
-            .as_str(),
-        "https://canary.treer.example/"
-    );
-    assert_eq!(
-        resolve_update_proxy(None, &config).unwrap().as_str(),
-        "https://stable.treer.example/"
-    );
-    assert!(
-        resolve_update_proxy(Some(Url::parse("file:///tmp/release").unwrap()), &config).is_err()
-    );
+fn update_distributor_requires_https_outside_loopback() {
+    for source in [
+        "file:///tmp/release",
+        "http://releases.example/",
+        "https://user:secret@releases.example/",
+    ] {
+        assert!(crate::release_update::normalize_base_url(Url::parse(source).unwrap()).is_err());
+    }
 }
 
 #[test]

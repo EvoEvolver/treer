@@ -20,6 +20,16 @@ PostgreSQL-backed workspace gate was skipped. Do not point
 `TREER_TEST_DATABASE_URL` at a shared or production database just to make the
 local gate pass.
 
+Pull requests and pushes to `main` run [CI](../.github/workflows/ci.yml).
+The Linux Rust job builds the workspace, checks formatting, runs
+`cargo test --workspace --locked` against a healthy PostgreSQL 17 service, and
+runs Clippy for all targets with warnings denied. Each database test uses its
+own schema; connection failures fail the job rather than skipping coverage.
+An independent Node 22 / pnpm job installs the frozen frontend lockfile and runs
+`pnpm typecheck` and `pnpm build`. CI requires no deployment credentials and
+does not publish artifacts or deploy. Native macOS/Windows PR gates and browser
+end-to-end CI remain separate gaps.
+
 Use Slurm for CPU- or memory-heavy builds, Clippy runs, frontend builds, and
 non-database workspace tests when the checkout and toolchain are available on
 the compute nodes. Slurm does not remove the PostgreSQL requirement: the job
@@ -54,7 +64,7 @@ node scripts/check-docs.mjs
 
 | Area | Present evidence | Remaining gap |
 | --- | --- | --- |
-| Rust | Workspace tests, format, strict Clippy | No normal cross-platform PR CI |
+| Rust | Linux PR workspace build/tests with PostgreSQL, format, strict Clippy | No native macOS/Windows PR gate; first GitHub run pending |
 | Frontend | Control-plane and Mail typecheck/build; mocked desktop/mobile browser workflows | No screenshot visual regression suite |
 | Core Message | Store/API/CLI tests for DAG visibility, delivery, idempotency, Policy revision, body-free outbox, and migration | No retention/export/delete, attachments, or load/failure suite |
 | App identity | OAuth/PKCE, audience, membership/service invalidation, directory, and App Message routes | No refresh-token contract or unattended browser test |
@@ -64,7 +74,7 @@ node scripts/check-docs.mjs
 | Distribution | NATS event/outbox and multi-Proxy routing tests, including terminal epoch/cursor delivery and bidirectional network payload/accounting | No automated partition/failure CI |
 | Host supervision | nohup default and PID identity, explicit systemd selection, partial-unit repair, stale-registration cleanup, TUI/Web diagnostics, and cold-Host restoration and explicit service probes | No normal macOS lifecycle CI; no Apple container machine setup CI |
 | Machine connection UX | Service workspace listing, `/api/health` `proxy_connected`, duplicate/stale reconnect, Proxy ping idle close, connect reuse, bind conflict, explicit plain-mode migration and service forwarding | No physical lid-close in CI; record a manual macOS sleep/wake check after deploy |
-| Release | Five-platform metadata/checksums, native Windows build/test job, GHCR publish workflow, and signed-manifest Node tests | Windows runner results pending; installed machine updater does not enforce signatures |
+| Release | Five-platform metadata/checksums, native Windows build/test job, GHCR publish workflow, signed-manifest Node tests, and Controller signed-channel/manifest plus binary SHA256 verification | Windows runner results pending; no updater downgrade/freshness enforcement; trusted release key must be provisioned locally |
 | Self-host update | Updater unit tests; Proxy admin forward tests; `/admin` e2e | No unattended Compose apply against live Docker |
 | Security | Explicit trust tier and Policy tests | Allow-by-default Policy; external isolation is operator-owned |
 
@@ -97,6 +107,7 @@ outside the initial implementation.
 | Native iOS/Android fleet | `just mobile-ios-ci`, `just mobile-android-ci`, Android `CreateFlowTest`, iOS `CreateFlowTests` / `TreerUITests`; live AOSP + iOS simulator login/create-machine/create-agent/prompt when a Proxy and Host are available |
 | Documentation | `node scripts/check-docs.mjs` |
 | Release publishing | `just machine-artifacts-test`, `node --test scripts/release-r2.test.mjs`; hosted downloads must match all twelve binaries without redirects; isolated R2 verification when publishing signed manifests |
+| Installed Controller updates | Node/Rust signature compatibility, tampered/missing metadata, trusted-key binding, channel/manifest/path binding, duplicate/missing artifacts, size limits, binary SHA256 failures before execution, and existing staging/recovery tests |
 | Self-host GHCR or updater | `just updater-test`, Proxy admin update tests, and `/admin` e2e |
 
 Documentation describes the current source, not future intent. Dated research

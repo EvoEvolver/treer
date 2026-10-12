@@ -7,6 +7,7 @@ mod interface_cache;
 mod local_api;
 mod network;
 mod proxy;
+mod release_update;
 mod service;
 mod startup_store;
 mod tui;
@@ -66,10 +67,20 @@ enum Command {
 
 #[derive(Debug, ClapArgs)]
 struct UpdateArgs {
-    /// Download Controller and CLI artifacts from this Proxy instead of the
-    /// first installed machine service's Proxy.
-    #[arg(long)]
-    proxy: Option<Url>,
+    /// Signed release distributor URL (not the Proxy's unsigned artifacts).
+    #[arg(
+        long,
+        visible_alias = "proxy",
+        env = "TREER_RELEASE_BASE_URL",
+        default_value = "https://releases.treer.ai/"
+    )]
+    release_base_url: Url,
+    /// Signed release channel to follow.
+    #[arg(long, env = "TREER_RELEASE_CHANNEL", default_value = "stable")]
+    channel: String,
+    /// Trusted local SPKI Ed25519 PEM public key; never fetched from the distributor.
+    #[arg(long, env = "TREER_RELEASE_PUBLIC_KEY")]
+    public_key: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -188,7 +199,9 @@ async fn main() -> Result<()> {
     match args.command {
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
-        Some(Command::Update(update)) => service::update(update.proxy).await,
+        Some(Command::Update(update)) => {
+            service::update(update.release_base_url, update.channel, update.public_key).await
+        }
         Some(Command::Restore { workspace }) => service::restore(&workspace).await,
         Some(Command::Run { config }) => {
             let config = service::ServiceConfig::load(&config)?;
@@ -943,8 +956,8 @@ mod tests {
             panic!("expected update command");
         };
         assert_eq!(
-            update.proxy.as_ref().map(Url::as_str),
-            Some("https://canary.treer.example/")
+            update.release_base_url.as_str(),
+            "https://canary.treer.example/"
         );
     }
 
@@ -955,7 +968,11 @@ mod tests {
         let Some(Command::Update(update)) = args.command else {
             panic!("expected update command");
         };
-        assert!(update.proxy.is_none());
+        assert_eq!(
+            update.release_base_url.as_str(),
+            "https://releases.treer.ai/"
+        );
+        assert_eq!(update.channel, "stable");
     }
 
     #[tokio::test]
