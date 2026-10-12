@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,9 @@ import { listFiles, previewFile, fileErrorStatus } from "./files.js";
 import { InvalidPromptMode, PromptQueue, promptMode } from "./prompt-queue.js";
 import { taskOutput } from "./task-output.js";
 import { GoalError, goalUpdate } from "./goals.js";
+import { QueueError, submissionOptions } from "./prompt-submission.js";
+import { notifySubmission } from "./prompt-notify.js";
+import { verifyInterfaceCaller } from "./interface-identity.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -27,7 +30,7 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("AGENT_
 const cwd = resolve(setting("CWD") || process.cwd());
 const agentId = process.env.TREER_AGENT_ID || "";
 const interfaceInstanceId = setting("INSTANCE_ID") || `agent-ui-${process.pid}`;
-const interfaceCapabilities = ["prompt.submit", "transcript.read", "state.observe", "abort"];
+const interfaceCapabilities = ["prompt.submit", "transcript.read", "state.observe", "abort", "prompt.queue", "prompt.notify", "prompt.queue.read"];
 const initialHistoryLimit = 50;
 
 function createRuntime(): HarnessRuntime {
@@ -52,8 +55,12 @@ function createRuntime(): HarnessRuntime {
 
 const runtime = createRuntime();
 const sockets = new Set<{ socket: WebSocket; historyLimit: number }>();
-const completedOperations = new Map<string, number>();
-const prompts = new PromptQueue(runtime, broadcast);
+if (agentId && !/^[A-Za-z0-9_-]+$/.test(agentId)) throw new Error("Invalid TREER_AGENT_ID for queue storage");
+const prompts = new PromptQueue(runtime, broadcast, {
+  file: join(realpathSync(cwd), ".treer", "agents", agentId || "standalone", "queue.json"),
+  limit: Number(setting("QUEUE_LIMIT") ?? "256"),
+  notify: notifySubmission,
+});
 
 function mime(file: string) {
   switch (extname(file)) {
@@ -181,6 +188,8 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const path = requestPath(url);
   try {
+    const queueRoute = path === "/v1/prompts" || path === "/v1/queue" || path.startsWith("/v1/queue/") || path.startsWith("/v1/submissions/");
+    const attested = queueRoute ? verifyInterfaceCaller(request.headers, agentId, interfaceInstanceId) : false;
     if (path === "/v1/files/tree" || path === "/v1/files") {
       if (method !== "GET") {
         response.setHeader("allow", "GET");
@@ -219,7 +228,8 @@ const server = createServer(async (request, response) => {
         agent_id: agentId,
         interface_instance_id: interfaceInstanceId,
         status: payload.runtime.state,
-        busy: payload.runtime.state === "working",
+        busy: prompts.busy,
+        queue_length: prompts.entries.length,
         error: payload.runtime.error,
       });
       return;
@@ -236,24 +246,26 @@ const server = createServer(async (request, response) => {
         send(response, 400, { error: "operation_id and text are required" });
         return;
       }
-      if (completedOperations.has(operationId)) {
-        send(response, 202, { accepted: true, duplicate: true, operation_id: operationId });
-        return;
-      }
-      completedOperations.set(operationId, Date.now());
-      try {
-        // Treer's Controller already sends "mode": "prompt" on this route, so the
-        // delivery choice has its own field. /api/prompt is private to the page.
-        const submission = await prompts.submit(text, promptMode(body.delivery));
-        send(response, 202, { accepted: true, operation_id: operationId, submission });
-      } catch (error) {
-        completedOperations.delete(operationId);
-        throw error;
-      }
-      while (completedOperations.size > 1024) {
-        completedOperations.delete(completedOperations.keys().next().value!);
-      }
+      // "mode": "prompt" is the Core compatibility field. Never reinterpret it.
+      if (!attested && (body.sender != null || body.notify != null)) throw new QueueError("Sender and notifications require an authenticated managed Controller request", 403);
+      const metadata = submissionOptions(body.sender, body.notify);
+      const submission = await prompts.submit(text, promptMode(body.delivery, "queue"), { operationId, ...metadata });
+      send(response, 202, { accepted: true, operation_id: operationId, ...(submission.duplicate ? { duplicate: true } : {}), submission });
       return;
+    }
+    if (path === "/v1/queue" && method === "GET") {
+      send(response, 200, { submissions: prompts.submissions }); return;
+    }
+    const submissionMatch = /^\/v1\/submissions\/([^/]+)$/.exec(path);
+    if (submissionMatch && method === "GET") {
+      const submission = prompts.submission(decodeURIComponent(submissionMatch[1]));
+      send(response, submission ? 200 : 404, submission ? { submission } : { error: "Submission not found" }); return;
+    }
+    const cancelMatch = /^\/v1\/queue\/([^/]+)$/.exec(path);
+    if (cancelMatch && method === "DELETE") {
+      const id = decodeURIComponent(cancelMatch[1]);
+      const removed = prompts.remove(id);
+      send(response, removed ? 200 : 404, removed ? { submission: prompts.submission(id) } : { error: "Submission not found" }); return;
     }
     if (path === "/v1/abort" && method === "POST") {
       await runtime.interrupt();
@@ -344,7 +356,7 @@ const server = createServer(async (request, response) => {
     send(response, 404, { error: "not found" });
   } catch (error) {
     console.error(error);
-    send(response, error instanceof GoalError ? error.status : error instanceof InvalidPromptMode ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
+    send(response, error instanceof GoalError || error instanceof QueueError ? error.status : error instanceof InvalidPromptMode ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -376,7 +388,7 @@ server.on("upgrade", (request, socket, head) => {
   });
 });
 
-runtime.on("exit", () => { void runtime.stop().finally(() => process.exit(1)); });
+runtime.on("exit", () => { prompts.close(); void runtime.stop().finally(() => process.exit(1)); });
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing listener address");
@@ -391,6 +403,7 @@ server.listen(port, "127.0.0.1", () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    prompts.close();
     void runtime.stop().finally(() => process.exit(0));
   });
 }

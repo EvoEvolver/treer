@@ -136,6 +136,12 @@ export async function testRuntimeControls(browser, screenshots) {
     // Drained entries disappear on a WebSocket update; the UI never dispatches them itself.
     setState({ queue: [] });
     await expect(page.locator("#prompt-queue")).toBeHidden();
+    setState({ queue: [{ id: "source-test", text: malicious, createdAt: new Date().toISOString(), sender: { agent_id: "ag_leader", path: "/treer-dev-team/leader", name: "leader" }, position: 1 }] });
+    await expect(page.locator("#prompt-queue")).toContainText("Queued 1 · /treer-dev-team/leader");
+    await expect(page.locator("#prompt-queue .queued-text")).toHaveText(malicious);
+    await expect(page.locator("#prompt-queue img")).toHaveCount(0);
+    await page.screenshot({ path: join(screenshots, "controls-desktop-queue-source.png") });
+    setState({ queue: [] });
     failPrompt = true;
     await prompt.fill("keep this draft");
     await prompt.press("Enter");
@@ -280,6 +286,8 @@ export async function testRuntimeControls(browser, screenshots) {
     await prompt.fill("touch queued");
     await page.getByRole("button", { name: "Queue message (steering unavailable)", exact: true }).click();
     await expect(page.locator("#prompt-queue")).toContainText("touch queued");
+    setState({ queue: state.queue.map((entry, index) => ({ ...entry, position: index + 1, sender: { agent_id: "ag_leader", path: "/treer-dev-team/leader", name: "leader" } })) });
+    await expect(page.locator("#prompt-queue")).toContainText("/treer-dev-team/leader");
     await page.screenshot({ path: join(screenshots, "controls-mobile-goal-queue.png") });
     await page.getByRole("button", { name: "Browse files", exact: true }).click();
     await expect(page.locator("#file-browser")).toBeVisible();

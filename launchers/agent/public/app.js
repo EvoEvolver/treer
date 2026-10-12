@@ -64,7 +64,8 @@ function itemNode(item) {
   if (!item?.text && item?.kind !== "reasoning") return null;
   if (item.kind === "userMessage") {
     const message = node("article", "message message-user");
-    message.append(node("div", "message-label", "You"), markdownNode("message-copy", item.text));
+    const origin = /^\[来自 ([^\r\n]+)，排队于 ([^\r\n]+)\]\n/.exec(item.text);
+    message.append(node("div", "message-label", origin ? `From ${origin[1]}` : "You"), markdownNode("message-copy", origin ? item.text.slice(origin[0].length) : item.text));
     return message;
   }
   if (item.kind === "agentMessage") {
@@ -287,7 +288,7 @@ function renderQueue() {
       } catch (error) { localError = error.message; }
       render();
     });
-    row.append(node("span", "queue-label", "Queued"), node("span", "queued-text", entry.text), cancel);
+    row.append(node("span", "queue-label", `Queued ${entry.position ?? ""}${entry.sender?.path ? ` · ${entry.sender.path}` : ""}`), node("span", "queued-text", entry.text), cancel);
     elements.queue.append(row);
   }
   if (focused) [...elements.queue.querySelectorAll("button")].find((button) => button.dataset.queueId === focused)?.focus();

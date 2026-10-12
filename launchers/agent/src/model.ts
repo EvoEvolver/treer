@@ -17,6 +17,8 @@ export interface QueuedPrompt {
   id: string;
   text: string;
   createdAt: string;
+  sender?: { agent_id: string; path: string; name: string } | null;
+  position?: number;
 }
 
 export interface Goal {

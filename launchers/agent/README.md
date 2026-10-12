@@ -313,15 +313,54 @@ installations and does not touch managed Agent processes or sessions.
 
 `GET /api/state` and WebSocket `state` messages include `harness.capabilities`
 (`steer`, `backgroundTasks`), `backgroundTasks`, and `queue`. Queue entries are
-`{id, text, createdAt}`. `POST /api/prompt` accepts `{prompt, mode?: "steer"|"queue"}`;
+`{id, text, createdAt, sender, position}`. Sender paths and one-based FIFO
+positions appear in the UI. `POST /api/prompt` accepts `{prompt, mode?: "steer"|"queue"}`;
 `POST /v1/prompts` accepts optional `delivery: "steer"|"queue"` alongside
 `operation_id` and `text`; its existing Core `mode: "prompt"` field is ignored.
-The default delivery is `steer` for compatibility. Replies include `submission`
-with `disposition` (`sent`, `queued`, `steered`), effective `mode`, and `downgraded`.
+The browser defaults to `steer`; AIS defaults to `queue`. AIS accepts attested
+`sender: {agent_id,path,name}` and optional `notify: {on,to?}` only from the
+registered Controller's matching `x-treer-agent-id` and
+`x-treer-interface-instance` headers, without a browser Origin. Public browser
+prompts cannot supply sender identity. Standalone AIS clients cannot supply
+sender/notification metadata. Replies include `submission` with stable `id`,
+`disposition` (`sent`, `queued`, `steered`) and nullable `position`; browser
+replies also report effective `mode` and `downgraded`.
 Unsupported steering becomes queueing with an `explanation`. An idle harness
 receives the prompt immediately; queued prompts are sent FIFO after each turn
-returns to idle. Errors pause draining. `DELETE /api/queue/:id` removes a waiting
-prompt (404 if absent). Queues are memory-only and do not survive restart.
+returns to idle. Dispatch failures become terminal `failed` submissions rather
+than silently retrying inference. Harness errors pause draining.
+`DELETE /api/queue/:id` removes a waiting prompt (404 if absent).
+
+The shared server queue journals to `<cwd>/.treer/agents/$TREER_AGENT_ID/queue.json`
+(or `standalone` without an Agent identity), mode 0600. Each bounded journal
+commit uses a private temporary file, file fsync, rename and directory fsync
+before accepting work. Symlink storage paths and corrupt journals are rejected;
+a storage failure closes dispatch rather than running uncommitted work. On
+restart pending messages retain FIFO order; uncertain running submissions become
+`interrupted`, never resubmitted. `AGENT_UI_QUEUE_LIMIT` (1–4096, default 256)
+bounds pending/running work plus undelivered notifications. Full queues return
+429. Text is limited to 64 KiB; terminal receipts keep bounded previews, and the
+most recent 1,024 delivered terminal receipts remain available for deduplication.
+Reusing an operation ID with different text/delivery/source/notification is 409.
+
+Controller-facing `GET /v1/queue` lists pending `submissions`;
+`GET /v1/submissions/:id` returns the correlated submission, including terminal
+state; `DELETE /v1/queue/:id` cancels only pending work (`interrupted`), with 409
+for running work. `/v1/status` adds `busy` and `queue_length` (pending only).
+The manifest advertises `prompt.queue`, `prompt.notify`, `prompt.queue.read`.
+Submission previews are bounded to 1,024 UTF-8 bytes (input) and 4,096 bytes
+(last assistant message). Source paths/times are prepended to model prompts and
+shown on user messages, so the native transcript also retains attribution.
+
+By default an attested sender receives `done`, `failed`, and `interrupted`
+notifications. Set `notify.on` to select outcomes (empty disables), and `to` to
+override the recipient; operators must explicitly supply a recipient. Terminal
+notifications use the Agent's own inherited identity via `treer message send`,
+including submission/turn IDs, outcome, error and assistant preview. A durable
+outbox retries with logged errors and exponential backoff capped at 60 seconds,
+using `prompt-submission/<id>/terminal` as its idempotency key. A notification
+failure never reruns the task. Pending notifications survive restart. Queue
+state is local to the Agent cwd and is not included in portable session exports.
 
 Background tasks are `{id, kind, description, status, startedAt, endedAt,
 exitCode, summary, outputFile?}`. Kind is `shell|agent|monitor|other`; status is
