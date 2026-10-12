@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { CodexRuntime } from "../src/harness/codex.js";
 import { loadThreadId, saveThreadId, threadStatePath } from "../src/thread-state.js";
+import { hermeticEnv } from "./hermetic.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const fake = join(root, "tests/fake-codex.mjs");
@@ -71,7 +72,7 @@ test("new thread is persisted privately and resumed by a replacement runtime; ex
 
 async function launchServer(cwd: string, env: Record<string, string> = {}) {
   const portFile = join(cwd, "port");
-  const environment: NodeJS.ProcessEnv = { ...process.env, CODEX_UI_CWD: cwd, CODEX_BIN: fake, CODEX_UI_PORT_FILE: portFile, TREER_AGENT_ID: "ag_test", ...env };
+  const environment: NodeJS.ProcessEnv = hermeticEnv({ CODEX_UI_CWD: cwd, CODEX_BIN: fake, CODEX_UI_PORT_FILE: portFile, TREER_AGENT_ID: "ag_test", ...env });
   if (!("CODEX_UI_PORT" in env)) delete environment.CODEX_UI_PORT;
   const child = spawn(join(root, "node_modules/.bin/tsx"), [join(root, "src/index.ts")], {
     env: environment,
@@ -147,7 +148,7 @@ test("switch dry-run prints exact self startup argv without writing or restartin
   const log = join(cwd, "calls");
   writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nif [ "$1" = whoami ]; then printf '%s\\n' '{"agent":{"agent_id":"ag_test"}}'; else exit 99; fi\n`, { mode: 0o700 });
   const result = execFileSync(join(root, "scripts/switch.sh"), ["--thread-id", "original", "--dry-run"], {
-    cwd, encoding: "utf8", env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, TREER_AGENT_ID: "ag_test", TREER_WORKLOAD_CREDENTIAL: "test", TREER_AGENT_SERVER_URL: "test" },
+    cwd, encoding: "utf8", env: hermeticEnv({ PATH: `${cwd}:${process.env.PATH}`, TREER_AGENT_ID: "ag_test", TREER_WORKLOAD_CREDENTIAL: "test", TREER_AGENT_SERVER_URL: "test" }),
   });
   const plan = JSON.parse(result);
   assert.deepEqual(plan.startup_command, ["treer", "agent", "startup", "set", "--cwd", ".", "--", join(root, "scripts/treer-agent.sh"), "--harness", "codex", "--session-id", "original", "--cwd", cwd]);
@@ -161,8 +162,8 @@ test("launcher CLI overrides env thread and registers the actual dynamic listene
   const code = join(cwd, "treer");
   writeFileSync(code, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nprintf '%s\\n' '{}'\n`, { mode: 0o700 });
   const child = spawn(join(root, "scripts/treer-agent.sh"), ["--thread-id", "from-cli", "--cwd", cwd], {
-    cwd, env: { ...process.env, HOME: cwd, PATH: `${cwd}:${process.env.PATH}`, CODEX_BIN: fake,
-      CODEX_UI_THREAD_ID: "from-env", CODEX_UI_PORT: "0", TREER_AGENT_ID: "ag_shell" }, stdio: "pipe",
+    cwd, env: hermeticEnv({ HOME: cwd, PATH: `${cwd}:${process.env.PATH}`, CODEX_BIN: fake,
+      CODEX_UI_THREAD_ID: "from-env", CODEX_UI_PORT: "0", TREER_AGENT_ID: "ag_shell" }), stdio: "pipe",
   });
   let output = "";
   child.stderr!.on("data", (chunk) => { output += String(chunk); });
@@ -191,7 +192,7 @@ test("failed resume exits launcher before interface registration", async () => {
   const log = join(cwd, "treer-calls");
   writeFileSync(join(cwd, "treer"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\n`, { mode: 0o700 });
   const child = spawn(join(root, "scripts/treer-agent.sh"), ["--thread-id", "missing"], {
-    cwd, env: { ...process.env, HOME: cwd, PATH: `${cwd}:${process.env.PATH}`, CODEX_BIN: fake, CODEX_UI_PORT: "0" }, stdio: "pipe",
+    cwd, env: hermeticEnv({ HOME: cwd, PATH: `${cwd}:${process.env.PATH}`, CODEX_BIN: fake, CODEX_UI_PORT: "0" }), stdio: "pipe",
   });
   let output = "";
   child.stderr!.on("data", (chunk) => { output += String(chunk); });
@@ -206,7 +207,7 @@ test("switch saves startup and detaches a self-only restart with private result/
   const log = join(cwd, "calls");
   writeFileSync(join(cwd, "treer"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nif [ "$1" = whoami ]; then printf '%s\\n' '{"agent":{"agent_id":"ag_test"}}'; else printf '%s\\n' '{}'; fi\n`, { mode: 0o700 });
   const output = execFileSync(join(root, "scripts/switch.sh"), ["--thread-id", "original"], {
-    cwd, encoding: "utf8", env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, TREER_AGENT_ID: "ag_test", TREER_WORKLOAD_CREDENTIAL: "test", TREER_AGENT_SERVER_URL: "test" },
+    cwd, encoding: "utf8", env: hermeticEnv({ PATH: `${cwd}:${process.env.PATH}`, TREER_AGENT_ID: "ag_test", TREER_WORKLOAD_CREDENTIAL: "test", TREER_AGENT_SERVER_URL: "test" }),
   });
   assert.match(output, /detached self restart queued/);
   const parent = join(cwd, ".treer/agents/ag_test/agent-ui-switches");
@@ -226,4 +227,43 @@ test("switch saves startup and detaches a self-only restart with private result/
   assert.match(recorded[1], /^agent startup set --cwd \. -- /);
   assert.equal(recorded[2], "agent restart self");
   assert.equal(recorded.length, 3);
+});
+
+test("a turn left in progress by an earlier restart does not make an idle thread look running", async () => {
+  const cwd = temp();
+  process.env.FAKE_CODEX_STALE = "1";
+  process.env.FAKE_CODEX_STATUS = "idle";
+  const runtime = new CodexRuntime(fake, cwd, { threadId: "original" });
+  try {
+    await runtime.start();
+    const thread = runtime.snapshot().thread!;
+    assert.equal(thread.status, "idle");
+    assert.equal(thread.activeTurnId, null);
+    assert.equal(thread.turns[0].status, "interrupted");
+  } finally { await runtime.stop(); delete process.env.FAKE_CODEX_STALE; delete process.env.FAKE_CODEX_STATUS; }
+});
+
+test("only the newest in-progress turn is live, and a stale steer target is corrected", async () => {
+  const cwd = temp();
+  const file = join(cwd, "calls");
+  process.env.FAKE_CODEX_CALLS = file;
+  process.env.FAKE_CODEX_STALE = "1";
+  process.env.FAKE_CODEX_LIVE = "1";
+  process.env.FAKE_CODEX_STATUS = "active";
+  const runtime = new CodexRuntime(fake, cwd, { threadId: "original" });
+  try {
+    await runtime.start();
+    const thread = runtime.snapshot().thread!;
+    assert.equal(thread.status, "running");
+    assert.equal(thread.activeTurnId, "turn-live");
+    assert.deepEqual(thread.turns.map((turn) => turn.status), ["interrupted", "completed", "inProgress"]);
+    // A steer aimed at a stale ID is retried at the turn Codex reports.
+    runtime.thread!.activeTurnId = "turn-0";
+    await runtime.prompt("steer me");
+    const steers = calls(file).filter((call) => call.method === "turn/steer");
+    assert.deepEqual(steers.map((call) => call.params.expectedTurnId), ["turn-0", "turn-live"]);
+  } finally {
+    await runtime.stop();
+    for (const key of ["FAKE_CODEX_CALLS", "FAKE_CODEX_STALE", "FAKE_CODEX_LIVE", "FAKE_CODEX_STATUS"]) delete process.env[key];
+  }
 });

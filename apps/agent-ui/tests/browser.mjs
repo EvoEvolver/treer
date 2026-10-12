@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, expect } from "@playwright/test";
+import { hermeticEnv } from "./hermetic.mjs";
 
 // An isolated listener and fake Codex: no inference, Treer mutations or Agent restart.
 const app = resolve(import.meta.dirname, "..");
@@ -14,9 +15,8 @@ await mkdir(join(cwd, "src"));
 await writeFile(join(cwd, "src/greeting.ts"), "export const greeting = 'Hello, Treer';\n// <script>window.fileXSS = true</script>\n");
 await writeFile(join(cwd, "README.md"), "# Workspace\nSmall tools, thoughtful interfaces.\n");
 await writeFile(join(cwd, "large.txt"), "x".repeat(65537));
-const env = { ...process.env, CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
-  CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1" };
-delete env.TREER_AGENT_ID;
+const env = hermeticEnv({ CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
+  CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1" });
 const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "pipe" });
 let logs = "";
 server.stderr.on("data", (chunk) => { logs += chunk; });

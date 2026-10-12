@@ -153,15 +153,20 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     }
     const input = [{ type: "text", text, text_elements: [] }];
     if (this.thread.status === "running" && this.thread.activeTurnId) {
-      await this.client.request<{ turnId: string }>(
+      const steer = (expectedTurnId: string) => this.client!.request<{ turnId: string }>(
         "turn/steer",
-        {
-          threadId: this.thread.id,
-          expectedTurnId: this.thread.activeTurnId,
-          input,
-        },
+        { threadId: this.thread!.id, expectedTurnId, input },
         60_000,
       );
+      try {
+        await steer(this.thread.activeTurnId);
+      } catch (error) {
+        // Codex names the turn that is really active when our idea of it is stale.
+        const actual = /found `([^`]+)`/.exec(error instanceof Error ? error.message : String(error))?.[1];
+        if (!actual || actual === this.thread.activeTurnId) throw error;
+        this.thread.activeTurnId = actual;
+        await steer(actual);
+      }
       this.thread.updatedAt = new Date().toISOString();
       this.emit("state");
       return;
@@ -380,7 +385,15 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       };
       const statusType = record.status && typeof record.status === "object" ? record.status.type : null;
       if (Array.isArray(record.turns)) this.fullTurns = record.turns.map((turn) => mapTurn(turn));
-      const active = this.fullTurns.find((turn) => turn.status === "inProgress");
+      // A turn cut off by a restart stays "inProgress" in the persisted history
+      // forever. Only the newest turn can be live, and only while the thread is
+      // active (or its status is unknown); every other stale turn was interrupted.
+      const newest = this.fullTurns.at(-1);
+      const threadLive = statusType === null || statusType === undefined || statusType === "active";
+      for (const turn of this.fullTurns) {
+        if (turn.status === "inProgress" && (turn !== newest || !threadLive)) turn.status = "interrupted";
+      }
+      const active = newest?.status === "inProgress" ? newest : undefined;
       const running = statusType === "active" || active !== undefined;
       const activeTurnId = running
         ? active?.id ?? this.thread.activeTurnId
