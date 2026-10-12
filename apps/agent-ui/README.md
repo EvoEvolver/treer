@@ -151,6 +151,28 @@ missing, 405 non-GET method). These routes expose local working-directory data
 through the same private AIS listener and Treer access boundary as the UI;
 they add no sandbox or separate authentication scheme.
 
+## Prompt queue and background-task contract
+
+`GET /api/state` and WebSocket `state` messages include `harness.capabilities`
+(`steer`, `backgroundTasks`), `backgroundTasks`, and `queue`. Queue entries are
+`{id, text, createdAt}`. `POST /api/prompt` accepts `{prompt, mode?: "steer"|"queue"}`;
+`POST /v1/prompts` accepts the same optional mode alongside `operation_id` and
+`text`. The default is `steer` for compatibility. Replies include `submission`
+with `disposition` (`sent`, `queued`, `steered`), effective `mode`, and `downgraded`.
+Unsupported steering becomes queueing with an `explanation`. An idle harness
+receives the prompt immediately; queued prompts are sent FIFO after each turn
+returns to idle. Errors pause draining. `DELETE /api/queue/:id` removes a waiting
+prompt (404 if absent). Queues are memory-only and do not survive restart.
+
+Background tasks are `{id, kind, description, status, startedAt, endedAt,
+exitCode, summary, outputFile?}`. Kind is `shell|agent|monitor|other`; status is
+`running|completed|failed|stopped`. Timestamps are ISO strings or null; exit code
+and summary can be null. `GET /api/tasks/:id/output?tail=65536` returns
+`{id, content, size, truncated}` from a registered task's output file. `tail` is a
+positive byte count capped at 64 KiB; unregistered task IDs return 404. Reads
+must remain in the adapter's trusted output roots, reject external symlinks and
+non-regular files, and never accept an output path from a client.
+
 ## Checks
 
 ```bash

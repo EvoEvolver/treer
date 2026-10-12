@@ -1,6 +1,6 @@
 import type { EventEmitter } from "node:events";
 
-import type { ModelOption, ReasoningEffort, TurnDto } from "./model.js";
+import type { BackgroundTask, ModelOption, ReasoningEffort, TurnDto } from "./model.js";
 
 // The adapter boundary. The server, AIS endpoints, file browser, persistence and
 // frontend only talk to a HarnessRuntime; each harness (native Codex app-server,
@@ -12,6 +12,7 @@ export interface HarnessInfo {
   id: string;
   /** Name shown to people, e.g. "Codex" or "Claude". */
   name: string;
+  capabilities: { steer: boolean; backgroundTasks: boolean };
 }
 
 export interface ThreadState {
@@ -33,10 +34,13 @@ export interface RuntimeSnapshot {
   ready: boolean;
   thread: ThreadState | null;
   models: ModelOption[];
+  backgroundTasks: BackgroundTask[];
 }
 
 export interface HarnessRuntime extends EventEmitter {
   readonly harness: HarnessInfo;
+  /** Trusted roots for registered background-task output files; never supplied by HTTP clients. */
+  readonly taskOutputRoots?: readonly string[];
   /** Starts the harness, resuming the saved or requested session when there is one. */
   start(): Promise<void>;
   stop(): Promise<void>;

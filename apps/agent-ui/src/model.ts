@@ -1,6 +1,24 @@
 // Harness-neutral history and settings shared by the server, frontend contract,
 // and every harness adapter.
 
+export interface BackgroundTask {
+  id: string;
+  kind: "shell" | "agent" | "monitor" | "other";
+  description: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  startedAt: string | null;
+  endedAt: string | null;
+  exitCode: number | null;
+  summary: string | null;
+  outputFile?: string;
+}
+
+export interface QueuedPrompt {
+  id: string;
+  text: string;
+  createdAt: string;
+}
+
 export interface HistoryItem {
   id: string;
   kind:

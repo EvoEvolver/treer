@@ -10,6 +10,8 @@ import { CodexRuntime } from "./harness/codex.js";
 import type { HarnessRuntime } from "./runtime.js";
 import { threadStatePath } from "./thread-state.js";
 import { listFiles, previewFile, fileErrorStatus } from "./files.js";
+import { PromptQueue, promptMode } from "./prompt-queue.js";
+import { taskOutput } from "./task-output.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -46,6 +48,7 @@ function createRuntime(): HarnessRuntime {
 const runtime = createRuntime();
 const sockets = new Set<{ socket: WebSocket; historyLimit: number }>();
 const completedOperations = new Map<string, number>();
+const prompts = new PromptQueue(runtime, broadcast);
 
 function mime(file: string) {
   switch (extname(file)) {
@@ -120,6 +123,8 @@ function statePayload(historyLimit = initialHistoryLimit) {
     harness: runtime.harness,
     thread: snapshot.thread,
     modelOptions: snapshot.models,
+    backgroundTasks: snapshot.backgroundTasks,
+    queue: prompts.entries,
     history: { limit: historyLimit },
   };
 }
@@ -231,7 +236,8 @@ const server = createServer(async (request, response) => {
       }
       completedOperations.set(operationId, Date.now());
       try {
-        await runtime.prompt(text);
+        const submission = await prompts.submit(text, promptMode(body.mode));
+        send(response, 202, { accepted: true, operation_id: operationId, submission });
       } catch (error) {
         completedOperations.delete(operationId);
         throw error;
@@ -239,7 +245,6 @@ const server = createServer(async (request, response) => {
       while (completedOperations.size > 1024) {
         completedOperations.delete(completedOperations.keys().next().value!);
       }
-      send(response, 202, { accepted: true, operation_id: operationId });
       return;
     }
     if (path === "/v1/abort" && method === "POST") {
@@ -265,6 +270,19 @@ const server = createServer(async (request, response) => {
       send(response, 200, statePayload());
       return;
     }
+    if (path.startsWith("/api/queue/") && method === "DELETE") {
+      const removed = prompts.remove(decodeURIComponent(path.slice("/api/queue/".length)));
+      send(response, removed ? 200 : 404, removed ? statePayload() : { error: "Queued prompt not found" });
+      return;
+    }
+    const taskMatch = /^\/api\/tasks\/([^/]+)\/output$/.exec(path);
+    if (taskMatch && method === "GET") {
+      const task = runtime.snapshot().backgroundTasks.find((entry) => entry.id === decodeURIComponent(taskMatch[1]));
+      if (!task) { send(response, 404, { error: "Task not found" }); return; }
+      try { send(response, 200, await taskOutput(task, runtime.taskOutputRoots ?? [cwd], url.searchParams.get("tail"))); }
+      catch (error) { send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
     if (path === "/api/history/older" && method === "POST") {
       const body = await readJson(request);
       const current = typeof body.limit === "number" && Number.isFinite(body.limit)
@@ -280,8 +298,8 @@ const server = createServer(async (request, response) => {
         send(response, 400, { error: "prompt is required" });
         return;
       }
-      await runtime.prompt(prompt);
-      send(response, 200, statePayload(historyLimitFrom(body)));
+      const submission = await prompts.submit(prompt, promptMode(body.mode));
+      send(response, 200, { ...statePayload(historyLimitFrom(body)), submission });
       return;
     }
     if (path === "/api/interrupt" && method === "POST") {

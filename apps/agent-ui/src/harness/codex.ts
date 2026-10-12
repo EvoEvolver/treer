@@ -27,7 +27,7 @@ interface LiveItem {
 }
 
 export class CodexRuntime extends EventEmitter implements HarnessRuntime {
-  readonly harness: HarnessInfo = { id: "codex", name: "Codex" };
+  readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false } };
   private child: ChildProcessWithoutNullStreams | null = null;
   private client: JsonRpcClient | null = null;
   private ready = false;
@@ -244,6 +244,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       ready: this.ready,
       thread,
       models: this.models,
+      backgroundTasks: [],
     };
   }
 

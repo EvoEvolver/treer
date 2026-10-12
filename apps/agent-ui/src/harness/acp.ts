@@ -145,7 +145,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
     private readonly options: { sessionId?: string; stateFile?: string; name?: string } = {},
   ) {
     super();
-    this.harness = { id: "acp", name: options.name || "Agent" };
+    this.harness = { id: "acp", name: options.name || "Agent", capabilities: { steer: false, backgroundTasks: false } };
   }
 
   async start() {
@@ -177,7 +177,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
       clientInfo: { name: "treer-agent-ui", title: "Treer Agent UI", version: "0.2.0" },
     }, 60_000);
     const agentInfo = initialized.agentInfo && typeof initialized.agentInfo === "object" ? initialized.agentInfo as Json : {};
-    if (!this.options.name) this.harness = { id: "acp", name: text(agentInfo.title) || text(agentInfo.name) || "Agent" };
+    if (!this.options.name) this.harness = { ...this.harness, name: text(agentInfo.title) || text(agentInfo.name) || "Agent" };
     const capabilities = initialized.agentCapabilities && typeof initialized.agentCapabilities === "object"
       ? initialized.agentCapabilities as Json
       : {};
@@ -297,7 +297,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
 
   snapshot(historyLimit?: number) {
     const thread = this.thread && historyLimit !== undefined ? withHistoryLimit(this.thread, this.turns, historyLimit) : this.thread;
-    return { ready: this.ready, thread, models: this.models };
+    return { ready: this.ready, thread, models: this.models, backgroundTasks: [] };
   }
 
   private publish() {
