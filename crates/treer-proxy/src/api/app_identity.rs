@@ -1,4 +1,38 @@
 use super::*;
+
+/// Recheck current membership and profile at the point of forwarding.
+/// Do not take role, name, or user ID from client identity headers.
+pub(super) async fn issue_browser_app_identity(
+    auth: &AuthStore,
+    identity: &IdentityIssuer,
+    workspace_id: &str,
+    user_id: &str,
+    service_id: &str,
+) -> Result<String, ApiFailure> {
+    let role = auth.workspace_member_role(workspace_id, user_id).await?;
+    let human = auth
+        .list_workspace_humans(workspace_id)
+        .await?
+        .into_iter()
+        .find(|human| human.user_id == user_id)
+        .ok_or_else(|| {
+            ApiFailure::unauthorized(
+                "app_authentication_required",
+                "current workspace membership required",
+            )
+        })?;
+    identity
+        .issue_human_request(
+            workspace_id,
+            user_id,
+            &human.preferred_name,
+            &role,
+            service_id,
+        )
+        .map(|token| token.access_token)
+        .map_err(|_| ApiFailure::internal("identity_token_failed", "failed to issue App identity"))
+}
+
 pub(super) async fn verify_app_identity(
     Extension(auth): Extension<AuthStore>,
     Extension(identity): Extension<IdentityIssuer>,

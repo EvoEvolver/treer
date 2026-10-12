@@ -153,7 +153,7 @@ is restricted or audited.
 | Agent workload credential | One stable managed workload across process generations; same-account inspection remains possible |
 | Local operator credential | One Controller install; protects the local API but is not a same-account sandbox |
 | Workload identity token | One Agent/machine/service audience for 60 seconds |
-| Human App token | One user/workspace/service audience; verification rechecks membership and service |
+| Human App token | One user/workspace/service audience; 12 hours via OAuth, 60 seconds via authenticated browser forwarding; verification rechecks membership and service |
 | Human user session | Cookie `treer_session` for browsers; native iOS/Android also receive the same token in JSON when `X-Treer-Client` is exactly `mobile`, `mobile_ios`, or `mobile_android`. `Authorization: Bearer` is accepted on every user route. The header is not CORS-allowed. Do not put the token in query strings |
 | Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts; can list emails and issue password-reset links |
 | Updater token | Shared Bearer secret between Proxy and the Compose updater sidecar; never exposed to browsers |
@@ -210,6 +210,41 @@ removes conflicting `X-Frame-Options`, so the control plane can embed the human
 interface. Other CSP directives remain enforced; direct App origins and ordinary
 virtual-host tunnels retain their embedding policies. Embedded App content is
 trusted workspace code, not an isolation boundary.
+
+For Workspace ingress authenticated with an ingress session, and for the
+workspace-authenticated Managed App UI tunnel, the Proxy issues a fresh
+60-second human App token on each request. It uses the App's registered
+`service_id` as audience and the current `workspace_member_role`, and stops
+issuing when membership is revoked. The App receives it in
+`X-Treer-Identity-Token`, so **App code can act as the current user through that
+service's App APIs until this token expires**. This is intentional delegation
+to trusted workspace code, not merely a login hint. App compromise exposes that
+short-lived, service-scoped authority; it does not reveal the platform login
+session or grant another App's audience. Apps must verify tokens and current
+membership on every request, avoid logging/persisting forwarded tokens, and
+apply their own data permissions. The 12-hour OAuth token is never used for
+per-request forwarding. Public ingress issues no human identity, even if the
+browser presents Treer cookies. Existing Agent service-token forwarding is
+unchanged. The authenticated UI tunnel remains a workspace route even for an
+App whose separate public ingress is anonymous.
+
+Client `x-treer-*` and `Treer-Authorization` headers are removed before trusted
+identity injection, including WebSocket upgrade requests. The embedded tunnel
+strips all cookies and gateway authorization; ingress strips its session cookie
+and Treer login/admin cookies while retaining App-owned cookies and application
+Authorization. Authentication-disabled local mode does not mint human tokens.
+
+Automatic human identity does **not** replace CSRF defenses. Ingress session
+cookies are `SameSite=Lax`; cross-site navigations can therefore carry the
+session. Apps must check `Origin` and `Sec-Fetch-Site` on state-changing browser
+requests, including requests authenticated with an injected human token. Reject
+untrusted/null origins and cross-site Fetch Metadata, use non-GET mutations,
+require JSON/custom request headers where appropriate, and do not allow broad
+credentialed CORS. Origin checks must account for the App ingress origin and
+the configured Proxy origin of the embedded tunnel, rather than the rewritten
+upstream Host. Non-browser service-token clients may lack these browser headers;
+that is not a reason to exempt human browser requests from validation.
+
 
 Self-hosted Compose gives the updater sidecar the host Docker socket and a
 read-only bind of `compose.yaml`. Compromise of that sidecar is host Docker

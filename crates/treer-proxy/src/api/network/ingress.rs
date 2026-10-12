@@ -111,16 +111,23 @@ pub(in crate::api) async fn proxy_service_ingress(
             identity_token = Some(token.to_string());
         } else {
             let session = cookie_value(request.headers(), config.ingress_cookie_name());
-            let authenticated = match session {
-                Some(token) => auth
-                    .authenticate_ingress_session(&hostname, &token)
-                    .await?
-                    .is_some(),
-                None => false,
+            let user_id = match session {
+                Some(token) => auth.authenticate_ingress_session(&hostname, &token).await?,
+                None => None,
             };
-            if !authenticated {
+            let Some(user_id) = user_id else {
                 return redirect_to_ingress_authorization(&config, &hostname, request.uri());
-            }
+            };
+            identity_token = Some(
+                issue_browser_app_identity(
+                    &auth,
+                    &identity,
+                    &resolved.ingress.workspace_id,
+                    &user_id,
+                    &resolved.service.service_id,
+                )
+                .await?,
+            );
         }
     }
 

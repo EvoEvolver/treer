@@ -127,6 +127,39 @@ and validated `return_to` location should be the negotiated App root. Human sess
 cookies do not authenticate an Agent. State the authentication requirement of
 every non-public API independently from the UI.
 
+Use this browser authentication order:
+
+1. If `X-Treer-Identity-Token` is present, verify it through
+   `/.treer/apps/identity/verify` against the App's own registered service audience
+   and workspace. Accept verified human and Agent principals; never trust
+   caller-supplied identity IDs, role/name headers or unsigned claims. Verify
+   every request. Invalid, expired or wrong-audience supplied tokens must fail,
+   even if a valid App cookie also exists.
+2. Without an identity header, explicit service-audience Bearer authentication
+   may be supported for programmatic clients.
+3. Without either header, fall back to an App's own OAuth session or a
+   **Sign in with Treer** button for direct/legacy access. Do not show that
+   button while a supplied identity is being resolved or after successful
+   automatic identification.
+
+Workspace ingress and the authenticated Managed App UI tunnel mint a fresh
+60-second human token from the current platform session and workspace role.
+They strip client `x-treer-*` headers before injecting it. Public ingress does
+not mint human tokens; Agent service tokens keep their existing semantics. The
+UI tunnel works without wildcard ingress. App OAuth remains a separate
+12-hour grant and requires a registered callback origin. Keep forwarded tokens
+out of HTML, JavaScript, logs and persistent browser sessions.
+
+The App is trusted with the current user's authority through its service's App
+APIs for the token's 60-second lifetime. This requires browser write protection:
+check `Origin` and `Sec-Fetch-Site` for state-changing requests, **including
+injected human tokens**, because ingress cookies use `SameSite=Lax`. Reject
+untrusted/null origins and cross-site requests. Compare against explicitly
+configured ingress and Proxy tunnel origins, not rewritten upstream Host or
+untrusted forwarding headers. Use non-GET mutations, JSON/custom request
+headers and narrow CORS. A token header is not evidence that a request was an
+Agent's explicit bearer call; inspect the verified principal kind.
+
 Apply ordinary browser protections, including an explicit Content Security
 Policy, `X-Content-Type-Options: nosniff`, a narrow cookie path and SameSite
 policy where practical, and no credentials embedded in HTML or JavaScript.
@@ -149,7 +182,15 @@ Tests should prove that:
 - browser navigation receives the human page and its relative assets resolve below the App root;
 - data routes return JSON even when they fail;
 - browser assets and API calls preserve a browser-tunnel path prefix; and
-- unknown paths do not fall through to an unrelated representation.
+- unknown paths do not fall through to an unrelated representation;
+- a human already logged into Treer opens the real App inside an iframe at
+  `/api/workspaces/WORKSPACE/apps/APP_ID/ui/` and through Workspace ingress
+  without an App login click, OAuth request or App session cookie;
+- invalid/expired/other-audience identity headers are rejected even with cookies;
+- injected human-token browser mutations still reject bad Origin/Fetch Metadata;
+- desktop and narrow-screen browser workflows run through a test Proxy or local
+  gateway reproducing per-request signing, header/cookie sanitization and Host
+  rewriting, with separate tests of actual Proxy handlers and signing.
 
 Keep the App's README focused on deployment, configuration, state, backup, and
 operator concerns. Put the concise runtime manual in the content served from

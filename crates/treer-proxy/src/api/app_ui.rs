@@ -4,6 +4,7 @@ pub(super) async fn proxy_app_ui_root(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(identity): Extension<IdentityIssuer>,
     Path((workspace_id, app_id)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
@@ -11,6 +12,7 @@ pub(super) async fn proxy_app_ui_root(
         state,
         auth,
         browser,
+        identity,
         workspace_id,
         app_id,
         String::new(),
@@ -23,23 +25,53 @@ pub(super) async fn proxy_app_ui_path(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(identity): Extension<IdentityIssuer>,
     Path((workspace_id, app_id, path)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
-    proxy_app_ui(state, auth, browser, workspace_id, app_id, path, request).await
+    proxy_app_ui(
+        state,
+        auth,
+        browser,
+        identity,
+        workspace_id,
+        app_id,
+        path,
+        request,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn proxy_app_ui(
     state: AppState,
     auth: AuthStore,
     browser: BrowserAccess,
+    identity: IdentityIssuer,
     workspace_id: String,
     app_id: String,
     path: String,
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     browser.validate_tunnel_if_present(request.headers())?;
     let app = auth.resolve_app_deployment(&workspace_id, &app_id).await?;
+    if !auth.authentication_disabled() {
+        let session = request
+            .extensions()
+            .get::<CurrentSession>()
+            .ok_or_else(|| {
+                ApiFailure::unauthorized("authentication_required", "human session required")
+            })?;
+        let token = issue_browser_app_identity(
+            &auth,
+            &identity,
+            &workspace_id,
+            &session.user_id,
+            &app.service_id,
+        )
+        .await?;
+        request.extensions_mut().insert(ForwardedAppIdentity(token));
+    }
     let mut response =
         proxy_virtual_network_host(state, auth, workspace_id, app.hostname, path, request).await?;
     allow_control_plane_frame(response.headers_mut(), &browser)?;

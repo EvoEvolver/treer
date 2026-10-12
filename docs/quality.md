@@ -94,7 +94,7 @@ node scripts/check-docs.mjs
 | Rust | Linux PR workspace build/tests with PostgreSQL, format, strict Clippy | No native macOS/Windows PR gate; first GitHub run pending |
 | Frontend | Control-plane and Mail typecheck/build; mocked desktop/mobile browser workflows | No screenshot visual regression suite |
 | Core Message | Store/API/CLI tests for DAG visibility, delivery, idempotency, Policy revision, body-free outbox, and migration | No retention/export/delete, attachments, or load/failure suite |
-| App identity | OAuth/PKCE, audience, membership/service invalidation, directory, and App Message routes | No refresh-token contract or unattended browser test |
+| App identity | OAuth/PKCE, audience, membership/service invalidation, directory, App Message routes, 60-second browser forwarding and sanitization; Issues iframe/ingress workflows at desktop/390px through a local gateway double | No refresh-token contract or deployed automatic-identity browser acceptance |
 | Unified workload lifecycle | Stable identity/generation, single Controller recovery owner, real Host cold/hot recovery and concurrent start, stopped-intent persistence, legacy App migration, and mixed browser tree/lifecycle | PTY-backed runtime; no health check, deployment revision, or durable terminal log archive |
 | Mail | Python HTTP contract, frontend build, resumable SQLite/PostgreSQL migration | No unattended real-browser audit |
 | Telegram | Fake Bot API, mapping, ack crash ordering, restart, rate-limit and ambiguous-send tests | No live Telegram canary, webhook, or active-active mode |

@@ -1,6 +1,10 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Service-audience identity shared by App OAuth and trusted browser forwarding.
+/// OAuth human tokens last 12 hours; forwarded human tokens last 60 seconds.
+/// Consumers must verify signature, audience, expiry and current membership;
+/// a human token does not remove the need for browser Origin/Fetch Metadata checks.
 pub struct AppIdentityClaims {
     pub iss: String,
     pub sub: String,

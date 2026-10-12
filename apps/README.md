@@ -21,11 +21,23 @@ through the control plane. Agents may register only their own identity-bound
 endpoints. No custom host is required or accepted for new Apps: Core assigns
 a stable service-derived domain under the configured wildcard base. Neither form grants special trust to App code.
 
-Browser-facing Apps use the standard App OAuth endpoints and a short-lived,
-service-audience bearer token. Agent-facing Apps may use the local `treer` CLI
-with the Agent's existing Policy subject. Core rechecks Policy for every
-operation; process isolation, secrets, configuration, state, upgrades, and
-network access remain deployment concerns.
+Browser Apps first accept `X-Treer-Identity-Token` and verify it against their
+own service/workspace through `/.treer/apps/identity/verify`. Authenticated
+Workspace ingress and the embedded Managed App UI tunnel supply fresh 60-second
+human tokens, so a logged-in Treer user needs no separate App sign-in. Missing
+headers may fall back to standard App OAuth for direct/legacy access; OAuth
+human tokens remain 12-hour grants. An invalid or expired supplied token must
+be rejected, not silently replaced by a cookie identity. Public ingress does
+not issue human identity. Existing Apps must implement this authentication
+order; the Proxy does not convert their private cookie/session logic for them.
+
+App code receives the current user's service-scoped authority for 60 seconds.
+Treat it as sensitive, verify every request, and check Origin/Sec-Fetch-Site for
+browser mutations even when a human identity header is present. Proxy-owned
+login/ingress cookies and untrusted Treer headers never reach the App.
+Agent-facing Apps may use the local `treer` CLI with the Agent's existing Policy
+subject. Core rechecks Policy for every operation; process isolation, secrets,
+configuration, state, upgrades, and network access remain deployment concerns.
 
 New Managed App runtimes also inherit their own `http_proxy`/`https_proxy` entry.
 HTTP calls to `http://NAME.treer/` or `http://SERVICE_ID.treer/` automatically

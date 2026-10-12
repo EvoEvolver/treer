@@ -96,8 +96,47 @@ impl IdentityIssuer {
         role: &str,
         service_id: &str,
     ) -> anyhow::Result<AppIdentityTokenResponse> {
+        self.issue_human_with_ttl(
+            workspace_id,
+            user_id,
+            preferred_name,
+            role,
+            service_id,
+            APP_HUMAN_TOKEN_TTL_SECONDS,
+        )
+    }
+
+    /// Browser forwarding gets a fresh service-audience token per request,
+    /// never the 12-hour OAuth token or a platform session credential.
+    pub fn issue_human_request(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        preferred_name: &str,
+        role: &str,
+        service_id: &str,
+    ) -> anyhow::Result<AppIdentityTokenResponse> {
+        self.issue_human_with_ttl(
+            workspace_id,
+            user_id,
+            preferred_name,
+            role,
+            service_id,
+            TOKEN_TTL_SECONDS,
+        )
+    }
+
+    fn issue_human_with_ttl(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        preferred_name: &str,
+        role: &str,
+        service_id: &str,
+        ttl: i64,
+    ) -> anyhow::Result<AppIdentityTokenResponse> {
         let now = Utc::now();
-        let expires_at = now + Duration::seconds(APP_HUMAN_TOKEN_TTL_SECONDS);
+        let expires_at = now + Duration::seconds(ttl);
         let claims = AppIdentityClaims {
             iss: self.issuer.to_string(),
             sub: user_id.to_string(),
@@ -115,7 +154,7 @@ impl IdentityIssuer {
         Ok(AppIdentityTokenResponse {
             access_token: self.sign_claims(&claims)?,
             token_type: "Bearer".to_string(),
-            expires_in: APP_HUMAN_TOKEN_TTL_SECONDS as u64,
+            expires_in: ttl as u64,
             expires_at,
             scope: "workspace:app".to_string(),
         })
@@ -379,5 +418,35 @@ mod tests {
             .expect("verify agent app token");
         assert_eq!(agent_claims.principal_kind, AppPrincipalKind::Agent);
         assert_eq!(agent_claims.machine_id.as_deref(), Some("machine-a"));
+    }
+    #[tokio::test]
+    async fn human_request_tokens_expire_in_sixty_seconds_without_changing_oauth_ttl() {
+        let auth = AuthStore::for_test("test").await;
+        let issuer = IdentityIssuer::load(&auth, &Url::parse("https://proxy.example/").unwrap())
+            .await
+            .unwrap();
+        let forwarded = issuer
+            .issue_human_request("ws", "alice", "Alice", "member", "svc")
+            .unwrap();
+        let oauth = issuer
+            .issue_human("ws", "alice", "Alice", "member", "svc")
+            .unwrap();
+        assert_eq!(forwarded.expires_in, 60);
+        assert_eq!(oauth.expires_in, 12 * 60 * 60);
+        let claims = issuer
+            .verify_app(&forwarded.access_token, "svc")
+            .claims
+            .unwrap();
+        assert_eq!(claims.exp - claims.iat, 60);
+        assert!(issuer
+            .verify_app_at(&forwarded.access_token, "svc", forwarded.expires_at)
+            .is_err());
+        assert!(issuer
+            .verify_app_at(&oauth.access_token, "svc", forwarded.expires_at)
+            .is_ok());
+        assert!(!issuer.verify_app(&forwarded.access_token, "other").active);
+        let mut tampered = forwarded.access_token;
+        tampered.push('x');
+        assert!(!issuer.verify_app(&tampered, "svc").active);
     }
 }

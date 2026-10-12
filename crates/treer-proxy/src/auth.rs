@@ -35,8 +35,8 @@ use uuid::Uuid;
 
 use crate::audit::{self, NewAuditEvent, NewWorkspaceAuditEvent};
 
-const SESSION_COOKIE: &str = "treer_session";
-const ADMIN_SESSION_COOKIE: &str = "treer_admin_session";
+pub(crate) const SESSION_COOKIE: &str = "treer_session";
+pub(crate) const ADMIN_SESSION_COOKIE: &str = "treer_admin_session";
 const NATIVE_CLIENT_HEADER: &str = "x-treer-client";
 const MAX_DEVICE_NAME_CHARS: usize = 128;
 const SESSION_TTL_DAYS: i64 = 30;

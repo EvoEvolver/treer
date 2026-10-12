@@ -53,7 +53,9 @@ class Application:
                                                 capture_output=True, text=True, timeout=10, check=True)
                         apps = json.loads(result.stdout)['apps']
                         app = next(a for a in apps if a['runtime_agent_id'] == os.environ.get('TREER_AGENT_ID'))
-                        service_id, public_url = app['service_id'], app.get('public_url')
+                        service_id = app['service_id']
+                        public_url = app.get('public_url') or (os.environ['ISSUES_PROXY_URL'].rstrip('/') +
+                            f"/api/workspaces/{app['workspace_id']}/apps/{app['app_id']}/ui/")
                         workspace = app['workspace_id']
                     except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError):
                         fail('app_not_ready', 'Managed App identity discovery unavailable; configure ISSUES_SERVICE_ID and ISSUES_PUBLIC_URL', 503)
@@ -167,20 +169,9 @@ class Handler(BaseHTTPRequestHandler):
             if not path.startswith('/v1/') and path != '/api/auth/logout':
                 fail('route_not_found', 'Route not found', 404)
             auth = app.identity_provider()
-            token = self.headers.get('X-Treer-Identity-Token')
-            if not token:
-                authorization = self.headers.get('Authorization', '')
-                token = authorization[7:] if authorization.startswith('Bearer ') else None
-            cookie_auth = not token
-            if cookie_auth:
-                token = auth.session_token(self.raw_cookie())
-                if method not in ('GET', 'HEAD') and self.headers.get('X-Issues-Request') != '1':
-                    fail('csrf_rejected', 'Browser mutations require X-Issues-Request: 1', 403)
-                origin = self.headers.get('Origin')
-                # Works at direct ingress and authenticated browser-tunnel origin; no CORS is allowed.
-                if method not in ('GET', 'HEAD') and origin and urllib.parse.urlsplit(origin).netloc != self.headers.get('Host'):
-                    fail('csrf_rejected', 'Cross-origin mutations rejected', 403)
-            actor, directory = auth.verify(token)
+            token, actor, directory, cookie_auth = auth.authenticate(self.headers, self.raw_cookie())
+            if method not in ('GET', 'HEAD'):
+                auth.check_browser_mutation(self.headers, actor, cookie_auth)
             if path == '/api/auth/logout' and method == 'POST':
                 auth.logout(self.raw_cookie())
                 self.reply(200, b'{}', 'application/json', {'Set-Cookie': self.cookie('', 0)})

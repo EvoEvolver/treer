@@ -29,7 +29,7 @@ class IssuesTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.process.terminate();cls.process.communicate(timeout=5)
     def req(self,path,method='GET',body=None,token='agent-a',extra=None,base=None):
-        headers={'Content-Type':'application/json',**({'X-Treer-Identity-Token':token} if token else {}),**(extra or {})}
+        headers={'Content-Type':'application/json',**({'X-Treer-Identity-Token':token} if token else {}),**({'X-Issues-Request':'1'} if token in ('human','admin') else {}),**(extra or {})}
         r=urllib.request.Request((base or self.base)+path,method=method,headers=headers,data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(r,timeout=10) as response:return response.status,json.load(response)
@@ -120,6 +120,41 @@ class IssuesTest(unittest.TestCase):
                 r=subprocess.run([sys.executable,str(ROOT/'issues'),*command],env=env,capture_output=True,text=True,timeout=10)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIsInstance(json.loads(r.stdout),dict)
         finally:proxy.shutdown();proxy.server_close()
+    def test_forwarded_human_identity_and_browser_mutation_security(self):
+        token=self.req('test/human-token',base=self.proxy)[1]['access_token']
+        expired=self.req('test/human-token?seconds=-1',base=self.proxy)[1]['access_token']
+        other=self.req('test/human-token?audience=svc_other',base=self.proxy)[1]['access_token']
+        self.assertEqual(self.req('v1/me',token=token,extra={'Authorization':'Bearer agent-b'})[1]['principal']['id'],'usr_a')
+        import http.cookiejar
+        jar=http.cookiejar.CookieJar();opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        opener.open(self.base+'api/auth/start').close()
+        cookie='; '.join(f'{c.name}={c.value}' for c in jar)
+        for invalid in ('forged',expired,other,''):
+            status,_=self.req('v1/me',token=None,extra={'X-Treer-Identity-Token':invalid,'Cookie':cookie})
+            self.assertEqual(status,401)
+        # An injected human token is never treated as an Agent CSRF exemption.
+        self.assertEqual(self.req('v1/issues','POST',{'title':'unsafe'},token=token)[0],403)
+        for headers in ({'Origin':'https://evil.test','Sec-Fetch-Site':'same-site'},
+                        {'Origin':self.base.rstrip('/'),'Sec-Fetch-Site':'cross-site'},
+                        {'Origin':'null'}, {'Sec-Fetch-Site':'none'}):
+            self.assertEqual(self.req('v1/issues','POST',{'title':'unsafe'},token=token,
+                extra={'X-Issues-Request':'1',**headers})[0],403)
+        for origin in (self.base.rstrip('/'),self.proxy.rstrip('/')):
+            status,result=self.req('v1/issues','POST',{'title':'Human verified'},token=token,
+                extra={'X-Issues-Request':'1','Origin':origin,'Sec-Fetch-Site':'same-origin'})
+            self.assertEqual(status,201,result);self.assertEqual(result['issue']['creator'],'usr_a')
+
+    def test_embedded_identity_discovery_without_wildcard_ingress(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from issues import Application
+        with tempfile.TemporaryDirectory() as directory:
+            app=Application(Store(Path(directory)/'issues.sqlite3'))
+            with patch.dict(os.environ,{'TREER_AGENT_ID':'app_test','ISSUES_PROXY_URL':'https://proxy.test/'}), patch('issues.subprocess.run',return_value=SimpleNamespace(stdout=json.dumps({'apps':[{
+                'runtime_agent_id':'app_test','app_id':'app_test','service_id':'svc_test','workspace_id':'ws_test','public_url':None}]}))):
+                auth=app.identity_provider()
+                self.assertEqual(auth.public_url,'https://proxy.test/api/workspaces/ws_test/apps/app_test/ui/')
+
     def test_representations_oauth_csrf(self):
         for headers,media in (({},'text/markdown'),({'Accept':'text/html'},'text/html'),({'User-Agent':'Mozilla/test'},'text/html'),({'Accept':'text/html;q=.1,text/markdown;q=.9'},'text/markdown')):
             with urllib.request.urlopen(urllib.request.Request(self.base,headers=headers)) as r:

@@ -75,6 +75,42 @@ class Auth:
             raise Error(403, 'identity_unavailable', 'Caller is absent from the workspace directory')
         return principal, directory
 
+    def authenticate(self, headers, raw_cookie):
+        # Header presence, including an empty/invalid value, is authoritative:
+        # never silently fall back to a different human session after rejection.
+        cookie_auth = False
+        if 'X-Treer-Identity-Token' in headers:
+            token = headers.get('X-Treer-Identity-Token')
+            if not token:
+                raise Error(401, 'identity_invalid', 'Injected identity token is empty')
+        elif 'Authorization' in headers:
+            value = headers.get('Authorization', '')
+            token = value[7:] if value.startswith('Bearer ') else None
+        else:
+            cookie_auth = True
+            token = self.session_token(raw_cookie)
+        principal, directory = self.verify(token)
+        return token, principal, directory, cookie_auth
+
+    def check_browser_mutation(self, headers, principal, cookie_auth):
+        # Injected human headers originated in an ambient browser session too.
+        # Their presence must not skip CSRF protection as Agent bearer calls do.
+        site = headers.get('Sec-Fetch-Site')
+        if site is not None and site not in ('same-origin', 'same-site'):
+            raise Error(403, 'csrf_rejected', 'Cross-site browser mutations rejected')
+        origin = headers.get('Origin')
+        if origin is not None:
+            allowed = {self.origin(self.public_url), self.origin(self.proxy_url)}
+            if origin not in allowed:
+                raise Error(403, 'csrf_rejected', 'Browser origin is not this App or its Treer tunnel')
+        if (cookie_auth or principal['kind'] == 'human') and headers.get('X-Issues-Request') != '1':
+            raise Error(403, 'csrf_rejected', 'Human mutations require X-Issues-Request: 1')
+
+    @staticmethod
+    def origin(value):
+        url = urllib.parse.urlsplit(value)
+        return f'{url.scheme}://{url.netloc}'
+
     def directory(self, token):
         return self.request('GET', f'/api/apps/{self.service_id}/directory', token)['principals']
 

@@ -43,8 +43,11 @@ curl -fsS http://issues.treer/v1/me
 
 Replace the Proxy URL with the trusted deployment's actual public Proxy URL,
 not the App ingress or Controller loopback URL. Read the generated `public_url`
-from the App record and open it in a browser; click **Sign in with Treer** to
-use standard App OAuth. The App lazily discovers its own service/workspace and
+from the App record and open it in a browser, or select Issues in Treer's
+workspace UI. With a Proxy containing human request identity forwarding, an
+already logged-in user is recognized automatically on both paths; no second
+App sign-in is required. The OAuth button appears only as a no-token fallback
+for direct access or older Proxies. The App lazily discovers its own service/workspace and
 public URL using `treer app list` and its injected runtime identity. This
 requires the App's Policy to allow App discovery. It does not register a service
 on behalf of the creating Agent. Discovery failure returns 503, never anonymous
@@ -52,8 +55,10 @@ access. Keep the command directory and Python installation available for recover
 The runtime's own inherited HTTP proxy supports App discovery and `.treer`
 clients. No Host/Controller restart is needed.
 
-Wildcard workspace ingress is needed for browser OAuth. For externally managed
-servers or a Policy that denies App listing, configure all identity values
+Embedded automatic identity works without wildcard ingress: discovery derives
+the canonical Proxy `/api/workspaces/WORKSPACE/apps/APP_ID/ui/` root when no
+public origin exists. Wildcard workspace ingress is still needed for the OAuth
+fallback callback. For externally managed servers or a Policy that denies App listing, configure all identity values
 explicitly after registering the service. Never select a service audience from
 request headers or bodies.
 
@@ -74,8 +79,16 @@ Protect the database directory: sessions contain short-lived human access
 tokens. Startup uses restrictive umask and database mode `0600`. OAuth uses
 S256 PKCE, one-use state, hashed local session IDs, HttpOnly/SameSite cookies
 and Secure cookies on HTTPS. Identity is reverified on every API call. The UI
-never receives tokens. Browser writes require JSON, a custom header and same
-origin; no cross-origin API access is enabled. CSP and nosniff protect assets.
+never receives tokens. Authentication checks injected `X-Treer-Identity-Token`
+first (even if a local cookie exists), then explicit Bearer, then an OAuth cookie.
+Invalid/expired/other-audience supplied tokens fail without cookie fallback.
+Forwarded tokens are verified on each request and are not saved as sessions.
+Human writes, including injected human tokens, require JSON and
+`X-Issues-Request: 1`. `Origin`, when present, must exactly match the configured
+App or Proxy origin; `Sec-Fetch-Site`, when present, must be same-origin or
+same-site. Null/untrusted origins and cross-site/none Fetch Metadata fail.
+Non-browser clients may lack these headers, but human writes still require the
+custom header. No cross-origin API access is enabled. CSP and nosniff protect assets.
 
 ## Permissions and notifications
 
@@ -148,15 +161,28 @@ node scripts/check-docs.mjs
 Playwright is a test-only dependency, not an App build chain. Browser tests can
 reuse an installed module through `ISSUES_PLAYWRIGHT_MODULE=/absolute/module`.
 Screenshots go to `/tmp/treer-issues-screenshots` (override
-`ISSUES_SCREENSHOT_DIR`). Tests use a real HTTP server and a Treer contract
-double, exercise OAuth, desktop/390px workflows, both themes, XSS text rendering
-and prefixed assets/API traffic. API tests cover identity spoofing, workspace/
-audience mismatches, permissions, lease concurrency/expiry/renew/release,
+`ISSUES_SCREENSHOT_DIR`). Tests use the real Issues server and a local Treer
+contract/gateway double. Four browser tests cover already logged-in humans on
+Workspace ingress and inside a distinct-origin control-plane iframe at the
+canonical `/api/workspaces/ws_test/apps/app_issues/ui/` prefix, each at desktop
+and 390px. The gateway issues/validates fresh 60-second human tokens, strips
+spoofed identity headers/platform cookies and rewrites upstream Host. Tests
+assert no OAuth requests or App session cookies, then create/assign/status/
+comment/claim/renew/release, check hierarchy, assets/API prefixes, XSS and both
+themes. Two separate tests retain direct OAuth fallback coverage. Rust Proxy
+tests exercise actual middleware, signing, sanitizers and controller HTTP
+streams against randomized schemas in the isolated local PostgreSQL test DB;
+the browser gateway double is not proof of deployment acceptance. API tests cover identity spoofing, valid/expired/other-audience human tokens,
+identity-header precedence, Origin/Fetch Metadata rejection, workspace/audience mismatches, permissions, lease concurrency/expiry/renew/release,
 hierarchy/dependency cycles, rollups, notification degradation and every CLI
 command. Fixtures, browser processes and client subprocesses clear inherited
-`TREER_*`, `AGENT_UI_*`, `CODEX_UI_*` and proxy settings. PostgreSQL-backed Core
-tests are unnecessary for this App-only change; the complete `just check` gate
-is not required.
+`TREER_*`, `AGENT_UI_*`, `CODEX_UI_*` and proxy settings. The initial App-only implementation omitted Core database tests; human browser
+identity forwarding is a Proxy auth change and additionally runs
+`cargo test -p treer-proxy` with
+`TREER_TEST_DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test`,
+`cargo test -p treer-protocol`, `cargo fmt --all --check` and
+`cargo clippy -p treer-proxy -p treer-protocol --all-targets -- -D warnings`.
+Each database test uses a random schema; do not select a shared database.
 
 ## Known limits
 
@@ -172,3 +198,18 @@ outbox or retry; an interrupted send remains pending in activity. Issue state
 is canonical only in this App's SQLite file. Claims are coordination leases,
 not execution isolation, fencing tokens, status resets or automatic Agent runs.
 A workspace operator can administer the machine and data directly.
+
+Automatic human identification requires deploying the new Proxy **and** loading
+the current Issues runtime code; older Proxies only authorize passage and still
+need OAuth. This change is tested locally but has not deployed or restarted
+Proxy, Host, Controller or Apps. Live Treer acceptance follows the leader's
+release/deployment. Other Apps that only read their private OAuth cookie (for
+example the current Mail implementation) must adopt the standard identity-header
+order separately. Direct/legacy OAuth uses the configured public callback root,
+so it does not preserve an original embedded-page return URL. No OAuth refresh
+tokens exist; direct sessions require reauthentication after expiry. The local
+browser gateway reproduces the two forwarding contracts using an HTTP test
+cookie and signed HMAC test tokens; it is not the production Ed25519 issuer or
+the full React control plane. Production signing, TTL, audience and membership
+revocation are checked by the Rust Proxy tests, and real release acceptance is
+still required.

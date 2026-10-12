@@ -132,6 +132,22 @@ Managed Agents can request a 60-second workload token for a registered service.
 Apps may validate tokens through `/.treer/apps/identity/verify`; verification
 also checks current service existence and, for humans, current membership.
 
+Workspace ingress authenticates human ingress sessions and the Managed App UI
+route authenticates platform human sessions. Both sign fresh 60-second human
+`AppIdentityClaims` scoped to the resolved service and inject
+`X-Treer-Identity-Token` after stripping untrusted Treer headers. Role comes from
+current workspace membership. Embedded identity is carried internally as a
+trusted request extension through virtual-host forwarding; it cannot come from
+client headers. Anonymous public ingress and ordinary virtual-host/AIS tunnels
+do not mint human identity. Agent ingress retains its existing service token.
+Login/ingress credentials stay at the Proxy; App code receives only the short
+service-scoped token. Apps verify this header first and fall back to App OAuth
+only when it is absent. Human token forwarding uses the existing protocol and
+verify endpoint, distinct from 12-hour OAuth grants; no new account type or
+refresh protocol is introduced. The App owns Origin/Fetch Metadata defenses and
+its data permissions. See the [App guidelines](../apps/GUIDELINES.md).
+
+
 ## Managed App Lifecycle
 
 A Managed App is a durable Proxy record for one command, one machine, and one

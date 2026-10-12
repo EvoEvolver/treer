@@ -7,10 +7,10 @@ function message(text) { $('notice').textContent = text; }
 async function api(path, method = 'GET', body) {
   const response = await fetch(new URL(path, document.baseURI), { method, credentials:'same-origin', headers:{Accept:'application/json', 'Content-Type':'application/json', 'X-Issues-Request':'1'}, ...(body !== undefined ? {body:JSON.stringify(body)} : {}) });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error?.message || 'Request failed');
+  if (!response.ok) { const error = new Error(result.error?.message || 'Request failed'); error.status = response.status; error.code = result.error?.code; throw error; }
   return result;
 }
-function run(fn) { return async () => { try { await fn(); } catch (e) { message(e.message); } }; }
+function run(fn) { return async () => { try { await fn(); } catch (e) { message(e.message); if (e.status === 401 && e.code === 'authentication_required') $('login').hidden = false; } }; }
 function name(id) { return people.find(p => p.id === id)?.name || id || 'Unassigned'; }
 function select(values, selected, nullable = false) {
   const n = node('select');

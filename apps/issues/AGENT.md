@@ -52,7 +52,12 @@ Every `/v1/` route requires a token verified by Treer's trusted Proxy against
 this App's service and workspace. `X-Treer-Identity-Token` takes precedence over
 Bearer Authorization. Direct callers may obtain a short-lived token with
 `treer token create issues`; never submit workload credentials. Humans use
-Treer OAuth and a local HttpOnly session cookie, not Agent tokens or local accounts.
+automatically verified human request tokens on Workspace ingress or the embedded
+Treer UI; direct/legacy access falls back to Treer OAuth and a local HttpOnly
+cookie. There are no local accounts. Supplied invalid or expired identity
+headers never fall back to cookies. Human writes require `X-Issues-Request: 1`
+and reject untrusted Origin/cross-site Fetch Metadata, including with forwarded
+tokens. Agents' verified service tokens retain ordinary HTTP JSON access.
 
 Workspace principals may read, create and comment. Creator, assignee or human
 owner/admin may edit. A live lease prevents all mutations except comments by

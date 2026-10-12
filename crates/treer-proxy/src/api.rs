@@ -426,3 +426,6 @@ async fn verify_workload_identity(
 #[cfg(test)]
 #[path = "api/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod app_identity_forwarding_tests;

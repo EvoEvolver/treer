@@ -1,5 +1,10 @@
 use super::*;
 
+// An in-process capability set only after App UI authentication. It cannot be
+// populated by browser headers and is consumed after untrusted headers are removed.
+#[derive(Clone)]
+pub(in crate::api) struct ForwardedAppIdentity(pub String);
+
 pub(in crate::api) async fn proxy_virtual_network_host_root(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -53,6 +58,16 @@ pub(in crate::api) async fn proxy_virtual_network_host(
 
     let upgraded = request.headers().contains_key(header::UPGRADE);
     sanitize_tunnel_request_headers(request.headers_mut(), upgraded, &host.hostname)?;
+    if let Some(ForwardedAppIdentity(token)) =
+        request.extensions_mut().remove::<ForwardedAppIdentity>()
+    {
+        request.headers_mut().insert(
+            TREER_IDENTITY_TOKEN_HEADER,
+            HeaderValue::from_str(&token).map_err(|_| {
+                ApiFailure::internal("identity_token_failed", "invalid issued App identity")
+            })?,
+        );
+    }
     tunnel_http_request(
         state,
         &workspace_id,
@@ -205,6 +220,15 @@ pub(in crate::api) fn sanitize_tunnel_request_headers(
     headers.remove(header::COOKIE);
     headers.remove(header::AUTHORIZATION);
     headers.remove(header::PROXY_AUTHORIZATION);
+    headers.remove(TREER_AUTHORIZATION_HEADER);
+    for name in headers
+        .keys()
+        .filter(|name| name.as_str().starts_with("x-treer-"))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        headers.remove(name);
+    }
     if !upgraded {
         remove_hop_by_hop_headers(headers);
     }
@@ -242,8 +266,11 @@ pub(in crate::api) fn sanitize_ingress_request_headers(
             .split(';')
             .map(str::trim)
             .filter(|item| {
-                item.split_once('=')
-                    .is_none_or(|(name, _)| name != ingress_cookie_name)
+                item.split_once('=').is_none_or(|(name, _)| {
+                    name != ingress_cookie_name
+                        && name != auth::SESSION_COOKIE
+                        && name != auth::ADMIN_SESSION_COOKIE
+                })
             })
             .collect::<Vec<_>>()
             .join("; ");
