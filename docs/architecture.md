@@ -58,6 +58,10 @@ HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,
 network, and cluster behavior. The parent modules retain composition and shared
 types; this is an in-process organization boundary, not a deployment boundary.
+`api/network.rs` retains the existing handler exports. Its `network/` modules
+separate service registration, runtime recovery, ingress authorization, HTTP
+tunneling, Agent-facing operations, stream relay, discovery, metadata refresh,
+and public TCP listeners; route wiring remains in `api.rs`.
 
 The React app in `web/` is the browser control plane. Workspace views cover
 terminals, launch profiles, managed Apps, network, machine overview, bounded
