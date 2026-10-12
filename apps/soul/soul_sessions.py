@@ -20,6 +20,11 @@ def safe_path(value):
     return value
 
 
+def project_instruction(path):
+    return (path in ('AGENTS.md','CLAUDE.md','MEMORY.md','.claude/CLAUDE.md')
+            or re.fullmatch(r'\.(?:codex|claude)/memory/.+\.md', path) is not None)
+
+
 def copy_snapshot(source, destination, jsonl=False):
     # Generic upload copies only, provider export consistency belongs to launcher.
     if source.is_symlink() or not source.is_file() or source.stat().st_size > MAX_FILE:
@@ -74,7 +79,7 @@ def validate_bundle(bundle,harness=None,session=None):
         scope=record.get('scope'); path=safe_path(record.get('path'))
         if scope not in ('session','memory','project') or (scope,path) in seen or record.get('encoding')!='base64':
             raise RuntimeError('Invalid session file record')
-        if scope=='project' and path!='CLAUDE.md': raise RuntimeError('Only project CLAUDE.md is supported')
+        if scope=='project' and not project_instruction(path): raise RuntimeError('Unsupported project instruction file')
         if scope=='session' and not path.endswith(('.jsonl','.sh')): raise RuntimeError('Unsupported session file type')
         if any(part.lower() in ('auth.json','.credentials.json','config.toml','settings.json','.env') for part in path.split('/')):
             raise RuntimeError('Credential/config files may not be exported')
@@ -112,12 +117,10 @@ def import_session(bundle_root,adapter,workspace,state_root,machine_root=None):
         harness=adapter['name']
         session=adapter.get('source_session_id',adapter['session_id'])
         if harness=='codex':
-            path=adapter.get('session_relative_path',session+'.jsonl')
-            entries.append(dict(scope='session',path=path,file=adapter['session_file']))
-            if adapter.get('shell_snapshot_file'):
-                entries.append(dict(scope='session',path='shell_snapshots/'+adapter.get('shell_snapshot_name',session+'.sh'),file=adapter['shell_snapshot_file']))
+            entries.append(dict(scope='session',path='session.jsonl',file=adapter['session_file']))
+            # Legacy shell snapshots remain archived but never enter native restore.
         else:
-            entries.append(dict(scope='session',path=session+'.jsonl',file=adapter['session_file']))
+            entries.append(dict(scope='session',path='session.jsonl',file=adapter['session_file']))
             for file in adapter.get('memory_files',[]):
                 entries.append(dict(scope='memory',path=file.removeprefix('files/memory/'),file=file))
             if adapter.get('project_instructions_file'):
@@ -145,7 +148,15 @@ def import_session(bundle_root,adapter,workspace,state_root,machine_root=None):
     environment=result.get('environment',{})
     if not isinstance(environment,dict) or set(environment)-{'CODEX_HOME','CLAUDE_CONFIG_DIR'}:
         raise RuntimeError('Launcher returned unsupported environment selectors')
-    for path in environment.values():
-        if not isinstance(path,str) or not Path(path).resolve().is_relative_to(destination.resolve()):
+    for key,path in environment.items():
+        if not isinstance(path,str): raise RuntimeError('Invalid launcher storage selector')
+        resolved=Path(path).resolve()
+        if key=='CLAUDE_CONFIG_DIR' and adapter['name']=='claude':
+            # Claude stores each project's native state under its existing config
+            # home; only that exact locally configured home may be selected.
+            local=Path(os.environ.get('CLAUDE_CONFIG_DIR',Path.home()/'.claude')).resolve()
+            if resolved!=local and not resolved.is_relative_to(destination.resolve()):
+                raise RuntimeError('Launcher selected an unrelated Claude home')
+        elif not resolved.is_relative_to(destination.resolve()):
             raise RuntimeError('Launcher storage selector is outside dedicated Agent directory')
     return environment,str(cwd)

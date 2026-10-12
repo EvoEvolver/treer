@@ -72,8 +72,10 @@ Self selection first asks its own Controller-registered AIS for the current thre
 then reads its own Agent-private saved thread or confirmed native session
 environment ID. It never infers self from a shared cwd or selects the newest
 session; missing authority needs an explicit --session. Claude captures project JSONL, project `memory/`, and `CLAUDE.md`.
-Codex captures rollout plus matching shell snapshot. No auth/config credential
-files are exported. Snapshot consistency retries are bounded; original sessions
+Codex captures its rollout; the current launcher transfer allowlist deliberately
+excludes shell snapshots because they can contain machine credentials. Legacy
+archives retain their snapshot file, which is never imported or executed. No auth/config credential
+files are exported. Launcher consistency checks reject changing source files; original sessions
 are never modified. `soul_sessions.py` is a thin bridge to the launcher-owned session export/import
 CLI. Native file selection, consistency and rebasing belong to launcher adapters.
 Soul validates the transfer bundle, decodes files into the tar so server scanning
@@ -99,7 +101,9 @@ Each Agent has its own `~/.local/state/treer-soul/AGENT_ID/workspace` and restor
 marker. Startup after completed restoration never downloads/reimports or overwrites
 new learning. Claude uses the dedicated cwd's unique project directory and memory;
 Codex/Claude storage selectors come from the launcher import result and must
-remain inside the dedicated Agent directory. Provider login remains machine-local
+remain inside the dedicated Agent directory, except Claude may select exactly
+the target's already configured local Claude home while creating a separate
+project keyed to the new cwd. Unrelated external config paths are rejected. Provider login remains machine-local
 and is handled by the launcher adapter; Soul never exports or reads credentials. Shell snapshots are
 archival only; Soul never executes them. Generic souls support an explicit command after `--`.
 
@@ -185,11 +189,15 @@ control. This is logical cleanup, not a secure-erasure guarantee.
 python3 apps/soul/tests/test_soul.py
 python3 apps/soul/tests/test_client.py
 SOUL_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node --test apps/soul/tests/browser.mjs
+SOUL_TEST_SESSION_CLI=/path/to/launchers/agent/scripts/session.sh \
+  python3 apps/soul/tests/test_launcher_integration.py
 ```
 
 Tests allowlist subprocess environments, use temporary HOME/TMP/state, fake Treer
 and local identity Proxy. They never create a real Agent or access a real machine.
-Browser tests reproduce automatic forwarded identity in direct ingress and embedded
+Three opt-in tests also use the actual launcher session CLI with temporary fake
+Claude/Codex files: export/redaction/import/restart and legacy Codex migration,
+without a provider process or real login. Browser tests reproduce automatic forwarded identity in direct ingress and embedded
 tunnel paths at desktop/390px with light/dark themes, manifest text/XSS, owner delete
 and screenshots. Mock identity verification is not production issuer coverage;
 Proxy identity signing is covered by the separate core tests. Real `/infra/soul`
