@@ -20,5 +20,6 @@ export function agentPath(agent: Agent, tree?: WorkloadTreeState): string {
   const placement = tree?.placements.find((entry) => entry.agent_id === agent.agent_id)
   if (!placement) return agent.path || (tree ? `/${agent.name}` : agent.agent_id)
   const folder = tree?.folders.find((entry) => entry.folder_id === placement.folder_id)
+  if (placement.folder_id && !folder) return agent.path || agent.agent_id
   return `${folder ? folderPath(folder, tree!.folders) : ""}/${agent.name}`
 }
