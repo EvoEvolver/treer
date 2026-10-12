@@ -755,8 +755,18 @@ mod tests {
         .into_owned()
     }
 
+    #[cfg(unix)]
     fn wait_for_output(runtime: &HostRuntime, process_id: &str, needle: &str) -> HostOutputReplay {
         let deadline = Instant::now() + Duration::from_secs(5);
+        wait_for_output_until(runtime, process_id, needle, deadline)
+    }
+
+    fn wait_for_output_until(
+        runtime: &HostRuntime,
+        process_id: &str,
+        needle: &str,
+        deadline: Instant,
+    ) -> HostOutputReplay {
         loop {
             let replay = runtime.read(process_id, None).expect("read output");
             if decoded(&replay).contains(needle) {
@@ -764,8 +774,9 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "process output did not contain {needle:?}; received {:?}",
-                decoded(&replay)
+                "process output did not contain {needle:?}; received {:?}; processes {:?}",
+                decoded(&replay),
+                runtime.list(),
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -797,21 +808,56 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_conpty_argv_input_resize_and_stop() {
+        native_pty_argv_input_resize_and_stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_native_fixture_argv_input_resize_and_stop() {
+        native_pty_argv_input_resize_and_stop();
+    }
+
+    // Run this Rust test executable as the workload rather than measuring
+    // PowerShell/.NET's first-use startup in a low-level ConPTY test. Keep the
+    // child alive until stop, and announce readiness before accepting input.
+    #[test]
+    #[ignore = "child fixture, invoked only by the native PTY test"]
+    fn native_pty_child_fixture() {
+        assert_eq!(std::env::var("TREER_TEST_VALUE").unwrap(), "environment-ok");
+        let args: Vec<_> = std::env::args().collect();
+        assert_eq!(&args[args.len() - 2..], ["hello world $ &", "空间 参数"]);
+        println!("\nargv:{}", args[args.len() - 2]);
+        println!("unicode:{}", args[args.len() - 1]);
+        println!("environment:{}", std::env::var("TREER_TEST_VALUE").unwrap());
+        println!("ready-for-input");
+        std::io::stdout().flush().unwrap();
+        let mut value = String::new();
+        assert!(std::io::stdin().read_line(&mut value).unwrap() > 0);
+        println!("echo:{}", value.trim_end_matches(['\r', '\n']));
+        std::io::stdout().flush().unwrap();
+        loop {
+            value.clear();
+            assert!(std::io::stdin().read_line(&mut value).unwrap() > 0);
+        }
+    }
+
+    fn native_pty_argv_input_resize_and_stop() {
         let root = std::env::temp_dir().join(format!("treer 空格 {}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
-        let script = root.join("agent test.ps1");
-        std::fs::write(&script, "Write-Output $args[0]\nWrite-Output $env:TREER_TEST_VALUE\n$value = Read-Host\nWrite-Output ('echo:' + $value)\nStart-Sleep -Seconds 30\n").unwrap();
+        let executable = root.join("agent test.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
         let runtime = HostRuntime::new(&root).unwrap();
         let request = HostSpawnRequest {
             process_id: "windows-agent".into(),
-            command: "powershell.exe".into(),
+            command: executable.to_string_lossy().into_owned(),
             args: vec![
-                "-NoProfile".into(),
-                "-ExecutionPolicy".into(),
-                "Bypass".into(),
-                "-File".into(),
-                script.to_string_lossy().into_owned(),
+                "--ignored".into(),
+                "--exact".into(),
+                "--nocapture".into(),
+                "tests::native_pty_child_fixture".into(),
+                "--".into(),
                 "hello world $ &".into(),
+                "空间 参数".into(),
             ],
             cwd: ".".into(),
             env: BTreeMap::from([("TREER_TEST_VALUE".into(), "environment-ok".into())]),
@@ -824,9 +870,29 @@ mod tests {
             runtime.spawn(request),
             Err(RuntimeError::ProcessExists(_))
         ));
-        wait_for_output(&runtime, "windows-agent", "hello world $ &");
-        wait_for_output(&runtime, "windows-agent", "environment-ok");
+        // One overall deadline, not a fixed startup sleep or a fresh timeout
+        // for each assertion. Loaded runners may need time to schedule the
+        // child; the ready marker, not elapsed time, gates input.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        for needle in [
+            "argv:hello world $ &",
+            "unicode:空间 参数",
+            "environment:environment-ok",
+            "ready-for-input",
+        ] {
+            wait_for_output_until(&runtime, "windows-agent", needle, deadline);
+        }
         runtime.resize("windows-agent", 100, 35).unwrap();
+        let process = runtime.get("windows-agent").unwrap();
+        let size = process
+            .master
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .get_size()
+            .unwrap();
+        assert_eq!((size.cols, size.rows), (100, 35));
         runtime
             .write(
                 "windows-agent",
@@ -836,10 +902,13 @@ mod tests {
                 }],
             )
             .unwrap();
-        wait_for_output(&runtime, "windows-agent", "echo:input-ok");
-        let process = runtime.get("windows-agent").unwrap();
-        runtime.stop("windows-agent").unwrap();
+        wait_for_output_until(&runtime, "windows-agent", "echo:input-ok", deadline);
+        assert!(process.info.lock().unwrap().running);
+        let stopped = runtime.stop("windows-agent").unwrap();
+        assert!(!stopped.running);
+        assert!(stopped.exited_at.is_some());
         wait_for_resources_released(&process);
+        assert!(!runtime.list()[0].running);
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
