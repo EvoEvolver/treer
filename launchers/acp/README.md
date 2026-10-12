@@ -157,8 +157,9 @@ cargo build --manifest-path launchers/acp/runtime/Cargo.toml
 node launchers/acp/tests/builtin_ui_browser.mjs
 ```
 
-It starts the fake ACP runtime behind a tunnel prefix and verifies lazy
-expansion, safe file rendering, truncation, embed themes, transcript, prompt
+It starts the fake ACP runtime behind a tunnel prefix, checks `ui_path=/`
+registration with a local Treer stub, and verifies lazy expansion, safe file
+rendering, truncation, embed themes, transcript, prompt
 retry idempotency, and abort. In a worktree, `TREER_UI_TEST_MODULE_ROOT` can
 point to another checkout's `web/package.json` with installed dependencies.
 

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -17,9 +17,14 @@ const cwd = `${scratch}/cwd`;
 await mkdir(`${cwd}/src`, { recursive: true });
 await writeFile(`${cwd}/src/hello & #.txt`, "<script>window.injected = true</script>\nHello!");
 await writeFile(`${cwd}/large.txt`, "x".repeat(70000));
-const runtime = spawn(fileURLToPath(new URL("../runtime/target/debug/treer-acp", import.meta.url)), [
+await mkdir(`${scratch}/bin`);
+await writeFile(`${scratch}/bin/treer`, `#!/bin/sh\nprintf '%s\\n' "$@" > '${scratch}/registration.txt'\n`, { mode: 0o755 });
+// A sibling Treer stub takes precedence over the runtime's augmented PATH.
+await copyFile(fileURLToPath(new URL("../runtime/target/debug/treer-acp", import.meta.url)), `${scratch}/bin/treer-acp`);
+const runtimeEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("TREER_") && !key.startsWith("TOWER_")));
+const runtime = spawn(`${scratch}/bin/treer-acp`, [
   "--fake", "--ui", "builtin", "--cwd", cwd, "--state-dir", `${scratch}/state`,
-], { env: { ...process.env, AIS_AUTO_REGISTER: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+], { env: { ...runtimeEnv, TREER_AGENT_ID: "browser-fixture", AIS_AUTO_REGISTER: "1" }, stdio: ["ignore", "pipe", "pipe"] });
 let logs = "";
 runtime.stderr.on("data", (data) => { logs += data; });
 let proxy;
@@ -35,6 +40,10 @@ try {
     runtime.once("exit", (code) => reject(new Error(`Runtime exited (${code}): ${logs}`)));
     setTimeout(() => reject(new Error(`Runtime startup timed out: ${logs}`)), 15000).unref();
   });
+  await expect.poll(async () => readFile(`${scratch}/registration.txt`, "utf8").catch(() => "")).toContain("--ui-path\n/\n");
+  const registration = (await readFile(`${scratch}/registration.txt`, "utf8")).trim().split("\n");
+  assert.deepEqual(registration.slice(0, 2), ["interface", "register"]);
+  for (const capability of ["prompt.submit", "transcript.read", "state.observe", "abort"]) assert.ok(registration.includes(capability));
   // Mimic the existing tunnel's prefix stripping; the UI must never escape it.
   proxy = createServer(async (request, response) => {
     if (request.url === "/") {
@@ -125,7 +134,7 @@ try {
     assert.equal(method, path === "/v1/prompts" || path === "/v1/abort" ? "POST" : "GET");
   }
   assert.deepEqual(errors, []);
-  console.log("PASS: lazy tree, safe text/encoded paths, truncated preview, embed themes, transcript, prompts, retry idempotency, abort, relative AIS paths");
+  console.log("PASS: UI registration, lazy tree, safe text/encoded paths, truncated preview, embed themes, transcript, prompts, retry idempotency, abort, relative AIS paths");
 } finally {
   await browser?.close();
   proxy?.close();
