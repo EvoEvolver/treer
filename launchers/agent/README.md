@@ -349,6 +349,37 @@ capture are no longer bundled. See the
 [migration decision](../../docs/research/2026-10-12-single-agent-launcher.md)
 for the explicit feature removals. The workspace TOWER App remains separate.
 
+### Session transfer contract
+
+`src/session-transfer.ts` defines `SessionBundle` with schema
+`treer.agent-session/v1`: `harness`, confirmed native `sessionId`, original `cwd`,
+`exportedAt`, and `files`. Each file has a `session|memory|project` scope, safe
+relative POSIX `path`, `encoding: "base64"`, `content` and SHA-256 of its bytes.
+Adapters optionally implement `exportSession()` and
+`importSession(bundle, {directory, sessionId?})`; `harness.capabilities.sessionTransfer` advertises actual
+support (omitted means unsupported). This initial contract does not yet advertise
+any implementation. ACP must reject transfer without provider support.
+
+Only native session files, this project's memory and explicit instruction files
+belong in a bundle. Never include provider auth, settings/configuration, Treer
+identity, environment, queues or arbitrary working-tree files. This is a file
+allowlist, not automatic redaction of secrets a user put into conversations.
+Import creates a dedicated new/empty directory, validates every path/hash/size,
+and refuses overwrite or symlink escapes. Import allocates a fresh native UUID
+(or accepts an explicit fresh UUID), rewriting native session identity/cwd so
+resume cannot select the original conversation. It returns `{sessionId, cwd,
+environment}`; environment contains only provider storage selectors. It neither
+switches nor restarts the current Agent. The caller authenticates the restored
+provider separately and launches using the returned cwd/session/storage settings.
+
+The companion local CLI contract (implementation follows this contract commit)
+is `scripts/session.sh export --harness codex|claude --session-id ID --cwd DIR`,
+writing a `SessionBundle` JSON to stdout, and `scripts/session.sh import
+--directory NEW_DIR [--session-id NEW_UUID]`, reading that JSON on stdin and
+writing `ImportedSession` JSON to stdout. `--input FILE` may replace stdin.
+Diagnostics go to stderr; nonzero exit means failure. Current-session HTTP
+export will be `GET /api/session/export`; unsupported adapters return 501.
+
 ## Checks
 
 ```bash

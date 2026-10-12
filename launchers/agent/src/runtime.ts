@@ -1,6 +1,7 @@
 import type { EventEmitter } from "node:events";
 
 import type { BackgroundTask, Goal, GoalUpdate, ModelOption, ReasoningEffort, TurnDto } from "./model.js";
+import type { ImportedSession, SessionBundle, SessionImportOptions } from "./session-transfer.js";
 
 // The adapter boundary. The server, AIS endpoints, file browser, persistence and
 // frontend only talk to a HarnessRuntime; each harness (native Codex app-server,
@@ -12,7 +13,13 @@ export interface HarnessInfo {
   id: string;
   /** Name shown to people, e.g. "Codex" or "Claude". */
   name: string;
-  capabilities: { steer: boolean; backgroundTasks: boolean; goal: { pause: boolean; budget: boolean } | null };
+  capabilities: {
+    steer: boolean;
+    backgroundTasks: boolean;
+    goal: { pause: boolean; budget: boolean } | null;
+    /** Omitted means unsupported. Advertise only after implementation. */
+    sessionTransfer?: { export: boolean; import: boolean };
+  };
 }
 
 export interface ThreadState {
@@ -51,6 +58,10 @@ export interface HarnessRuntime extends EventEmitter {
   updateSettings(input: { model?: string; reasoningEffort?: string | null }): Promise<void>;
   updateGoal?(input: GoalUpdate): Promise<void>;
   clearGoal?(): Promise<void>;
+  /** Snapshot the current confirmed native session; never export auth/config files. */
+  exportSession?(): Promise<SessionBundle>;
+  /** Restore separately; does not change/restart the currently running session. */
+  importSession?(bundle: SessionBundle, options: SessionImportOptions): Promise<ImportedSession>;
   snapshot(historyLimit?: number): RuntimeSnapshot;
 }
 
