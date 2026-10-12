@@ -1,0 +1,1 @@
+{"name":"treer-email-endpoint-tests","private":true,"type":"module","scripts":{"test:browser":"node tests/browser.mjs"},"devDependencies":{"playwright":"1.58.2"}}

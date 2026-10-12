@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Tiny proxy-aware HTTP client; stdin goes only to the App/Core, never argv."""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.request
+import urllib.error
+import uuid
+
+p = argparse.ArgumentParser()
+p.add_argument("command", choices=["notify", "status"])
+p.add_argument("--to")
+p.add_argument("--subject")
+p.add_argument("--summary")
+p.add_argument("--urgency", choices=["normal", "high"], default="normal")
+p.add_argument("--thread")
+p.add_argument("--idempotency-key", default=None)
+p.add_argument("--notification")
+p.add_argument(
+    "--url",
+    default=os.environ.get("EMAIL_ENDPOINT_URL", "http://email-endpoint.treer/"),
+)
+a = p.parse_args()
+headers = {"Accept": "application/json"}
+data = None
+if a.command == "notify":
+    if not a.to or not a.subject:
+        p.error("notify requires --to and --subject")
+    body = {
+        "to": a.to,
+        "subject": a.subject,
+        "body": sys.stdin.read(),
+        "urgency": a.urgency,
+    }
+    if a.summary:
+        body["summary"] = a.summary
+    if a.thread:
+        body["thread_id"] = a.thread
+    data = json.dumps(body).encode()
+    headers.update(
+        {
+            "Content-Type": "application/json",
+            "Idempotency-Key": a.idempotency_key or str(uuid.uuid4()),
+        }
+    )
+    path = "v1/notify"
+else:
+    if not a.notification:
+        p.error("status requires --notification")
+    path = "v1/notifications/" + a.notification
+# urllib honors inherited http_proxy for .treer identity injection.
+try:
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            a.url.rstrip("/") + "/" + path, data=data, headers=headers
+        ),
+        timeout=120,
+    ) as r:
+        print(r.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.read().decode(), file=sys.stderr)
+    sys.exit(1)

@@ -46,6 +46,8 @@ to expose their registered `ui_path`.
 
 - [`issues`](issues/README.md) is a shared human/Agent issue tracker with SQLite,
   hierarchy, dependencies, comments and expiring claims.
+- [`email-endpoint`](email-endpoint/README.md) cues workspace humans with email
+  summaries and links to recipient-bound Core Message conversations.
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`pi-ui`](pi-ui/README.md) is an Agent-scoped browser interface loaded inside
