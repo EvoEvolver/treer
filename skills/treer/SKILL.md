@@ -495,6 +495,24 @@ the selected machine's Host root and must stay inside that root.
 `--machine` accepts a server ID or unique machine name, as with `agent admin
 create`, `app create`, and `exec`.
 
+`agent admin create` and `agent admin profile launch` accept `--folder PATH`
+to choose the new Agent's workspace Tree folder. Without it, a managed Agent
+creates peers in its own Tree folder; an operator defaults to workspace root.
+Relative Tree paths (including `.` and `..`) start at the caller's folder;
+absolute paths start at `/`, and folder IDs are also accepted. Use `--folder /`
+to create at root explicitly. This is independent of the process directory
+selected by `--cwd` or the profile's saved `cwd`.
+
+```bash
+treer agent admin profile launch reviewer --name review-42 --folder ../reviews
+treer agent admin create --kind command --name helper --folder /research --cwd repo -- /bin/sh
+```
+
+The destination must exist and is checked before creating the Agent. Placement
+then uses the existing Tree API and its `agent.tree.manage` Policy. If placement
+fails after creation, the error includes the created Agent ID and a `treer agent
+mv` retry command. Move that Agent rather than repeating creation.
+
 Select an online machine from `treer status`, then create an explicit command
 Agent. Preserve the current working directory unless the task requires a
 different relative directory.

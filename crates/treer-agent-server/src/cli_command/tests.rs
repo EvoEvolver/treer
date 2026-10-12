@@ -239,7 +239,7 @@ fn launch_profile_commands_parse_structured_arguments() {
         Some(Command::Agent {
             command: AgentCommand::Admin {
                 command: AgentAdminCommand::Profile {
-                    command: ProfileCommand::Launch { target, machine, name, cwd }
+                    command: ProfileCommand::Launch { target, machine, name, cwd, .. }
                 }
             }
         }) if target == "reviewer"
@@ -523,6 +523,39 @@ fn agent_admin_commands_parse() {
             }
         }) if url == "https://github.com/example/recipe.git"
     ));
+}
+
+#[test]
+fn agent_creation_accepts_tree_folder_separately_from_working_directory() {
+    let parsed = Args::try_parse_from([
+        "treer",
+        "agent",
+        "admin",
+        "create",
+        "--kind",
+        "command",
+        "--name",
+        "child",
+        "--folder",
+        "../reviews",
+        "--cwd",
+        "repo",
+        "--",
+        "/bin/sh",
+    ])
+    .unwrap();
+    assert!(matches!(parsed.command,
+        Some(Command::Agent { command: AgentCommand::Admin {
+            command: AgentAdminCommand::Create { folder: Some(folder), cwd, .. }
+        } }) if folder == "../reviews" && cwd == "repo"));
+    let parsed = Args::try_parse_from([
+        "treer", "agent", "admin", "profile", "launch", "reviewer", "--folder", "/reviews",
+    ])
+    .unwrap();
+    assert!(matches!(parsed.command,
+        Some(Command::Agent { command: AgentCommand::Admin {
+            command: AgentAdminCommand::Profile { command: ProfileCommand::Launch { folder: Some(folder), cwd: None, .. } }
+        } }) if folder == "/reviews"));
 }
 
 #[test]

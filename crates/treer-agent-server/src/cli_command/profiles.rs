@@ -92,25 +92,26 @@ pub(super) async fn run_profile_command(
             machine,
             name,
             cwd,
+            folder,
         } => {
             let target = normalize_target(&target)?;
             let server_id = match machine {
                 Some(machine) => Some(resolve_machine(client, &machine).await?.server_id),
                 None => None,
             };
-            client
-                .value(
-                    Method::POST,
-                    &format!("api/launch-profiles/{}/launch", path_segment(&target)),
-                    Some(serde_json::to_value(LaunchAgentProfileRequest {
-                        server_id,
-                        agent_name: name,
-                        cwd,
-                        cols: 120,
-                        rows: 36,
-                    })?),
-                )
-                .await
+            workload_tree::create_in_folder(
+                client,
+                folder.as_deref(),
+                &format!("api/launch-profiles/{}/launch", path_segment(&target)),
+                serde_json::to_value(LaunchAgentProfileRequest {
+                    server_id,
+                    agent_name: name,
+                    cwd,
+                    cols: 120,
+                    rows: 36,
+                })?,
+            )
+            .await
         }
     }
 }

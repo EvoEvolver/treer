@@ -126,6 +126,44 @@ fn entry_path(parent: &str, name: &str) -> String {
     format!("{}/{}", parent.trim_end_matches('/'), name)
 }
 
+// Resolve before creation so a misspelled destination never starts a workload.
+// Placement uses the existing Policy-checked tree API, without changing the
+// create/launch wire contract or interpreting paths in the thin client.
+pub(super) async fn create_in_folder(
+    client: &ApiClient,
+    requested: Option<&str>,
+    endpoint: &str,
+    request: Value,
+) -> anyhow::Result<Value> {
+    let destination = if requested.is_some() || client.source_agent_id.is_some() {
+        let tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
+        resolve_folder(
+            &tree,
+            requested.unwrap_or("."),
+            current_folder(&tree, client),
+        )?
+    } else {
+        None
+    };
+    let created = client.value(Method::POST, endpoint, Some(request)).await?;
+    if let Some(folder) = destination {
+        let agent_id = created["agent_id"].as_str().ok_or_else(|| {
+            fail("agent_created_placement_failed", "Agent creation returned no agent_id; inspect the workspace before retrying creation")
+        })?;
+        client
+            .value(
+                Method::PUT,
+                &format!("{TREE}/placements/{}", path_segment(agent_id)),
+                Some(json!({"folder_id":folder,"position":i64::MAX})),
+            )
+            .await
+            .map_err(|error| fail("agent_created_placement_failed", format!(
+                "Agent {agent_id} was created, but folder placement failed: {error}. Do not repeat creation; retry with treer agent mv {agent_id} {folder}"
+            )))?;
+    }
+    Ok(created)
+}
+
 pub(super) async fn mkdir(client: &ApiClient, path: &str, parents: bool) -> anyhow::Result<Value> {
     let mut tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
     let parts = components(&tree, path, current_folder(&tree, client))?;
@@ -442,12 +480,20 @@ mod tests {
         State(expected): State<Arc<Mutex<std::collections::VecDeque<Expected>>>>,
         request: Request<Body>,
     ) -> Json<Value> {
-        assert_eq!(request.headers()[AGENT_ID_HEADER], "agent-caller");
-        assert_eq!(
-            request.headers()[WORKLOAD_CREDENTIAL_HEADER],
-            "test-workload-credential"
-        );
-        assert!(!request.headers().contains_key(OPERATOR_CREDENTIAL_HEADER));
+        if request.headers().contains_key(AGENT_ID_HEADER) {
+            assert_eq!(request.headers()[AGENT_ID_HEADER], "agent-caller");
+            assert_eq!(
+                request.headers()[WORKLOAD_CREDENTIAL_HEADER],
+                "test-workload-credential"
+            );
+            assert!(!request.headers().contains_key(OPERATOR_CREDENTIAL_HEADER));
+        } else {
+            assert_eq!(
+                request.headers()[OPERATOR_CREDENTIAL_HEADER],
+                "test-operator-credential"
+            );
+            assert!(!request.headers().contains_key(WORKLOAD_CREDENTIAL_HEADER));
+        }
         let mut pending = expected.lock().await;
         let index = pending
             .iter()
@@ -707,5 +753,168 @@ mod tests {
             parent_id: None,
         });
         assert!(resolve_folder(&tree, "/research", None).is_err());
+    }
+
+    #[tokio::test]
+    async fn creation_inherits_tree_folder_or_resolves_explicit_destination_before_creation() {
+        let tree = json!({"folders":[
+            {"folder_id":"research","name":"research","parent_id":null},
+            {"folder_id":"experiments","name":"experiments","parent_id":"research"},
+            {"folder_id":"reviews","name":"reviews","parent_id":"research"}
+        ],"placements":[{"agent_id":"agent-caller","folder_id":"experiments","position":0}]});
+        for (managed, requested, destination, caller_folder) in [
+            (true, None, Some("experiments"), Some("experiments")),
+            (
+                true,
+                Some("../reviews"),
+                Some("reviews"),
+                Some("experiments"),
+            ),
+            (
+                true,
+                Some("/research"),
+                Some("research"),
+                Some("experiments"),
+            ),
+            (true, Some("reviews"), Some("reviews"), Some("experiments")), // folder ID
+            (true, Some("/"), None, Some("experiments")),
+            (false, None, None, None),
+            (false, Some("research/reviews"), Some("reviews"), None),
+            (true, Some("missing"), None, Some("experiments")),
+            (true, None, None, None), // Caller at root stays at root.
+        ] {
+            let mut tree = tree.clone();
+            tree["placements"][0]["folder_id"] = json!(caller_folder);
+            let invalid = requested == Some("missing");
+            let mut requests = Vec::new();
+            if managed || requested.is_some() {
+                requests.push((Method::GET, "/api/workload-tree".into(), None, tree.clone()));
+            }
+            if !invalid {
+                requests.push((
+                    Method::POST,
+                    "/api/agents".into(),
+                    Some(json!({"name":"child"})),
+                    json!({"agent_id":"new-agent","cwd":"repo"}),
+                ));
+                if let Some(folder) = destination {
+                    requests.push((
+                        Method::PUT,
+                        "/api/workload-tree/placements/new%2Dagent".into(),
+                        Some(json!({"folder_id":folder,"position":i64::MAX})),
+                        json!({"ok":true}),
+                    ));
+                }
+            }
+            let expected = Arc::new(Mutex::new(std::collections::VecDeque::from(requests)));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn({
+                let expected = expected.clone();
+                async move {
+                    axum::serve(
+                        listener,
+                        Router::new()
+                            .fallback(any(mock_request))
+                            .with_state(expected),
+                    )
+                    .await
+                    .unwrap()
+                }
+            });
+            let client = ApiClient {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                base: Url::parse(&format!("http://{address}/")).unwrap(),
+                source_agent_id: managed.then(|| "agent-caller".into()),
+                workload_credential: managed.then(|| "test-workload-credential".into()),
+                operator_credential: (!managed).then(|| "test-operator-credential".into()),
+            };
+            let result =
+                create_in_folder(&client, requested, "api/agents", json!({"name":"child"})).await;
+            if invalid {
+                assert_eq!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<CliFailure>()
+                        .unwrap()
+                        .code,
+                    "folder_not_found"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    json!({"agent_id":"new-agent","cwd":"repo"})
+                );
+            }
+            assert!(expected.lock().await.is_empty());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_launch_inherits_folder_and_reports_partial_creation_without_retrying() {
+        let expected = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            (
+                Method::GET,
+                "/api/workload-tree".into(),
+                None,
+                json!({"folders":[{"folder_id":"research","name":"research","parent_id":null}],"placements":[{"agent_id":"agent-caller","folder_id":"research","position":0}]}),
+            ),
+            (
+                Method::POST,
+                "/api/launch-profiles/reviewer/launch".into(),
+                Some(
+                    serde_json::to_value(LaunchAgentProfileRequest {
+                        server_id: None,
+                        agent_name: None,
+                        cwd: None,
+                        cols: 120,
+                        rows: 36,
+                    })
+                    .unwrap(),
+                ),
+                json!({"agent_id":"new-agent"}),
+            ),
+        ])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let expected = expected.clone();
+            async move {
+                axum::serve(listener, Router::new()
+                    .route("/api/workload-tree/placements/new%2Dagent", axum::routing::put(|| async {
+                        (axum::http::StatusCode::FORBIDDEN, Json(json!({"error":{"code":"policy_denied","message":"placement denied"}})))
+                    }))
+                    .fallback(any(mock_request)).with_state(expected)).await.unwrap()
+            }
+        });
+        let client = ApiClient {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            base: Url::parse(&format!("http://{address}/")).unwrap(),
+            source_agent_id: Some("agent-caller".into()),
+            workload_credential: Some("test-workload-credential".into()),
+            operator_credential: None,
+        };
+        let error = run_profile_command(
+            &client,
+            ProfileCommand::Launch {
+                target: "reviewer".into(),
+                machine: None,
+                name: None,
+                cwd: None,
+                folder: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        let failure = error.downcast_ref::<CliFailure>().unwrap();
+        assert_eq!(failure.code, "agent_created_placement_failed");
+        assert!(failure.message.contains("new-agent was created"));
+        assert!(failure
+            .message
+            .contains("treer agent mv new-agent research"));
+        assert!(failure.message.contains("Do not repeat creation"));
+        assert!(expected.lock().await.is_empty());
+        server.abort();
     }
 }

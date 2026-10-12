@@ -101,6 +101,7 @@ pub(super) async fn run_agent_admin_command(
             kind,
             name,
             cwd,
+            folder,
             publish_ports,
             recipe,
             args,
@@ -112,23 +113,23 @@ pub(super) async fn run_agent_admin_command(
                 bail!("sandbox port publication is retired; register process ports with treer service register");
             }
             let server_id = resolve_service_machine(client, machine.as_deref()).await?;
-            client
-                .value(
-                    Method::POST,
-                    "api/agents",
-                    Some(serde_json::to_value(CreateAgentRequest {
-                        server_id: Some(server_id),
-                        kind,
-                        name,
-                        cwd,
-                        args,
-                        cols: 120,
-                        rows: 36,
-                        publish_ports,
-                        recipe,
-                    })?),
-                )
-                .await
+            workload_tree::create_in_folder(
+                client,
+                folder.as_deref(),
+                "api/agents",
+                serde_json::to_value(CreateAgentRequest {
+                    server_id: Some(server_id),
+                    kind,
+                    name,
+                    cwd,
+                    args,
+                    cols: 120,
+                    rows: 36,
+                    publish_ports,
+                    recipe,
+                })?,
+            )
+            .await
         }
         AgentAdminCommand::Rename { target, name } => rename_agent(client, &target, name).await,
         AgentAdminCommand::Stop { target } => stop_agent(client, &target).await,

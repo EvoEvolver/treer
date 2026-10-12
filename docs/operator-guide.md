@@ -692,6 +692,25 @@ without changing the profile. The directory is relative to the selected
 machine's Host root and must resolve inside that root. Omitting it uses the
 profile's saved `cwd`.
 
+For CLI creation, both `treer agent admin create` and `treer agent admin profile
+launch` accept `--folder PATH` for the workspace Tree destination. Omit it to
+inherit the calling Agent's Tree folder; non-Agent callers default to `/`.
+Relative paths, `.` and `..` resolve from that folder. Absolute paths and folder
+IDs work as with `agent ls`; `--folder /` explicitly selects root. This option
+does not change `--cwd` or the profile's process working directory.
+
+```bash
+treer agent admin profile launch reviewer --name review-42 --folder ../reviews
+treer agent admin create --machine build-machine --kind command --name helper \
+  --folder /research --cwd repo -- /bin/sh
+```
+
+CLI checks the folder before creation, then places the created Agent at its
+end through the existing authenticated Tree API. Tree reads and placement use
+`agent.tree.read` and `agent.tree.manage`. If creation succeeds but placement
+fails, CLI reports `agent_created_placement_failed` with the Agent ID and a
+`treer agent mv` retry command; do not repeat creation to retry placement.
+
 ## Host and Controller
 
 `treer-agent-host` is the stable process boundary. It understands only raw

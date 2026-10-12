@@ -284,8 +284,14 @@ resource. Placement IDs must belong to active credentials
 in that workspace. Deleting a folder promotes its children to its parent (or
 the workspace root); placement order is preserved. Organizing the tree does
 not change filesystem paths, machine ownership, process identity, or Policy.
-The Controller parses `treer agent mkdir/ls/mv/rmdir` and resolves tree paths;
-the thin CLI remains argv/I/O transport. New or renamed folders reject `/`,
+The Controller parses `treer agent mkdir/ls/mv/rmdir` and resolves tree paths.
+CLI Agent creation and profile launch resolve `--folder` before creation,
+defaulting to the calling Agent's placement (operators default to root), then
+place the returned Agent through the same Policy-checked Tree API. A failed
+post-create placement reports the created ID for a move retry rather than
+creating a second workload. This does not change the process `cwd` or the
+Proxy/Controller create and launch wire contracts.
+The thin CLI remains argv/I/O transport. New or renamed folders reject `/`,
 `.` and `..` names and duplicate sibling names under the workspace lock.
 Legacy ambiguous names remain addressable by folder ID. CLI `rmdir` sends
 `require_empty=true`, checked atomically; browser deletion retains child

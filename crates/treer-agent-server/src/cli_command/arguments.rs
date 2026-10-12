@@ -258,7 +258,7 @@ pub(super) enum MessageCommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum AgentCommand {
-    #[command(about = "Create a workspace folder (paths start at workspace root)")]
+    #[command(about = "Create a workspace Tree folder")]
     Mkdir {
         path: String,
         #[arg(short = 'p', long)]
@@ -383,6 +383,8 @@ pub(super) enum AgentAdminCommand {
         name: String,
         #[arg(long, default_value = ".")]
         cwd: String,
+        #[arg(long, help = "Workspace Tree folder (defaults to the caller's folder)")]
+        folder: Option<String>,
         #[arg(
             long = "publish",
             value_name = "PORT",
@@ -463,6 +465,8 @@ pub(super) enum ProfileCommand {
         name: Option<String>,
         #[arg(long, help = "Override the profile working directory for this launch")]
         cwd: Option<String>,
+        #[arg(long, help = "Workspace Tree folder (defaults to the caller's folder)")]
+        folder: Option<String>,
     },
 }
 
