@@ -60,7 +60,7 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
   Treer workload/operator credential literals in new specifications are rejected. Audit events
   record actor/target IDs, never the command, arguments, or credentials.
 
-## Process environment
+## Machine connection ownership
 
 Machine WebSocket registration is authenticated against the enrolled machine's
 workspace and server ID before it may claim distributed ownership. A current
@@ -68,6 +68,8 @@ connection can recover an expired lease only through atomic create-if-absent;
 renewal cannot overwrite a different connection's owner record. Lease revision
 checks also prevent cleanup of an old socket from releasing its replacement's
 ownership. A missing lease alone is not evidence of another Controller.
+
+## Process environment
 
 Host/Controller do not inherit a caller's Treer workload identity or Agent UI
 session. A shared platform environment filter removes Treer identity and
