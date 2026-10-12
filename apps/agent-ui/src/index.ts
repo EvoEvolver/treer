@@ -236,7 +236,9 @@ const server = createServer(async (request, response) => {
       }
       completedOperations.set(operationId, Date.now());
       try {
-        const submission = await prompts.submit(text, promptMode(body.mode));
+        // Treer's Controller already sends "mode": "prompt" on this route, so the
+        // delivery choice has its own field. /api/prompt is private to the page.
+        const submission = await prompts.submit(text, promptMode(body.delivery));
         send(response, 202, { accepted: true, operation_id: operationId, submission });
       } catch (error) {
         completedOperations.delete(operationId);

@@ -28,6 +28,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   if (!request.id) continue;
   let result = {};
   if (request.method === "model/list") result = { data: [] };
+  if (request.method === "turn/start") result = { turn: { id: "turn-new" } };
   if (request.method === "thread/resume") {
     if (request.params.threadId === "missing") {
       console.log(JSON.stringify({ id: request.id, error: { message: "thread does not exist" } }));

@@ -267,3 +267,18 @@ test("only the newest in-progress turn is live, and a stale steer target is corr
     for (const key of ["FAKE_CODEX_CALLS", "FAKE_CODEX_STALE", "FAKE_CODEX_LIVE", "FAKE_CODEX_STATUS"]) delete process.env[key];
   }
 });
+
+test("/v1/prompts accepts the body Treer's Controller sends, and delivery selects steer or queue", async () => {
+  const server = await launchServer(temp(), { CODEX_UI_THREAD_ID: "original" });
+  const post = (body: unknown) => fetch(server.base + "/v1/prompts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    // Exactly what crates/treer-agent-server/src/agent_interface.rs submits.
+    const controller = await post({ operation_id: "op-controller", text: "hello", mode: "prompt" });
+    assert.equal(controller.status, 202, await controller.clone().text());
+    const queued = await post({ operation_id: "op-queue", text: "later", delivery: "queue" });
+    assert.equal(queued.status, 202, await queued.clone().text());
+    const invalid = await post({ operation_id: "op-bad", text: "x", delivery: "now" });
+    assert.equal(invalid.status, 500);
+    assert.match(await invalid.text(), /mode must be steer or queue/);
+  } finally { await stop(server.child); }
+});
