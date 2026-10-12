@@ -25,6 +25,13 @@ def project_instruction(path):
             or re.fullmatch(r'\.(?:codex|claude)/memory/.+\.md', path) is not None)
 
 
+def transfer_file_allowed(harness, scope, path):
+    if scope == 'project': return project_instruction(path)
+    if scope == 'session': return path == 'session.jsonl' or (harness == 'claude' and re.fullmatch(r'subagents/.+\.jsonl', path) is not None)
+    if scope == 'memory': return harness == 'claude' and path.endswith('.md')
+    return False
+
+
 def copy_snapshot(source, destination, jsonl=False):
     # Generic upload copies only, provider export consistency belongs to launcher.
     if source.is_symlink() or not source.is_file() or source.stat().st_size > MAX_FILE:
@@ -79,8 +86,7 @@ def validate_bundle(bundle,harness=None,session=None):
         scope=record.get('scope'); path=safe_path(record.get('path'))
         if scope not in ('session','memory','project') or (scope,path) in seen or record.get('encoding')!='base64':
             raise RuntimeError('Invalid session file record')
-        if scope=='project' and not project_instruction(path): raise RuntimeError('Unsupported project instruction file')
-        if scope=='session' and not path.endswith(('.jsonl','.sh')): raise RuntimeError('Unsupported session file type')
+        if not transfer_file_allowed(bundle['harness'],scope,path): raise RuntimeError('Unsupported native transfer file')
         if any(part.lower() in ('auth.json','.credentials.json','config.toml','settings.json','.env') for part in path.split('/')):
             raise RuntimeError('Credential/config files may not be exported')
         try: data=base64.b64decode(record.get('content',''),validate=True)

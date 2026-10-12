@@ -74,7 +74,9 @@ environment ID. It never infers self from a shared cwd or selects the newest
 session; missing authority needs an explicit --session. Claude captures project JSONL, project `memory/`, and `CLAUDE.md`.
 Codex captures its rollout; the current launcher transfer allowlist deliberately
 excludes shell snapshots because they can contain machine credentials. Legacy
-archives retain their snapshot file, which is never imported or executed. No auth/config credential
+archives retain their snapshot file, which is never imported or executed.
+Codex save output explicitly reports omitted=[shell_snapshot], and the legacy
+--include-shell-snapshot flag fails clearly instead of silently ignoring it. No auth/config credential
 files are exported. Launcher consistency checks reject changing source files; original sessions
 are never modified. `soul_sessions.py` is a thin bridge to the launcher-owned session export/import
 CLI. Native file selection, consistency and rebasing belong to launcher adapters.

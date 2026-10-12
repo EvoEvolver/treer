@@ -22,7 +22,7 @@ class LauncherIntegration(ClientTest):
         script.chmod(0o755)
         import shutil
         node=shutil.which('node')
-        self.env['PATH']=os.environ.get('SOUL_TEST_NODE_PATH',str(Path(node).resolve().parent) + ':' + os.defpath) if node else os.defpath
+        self.env['PATH']=os.environ.get('SOUL_TEST_NODE_PATH') or (str(Path(node).resolve().parent) + ':' + os.defpath if node else os.defpath)
         self.env['CODEX_HOME']=str(self.home/'.codex')
         self.env['CLAUDE_CONFIG_DIR']=str(self.home/'.claude')
         (self.home/'.claude').mkdir(exist_ok=True)

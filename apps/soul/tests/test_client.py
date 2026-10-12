@@ -93,7 +93,7 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         session.write_text(json.dumps(data)+'\n')
         (project/'memory/MEMORY.md').write_text('memory ghp_'+'A'*40+'\n' if secret else 'memory\n')
         (self.cwd/'CLAUDE.md').write_text('project instruction\n')
-        self.source('claude',[dict(scope='session',path=SID+'.jsonl',source=str(session)),
+        self.source('claude',[dict(scope='session',path='session.jsonl',source=str(session)),
                               dict(scope='memory',path='MEMORY.md',source=str(project/'memory/MEMORY.md')),
                               dict(scope='project',path='CLAUDE.md',source=str(self.cwd/'CLAUDE.md'))])
         return session
@@ -109,8 +109,7 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         (config/'shell_snapshots').mkdir()
         (config/'shell_snapshots'/(SID+'.sh')).write_text('export api_key=abcdef\n')
         (config/'auth.json').write_text('DO NOT READ OR COPY')
-        self.source('codex',[dict(scope='session',path='2026/10/12/rollout-'+SID+'.jsonl',source=str(session)),
-                             dict(scope='session',path='shell_snapshots/'+SID+'.sh',source=str(config/'shell_snapshots'/(SID+'.sh')))])
+        self.source('codex',[dict(scope='session',path='session.jsonl',source=str(session))])
         return session
 
     def save(self,harness='claude',*extra):
@@ -139,11 +138,14 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertTrue(record['contains_secrets'])
         self.assertEqual(list(self.tmp.iterdir()),[])
 
-    def test_codex_save_shell_and_explicit_ambiguity(self):
+    def test_codex_save_excludes_shell_and_requires_authoritative_self(self):
         original=self.codex()
         record=self.save('codex')
         self.assertEqual(record['harness'],'codex')
-        self.assertTrue(any(f['path']=='shell_snapshots/'+SID+'.sh' for f in record['manifest']['adapter']['transfer_files']))
+        self.assertEqual(record['omitted'],['shell_snapshot'])
+        self.call('capture-codex','--include-shell-snapshot',success=False)
+        self.assertFalse(any(f['path'].endswith('.sh') for f in record['manifest']['adapter']['transfer_files']))
+        self.assertIn('api_key=abcdef',(self.home/'.codex/shell_snapshots'/(SID+'.sh')).read_text())
         self.assertFalse(record['contains_secrets'])
         self.assertIn('wlc_',original.read_text())
         self.claude()

@@ -21,7 +21,7 @@ from urllib.parse import urlsplit, parse_qs, unquote
 from http.cookies import SimpleCookie
 import subprocess
 from soul_auth import Auth, Error as AuthError
-from soul_sessions import project_instruction
+from soul_sessions import transfer_file_allowed
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -169,8 +169,8 @@ def validate_manifest(value: object, archive_files: set[str]) -> dict[str, objec
                 file = validate_member_path(entry['file'])
                 if file not in archive_files or not file.startswith('files/') or (entry['scope'],path) in seen:
                     raise SoulError(400, 'invalid_adapter', 'Transfer file missing or duplicated')
-                if entry['scope'] == 'project' and not project_instruction(path):
-                    raise SoulError(400, 'invalid_adapter', 'Unsupported project instruction file')
+                if not transfer_file_allowed(adapter['name'],entry['scope'],path):
+                    raise SoulError(400, 'invalid_adapter', 'Unsupported native transfer file')
                 seen.add((entry['scope'],path))
                 clean_adapter['transfer_files'].append(dict(scope=entry['scope'],path=path,file=file))
         if 'exported_at' in adapter:
