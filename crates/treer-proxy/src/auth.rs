@@ -789,6 +789,7 @@ impl AuthStore {
 }
 mod accounts;
 mod apps;
+mod email;
 mod handlers;
 mod machines;
 mod network;

@@ -1228,3 +1228,38 @@ The complete gate checks documentation links, release tooling, the control-plane
 React build, updater tests, and the full Rust workspace. Workspace App and AIS
 adapter tests are focused, opt-in checks; while iterating on messaging, use
 `just app-test` and `just messaging-e2e`.
+
+### Managed App email sending
+
+`POST /api/apps/{service_id}/email` reuses the Cloudflare sender configured for
+registration/recovery. Configure `CLOUDFLARE_API_TOKEN`, the existing Cloudflare
+account configuration, and `TREER_EMAIL_FROM` on the Proxy only. Do not give an
+App these credentials. `TREER_EMAIL_ALLOWLIST` is a comma-separated list of
+exact addresses and `@domain.example` entries (exact domains, no subdomain
+matching). Without an allowlist, only verified organization-member addresses
+are admitted. `email.send` is evaluated for the Managed App's runtime Agent
+against its owned `machine.service`; ordinary Agents and human tokens cannot
+use this route. No SMTP configuration is required.
+
+Request JSON contains only `to`, `subject` (1–200 bytes, no controls), `text`
+(1–4096 bytes), and `idempotency_key` (1–128 bytes). No caller HTML, From or
+Reply-To is accepted. Success returns `email_id` and `status=sent`. Errors include
+`email_not_configured` (503), `email_recipient_denied` (403), `email_rate_limited`
+(429), `email_delivery_failed` (502), and `email_in_progress` (503). Each workspace
+limits App attempts to 20/hour and recipient attempts to 5/hour. Failed attempts
+consume limits; identical completed sends return the original result after
+current admission and Policy checks.
+
+Inspect body-free delivery history in PostgreSQL `app_email_attempts`: `app_id`,
+`recipient_hash`, `created_at`, `status`. Configure retention/backup according to
+local audit requirements; history is not automatically deleted. Provider errors
+are sanitized. The reservation and remote provider dispatch are not a single
+transaction: a crash or ambiguous provider response can cause a duplicate on a
+later retry. In-flight reservations can be retried after 60 seconds.
+
+Deploy [email-endpoint](../apps/email-endpoint/README.md) as a workspace Managed
+App, initially in `outbox` mode. `proxy` mode falls back to local outbox only on
+`email_not_configured`; Policy/recipient failures remain visible retry failures.
+Older Proxies without this route return a visible failure; select outbox
+explicitly until the Proxy upgrade. Real email acceptance requires operator
+coordination after the route is deployed; automated tests use local fakes only.

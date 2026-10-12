@@ -607,3 +607,22 @@ control plane is a follow-up.
 
 See [Self-hosted Compose](../deploy/README.md), [Security](security.md) for
 trust claims, and [Quality](quality.md) for the verification matrix.
+
+### App email transport
+
+The Proxy exposes `POST /api/apps/{service_id}/email` as a narrow transport for
+Managed Apps, reusing `CloudflareEmailSender`. Protocol request/response types
+live in `treer-protocol::SendAppEmailRequest` / `SendAppEmailResponse`. Ownership,
+service-audience identity, `email.send`, organization verified email/allowlist,
+and durable hourly reservations are checked before provider dispatch. Sender
+configuration and Cloudflare credentials never cross the Proxy/App boundary.
+PostgreSQL `app_email_sends` stores fingerprint/idempotency/state, and
+`app_email_attempts` is body-free delivery audit and rate history. Email is not
+Core Message and does not create or wake an Agent.
+
+The [email-endpoint App](../apps/email-endpoint/README.md) owns its SQLite
+thread-to-message/email mapping, retry queue, local outbox, membership/email
+bindings, HTML page, and optional wake. Core owns canonical message bodies and
+per-recipient delivery. Agent requests and human replies use their own verified
+service tokens through App Message routes. App-owned channel data does not add
+email fields to Core Message or use an App credential to impersonate a caller.

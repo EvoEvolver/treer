@@ -266,3 +266,31 @@ security control.
 Relevant source boundaries are `crates/treer-proxy/src/auth.rs`,
 `identity.rs`, `policy.rs`, `message_store.rs`, `updater.rs`,
 `deploy/updater/updater.py`, and the Controller CLI, startup-store, and explicit network modules.
+
+### Managed App email notifications
+
+`POST /api/apps/{service_id}/email` lets a Managed App use the Proxy's fixed
+`TREER_EMAIL_FROM` sender (default `service@treer.ai`). It accepts only the
+runtime identity owning that App and service, with a service-audience token;
+human tokens and unrelated Agents cannot use it. Workspace Policy evaluates
+`email.send` against that App's Agent subject and `machine.service` resource.
+Deployment Policy must explicitly govern this action; permissive/audit modes
+retain their ordinary semantics.
+
+Recipients must have verified email in the workspace's organization or match
+the operator's `TREER_EMAIL_ALLOWLIST`. This is permission to send email, not
+permission to read Core Messages. Fixed hourly limits are 20 attempts per App
+and 5 per recipient per workspace, shared across Proxy replicas and restarts.
+Subject is at most 200 bytes and plain text at most 4096 bytes. Caller HTML,
+From, and Reply-To are rejected; HTML is generated from escaped text. Credentials
+stay in the Proxy. Body-free PostgreSQL audit rows retain App ID, time,
+recipient SHA-256 and sending/sent/failed outcome; hashes are pseudonymous, not
+anonymous. Policy denials also use the ordinary Policy audit path.
+
+The email-endpoint App defaults to workspace access and local outbox. It admits
+only administrator-bound, current workspace human recipients and rechecks thread
+ownership for every read and reply. It forwards Agent/human service tokens to
+Core Message so the actual caller authors the canonical message. Emails contain
+only explicit summaries and links; operators and callers must keep secrets out
+of summaries and subjects. Optional Agent wake requires both administrator
+opt-in and `agent.prompt` Policy. Same-UID App isolation is still not promised.

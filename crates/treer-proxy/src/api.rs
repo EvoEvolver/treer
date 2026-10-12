@@ -328,6 +328,8 @@ impl BrowserAccess {
 }
 
 mod agents;
+mod email;
+use email::*;
 mod app_identity;
 mod app_ui;
 mod apps;

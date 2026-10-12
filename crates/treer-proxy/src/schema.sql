@@ -637,3 +637,15 @@ CREATE INDEX IF NOT EXISTS agent_traffic_usage_hourly_workspace_window
     ON agent_traffic_usage_hourly(workspace_id, window_start DESC);
 CREATE INDEX IF NOT EXISTS virtual_network_hosts_service
     ON virtual_network_hosts(workspace_id, service_id);
+
+-- Body-free email audit and durable idempotency/rate reservations across replicas.
+CREATE TABLE IF NOT EXISTS app_email_sends (
+ workspace_id TEXT NOT NULL, app_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+ email_id TEXT UNIQUE NOT NULL, fingerprint TEXT NOT NULL, status TEXT NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(workspace_id,app_id,idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS app_email_attempts (
+ attempt_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, app_id TEXT NOT NULL,
+ recipient_hash TEXT NOT NULL, status TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS app_email_attempts_rate ON app_email_attempts(workspace_id,created_at);

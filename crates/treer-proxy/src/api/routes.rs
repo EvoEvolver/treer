@@ -625,6 +625,7 @@ pub fn router(
         .route("/.treer/apps/identity/verify", post(verify_app_identity))
         .route("/api/apps/oauth/authorize", get(authorize_workspace_app))
         .route("/api/apps/oauth/token", post(exchange_workspace_app_code))
+        .route("/api/apps/{service_id}/email", post(send_app_email))
         .route(
             "/api/apps/{service_id}/directory",
             get(workspace_app_directory),

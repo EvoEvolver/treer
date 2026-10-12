@@ -100,3 +100,6 @@ pub use enrollment::*;
 #[cfg(test)]
 #[path = "lib/tests.rs"]
 mod tests;
+
+mod email;
+pub use email::*;
