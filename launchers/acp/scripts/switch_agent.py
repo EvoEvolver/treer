@@ -115,11 +115,23 @@ def main():
     if options.ui == "remote-codex" and not (version / "launchers/acp/.build/remote-codex-ui/source/apps/agent-ui-web/dist/index.html").is_file():
         raise RuntimeError("Remote Codex UI assets are missing; startup was not changed")
     sid, transcript = discover(options.agent, cwd, options.session_id)
+    if options.agent == "codex":
+        argv = profile["run"]["args"]
+        checked = subprocess.run([str(runtime), "--check-session-load", "--harness", "codex",
+            "--base-command", argv[argv.index("--base-command") + 1],
+            "--server-command", argv[argv.index("--server-command") + 1], "--session-id", sid],
+            capture_output=True, text=True, timeout=15)
+        if checked.returncode:
+            raise RuntimeError("Native Codex load compatibility check failed; startup was not changed: " + checked.stderr.strip())
+        compatibility = json.loads(checked.stdout)
+    else:
+        compatibility = None
     text = options.summary_file.read_text() if options.summary_file else summary(options.agent, sid, transcript, cwd)
     command = [str(launcher), *profile["run"]["args"], "--session-id", sid]
     plan = {"agent_id": context["agent"]["agent_id"], "generation": context["agent"].get("run_generation", 0), "machine_root": str(root),
             "cwd": str(cwd), "session_id": sid, "command": command,
             "operation_id": "acp-switch-" + uuid.uuid4().hex, "summary": text}
+    plan["native_load_compatibility"] = compatibility
     print(json.dumps({k: v for k, v in plan.items() if k != "summary"}, indent=2), flush=True)
     if options.dry_run:
         return

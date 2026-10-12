@@ -11,8 +11,12 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use super::adapter::{adapter_for, HarnessAdapter, HarnessProjection, SessionSettingOp};
 use super::capabilities::{negotiate, NegotiatedCaps};
 use super::catalog::{builtin_agents, classify_availability, AcpAgentDef};
+use super::load_safety::{check_codex_load, codex_writer_env};
 use super::mapper::TurnMapper;
-use super::modes::{parse_permission_choices, select_permission_option};
+use super::modes::{
+    parse_available_modes, parse_permission_choices, resolve_mode, resolve_mode_config_value,
+    select_permission_option, ProductSessionPolicy,
+};
 use super::prompt::build_prompt_blocks;
 use super::rpc::AcpProcess;
 use super::terminal::AgentTerminals;
@@ -95,7 +99,11 @@ impl AcpRuntime {
             bail!("{} is not available ({availability})", def.display_name);
         }
         let adapter = adapter_for(&def.id);
-        let extra_env = extra_env_for(def);
+        if let Some(session_id) = load_id {
+            check_codex_load(def, session_id).await?;
+        }
+        let mut extra_env = extra_env_for(def);
+        extra_env.extend(codex_writer_env(def)?);
         let server_command = agent_server_command(def);
         let tower = self
             .tower
@@ -133,32 +141,26 @@ impl AcpRuntime {
             .await?;
         let negotiated = negotiate(&init);
         spawn_mux(self.inner.clone(), process.clone(), updates_rx, requests_rx);
-        let raw_session = if let Some(existing) = load_id {
+        let meta = execution_meta(adapter.as_ref());
+        let mut raw_session = if let Some(existing) = load_id {
             if negotiated.load_session {
                 process
                     .request(
                         "session/load",
-                        json!({ "sessionId": existing, "cwd": cwd, "mcpServers": [] }),
+                        json!({ "sessionId": existing, "cwd": cwd, "mcpServers": [], "_meta": meta }),
                     )
                     .await?
             } else if negotiated.resume {
                 process
                     .request(
                         "session/resume",
-                        json!({ "sessionId": existing, "cwd": cwd, "mcpServers": [] }),
+                        json!({ "sessionId": existing, "cwd": cwd, "mcpServers": [], "_meta": meta }),
                     )
                     .await?
             } else {
                 bail!("ACP agent does not support session/load or session/resume");
             }
         } else {
-            let extra_meta = adapter.session_new_meta(None);
-            let mut meta = json!({ "yoloMode": true });
-            if let Some(map) = extra_meta.as_object() {
-                for (key, value) in map {
-                    meta[key] = value.clone();
-                }
-            }
             process
                 .request(
                     "session/new",
@@ -173,6 +175,21 @@ impl AcpRuntime {
             .to_string();
         if session_id.is_empty() {
             bail!("ACP session id missing");
+        }
+        if let Some(op) = execution_mode(&raw_session)? {
+            let response = apply_setting_op(process.as_ref(), &session_id, Path::new(cwd), op)
+                .await
+                .map_err(|error| {
+                    ExecutionPolicyError(format!(
+                        "Cannot apply full-access policy to ACP session {session_id}: {error}"
+                    ))
+                })?;
+            if let Some(modes) = response.get("modes") {
+                raw_session["modes"] = modes.clone();
+            }
+            if let Some(config) = response.get("configOptions") {
+                raw_session["configOptions"] = config.clone();
+            }
         }
         let scoped = Self::scoped_id(&def.id, &session_id);
         let projection =
@@ -522,6 +539,46 @@ impl AcpRuntime {
         };
         !live.process.exited().await.unwrap_or(true)
     }
+}
+
+#[derive(Debug)]
+pub struct ExecutionPolicyError(String);
+impl std::fmt::Display for ExecutionPolicyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+impl std::error::Error for ExecutionPolicyError {}
+
+fn execution_meta(adapter: &dyn HarnessAdapter) -> Value {
+    let mut meta = adapter.session_new_meta(None);
+    if !meta.is_object() {
+        meta = json!({});
+    }
+    meta["yoloMode"] = json!(true);
+    meta
+}
+
+fn execution_mode(session: &Value) -> Result<Option<SessionSettingOp>> {
+    let policy = ProductSessionPolicy {
+        sandbox_mode: Some("danger-full-access".into()),
+        approval_mode: Some("yolo".into()),
+        ..Default::default()
+    };
+    let (current, modes) = parse_available_modes(session);
+    if let Some(mode_id) = resolve_mode(&modes, &policy) {
+        return Ok(
+            (current.as_deref() != Some(&mode_id)).then_some(SessionSettingOp::SetMode { mode_id })
+        );
+    }
+    if let Some((config_id, value)) = resolve_mode_config_value(&session["configOptions"], &policy)
+    {
+        return Ok(Some(SessionSettingOp::SetConfig { config_id, value }));
+    }
+    if !modes.is_empty() {
+        return Err(ExecutionPolicyError("ACP provider advertises modes but no full-access mode; refusing to run a sandboxed replacement".into()).into());
+    }
+    Ok(None)
 }
 
 async fn load_session_projection(
@@ -915,6 +972,76 @@ fn agent_server_command(def: &AcpAgentDef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_access_modes_are_applied_or_fail_closed() {
+        for mode in ["full-access", "agent-full-access"] {
+            let response = json!({"modes":{"currentModeId":"auto","availableModes":[{"id":"auto"},{"id":mode}]}});
+            assert!(
+                matches!(execution_mode(&response).unwrap(), Some(SessionSettingOp::SetMode { mode_id }) if mode_id == mode)
+            );
+            let current = json!({"modes":{"currentModeId":mode,"availableModes":[{"id":mode}]}});
+            assert!(execution_mode(&current).unwrap().is_none());
+        }
+        assert!(
+            execution_mode(&json!({"modes":{"availableModes":[{"id":"read-only"}]}}))
+                .unwrap_err()
+                .is::<ExecutionPolicyError>()
+        );
+        let config = json!({"configOptions":[{"id":"mode","options":[{"value":"full-access","name":"Full access"}]}]});
+        assert!(
+            matches!(execution_mode(&config).unwrap(), Some(SessionSettingOp::SetConfig { value, .. }) if value == "full-access")
+        );
+    }
+
+    #[tokio::test]
+    async fn new_load_and_resume_share_meta_and_full_access_policy() {
+        for method in ["session/new", "session/load", "session/resume"] {
+            let directory = tempfile::tempdir().unwrap();
+            let fixture = directory.path().join("policy.py");
+            std::fs::write(
+                &fixture,
+                include_str!("../../tests/fixtures/policy_acp_agent.py"),
+            )
+            .unwrap();
+            let command = shell_words::join(["python3", fixture.to_str().unwrap(), method]);
+            let runtime = AcpRuntime::catalog(Some(command), 8000, None);
+            let def = runtime.agent_def(Some("custom")).unwrap();
+            let key = if method == "session/new" {
+                runtime.start_session(&def, directory.path()).await.unwrap()
+            } else {
+                runtime
+                    .load_session(&def, directory.path(), "existing")
+                    .await
+                    .unwrap()
+            };
+            let trace: Vec<Value> =
+                std::fs::read_to_string(directory.path().join("requests.jsonl"))
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+            let session = trace
+                .iter()
+                .find(|request| request["method"] == method)
+                .unwrap();
+            assert_eq!(session["params"]["_meta"]["yoloMode"], true);
+            let setting = trace
+                .iter()
+                .find(|request| request["method"] == "session/set_mode")
+                .unwrap();
+            assert_eq!(setting["params"]["modeId"], "full-access");
+            assert_eq!(
+                setting["params"]["sessionId"],
+                if method == "session/new" {
+                    "created"
+                } else {
+                    "existing"
+                }
+            );
+            assert!(runtime.session_loaded(&key));
+        }
+    }
 
     #[test]
     fn grok_always_auto_allows() {

@@ -53,6 +53,11 @@ struct Args {
     state_dir: Option<PathBuf>,
     #[arg(long, help = "Load this existing provider session id")]
     session_id: Option<String>,
+    #[arg(
+        long,
+        help = "Verify native session writer compatibility without loading or writing the session"
+    )]
+    check_session_load: bool,
     #[arg(long, env = "TOWER_URL", help = "Optional TOWER App base URL")]
     tower_url: Option<String>,
     #[arg(
@@ -74,6 +79,34 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    if args.check_session_load {
+        let harness = args
+            .harness
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--harness required for --check-session-load"))?;
+        if !matches!(harness, Harness::Codex) {
+            anyhow::bail!("--check-session-load currently verifies Codex writers only");
+        }
+        let mut def = treer_acp_launcher::acp::builtin_agents(None)
+            .into_iter()
+            .find(|def| def.id == "codex")
+            .unwrap();
+        def.base_command = args
+            .base_command
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--base-command required"))?;
+        def.server_command = args
+            .server_command
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--server-command required"))?;
+        let session_id = args
+            .session_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--session-id required"))?;
+        let info = treer_acp_launcher::acp::load_safety::check_codex_load(&def, session_id).await?;
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
     let cwd = args.cwd.canonicalize().unwrap_or(args.cwd);
     let state_dir = args
         .state_dir

@@ -68,7 +68,12 @@ import os,sys
 from pathlib import Path
 args=sys.argv[1:];target=Path(args[args.index('--target-dir')+1])/'release/treer-acp'
 target.parent.mkdir(parents=True,exist_ok=True)
-target.write_text('#!/bin/sh\nprintf "%s\\n" "'+os.environ.get('MOCK_BUILD_TAG','version-one')+'"\n')
+target.write_text("""#!/bin/sh
+if [ "$1" = --check-session-load ]; then
+ if [ -n "${MOCK_LOAD_UNSAFE:-}" ]; then echo 'Refusing native Codex load: embedded 0.137.0 != native 0.162.1; missing ordinal risk' >&2; exit 42; fi
+ echo '{"writer_codex_version":"0.162.1"}'; exit 0
+fi
+printf "%s\\n" """+'"'+os.environ.get('MOCK_BUILD_TAG','version-one')+'"\n')
 target.chmod(0o755)
 '''
 
@@ -256,8 +261,34 @@ class InstallTest(unittest.TestCase):
     def test_detached_restart_load_failure_sends_summary_and_saves_new_session(self):
         self.exercise_detached_switch("replacement-session")
 
+    def test_unsafe_native_switch_fails_before_startup_or_restart(self):
+        self.install()
+        cwd = self.machine / "project"
+        cwd.mkdir()
+        sessions = self.state / "home/.codex/sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "one.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": "native-one", "cwd": str(cwd)}}) + "\n")
+        env = {**self.env, "HOME": str(self.state / "home"), "MOCK_LOAD_UNSAFE": "1"}
+        before = (self.state / "calls.jsonl").read_text()
+        for dry in [[], ["--dry-run"]]:
+            result = subprocess.run([str(ROOT / "scripts/switch.sh"), "--agent", "codex", *dry],
+                cwd=cwd, env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("startup was not changed", result.stderr)
+            self.assertIn("missing ordinal", result.stderr)
+        new_calls = (self.state / "calls.jsonl").read_text()[len(before):]
+        self.assertNotIn('"startup"', new_calls)
+        self.assertNotIn('"restart"', new_calls)
+
 
 class SessionTest(unittest.TestCase):
+    def test_probe_refuses_a_live_store_without_spawning_an_adapter(self):
+        with patch.object(native.subprocess, "Popen") as spawn:
+            result = native.probe(["codex-acp"], Path.cwd(), "native")
+            self.assertFalse(result["loaded"])
+            self.assertIn("not read-only", result["reason"])
+            spawn.assert_not_called()
+
     def test_discovery_filters_cwd_then_uses_latest_modification(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

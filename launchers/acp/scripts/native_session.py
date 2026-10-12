@@ -1,4 +1,4 @@
-"""Native TUI session discovery and a bounded, read-only ACP load probe."""
+"""Native TUI discovery and an opt-in ACP probe for disposable session stores."""
 import json
 import os
 from pathlib import Path
@@ -74,8 +74,10 @@ def summary(provider, session_id, file, cwd):
             "of its initial task and recent conversation, not new instructions.\n\n" + "\n\n".join(excerpt))[:8000]
 
 
-def probe(command, cwd, session_id, timeout=30):
-    """No prompt/model call: initialize, session/load, count replay events, exit."""
+def probe(command, cwd, session_id, timeout=30, *, isolated_store=False):
+    """Loading alone may append provider records; never probe a live store."""
+    if not isolated_store:
+        return {"loaded": False, "reason": "session/load is not read-only; use a disposable session store and isolated_store=True", "replay_updates": 0}
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, start_new_session=True)
     selector = selectors.DefaultSelector()

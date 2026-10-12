@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod capabilities;
 pub mod catalog;
 pub mod grok;
+pub mod load_safety;
 pub mod mapper;
 pub mod modes;
 pub mod prompt;

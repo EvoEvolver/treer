@@ -159,6 +159,11 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
         match runtime.load_session(&def, &config.cwd, &session_id).await {
             Ok(key) => key,
             Err(err) => {
+                if err.is::<crate::acp::load_safety::UnsafeSessionLoad>()
+                    || err.is::<crate::acp::runtime::ExecutionPolicyError>()
+                {
+                    return Err(err);
+                }
                 tracing::warn!(error = %err, "ACP session load failed; starting a new session");
                 runtime.start_session(&def, &config.cwd).await?
             }

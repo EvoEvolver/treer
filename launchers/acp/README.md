@@ -190,6 +190,16 @@ the cached descriptor when the Agent process is still the same. `--session-id`
 is supported by the launcher script for an explicit custom profile, but no
 workspace-wide session-discovery API is added to Core.
 
+New, loaded, and resumed sessions all receive the same adapter metadata,
+including `yoloMode=true`. After the provider responds, the runtime selects its
+advertised full-access mode (`full-access` / `agent-full-access`) with
+`session/set_mode`, or the equivalent mode config option. A provider advertising
+modes without full access, or failing the mode change, fails startup; it does
+not silently run sandboxed or replace the requested conversation with a new
+one. Providers without a mode surface continue to receive the metadata policy.
+This grants machine-account execution authority, not a Treer sandbox. The
+browser file API remains restricted to cwd.
+
 Generated binaries, UI checkouts, dependencies, and assets stay under
 `launchers/acp/.build/` and are ignored by Git.
 
@@ -222,8 +232,42 @@ session then runs `treer agent restart self`, surviving termination of the old
 PTY process group on Linux/macOS. It does not rely on `nohup` alone. Startup
 always stays self-only and cwd remains relative to `machine.root`.
 
-The existing runtime first tries ACP session loading. If loading fails, it
-starts a fresh session. The helper waits for the new run generation and AIS
+Before saving startup (also during dry-run), Codex switching invokes the
+installed runtime's `--check-session-load` preflight. Startup and automatic
+journal recovery perform the same check before spawning an adapter for a load.
+The deprecated `@zed-industries/codex-acp 0.16.0` embeds Codex 0.137.0,
+[as recorded in its Cargo dependencies](https://github.com/zed-industries/codex-acp/blob/v0.16.0/Cargo.toml).
+With native Codex 0.162.1 this is a mismatched writer, so direct load is refused
+before it can open the original rollout. Unknown adapter/core provenance is
+also refused. These safety errors are fatal and never use the fresh-session
+fallback. A preflight failure prints the writer/native versions and leaves
+startup unchanged. Install a launcher containing this check before switching;
+older launcher binaries cannot perform the new preflight.
+
+Recommended and tested on 2026-10-12, macOS arm64:
+`@agentclientprotocol/codex-acp 2.2.2` with native `codex-cli 0.162.1`.
+The maintained adapter uses app-server and supports
+[`CODEX_PATH`](https://github.com/agentclientprotocol/codex-acp/blob/main/src/index.ts).
+The launcher sets that variable to the resolved `--base-command` executable,
+overriding any inherited value, so it uses the exact native Codex writer
+instead of a separately installed/bundled core. Keep the npm package metadata
+next to the adapter executable; standalone binaries and arbitrary wrapper
+commands with unverifiable provenance are intentionally rejected for native
+loads. A base command with extra arguments is also rejected for this check.
+No adapter installation or running Agent is changed automatically.
+
+Do not load modern native sessions with the deprecated adapter as a probe:
+even `session/load` without a model prompt can write to the rollout. Old records
+without `ordinal` can make native paginated `thread/resume` fail. This guard
+prevents new contamination; it does not repair already damaged files. Preserve
+the original and backups. If investigating an incompatible writer, use a
+disposable `CODEX_HOME` containing a private copy, never a symlink to the live
+store. The optional Python probe refuses to run unless the caller explicitly
+confirms a disposable store with `isolated_store=True`.
+
+The runtime first tries ACP session loading. Ordinary provider load errors can
+start a fresh session; unsafe writer and execution-policy errors stop startup.
+The helper waits for the new run generation and AIS
 registration, reads the actual session ID from that Agent's local journal, and
 only on fallback submits the summary as the first handoff prompt through the
 private AIS. This prompt has a stable operation ID for deduplication. It also
@@ -241,9 +285,10 @@ credential forwarding, or sandbox is introduced.
 
 ### Native Session Load Measurements
 
-On 2026-10-11 (Toronto), macOS arm64, `codex-cli 0.162.1` and Claude Code
-`2.1.296`, read-only ACP probes initialized the real adapters and called
-`session/load` on existing native TUI transcripts. No model prompt was sent.
+Historical observations on 2026-10-11 (Toronto), macOS arm64, with
+`codex-cli 0.162.1` and Claude Code `2.1.296` called `session/load` without a
+model prompt. These were **not read-only operations** and do not establish a
+safe round trip to the native CLI:
 
 | Adapter package | Native history load |
 | --- | --- |
@@ -252,20 +297,37 @@ On 2026-10-11 (Toronto), macOS arm64, `codex-cli 0.162.1` and Claude Code
 | `@zed-industries/claude-agent-acp 0.23.1` | Succeeded; 193 replay updates |
 | `@agentclientprotocol/claude-agent-acp 0.89.1` | Succeeded; 145 replay updates |
 
-The deprecated Zed package names and newer package names both expose the same
-CLI executable names. These are local compatibility observations, not a claim
-that every native transcript or adapter version can load. Replay establishes
-history loading; it does not establish successful model continuation after a
-live Treer restart. The fallback and detached restart paths are covered by
-isolated script tests with a simulated Treer Controller/AIS.
+The newer adapter's historical rejection does not establish that clean native
+sessions are incompatible. The 2026-10-12 regression used a newly created native
+session in an independent `CODEX_HOME`, then loaded it with adapter 2.2.2 and
+the pinned native 0.162.1 writer in a temporary Treer Agent. `treer whoami`
+succeeded as that Agent, a shell write outside cwd succeeded, and native
+`thread/resume` still accepted the same rollout after the ACP turn. The
+temporary Agent was deleted. The old adapter preflight was rejected without
+changing the disposable rollout's SHA256. Existing native sessions and
+read-only recovery backups were not used or changed.
 
 Run launcher checks with:
 
 ```sh
 python3 -m unittest discover -s launchers/acp/tests -v
 cargo test --locked --manifest-path launchers/acp/runtime/Cargo.toml
+cargo clippy --locked --manifest-path launchers/acp/runtime/Cargo.toml --all-targets -- -D warnings
 sh -n launchers/acp/install.sh launchers/acp/scripts/apply.sh \
   launchers/acp/scripts/treer-agent.sh launchers/acp/scripts/switch.sh
+```
+
+The real Codex check is opt-in, uses existing credentials for inference, copies
+auth/config privately into a disposable store, and creates/deletes its own
+temporary Agent. It does not install adapters, restart Host/Controller, or use
+existing native sessions. Build the debug runtime first and pass the maintained
+adapter's absolute path (optionally add `--old-adapter` to test its rejection):
+
+```sh
+cargo build --locked --manifest-path launchers/acp/runtime/Cargo.toml
+python3 launchers/acp/tests/live_codex_load.py \
+  --adapter /absolute/path/to/maintained/codex-acp \
+  --old-adapter /absolute/path/to/deprecated/codex-acp
 ```
 
 ## Optional TOWER Capture
