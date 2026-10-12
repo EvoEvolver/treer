@@ -305,6 +305,18 @@ class Tests(unittest.TestCase):
         self.assertEqual(denied.exception.code, "recipient_denied")
         self.assertEqual(self.api.email_requests, [])
 
+    def test_pending_intent_cannot_be_retargeted_by_contact_rebinding(self):
+        request=self.request(to="member-u1")
+        with patch.object(self.app,"core",side_effect=e.mail.AppApiError("app_api_unavailable","offline")):
+            with self.assertRaises(e.mail.AppApiError): self.app.notify("agent",request,"pending")
+        self.app.contacts[0]["user_id"]="u2"
+        with self.assertRaises(e.Error) as denied: self.app.notify("agent",request,"pending")
+        self.assertEqual(denied.exception.code,"recipient_changed")
+        self.assertFalse(self.api.messages)
+        self.app.contacts[0]["user_id"]="u1"
+        self.app.notify("agent",request,"pending")
+        self.assertEqual(next(iter(self.api.messages.values()))["recipients"],["u1"])
+
     def test_oauth_browser_binding_replay_expiry_and_nonmember(self):
         def start(browser):
             url = self.app.start_oauth("/", browser)

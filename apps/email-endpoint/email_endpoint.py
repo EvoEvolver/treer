@@ -370,6 +370,9 @@ class Application(mail.MailApplication):
                     raise Error(
                         409, "Idempotency key content changed", "idempotency_conflict"
                     )
+                t = db.execute("SELECT * FROM threads WHERE id=?", (old["thread"],)).fetchone()
+                if not t or (t["agent"], t["recipient"], t["contact"], t["email"]) != (agent, recipient, contact, address):
+                    raise Error(409, "Original notification recipient binding changed", "recipient_changed")
                 if old["message"]:
                     return self.notification_result(dict(old))
                 n = dict(old)
@@ -400,7 +403,6 @@ class Application(mail.MailApplication):
                         or t["agent"] != agent
                         or t["recipient"] != recipient
                         or t["contact"] != contact
-                        or t["email"] != address
                         or t["email"] != address
                     ):
                         raise Error(
