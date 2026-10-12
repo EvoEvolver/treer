@@ -825,7 +825,7 @@ fn nohup_stop_discards_a_reused_pid_without_signaling_it() {
     fs::remove_dir_all(directory).expect("remove nohup state directory");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn nohup_launcher_detaches_and_stops_the_recorded_process() {
     use std::os::unix::fs::PermissionsExt;
@@ -850,13 +850,30 @@ fn nohup_launcher_detaches_and_stops_the_recorded_process() {
         .expect("read PID record")
         .expect("PID record");
     assert!(nohup_process_is_current(&process).expect("inspect fake Host"));
+    // An own process group keeps the Host alive when the caller's group is
+    // reaped, as launchd does when a job that ran `service restart` exits.
+    let process_group = |pid: u32| {
+        let output = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .expect("read process group");
+        String::from_utf8(output.stdout)
+            .expect("UTF-8 process group")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric process group")
+    };
+    assert_ne!(
+        process_group(process.pid),
+        process_group(std::process::id())
+    );
     stop_nohup(&paths, &config, true).expect("stop detached fake Host");
     assert!(!nohup_pid_path(&paths, &config).exists());
 
     fs::remove_dir_all(directory).expect("remove nohup lifecycle directory");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn nohup_test_service(label: &str) -> (PathBuf, ServicePaths, ServiceConfig) {
     let directory = std::env::temp_dir().join(format!(
         "treer-nohup-{label}-{}",

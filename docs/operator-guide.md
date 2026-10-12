@@ -264,8 +264,11 @@ treer-agent-server connect \
 `connect` decodes the workspace ID from the key, uses the current directory as
 the workspace root, registers the Host service, and starts it. Before exchanging
 the single-use key, it validates local paths and binaries. On Linux and macOS,
-`auto` starts the Host detached with `nohup`, records its PID and process start
-identity, and writes output under the Treer state directory. This mode
+`auto` starts the Host detached with `nohup` in its own process group, records
+its PID and process start identity, and writes output under the Treer state
+directory. The separate process group keeps the Host and its workloads alive
+when the command that started it is reaped, for example when a launchd job or
+CI step that ran `service restart` exits. This mode
 deliberately provides no start-at-boot or Host crash restart. Select a native
 user service explicitly with `--service-mode systemd` on Linux or
 `--service-mode launchd` on macOS; attached diagnostics remain available with

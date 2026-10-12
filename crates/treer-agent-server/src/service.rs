@@ -1954,14 +1954,24 @@ fn start_nohup_with(nohup: &OsStr, paths: &ServicePaths, config: &ServiceConfig)
         .open(&log_path)
         .with_context(|| format!("failed to open {}", log_path.display()))?;
     drop(log);
-    let output = Command::new("sh")
+    let mut launcher = Command::new("sh");
+    launcher
         .arg("-c")
         .arg(r#""$1" "$2" run --config "$3" </dev/null >>"$4" 2>&1 & printf '%s\n' "$!""#)
         .arg("treer-nohup")
         .arg(nohup)
         .arg(&paths.host_executable)
         .arg(&paths.host_config)
-        .arg(&log_path)
+        .arg(&log_path);
+    // The Host must outlive whatever started it. A caller's process group can
+    // be reaped as a unit (launchd kills a job's process group when the job
+    // exits), so the launcher shell and the Host it backgrounds start in their
+    // own process group. nohup already covers terminal hangup.
+    {
+        use std::os::unix::process::CommandExt;
+        launcher.process_group(0);
+    }
+    let output = launcher
         .output()
         .with_context(|| format!("failed to start {}", PathBuf::from(nohup).display()))?;
     require_success(output.status, "nohup Host launcher")?;

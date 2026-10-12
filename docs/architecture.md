@@ -257,8 +257,9 @@ command action; either case keeps the machine connection alive during rolling
 upgrades. New command variants must declare a capability unless they are part
 of the protocol-v4 baseline.
 
-Automatic mode starts the Host as a detached `nohup` process on Linux and
-macOS. Treer records the PID and process start identity and redirects output to
+Automatic mode starts the Host as a detached `nohup` process in its own process
+group on Linux and macOS, so reaping the caller's process group does not stop
+the Host. Treer records the PID and process start identity and redirects output to
 its state directory so lifecycle commands can reject reused PIDs and manage the
 correct Host. Both Agent and App workloads save a resolved launch snapshot before process creation,
 including stable Agent ID, argv, cwd, dimensions, credential, and desired state.
