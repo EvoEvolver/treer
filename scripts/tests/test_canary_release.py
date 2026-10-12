@@ -72,6 +72,11 @@ class ReleaseTest(unittest.TestCase):
                 release.deploy(self.root, self.args(notify="leader", agent="release-eng"))
         self.assertFalse((self.root / ".treer").exists())
 
+    def test_expected_caller_accepts_canonical_role_path(self):
+        agent = {"agent": {"agent_id": "ag_release", "name": "release-eng", "path": "/treer-dev-team/release-eng"}}
+        with patch.object(release, "run", return_value=json.dumps(agent)):
+            self.assertEqual(release.checked_identity(self.root, "/treer-dev-team/release-eng"), "ag_release")
+
     def test_push_refuses_a_remote_commit_missing_from_the_candidate(self):
         self.git("checkout", "-b", "remote-change")
         (self.root / "source.txt").write_text("remote update\n")

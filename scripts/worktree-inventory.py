@@ -46,7 +46,9 @@ def inventory(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
+    checkout = Path(__file__).resolve().parent.parent
+    common = Path(git(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    parser.add_argument("--root", type=Path, default=common.parent)
     args = parser.parse_args()
     print(json.dumps(inventory(args.root), indent=2))
 

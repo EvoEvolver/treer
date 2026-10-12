@@ -21,7 +21,7 @@ def git(root, *args):
 
 def checked_identity(root, expected):
     agent = json.loads(run("treer", "whoami", cwd=root, capture=True))["agent"]
-    if expected not in (agent["agent_id"], agent["name"]):
+    if expected not in (agent["agent_id"], agent.get("path"), agent["name"]):
         raise RuntimeError(f"caller is {agent['name']} ({agent['agent_id']}), expected {expected}; "
                            "run from the intended Agent, never copy peer credentials")
     return agent["agent_id"]
