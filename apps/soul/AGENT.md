@@ -21,8 +21,9 @@ treer-soul incarnate checkpoint --machine target-machine
 treer-soul delete soul_ID
 ```
 
-Default `--session self` selects an explicit runtime session or one unambiguous
-cwd match. Pass --session UUID for ambiguity. Default redaction modifies copies
+Default `--session self` selects the current own AIS thread, own Agent-private
+saved thread or confirmed native session environment ID. It never guesses self
+from a shared cwd. Pass --session UUID when self identity is unavailable. Default redaction modifies copies
 only. The server rejects detected secrets unless --allow-secrets is explicit;
 transcripts remain sensitive even when scanning finds nothing. Generic upload
 supports --manifest and --file ARCHIVE_PATH=LOCAL_PATH.

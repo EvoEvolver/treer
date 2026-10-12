@@ -71,7 +71,13 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         else: self.assertNotEqual(result.returncode,0,result.stdout)
         return result
 
+    def saved_self(self):
+        directory=self.cwd/'.treer/agents/ag_owner'
+        directory.mkdir(parents=True,exist_ok=True)
+        (directory/'agent-ui.json').write_text(json.dumps({'threadId':SID}))
+
     def claude(self,secret=False):
+        self.saved_self()
         project=self.home/'.claude/projects'/project_key(self.cwd)
         (project/'memory').mkdir(parents=True)
         session=project/(SID+'.jsonl')
@@ -82,6 +88,7 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         return session
 
     def codex(self):
+        self.saved_self()
         config=self.home/'.codex'
         folder=config/'sessions/2026/10/12'
         folder.mkdir(parents=True)
@@ -129,6 +136,7 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.claude()
         project=self.home/'.claude/projects'/project_key(self.cwd)
         (project/'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl').write_text('{}\n')
+        (self.cwd/'.treer/agents/ag_owner/agent-ui.json').unlink()
         self.call('save','--harness','claude',success=False)
         self.call('save','--harness','claude','--session',SID)
 

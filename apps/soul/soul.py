@@ -839,13 +839,14 @@ class SoulHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _json(self, status: int, value: object, head: bool = False) -> None:
-        self._bytes(status, (json.dumps(value, sort_keys=True) + "\n").encode(), "application/json", head=head)
+        self._bytes(status, (json.dumps(value, sort_keys=True) + "\n").encode(), "application/json; charset=utf-8", head=head)
 
     def _error(self, error: SoulError, head: bool = False) -> None:
         self._json(error.status, {"error": {"code": error.code, "message": error.message, **getattr(error, "details", {})}}, head=head)
 
     def log_message(self, format: str, *args: object) -> None:
-        print(f"soul {self.address_string()} {format % args}", file=sys.stderr)
+        # Query strings/names can themselves contain secrets; never log request targets.
+        print("soul request completed", file=sys.stderr)
 
 
 def parse_listen(value: str) -> tuple[str, int]:

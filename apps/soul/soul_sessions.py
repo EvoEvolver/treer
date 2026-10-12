@@ -45,6 +45,8 @@ def export_session(harness, session, cwd, destination):
     if session in (None, 'self'):
         keys = ('CLAUDE_SESSION_ID', 'TREER_SESSION_ID') if harness == 'claude' else ('CODEX_SESSION_ID', 'CODEX_THREAD_ID', 'TREER_SESSION_ID')
         session = next((os.environ[k] for k in keys if os.environ.get(k)), None)
+        if not session:
+            raise RuntimeError('Cannot identify own self session; pass --session ID explicitly')
     if session and not UUID.fullmatch(session):
         raise RuntimeError('Session ID must be a UUID')
     home = Path.home()

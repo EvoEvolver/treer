@@ -69,9 +69,9 @@ ID pins a specific immutable snapshot. List supports `--name`, `--harness`,
 `--owner`, `--limit`, `--offset`; follow next_offset until null.
 
 Self selection first asks its own Controller-registered AIS for the current thread,
-then uses confirmed session environment IDs or an unambiguous session
-matching the resolved cwd; it refuses ambiguity rather than choosing the newest
-shared session. Claude captures project JSONL, project `memory/`, and `CLAUDE.md`.
+then reads its own Agent-private saved thread or confirmed native session
+environment ID. It never infers self from a shared cwd or selects the newest
+session; missing authority needs an explicit --session. Claude captures project JSONL, project `memory/`, and `CLAUDE.md`.
 Codex captures rollout plus matching shell snapshot. No auth/config credential
 files are exported. Snapshot consistency retries are bounded; original sessions
 are never modified. `soul_sessions.py` isolates this native format logic pending
@@ -188,7 +188,7 @@ deployment/migration/remote-machine acceptance remains the leader's responsibili
 Native session formats vary by harness/version; JSONL includes historical source
 paths even though structured cwd is rebased for restore. Claude project storage is
 isolated by cwd, not an OS sandbox. Codex target login uses a local symlink and may
-change if the machine login changes. Self ambiguity needs explicit --session.
+change if the machine login changes. Missing self session identity needs explicit --session.
 No cross-owner mutable sharing, refresh tokens, background migration, scheduling,
 secure disk erase, or remote download cache. Response/archive materialization and
 list filtering currently use bounded-request in-memory processing; quotas are

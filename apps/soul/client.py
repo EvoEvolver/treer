@@ -142,14 +142,29 @@ def redact_file(path, counts):
             counts[category] = counts.get(category, 0) + count
 
 
-def self_session(harness):
+def self_session(harness, cwd=None):
     # Ask the authenticated Controller for THIS Agent's registered AIS port.
     # Never use a default UI port which may belong to a different Agent.
     try:
         descriptor = json.loads(treer('interface', 'show'))
     except (RuntimeError, ValueError):
-        return None
+        descriptor = None
     if not descriptor:
+        if cwd is None: return None
+        who = json.loads(treer('whoami'))
+        actor = who.get('agent', {}).get('agent_id', '')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', actor):
+            raise RuntimeError('Cannot identify own Agent for self session discovery')
+        directory = Path(cwd).resolve() / '.treer/agents' / actor
+        for name in ('agent-ui.json','codex-ui.json'):
+            file = directory / name
+            if file.is_file() and not file.is_symlink():
+                saved = json.loads(file.read_text())
+                session = saved.get('threadId')
+                from soul_sessions import UUID
+                if not isinstance(session, str) or not UUID.fullmatch(session):
+                    raise RuntimeError('Saved own Agent session ID is invalid')
+                return session
         return None
     port = descriptor.get('port')
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
@@ -176,7 +191,7 @@ def command_save(args):
     with tempfile.TemporaryDirectory(prefix='treer-soul-save-') as temp:
         root=Path(temp)
         root.chmod(0o700)
-        session = self_session(args.harness) if args.session == 'self' else args.session
+        session = self_session(args.harness, args.cwd) if args.session == 'self' else args.session
         adapter=export_session(args.harness,session or args.session,args.cwd,root)
         who=json.loads(treer('whoami'))
         source_machine=who.get('machine',{}).get('server_id')
