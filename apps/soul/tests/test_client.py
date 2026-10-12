@@ -337,6 +337,26 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertNotIn('hidden',json.dumps(clean))
         self.assertGreaterEqual(sum(counts.values()),3)
 
+    def test_import_rejects_unrelated_claude_home_selector(self):
+        from unittest.mock import patch
+        import soul_sessions
+        bundle=self.root/'selector-bundle'
+        file=bundle/'files/session/session.jsonl'
+        file.parent.mkdir(parents=True);file.write_text('{}\n')
+        state=self.root/'selector-state';state.mkdir()
+        adapter=dict(name='claude',session_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',source_session_id=SID,
+                     transfer_files=[dict(scope='session',path='session.jsonl',file='files/session/session.jsonl')])
+        local=self.root/'known-claude'
+        unrelated=self.root/'someone-else-claude'
+        result=dict(sessionId=adapter['session_id'],cwd=str(state/'native'),environment={'CLAUDE_CONFIG_DIR':str(unrelated)})
+        with patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':str(local)}), patch.object(soul_sessions,'transfer_cli',return_value='/unused'), patch.object(soul_sessions,'run_transfer',return_value=result):
+            with self.assertRaisesRegex(RuntimeError,'unrelated Claude home'):
+                soul_sessions.import_session(bundle,adapter,state/'workspace',state)
+            result['environment']['CLAUDE_CONFIG_DIR']=str(local)
+            environment,cwd=soul_sessions.import_session(bundle,adapter,state/'workspace',state)
+            self.assertEqual(environment['CLAUDE_CONFIG_DIR'],str(local))
+            self.assertEqual(Path(cwd),(state/'native').resolve())
+
 
 if __name__=='__main__':
     environment=sealed_environment()
