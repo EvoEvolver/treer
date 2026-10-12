@@ -11,6 +11,7 @@ import platform
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -91,6 +92,19 @@ def run(argv, home, timeout=20, bin_dir=None, config_dir=None):
         if directory.parts[-2:] != ("treer", "agent-servers"):
             raise RuntimeError("config directory must end in treer/agent-servers")
         environment["XDG_CONFIG_HOME"] = str(directory.parent.parent)
+    if bin_dir and sys.platform == "linux":
+        # systemctl --user needs the target user's own bus even under env -i.
+        # Derive it on the target; never forward the caller's bus/environment.
+        runtime = Path(f"/run/user/{os.getuid()}")
+        try:
+            info = runtime.stat()
+            if info.st_uid == os.getuid() and stat.S_ISDIR(info.st_mode) and not info.st_mode & 0o077:
+                environment["XDG_RUNTIME_DIR"] = str(runtime)
+                bus = runtime / "bus"
+                if bus.is_socket():
+                    environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+        except FileNotFoundError:
+            pass
     result = subprocess.run(argv, env=environment, stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=timeout)
     if result.returncode:

@@ -1355,6 +1355,9 @@ remote copies use bounded chunks and must still match the online Canary
 checksum manifest. Redirects and non-HTTPS artifact authorities are rejected
 except loopback test servers. Inherited workload credentials, UI settings and
 proxy variables are absent from the detached worker and service commands.
+For Linux user-service control, the worker derives the target user's private
+`/run/user/UID` and bus socket locally; it does not inherit a caller's DBus
+address. An explicit configuration directory is mapped to `XDG_CONFIG_HOME`.
 
 The worker checks and stages binaries, executes `--version`, backs up installed
 files under `~/.local/share/treer-backups/<old-commit>-<timestamp>-<job>/`, then

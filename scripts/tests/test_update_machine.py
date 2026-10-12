@@ -265,6 +265,20 @@ class TransportTest(unittest.TestCase):
             self.assertEqual(source.read_bytes(), target.read_bytes())
             self.assertLess(max(map(len, commands)), 34_000)
 
+    def test_clean_service_command_derives_only_the_private_target_user_bus(self):
+        for owner, mode, allowed in [(1000, 0o40700, True), (1001, 0o40700, False), (1000, 0o40777, False)]:
+            info = os.stat_result((mode, 0, 0, 1, owner, 1000, 0, 0, 0, 0))
+            with patch.object(update.sys, "platform", "linux"), patch.object(update.os, "getuid", return_value=1000), \
+                 patch.object(Path, "stat", return_value=info), patch.object(Path, "is_socket", return_value=True), \
+                 patch.object(update.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "ok", "")) as run:
+                update.run(["fake-controller", "service"], "/home/test", bin_dir="/home/test/bin")
+                environment = run.call_args.kwargs["env"]
+                self.assertEqual("XDG_RUNTIME_DIR" in environment, allowed)
+                self.assertEqual("DBUS_SESSION_BUS_ADDRESS" in environment, allowed)
+                if allowed:
+                    self.assertEqual(environment["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/run/user/1000/bus")
+                self.assertNotIn("TREER_WORKLOAD_CREDENTIAL", environment)
+
     def test_detached_worker_survives_launcher_and_has_clean_environment(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
