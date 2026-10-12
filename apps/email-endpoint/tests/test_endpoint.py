@@ -305,6 +305,18 @@ class Tests(unittest.TestCase):
         self.assertEqual(denied.exception.code, "recipient_denied")
         self.assertEqual(self.api.email_requests, [])
 
+    def test_tightened_allowlist_rejects_persisted_queue_after_restart(self):
+        n=self.app.notify("agent",self.request(),"before-restriction")
+        self.app.settings.allowlist=["@other.test"]
+        recovered=e.Application(self.app.settings,self.api,tree_loader=lambda:self.api.tree,token_loader=lambda:"endpoint-token")
+        recovered.deliver()
+        status=recovered.status(n["id"],"agent")
+        self.assertEqual(status["status"],"failed")
+        self.assertEqual(status["error"],"recipient_denied")
+        self.assertFalse((Path(self.tmp.name)/"outbox").exists())
+        self.assertEqual(self.api.email_requests,[])
+        with self.assertRaises(e.Error): recovered.notify("agent",self.request(),"new-denied")
+
     def test_pending_intent_cannot_be_retargeted_by_contact_rebinding(self):
         request=self.request(to="member-u1")
         with patch.object(self.app,"core",side_effect=e.mail.AppApiError("app_api_unavailable","offline")):

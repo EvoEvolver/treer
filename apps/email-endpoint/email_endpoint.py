@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 import hashlib
-import base64
 import html
 import json
 import os
@@ -328,12 +327,16 @@ class Application(mail.MailApplication):
         if not c["reply_available"]:
             raise Error(409, "Contact requires active workspace membership and administrator binding", "reply_unavailable")
         address = c["email"]
+        self.admit_address(address)
+        return c["user_id"], address, c["id"]
+
+    def admit_address(self, address):
+        # Shared by new intents and durable queued deliveries after config changes.
         if self.settings.allowlist and not any(address == a.lower() or
                 (a.startswith("@") and address.rsplit("@", 1)[1] == a[1:].lower()) for a in self.settings.allowlist):
             raise Error(403, "Recipient is outside the configured allowlist", "recipient_denied")
         if self.settings.mode == "proxy" and address != "doomspec@outlook.com":
             raise Error(403, "Real delivery is restricted to the approved recipient", "recipient_denied")
-        return c["user_id"], address, c["id"]
 
     def notify(self, token, request, key):
         agent = self.principal(token)["sub"]
@@ -637,8 +640,7 @@ class Application(mail.MailApplication):
                     contact = next((c for c in self.contact_view(token) if c["id"] == n["contact"] and c["email"] == n["email"] and c.get("user_id") == n["recipient"] and c["reply_available"]), None)
                     if not contact:
                         raise Error(403, "Contact binding revoked", "recipient_denied")
-                    if transport == "proxy" and n["email"] != "doomspec@outlook.com":
-                        raise Error(403, "Real recipient denied", "recipient_denied")
+                    self.admit_address(n["email"])
                     if transport == "proxy":
                         try:
                             self.api.request(
