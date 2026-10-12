@@ -1,5 +1,9 @@
 #!/bin/sh
+set +x
 set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_dir/canary-auth.sh"
 
 project_id=${TREER_RAILWAY_PROJECT_ID:-09d4eeeb-cc5a-49e5-bcfe-f43c1c1b112b}
 environment=${TREER_CANARY_ENVIRONMENT:-canary}
@@ -18,9 +22,8 @@ machine_a=${TREER_CANARY_MACHINE_A_NAME:-canary-a}
 machine_b=${TREER_CANARY_MACHINE_B_NAME:-canary-b}
 workspace_id=canary-e2e
 test_email=canary-tester@treer.invalid
-tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/treer-canary.XXXXXX")
-admin_cookies="$tmp_dir/admin.cookies"
-user_cookies="$tmp_dir/user.cookies"
+admin_cookies=
+user_cookies=
 agent_ids=
 treer_service_id=
 ingress_id=
@@ -34,7 +37,7 @@ api() {
     api_path=$2
     data=${3:-}
     if [ -n "$data" ]; then
-        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" -c "$user_cookies" \
+        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" \
             -X "$method" -H 'Content-Type: application/json' --data "$data" \
             "$proxy_url$api_path"); then
             printf 'Treer API %s %s failed: %s\n' "$method" "$api_path" "$api_response" >&2
@@ -42,13 +45,13 @@ api() {
         fi
     elif [ "$method" = GET ]; then
         if ! api_response=$(curl -sS --fail-with-body --retry 5 --retry-delay 1 \
-            --retry-all-errors -b "$user_cookies" -c "$user_cookies" \
+            --retry-all-errors -b "$user_cookies" \
             "$proxy_url$api_path"); then
             printf 'Treer API GET %s failed: %s\n' "$api_path" "$api_response" >&2
             return 1
         fi
     else
-        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" -c "$user_cookies" \
+        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" \
             -X "$method" "$proxy_url$api_path"); then
             printf 'Treer API %s %s failed: %s\n' "$method" "$api_path" "$api_response" >&2
             return 1
@@ -64,7 +67,7 @@ cleanup() {
         echo "Keeping Canary logical resources for inspection"
         return
     fi
-    if [ -s "$user_cookies" ]; then
+    if [ -n "$user_cookies" ]; then
         for agent_id in $agent_ids; do
             api DELETE "/api/workspaces/$workspace_id/agents/$agent_id" >/dev/null 2>&1
         done
@@ -75,7 +78,6 @@ cleanup() {
             api DELETE "/api/workspaces/$workspace_id/services/$treer_service_id" >/dev/null 2>&1
         fi
     fi
-    rm -rf "$tmp_dir"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -177,23 +179,23 @@ admin_password=$(railway variable list --project "$project_id" \
     --environment "$environment" --service "$proxy_service" --json \
     | jq -er '.ADMIN_PASSWORD')
 
-curl -fsS -c "$admin_cookies" -H 'Content-Type: application/json' \
-    --data "$(jq -n --arg password "$admin_password" '{password: $password}')" \
-    "$proxy_url/api/admin/login" >/dev/null
+admin_cookies=$(jq -n --arg password "$admin_password" '{password: $password}' \
+    | canary_login_cookies "$proxy_url/api/admin/login")
 
 login_payload=$(jq -n --arg email "$test_email" --arg password "$admin_password" \
     '{email: $email, password: $password}')
-if ! curl -fsS -c "$user_cookies" -H 'Content-Type: application/json' \
-    --data "$login_payload" "$proxy_url/api/auth/login" >/dev/null 2>&1; then
+if ! user_cookies=$(printf '%s' "$login_payload" \
+    | canary_login_cookies "$proxy_url/api/auth/login" 2>/dev/null); then
     invitation=$(curl -fsS -b "$admin_cookies" -H 'Content-Type: application/json' \
         -X POST "$proxy_url/api/admin/invitations")
     invite=$(printf '%s' "$invitation" | jq -er '.token')
     register_payload=$(jq -n --arg invite "$invite" --arg email "$test_email" \
         --arg password "$admin_password" \
         '{invite: $invite, email: $email, preferred_name: "Canary tester", password: $password}')
-    curl -fsS -c "$user_cookies" -H 'Content-Type: application/json' \
-        --data "$register_payload" "$proxy_url/api/auth/register" >/dev/null
+    user_cookies=$(printf '%s' "$register_payload" \
+        | canary_login_cookies "$proxy_url/api/auth/register")
 fi
+unset admin_password login_payload register_payload invite invitation admin_cookies
 
 organization_id=$(api GET /api/organizations | jq -er '.organizations[0].organization_id')
 workspaces=$(api GET "/api/workspaces?organization_id=$organization_id")

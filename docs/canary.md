@@ -62,8 +62,14 @@ The operator needs authenticated GitHub, Railway and Wrangler CLIs plus `curl`, 
 `pnpm`, Python 3, PostgreSQL client tools, Docker, and `just`:
 
 ```bash
+just canary HEAD --dry-run
+just canary HEAD --push
+# Or, from an already prepared clean release checkout:
 just release-canary HEAD
 ```
+
+The `canary` wrapper prepares an isolated worktree, supports `--resume`, and
+optionally notifies a verified Agent after success. See [Release process](releases.md#canary-release).
 
 `release-canary` requires a clean committed revision, runs `just check`, deploys
 the current worktree to the Railway Proxy and the built App artifact to

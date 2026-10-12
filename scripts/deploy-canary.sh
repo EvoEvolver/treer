@@ -81,6 +81,11 @@ curl -fsS --retry 12 --retry-all-errors "$app_url/health" \
     | jq -e '.service == "treer-app" and .status == "ok" and .environment == "canary"' >/dev/null
 curl -fsS --retry 12 --retry-all-errors "$app_url/config.json" \
     | jq -e --arg proxy "$proxy_url/" '.proxy_url == $proxy' >/dev/null
+curl -fsS --retry 12 --retry-all-errors "$app_url/" -o "$upload/served-index.html"
+cmp web/dist/index.html "$upload/served-index.html" || {
+    echo "served Canary frontend differs from the candidate" >&2
+    exit 1
+}
 
 worker_message="canary $commit"
 worker_version_id=

@@ -124,6 +124,42 @@ normal service tooling; Treer has no App package installer.
 
 ## Canary release
 
+For routine releases, use the wrapper from the development checkout:
+
+```bash
+just canary HEAD --dry-run
+just canary HEAD --push
+# Retry the exact commit after fixing a failed build/deployment:
+just canary <full-commit> --resume
+# Optional completion message; requires the actual managed caller to match:
+just canary HEAD --push --notify leader --agent deployer
+```
+
+The wrapper resolves the revision once and creates a detached worktree under
+`.treer/canary-checkouts/<commit>/`, leaving concurrent development untouched.
+`--push` only fast-forwards `origin/main`; divergent history requires a reviewed
+merge. It installs frontend dependencies and runs the maintained release pipeline
+below, including all five native artifact builds. It preserves the worktree and
+release manifest for inspection and retry. `--dry-run` only prints the local
+plan; it performs no writes or network calls. The wrapper never updates local
+CLI binaries, restarts a local Host/Controller, or promotes Production.
+
+`--resume` reuses the completed local gate only when its receipt matches the
+exact commit and unchanged frontend SHA-256. Missing or mismatched receipts
+rerun the full gate; deployment, artifact verification, and two-machine tests
+always run again. These receipts are local operator state, not signed build
+attestations. Native workflow failures remain failures: inspect the failed job
+and explicitly rerun it with `gh run rerun <run-id> --failed` before resuming.
+No failing test is skipped or automatically retried by the wrapper.
+The deployed frontend must also match the candidate HTML byte for byte.
+
+`--notify` sends only after the release passes, with an idempotency key derived
+from the full commit. `--agent` checks the caller before any release changes and
+again before sending. A mismatched caller fails instead of borrowing another
+Agent's credentials. Canary login cookies stay in shell memory; the test script
+does not create credential files. `just canary-scripts-test` checks the wrapper,
+checkpoint invalidation, and in-memory cookie handling without a deployment.
+
 The operator needs authenticated GitHub, Railway and Wrangler CLIs, Docker, `just`,
 `pnpm`, Python 3, PostgreSQL client tools, `jq`, and `curl`. Start from a clean
 checkout of the candidate commit:

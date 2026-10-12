@@ -20,6 +20,7 @@ service-canary:
 
 check:
     node scripts/check-docs.mjs
+    python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
     node --test scripts/release-r2.test.mjs scripts/machine-artifacts.test.mjs
     node --test scripts/install-path.test.mjs
     cd web && pnpm typecheck
@@ -126,6 +127,12 @@ test-canary-enroll:
 
 release-canary revision="HEAD":
     sh scripts/release-canary.sh {{revision}}
+
+canary *args:
+    python3 scripts/canary-release.py {{args}}
+
+canary-scripts-test:
+    python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
 
 promote-production manifest:
     sh scripts/promote-production.sh {{manifest}}

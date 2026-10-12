@@ -44,8 +44,16 @@ sha256_file() {
 }
 
 mkdir -p "$release_root/app"
-just test-db-up
-just check
+checkpoint="$release_root/check-passed.json"
+if [ "${TREER_RELEASE_RESUME:-0}" = 1 ] && \
+    python3 scripts/release-checkpoint.py verify "$checkpoint" "$commit" web/dist/index.html; then
+    echo "Reusing the completed local gate for $commit"
+else
+    rm -f "$checkpoint"
+    just test-db-up
+    just check
+    python3 scripts/release-checkpoint.py write "$checkpoint" "$commit" web/dist/index.html
+fi
 cp web/dist/index.html "$release_root/app/index.html"
 artifact_sha=$(sha256_file "$release_root/app/index.html")
 
