@@ -665,6 +665,8 @@ async fn start_service_and_wait(
             "treer: starting Host in foreground mode; keep this terminal open or run the command under a process supervisor"
         );
         let child = tokio::process::Command::new(&paths.host_executable)
+            .env_clear()
+            .envs(treer_platform::inherited_environment())
             .arg("run")
             .arg("--config")
             .arg(&paths.host_config)
@@ -769,6 +771,7 @@ pub async fn repair_and_wait(
 }
 
 pub fn stop(workspace: &str) -> Result<()> {
+    warn_managed_agent_service_stop();
     let (paths, config) = installed_service(workspace)?;
     platform::stop(&paths, &config)
 }
@@ -779,6 +782,7 @@ pub fn stop_remotely(workspace: &str) -> Result<()> {
 }
 
 pub fn restart(workspace: &str) -> Result<()> {
+    warn_managed_agent_service_stop();
     let (paths, config) = installed_service(workspace)?;
     platform::restart(&paths, &config)
 }
@@ -786,6 +790,12 @@ pub fn restart(workspace: &str) -> Result<()> {
 pub fn restart_controller(workspace: &str) -> Result<()> {
     let (paths, config) = installed_service(workspace)?;
     restart_controller_at(&paths, &config.host_socket)
+}
+
+fn warn_managed_agent_service_stop() {
+    if env::var_os("TREER_AGENT_ID").is_some() {
+        eprintln!("treer: warning: stopping/restarting the Host will terminate the current managed Agent. Run this from the host terminal or a detached process session; execution will continue.");
+    }
 }
 
 pub async fn update(
@@ -1956,6 +1966,8 @@ fn start_nohup_with(nohup: &OsStr, paths: &ServicePaths, config: &ServiceConfig)
     drop(log);
     let mut launcher = Command::new("sh");
     launcher
+        .env_clear()
+        .envs(treer_platform::inherited_environment())
         .arg("-c")
         .arg(r#""$1" "$2" run --config "$3" </dev/null >>"$4" 2>&1 & printf '%s\n' "$!""#)
         .arg("treer-nohup")
@@ -2196,3 +2208,7 @@ fn launchd_start_steps(loaded: bool, domain: &str, target: &str, plist: &Path) -
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "service_environment_tests.rs"]
+mod environment_tests;

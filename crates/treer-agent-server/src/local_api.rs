@@ -247,7 +247,10 @@ impl LocalApiState {
         runtime: ControllerRuntime,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("control-plane HTTP client"),
             proxy_http,
             workspace_id,
             server_id,

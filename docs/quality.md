@@ -11,6 +11,33 @@ The Host answers the initial cursor inheritance query required by portable-pty
 so child output can begin. The runtime tests cover split query bytes and the
 native Windows test covers argv, environment, input, resize, and process stop.
 
+### Service environment and recovery validation
+
+The shared `treer-platform` environment filter is used by nohup, foreground and
+Windows detached launchers, daemon entry points (including launchd/systemd),
+Host-spawned Controllers on crash/hot update, and PTY workload inheritance.
+Generated launchd/systemd registrations contain configuration paths, not caller
+environment snapshots. Explicit workload environment is applied after filtering.
+An independent PTY subprocess regression starts from a polluted Host runtime
+and verifies that old UI/identity variables are removed while a fresh explicit
+workload identity and proxy entry survive.
+
+`real_service_environment_boundary` runs isolated real Host/Controller binaries
+with polluted identity/UI variables and a dead loopback proxy. It checks daemon
+environment names, restores both Agent and App startup intent through a mock
+Proxy, survives transient validation failures without reconnecting, and hot
+restarts the Controller without replacing the workloads. It uses private
+fixture state and never resolves installed services. Build sibling binaries
+first, then run:
+
+```sh
+cargo build -p treer-agent-host -p treer-agent-server
+cargo test -p treer-agent-server real_service_environment_boundary -- --ignored
+```
+
+Run this subprocess fixture on macOS and Linux; Windows cross-target checking
+only establishes compilation, not native process-environment behavior.
+
 ### Output retention and recovery
 
 Controller inventory reconciliation must preserve the cached output and its

@@ -173,8 +173,20 @@ struct ServerArgs {
     supervision: Option<treer_protocol::MachineSupervision>,
 }
 
+fn main() -> Result<()> {
+    // Saved service configuration supplies identity; never let a launcher or
+    // service manager's inherited workload identity override it.
+    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--execute-cli"))
+        && Args::try_parse()
+            .is_ok_and(|args| !args.tui && matches!(args.command, None | Some(Command::Run { .. })))
+    {
+        treer_platform::clean_process_environment_before_threads()?;
+    }
+    async_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn async_main() -> Result<()> {
     if cli_command::maybe_execute().await? {
         return Ok(());
     }
@@ -529,7 +541,9 @@ async fn claim_machine_enrollment(
     let endpoint = proxy
         .join("api/machines/enroll")
         .context("failed to build Proxy enrollment URL")?;
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .post(endpoint.clone())
         .bearer_auth(enrollment_key)
         .json(&MachineEnrollmentRequest {

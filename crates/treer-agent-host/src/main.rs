@@ -82,8 +82,13 @@ impl ResultCache {
     }
 }
 
+fn main() -> Result<()> {
+    treer_platform::clean_process_environment_before_threads()?;
+    async_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -191,6 +196,9 @@ async fn shutdown_signal() -> Result<()> {
 async fn spawn_controller(config: &HostDaemonConfig) -> Result<Child> {
     info!(controller = %config.controller_path.display(), "starting controller");
     let mut command = Command::new(&config.controller_path);
+    command
+        .env_clear()
+        .envs(treer_platform::inherited_environment());
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW; Agent terminals use ConPTY.
     command

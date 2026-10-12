@@ -60,6 +60,26 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
   Treer workload/operator credential literals in new specifications are rejected. Audit events
   record actor/target IDs, never the command, arguments, or credentials.
 
+## Process environment
+
+Host/Controller do not inherit a caller's Treer workload identity or Agent UI
+session. A shared platform environment filter removes Treer identity and
+credential variables, `TREER_BIN`, `AGENT_UI_*`, `CODEX_UI_*`, and proxies whose
+host is loopback (including localhost, IPv4 loopback and IPv6 ::1). Service
+launchers filter before spawning; daemon entry points filter before creating
+threads, including direct service-manager launches. On Unix a contaminated
+daemon re-execs with the same PID so its initial OS-visible environment is
+clean too. Controller hot replacement applies the same filter.
+
+The PTY runtime filters the Host environment before applying each workload's
+explicit environment, so restored Agents and Apps cannot inherit another
+Agent's UI identity through the Host. Fresh workload credentials and per-Agent
+proxy entries are injected afterwards. This is inheritance hygiene, not
+provider-secret isolation: other user environment variables are retained and
+same-account access remains possible. The Controller's control-plane HTTP
+clients ignore environment proxies; external proxy variables are preserved for
+user tools, but are not a control-plane transport configuration.
+
 ## Unsupported Claims
 
 Do not describe Treer as zero trust, mutually untrusted multi-tenancy,

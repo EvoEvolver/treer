@@ -81,6 +81,8 @@ pub fn start(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
     // DETACHED_PROCESS: no terminal ownership. Host creates ConPTY sessions
     // explicitly; it and its children are owned by the Host's Windows job.
     let mut child = Command::new(&paths.host_executable)
+        .env_clear()
+        .envs(treer_platform::inherited_environment())
         .args(["run", "--config"])
         .arg(&paths.host_config)
         .creation_flags(0x00000008)

@@ -282,7 +282,9 @@ impl ProxyClient {
                         }
                     }
                 }
-                Err(error) => warn!(%error, "Agent startup validation failed; deferring restore"),
+                Err(error) => {
+                    warn!(error = %format!("{error:#}"), retry_seconds = HEARTBEAT_INTERVAL.as_secs(), "Agent startup validation failed; deferring restore until heartbeat retry")
+                }
             }
         }
         send(
@@ -319,11 +321,17 @@ impl ProxyClient {
                     let candidates = self.runtime.automatic_startup_candidate_ids();
                     let validation_ids = self.runtime.startup_validation_ids();
                     if !validation_ids.is_empty() {
-                        if let Ok(active) = self.validate_startup_agents(validation_ids).await {
-                            let active: Vec<_> = active.into_iter().filter(|id| candidates.contains(id)).collect();
-                            for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
-                                if let Err(error) = result { warn!(%agent_id, code = %error.code, "workload recovery failed"); }
+                        match self.validate_startup_agents(validation_ids).await {
+                            Ok(active) => {
+                                let active: Vec<_> = active.into_iter().filter(|id| candidates.contains(id)).collect();
+                                for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
+                                    match result {
+                                        Ok(_) => info!(%agent_id, "restored deferred Agent startup command"),
+                                        Err(error) => warn!(%agent_id, code = %error.code, "workload recovery failed"),
+                                    }
+                                }
                             }
+                            Err(error) => warn!(error = %format!("{error:#}"), retry_seconds = HEARTBEAT_INTERVAL.as_secs(), "Agent startup validation failed; restore will retry"),
                         }
                     }
                     let kinds = self.runtime.available_agent_kinds();
@@ -663,7 +671,10 @@ impl ProxyClient {
         ));
         url.set_query(None);
         let response = validate_startup_batches(
-            &reqwest::Client::new(),
+            &reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()?,
             url,
             self.machine_token.as_deref(),
             &agent_ids,

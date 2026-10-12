@@ -3699,6 +3699,7 @@ name = "treer-platform"
 version = "0.1.13"
 dependencies = [
  "tokio",
+ "url",
  "windows-sys 0.61.2",
 ]
 

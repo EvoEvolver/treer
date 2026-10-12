@@ -271,6 +271,11 @@ impl HostRuntime {
         let mut builder = CommandBuilder::new(request.command);
         builder.args(request.args);
         builder.cwd(&cwd);
+        // portable-pty otherwise captures the Host's entire environment.
+        builder.env_clear();
+        for (key, value) in treer_platform::inherited_environment() {
+            builder.env(key, value);
+        }
         for (key, value) in request.env {
             builder.env(key, value);
         }
@@ -815,6 +820,100 @@ mod tests {
     #[test]
     fn unix_native_fixture_argv_input_resize_and_stop() {
         native_pty_argv_input_resize_and_stop();
+    }
+
+    #[test]
+    fn polluted_host_environment_does_not_leak_into_workloads() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::polluted_host_environment_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("AGENT_UI_INSTANCE_ID", "old-ui-instance")
+            .env("CODEX_UI_THREAD_ID", "old-thread")
+            .env("TREER_WORKLOAD_CREDENTIAL", "old-credential")
+            .env("TREER_AGENT_ID", "old-agent")
+            .env("TREER_MACHINE_TOKEN", "old-machine-token")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper, intentionally polluted Host runtime"]
+    fn polluted_host_environment_fixture() {
+        let root = std::env::temp_dir().join(format!("trr-env-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let runtime = HostRuntime::new(&root).unwrap();
+        runtime
+            .spawn(HostSpawnRequest {
+                process_id: "environment-boundary".into(),
+                command: std::env::current_exe().unwrap().display().to_string(),
+                args: vec![
+                    "--exact".into(),
+                    "tests::clean_workload_environment_fixture".into(),
+                    "--ignored".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: ".".into(),
+                env: std::collections::BTreeMap::from([
+                    ("TREER_AGENT_ID".into(), "new-agent".into()),
+                    ("TREER_WORKLOAD_CREDENTIAL".into(), "new-credential".into()),
+                    ("HTTP_PROXY".into(), "http://127.0.0.1:12345".into()),
+                ]),
+                cols: 80,
+                rows: 24,
+                metadata: "{}".into(),
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let info = runtime
+                .list()
+                .into_iter()
+                .find(|p| p.process_id == "environment-boundary")
+                .unwrap();
+            if !info.running {
+                assert_eq!(info.exit_code, Some(0));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "workload environment fixture timed out"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "subprocess helper, validates the fresh workload identity"]
+    fn clean_workload_environment_fixture() {
+        for name in [
+            "AGENT_UI_INSTANCE_ID",
+            "CODEX_UI_THREAD_ID",
+            "TREER_MACHINE_TOKEN",
+            "ALL_PROXY",
+        ] {
+            assert!(std::env::var_os(name).is_none(), "inherited {name}");
+        }
+        assert_eq!(std::env::var("TREER_AGENT_ID").unwrap(), "new-agent");
+        assert_eq!(
+            std::env::var("TREER_WORKLOAD_CREDENTIAL").unwrap(),
+            "new-credential"
+        );
+        assert_eq!(
+            std::env::var("HTTP_PROXY").unwrap(),
+            "http://127.0.0.1:12345"
+        );
     }
 
     // Run this Rust test executable as the workload rather than measuring

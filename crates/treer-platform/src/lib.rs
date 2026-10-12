@@ -5,6 +5,11 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
+mod environment;
+pub use environment::{
+    clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
+};
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;

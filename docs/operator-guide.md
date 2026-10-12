@@ -274,6 +274,24 @@ user service explicitly with `--service-mode systemd` on Linux or
 `--service-mode launchd` on macOS; attached diagnostics remain available with
 `--service-mode foreground`.
 
+Host and Controller launch with a cleaned environment, including launches from
+managed Agents, service managers, CI, foreground mode and updater hot restarts.
+Treer workload identity variables, `TREER_BIN`, `AGENT_UI_*`, `CODEX_UI_*` and
+loopback HTTP/HTTPS/ALL proxy variables (both cases) are removed. Ordinary
+account, PATH, locale, temporary-directory and install/state configuration
+variables remain; external user proxies remain available to ordinary tools.
+Controller control-plane HTTP requests connect directly to the configured
+Proxy, as its WebSocket already does. They do not use environment proxies.
+Startup validation has a request timeout; transient failures are logged and
+retried on the connected heartbeat until recovery succeeds.
+
+`service stop` and `service restart` called inside a managed Agent warn that
+stopping the Host terminates that Agent too. Use a host terminal or a detached
+process session when the command must finish after its caller exits. The
+warning does not prevent execution. Direct diagnostic Controller invocations
+must pass identity/configuration with CLI flags or use `run --config`; daemon
+startup strips inherited identity credentials before parsing its configuration.
+
 Explicit Linux systemd setup checks linger and prints an actionable warning
 when the service will stop after the last login session exits. It does not
 attempt a privileged linger change. `connect` reports success only after the
