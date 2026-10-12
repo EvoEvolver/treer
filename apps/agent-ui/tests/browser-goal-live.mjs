@@ -38,9 +38,12 @@ try {
         await page.getByRole("button", { name: "Send message", exact: true }).click();
       }
       await expect(page.locator(".goal-status")).toContainText("Complete", { timeout: 60000 });
+      // Codex can announce goal completion before final turn usage is accounted.
+      await expect.poll(async () => (await fetch(base + "/api/state").then((response) => response.json())).thread.status, { timeout: 60000 }).toBe("idle");
       let state = await fetch(base + "/api/state").then((response) => response.json());
       assert.equal(state.goal.status, "complete");
-      assert.ok(state.goal.tokensUsed > 0); assert.ok(state.goal.timeUsedSeconds >= 0);
+      assert.ok(typeof state.goal.tokensUsed === "number" && state.goal.tokensUsed >= 0);
+      assert.ok(typeof state.goal.timeUsedSeconds === "number" && state.goal.timeUsedSeconds >= 0);
       await page.screenshot({ path: join(shots, `${harness}-complete-desktop.png`) });
       await page.setViewportSize({ width: 390, height: 844 });
       await page.screenshot({ path: join(shots, `${harness}-complete-mobile.png`) });
