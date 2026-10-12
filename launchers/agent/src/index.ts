@@ -16,6 +16,7 @@ import { taskOutput } from "./task-output.js";
 import { GoalError, goalUpdate } from "./goals.js";
 import { QueueError, submissionOptions } from "./prompt-submission.js";
 import { notifySubmission } from "./prompt-notify.js";
+import { MessageWatch, messageWatchEnabled } from "./message-watch.js";
 import { verifyInterfaceCaller } from "./interface-identity.js";
 import { SessionTransferError } from "./session-transfer.js";
 
@@ -401,14 +402,15 @@ server.on("upgrade", (request, socket, head) => {
   });
 });
 
-runtime.on("exit", () => { prompts.close(); void runtime.stop().finally(() => process.exit(1)); });
+const messageWatch = messageWatchEnabled(process.env) ? new MessageWatch(prompts, agentId, (message) => runtime.emit("log", message)) : undefined;
+runtime.on("exit", () => { void messageWatch?.stop(); prompts.close(); void runtime.stop().finally(() => process.exit(1)); });
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing listener address");
   const portFile = setting("PORT_FILE");
   if (portFile) writeFileSync(portFile, String(address.port), { mode: 0o600 });
   console.log(`Treer Agent UI (${runtime.harness.id}) listening on http://127.0.0.1:${address.port}`);
-  runtime.start().catch((error) => {
+  runtime.start().then(() => messageWatch?.start()).catch((error) => {
     console.error(`failed to start ${runtime.harness.name}`, error);
     void runtime.stop().finally(() => process.exit(1));
   });
@@ -416,6 +418,7 @@ server.listen(port, "127.0.0.1", () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    void messageWatch?.stop();
     prompts.close();
     void runtime.stop().finally(() => process.exit(0));
   });

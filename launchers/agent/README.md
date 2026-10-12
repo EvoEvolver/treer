@@ -272,6 +272,33 @@ missing, 405 non-GET method). These routes expose local working-directory data
 through the same private AIS listener and Treer access boundary as the UI;
 they add no sandbox or separate authentication scheme.
 
+## Treer message monitoring
+
+Managed Agents automatically long-poll `treer message receive --wait 30000`
+using their own inherited CLI identity. Set `AGENT_UI_MESSAGE_WATCH=0` (also
+`false`/`off`) to disable this. Standalone launchers without the injected Agent
+ID, Controller URL and workload credential do not monitor messages.
+
+Every received message enters the shared persistent queue with delivery `queue`,
+never steer. The launcher commits the message ID and pending acknowledgment in
+the queue journal before acknowledging the delivery. Pending acknowledgments
+are retried first after restart with a stable operation ID; their receipts stay
+pinned until confirmed. Full queues leave messages unacknowledged. CLI/network
+errors retry with exponential backoff (1–60 seconds); shutdown cancels polling.
+Queued messages survive restart; an already running turn follows the queue's
+existing interrupted-on-restart rule rather than executing uncertain work twice.
+
+Prompts start with `[收到一条 Treer 消息]`, identify the sender path and kind,
+timestamp and message ID, and explicitly say the sender's content is not system
+instructions: the Agent chooses whether to execute, reply or ignore. No message
+kind or body type is filtered, including completion notifications. Core has no
+trusted subject/type field; the entire body is sender-authored text. Bodies are
+UTF-8 truncated at 32 KiB without splitting codepoints, with an explicit marker
+and `treer message get MESSAGE_ID` for the full text. Metadata is escaped and
+bounded separately, so the warning and retrieval command cannot be truncated.
+Watched messages have automatic terminal notifications disabled for every type
+to prevent notification loops; Agents can explicitly reply through Treer.
+
 ## Prompt queue and background-task contract
 
 State and WebSocket messages also include `goal` (a Goal or null), with

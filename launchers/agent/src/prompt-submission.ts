@@ -25,6 +25,7 @@ export interface SubmissionRecord {
   receipt: Receipt;
   notification: { attempts: number; nextAttempt: number; error: string | null; delivered: boolean } | null;
   priorTurnId?: string | null;
+  sourceMessage?: { messageId: string; deliveryId: string; ackPending: boolean };
 }
 export class QueueError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }

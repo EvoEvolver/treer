@@ -12,7 +12,7 @@ interface QueueOptions {
   notify?: (record: SubmissionRecord) => Promise<void>;
   retryMs?: number;
 }
-interface SubmitOptions { operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null }
+interface SubmitOptions { operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null; sourceMessage?: { messageId: string; deliveryId: string } }
 
 /** One server-owned journal and turn correlator, shared by every harness. */
 export class PromptQueue {
@@ -45,12 +45,26 @@ export class PromptQueue {
   submission(id: string) { const record = this.records.find((entry) => entry.submission.id === id); return record ? { ...record.submission } : undefined; }
   close() { this.closed = true; if (this.retry) clearTimeout(this.retry); }
 
+  pendingMessageAcks() {
+    if (this.closed) throw new QueueError("Prompt queue is closed", 503);
+    return this.records.filter((record) => record.sourceMessage?.ackPending).map((record) => ({ operationId: record.operationId, ...record.sourceMessage! }));
+  }
+  hasMessage(messageId: string) {
+    if (this.closed) throw new QueueError("Prompt queue is closed", 503);
+    return this.records.some((record) => record.sourceMessage?.messageId === messageId);
+  }
+  acknowledgeMessage(operationId: string, deliveryId: string) {
+    const record = this.records.find((entry) => entry.operationId === operationId);
+    if (!record?.sourceMessage || record.sourceMessage.deliveryId !== deliveryId) throw new QueueError("Unknown message acknowledgment");
+    record.sourceMessage.ackPending = false; this.persist();
+  }
+
   private persist() {
     let position = 0;
     for (const record of this.records) record.submission.position = record.submission.state === "queued" ? ++position : null;
     let terminal = this.records.filter((record) => !["queued", "running"].includes(record.submission.state) && (!record.notification || record.notification.delivered)).length;
     this.records = this.records.filter((record) => {
-      if (terminal > 1024 && !["queued", "running"].includes(record.submission.state) && (!record.notification || record.notification.delivered)) { terminal--; return false; }
+      if (terminal > 1024 && !record.sourceMessage?.ackPending && !["queued", "running"].includes(record.submission.state) && (!record.notification || record.notification.delivered)) { terminal--; return false; }
       return true;
     });
     try { this.store?.save(this.records); }
@@ -70,7 +84,7 @@ export class PromptQueue {
     }
     if (!this.runtime.snapshot().ready) throw new QueueError("Harness is not ready", 503);
     if (this.closed) throw new QueueError("Prompt queue is closed after shutdown or a journal failure", 503);
-    if (this.records.filter((record) => ["queued", "running"].includes(record.submission.state) || record.notification && !record.notification.delivered).length >= this.limit) throw new QueueError(`Prompt queue is full (limit ${this.limit}, including pending notifications)`, 429);
+    if (this.records.filter((record) => ["queued", "running"].includes(record.submission.state) || record.sourceMessage?.ackPending || record.notification && !record.notification.delivered).length >= this.limit) throw new QueueError(`Prompt queue is full (limit ${this.limit}, including pending notifications and acknowledgments)`, 429);
     const busy = this.busy;
     const downgraded = mode === "steer" && !this.runtime.harness.capabilities.steer;
     const delivery = downgraded ? "queue" : mode;
@@ -80,6 +94,7 @@ export class PromptQueue {
       submission: { id, sender: metadata.sender, created_at: new Date().toISOString(), position: null, text_preview: preview(text, 1024), state: steering ? "running" : "queued", turn_id: steering ? this.runtime.snapshot().thread?.activeTurnId ?? null : null, assistant_preview: null, error: null },
       operationId, fingerprint: hash, text, delivery, notify: metadata.notify,
       receipt: { id, disposition: steering ? "steered" : busy || this.entries.length ? "queued" : "sent", position: null }, notification: null,
+      ...(options.sourceMessage ? { sourceMessage: { ...options.sourceMessage, ackPending: true } } : {}),
     };
     this.records.push(record);
     this.persist(); record.receipt.position = record.receipt.disposition === "queued" ? record.submission.position : null; this.persist();
@@ -87,7 +102,7 @@ export class PromptQueue {
     if (steering) await this.dispatch(record);
     // Steering adapters acknowledge insertion before returning. ACP does not
     // support steering and resolves only at completion: do not wait for its turn.
-    else if (!busy && this.runtime.harness.capabilities.steer) await this.drain();
+    else if (!busy && this.runtime.harness.capabilities.steer && !options.sourceMessage) await this.drain();
     else if (!busy) void this.drain();
     return { ...record.receipt, duplicate: false, mode: delivery, downgraded, ...(downgraded ? { explanation: "This harness does not support steering; using queue" } : {}) };
   }
@@ -107,7 +122,7 @@ export class PromptQueue {
     record.submission.state = "running"; record.submission.position = null;
     this.persist(); this.changed();
     const sender = record.submission.sender;
-    const prefix = sender ? `[来自 ${sender.path}，排队于 ${record.submission.created_at}]\n` : "";
+    const prefix = sender && !record.sourceMessage ? `[来自 ${sender.path}，排队于 ${record.submission.created_at}]\n` : "";
     try {
       await this.runtime.prompt(prefix + record.text);
       const thread = this.runtime.snapshot(10_000).thread;
