@@ -1,11 +1,16 @@
-import { chmodSync, mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, renameSync, readFileSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, renameSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 export function threadStatePath(cwd: string, agentId: string) {
   if (!agentId) return undefined;
   if (!/^[A-Za-z0-9_-]+$/.test(agentId)) throw new Error("Invalid TREER_AGENT_ID");
-  return join(cwd, ".treer", "agents", agentId, "codex-ui.json");
+  const directory = join(cwd, ".treer", "agents", agentId);
+  const file = join(directory, "agent-ui.json");
+  // Agents launched before the shared Agent UI saved their thread as codex-ui.json.
+  const legacy = join(directory, "codex-ui.json");
+  if (!existsSync(file) && existsSync(legacy)) renameSync(legacy, file);
+  return file;
 }
 
 export function loadThreadId(file?: string): string | undefined {
@@ -18,7 +23,7 @@ export function loadThreadId(file?: string): string | undefined {
   }
   const state = JSON.parse(text) as { threadId?: unknown };
   if (typeof state.threadId !== "string" || !state.threadId.trim()) {
-    throw new Error(`Invalid saved Codex thread in ${file}; refusing to start a new thread`);
+    throw new Error(`Invalid saved session in ${file}; refusing to start a new one`);
   }
   return state.threadId;
 }

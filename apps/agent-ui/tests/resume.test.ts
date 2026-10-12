@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, statSync, readdirSync, writeFileSync, realpa
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { CodexRuntime } from "../src/codex.js";
+import { CodexRuntime } from "../src/harness/codex.js";
 import { loadThreadId, saveThreadId, threadStatePath } from "../src/thread-state.js";
 
 const root = resolve(import.meta.dirname, "..");
@@ -55,7 +55,7 @@ test("new thread is persisted privately and resumed by a replacement runtime; ex
   assert.equal(loadThreadId(stateFile), id);
   assert.equal(statSync(stateFile).mode & 0o777, 0o600);
   assert.equal(statSync(join(cwd, ".treer/agents/ag_test")).mode & 0o777, 0o700);
-  assert.deepEqual(readdirSync(join(cwd, ".treer/agents/ag_test")), ["codex-ui.json"]);
+  assert.deepEqual(readdirSync(join(cwd, ".treer/agents/ag_test")), ["agent-ui.json"]);
   const second = new CodexRuntime(fake, cwd, { stateFile });
   try { await second.start(); assert.equal(second.thread!.id, id); assert.equal(second.thread!.turns.length, 2); }
   finally { await second.stop(); }
@@ -63,7 +63,7 @@ test("new thread is persisted privately and resumed by a replacement runtime; ex
   try { await override.start(); assert.equal(loadThreadId(stateFile), "override"); }
   finally { await override.stop(); }
   writeFileSync(stateFile, "{}");
-  assert.throws(() => loadThreadId(stateFile), /refusing to start a new thread/);
+  assert.throws(() => loadThreadId(stateFile), /refusing to start a new one/);
   assert.throws(() => threadStatePath(cwd, "../other"), /Invalid/);
   assert.equal(threadStatePath(cwd, ""), undefined);
   saveThreadId(undefined, "local");
@@ -150,7 +150,7 @@ test("switch dry-run prints exact self startup argv without writing or restartin
     cwd, encoding: "utf8", env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, TREER_AGENT_ID: "ag_test", TREER_WORKLOAD_CREDENTIAL: "test", TREER_AGENT_SERVER_URL: "test" },
   });
   const plan = JSON.parse(result);
-  assert.deepEqual(plan.startup_command, ["treer", "agent", "startup", "set", "--cwd", ".", "--", join(root, "scripts/treer-agent.sh"), "--thread-id", "original", "--cwd", cwd]);
+  assert.deepEqual(plan.startup_command, ["treer", "agent", "startup", "set", "--cwd", ".", "--", join(root, "scripts/treer-agent.sh"), "--harness", "codex", "--session-id", "original", "--cwd", cwd]);
   assert.equal(readFileSync(log, "utf8"), "whoami\n");
   assert.deepEqual(readdirSync(cwd).sort(), ["calls", "treer"]);
 });
@@ -209,7 +209,7 @@ test("switch saves startup and detaches a self-only restart with private result/
     cwd, encoding: "utf8", env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, TREER_AGENT_ID: "ag_test", TREER_WORKLOAD_CREDENTIAL: "test", TREER_AGENT_SERVER_URL: "test" },
   });
   assert.match(output, /detached self restart queued/);
-  const parent = join(cwd, ".treer/agents/ag_test/codex-ui-switches");
+  const parent = join(cwd, ".treer/agents/ag_test/agent-ui-switches");
   const state = join(parent, readdirSync(parent)[0]);
   const result = join(state, "result.json");
   const deadline = Date.now() + 5000;

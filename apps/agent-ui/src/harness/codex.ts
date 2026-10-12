@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 
-import { JsonRpcClient } from "./jsonrpc.js";
-import { loadThreadId, saveThreadId } from "./thread-state.js";
+import { JsonRpcClient } from "../jsonrpc.js";
+import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
+import { loadThreadId, saveThreadId } from "../thread-state.js";
 import {
   fallbackModelOption,
   mapItem,
@@ -15,7 +16,7 @@ import {
   type ModelOption,
   type ReasoningEffort,
   type TurnDto,
-} from "./map.js";
+} from "./codex-map.js";
 
 const HISTORY_PAGE_SIZE = 50;
 
@@ -25,22 +26,8 @@ interface LiveItem {
   turnId: string;
 }
 
-export interface ThreadState {
-  id: string;
-  title: string;
-  cwd: string;
-  model: string | null;
-  reasoningEffort: ReasoningEffort | null;
-  status: "idle" | "running" | "error";
-  activeTurnId: string | null;
-  lastError: string | null;
-  createdAt: string;
-  updatedAt: string;
-  turns: TurnDto[];
-  hasOlderItems: boolean;
-}
-
-export class CodexRuntime extends EventEmitter {
+export class CodexRuntime extends EventEmitter implements HarnessRuntime {
+  readonly harness: HarnessInfo = { id: "codex", name: "Codex" };
   private child: ChildProcessWithoutNullStreams | null = null;
   private client: JsonRpcClient | null = null;
   private ready = false;
@@ -308,22 +295,7 @@ export class CodexRuntime extends EventEmitter {
   }
 
   private threadWithHistoryLimit(historyLimit: number) {
-    const thread = this.thread!;
-    const sourceTurns = this.mergedTurns();
-    const totalItems = sourceTurns.reduce((count, turn) => count + turn.items.length, 0);
-    let remaining = Math.min(Math.max(1, historyLimit), totalItems);
-    const visibleTurns: TurnDto[] = [];
-    for (let index = sourceTurns.length - 1; index >= 0 && remaining > 0; index -= 1) {
-      const turn = sourceTurns[index];
-      const items = turn.items.slice(-remaining);
-      remaining -= items.length;
-      visibleTurns.unshift({ ...turn, items });
-    }
-    return {
-      ...thread,
-      turns: visibleTurns,
-      hasOlderItems: totalItems > historyLimit,
-    };
+    return withHistoryLimit(this.thread!, this.mergedTurns(), historyLimit);
   }
 
   private mergedTurns() {

@@ -48,8 +48,9 @@ to expose their registered `ui_path`.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`pi-ui`](pi-ui/README.md) is an Agent-scoped browser interface loaded inside
   a Pi Agent.
-- [`codex-ui`](codex-ui/README.md) is Treer's single-Agent browser interface for
-  Codex.
+- [`agent-ui`](agent-ui/README.md) is Treer's single-Agent browser interface,
+  shared by every harness: native Codex and any ACP agent (Claude Code, Gemini,
+  Grok, Cursor, OpenCode, ...) through small adapters.
 - [`soul`](soul/README.md) is an experimental Managed App file server that
   uploads environment-bound state bundles and launches command Agents from them.
 - [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for

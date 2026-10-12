@@ -1,4 +1,4 @@
 #!/bin/sh
+# Compatibility entry point; see apps/agent-ui/README.md.
 set -eu
-SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-exec python3 "$SCRIPT_ROOT/switch.py" "$@"
+exec "$(CDPATH= cd -- "$(dirname "$0")/../../agent-ui/scripts" && pwd)/switch.sh" --harness codex "$@"

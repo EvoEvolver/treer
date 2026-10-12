@@ -70,7 +70,7 @@ try {
     return state.thread.status === "idle" && items.some((i) => i.kind === "agentMessage" && i.text.includes("STORED")) ? state : null;
   });
   assert.ok(completed.thread.turns.some((t) => t.items.some((i) => i.text.includes(code))));
-  const saved = JSON.parse(readFileSync(join(cwd, ".treer/agents", agents[0], "codex-ui.json"), "utf8"));
+  const saved = JSON.parse(readFileSync(join(cwd, ".treer/agents", agents[0], "agent-ui.json"), "utf8"));
   assert.equal(saved.threadId, id);
   treer("agent", "restart", agents[0]);
   const restored = await interfaceReady(agents[0], first.agent.run_generation);

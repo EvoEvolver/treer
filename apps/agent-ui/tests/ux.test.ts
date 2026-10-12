@@ -4,8 +4,8 @@ import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { listFiles, previewFile, PREVIEW_LIMIT } from "../src/files.js";
-import { mapItem, mapPlanSteps } from "../src/map.js";
-import { CodexRuntime } from "../src/codex.js";
+import { mapItem, mapPlanSteps } from "../src/harness/codex-map.js";
+import { CodexRuntime } from "../src/harness/codex.js";
 
 test("file browser bounds paths and symlinks, skips special entries and caps preview reads", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "codex-ui-files-"));

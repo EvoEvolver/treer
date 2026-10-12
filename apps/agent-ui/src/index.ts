@@ -5,25 +5,45 @@ import { fileURLToPath } from "node:url";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { CodexRuntime } from "./codex.js";
+import { AcpRuntime } from "./harness/acp.js";
+import { CodexRuntime } from "./harness/codex.js";
+import type { HarnessRuntime } from "./runtime.js";
 import { threadStatePath } from "./thread-state.js";
 import { listFiles, previewFile, fileErrorStatus } from "./files.js";
 
+/** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
+function setting(name: string) {
+  return process.env[`AGENT_UI_${name}`] ?? process.env[`CODEX_UI_${name}`];
+}
+
 const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const publicDir = resolve(process.env.CODEX_UI_PUBLIC_DIR || join(appRoot, "public"));
-const port = Number(process.env.CODEX_UI_PORT ?? "0");
-if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("CODEX_UI_PORT must be a port from 0 to 65535");
-const cwd = resolve(process.env.CODEX_UI_CWD || process.cwd());
-const command = process.env.CODEX_BIN || "codex";
+const publicDir = resolve(setting("PUBLIC_DIR") || join(appRoot, "public"));
+const port = Number(setting("PORT") ?? "0");
+if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("AGENT_UI_PORT must be a port from 0 to 65535");
+const cwd = resolve(setting("CWD") || process.cwd());
 const agentId = process.env.TREER_AGENT_ID || "";
-const interfaceInstanceId = process.env.CODEX_UI_INSTANCE_ID || `codex-ui-${process.pid}`;
+const interfaceInstanceId = setting("INSTANCE_ID") || `agent-ui-${process.pid}`;
 const interfaceCapabilities = ["prompt.submit", "transcript.read", "state.observe", "abort"];
 const initialHistoryLimit = 50;
 
-const runtime = new CodexRuntime(command, cwd, {
-  threadId: process.env.CODEX_UI_THREAD_ID,
-  stateFile: threadStatePath(cwd, agentId),
-});
+function createRuntime(): HarnessRuntime {
+  const harness = process.env.AGENT_UI_HARNESS || "codex";
+  const resumeId = process.env.AGENT_UI_SESSION_ID || process.env.CODEX_UI_THREAD_ID;
+  const stateFile = threadStatePath(cwd, agentId);
+  if (harness === "codex") {
+    return new CodexRuntime(process.env.CODEX_BIN || "codex", cwd, { threadId: resumeId, stateFile });
+  }
+  if (harness === "acp") {
+    const command = process.env.AGENT_UI_ACP_COMMAND;
+    if (!command) throw new Error("AGENT_UI_ACP_COMMAND is required for the acp harness");
+    const args = JSON.parse(process.env.AGENT_UI_ACP_ARGS || "[]") as unknown;
+    if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) throw new Error("AGENT_UI_ACP_ARGS must be a JSON string array");
+    return new AcpRuntime(command, args, cwd, { sessionId: resumeId, stateFile, name: process.env.AGENT_UI_NAME });
+  }
+  throw new Error(`Unknown AGENT_UI_HARNESS ${harness}; expected codex or acp`);
+}
+
+const runtime = createRuntime();
 const sockets = new Set<{ socket: WebSocket; historyLimit: number }>();
 const completedOperations = new Map<string, number>();
 
@@ -97,6 +117,7 @@ function statePayload(historyLimit = initialHistoryLimit) {
             : "idle",
       error: snapshot.thread?.lastError ?? null,
     },
+    harness: runtime.harness,
     thread: snapshot.thread,
     modelOptions: snapshot.models,
     history: { limit: historyLimit },
@@ -142,7 +163,7 @@ function broadcast() {
 }
 
 runtime.on("state", broadcast);
-runtime.on("log", (message) => console.log(`[codex] ${message}`));
+runtime.on("log", (message) => console.log(`[${runtime.harness.id}] ${message}`));
 
 const server = createServer(async (request, response) => {
   const method = request.method ?? "GET";
@@ -234,7 +255,7 @@ const server = createServer(async (request, response) => {
             protocol: "treer.agent.surface",
             version: 1,
             ready: payload.ready,
-            title: payload.thread?.title ?? "Codex",
+            title: payload.thread?.title ?? runtime.harness.name,
             ui: true,
             capabilities: interfaceCapabilities,
           });
@@ -326,10 +347,11 @@ runtime.on("exit", () => { void runtime.stop().finally(() => process.exit(1)); }
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing listener address");
-  if (process.env.CODEX_UI_PORT_FILE) writeFileSync(process.env.CODEX_UI_PORT_FILE, String(address.port), { mode: 0o600 });
-  console.log(`Treer Codex UI listening on http://127.0.0.1:${address.port}`);
+  const portFile = setting("PORT_FILE");
+  if (portFile) writeFileSync(portFile, String(address.port), { mode: 0o600 });
+  console.log(`Treer Agent UI (${runtime.harness.id}) listening on http://127.0.0.1:${address.port}`);
   runtime.start().catch((error) => {
-    console.error("failed to start Codex app-server", error);
+    console.error(`failed to start ${runtime.harness.name}`, error);
     void runtime.stop().finally(() => process.exit(1));
   });
 });

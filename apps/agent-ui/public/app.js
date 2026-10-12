@@ -8,6 +8,7 @@ const elements = {
   effort: document.querySelector("#effort"),
   feedback: document.querySelector("#feedback"),
   interrupt: document.querySelector("#interrupt"),
+  mark: document.querySelector("#brand-mark"),
   model: document.querySelector("#model"),
   prompt: document.querySelector("#prompt"),
   send: document.querySelector("#send"),
@@ -17,6 +18,10 @@ const elements = {
 };
 
 let snapshot = null;
+
+function harnessName() {
+  return snapshot?.harness?.name || "Agent";
+}
 let socket = null;
 let reconnectTimer = null;
 let streamConnected = false;
@@ -111,7 +116,7 @@ function itemNode(item) {
 function workingNode() {
   const activity = node("div", "agent-activity");
   activity.setAttribute("role", "status");
-  activity.setAttribute("aria-label", "Codex is working");
+  activity.setAttribute("aria-label", `${harnessName()} is working`);
   activity.append(node("span", "activity-spinner"), node("span", "", "Working"));
   return activity;
 }
@@ -146,7 +151,7 @@ function renderTimeline(scrollAnchor) {
   elements.timeline.replaceChildren(fragment);
   if (!elements.timeline.childElementCount) {
     const empty = node("div", "empty");
-    empty.append(node("span", "empty-mark", "C"), node("strong", "", snapshot?.ready ? "Ready" : "Starting"));
+    empty.append(node("span", "empty-mark", harnessName().charAt(0).toUpperCase()), node("strong", "", snapshot?.ready ? "Ready" : "Starting"));
     elements.timeline.append(empty);
   }
   if (scrollAnchor) {
@@ -162,6 +167,8 @@ function replaceOptions(select, options, value, placeholder) {
   select.dataset.signature = signature;
   select.replaceChildren();
   if (!options.length) select.append(new Option(placeholder, ""));
+  // A harness may leave a setting on its own default, which is not one of the choices.
+  else if (!options.some((option) => option.value === value)) select.append(new Option("Default", ""));
   for (const option of options) select.append(new Option(option.label, option.value));
   select.value = value || "";
 }
@@ -185,12 +192,19 @@ function renderSettings() {
   );
   elements.model.disabled = settingsBusy || !thread || models.length === 0;
   elements.effort.disabled = settingsBusy || !thread || efforts.length === 0;
+  // Harnesses without reasoning levels get no empty picker.
+  elements.effort.closest(".select-wrap").hidden = Boolean(thread) && efforts.length === 0;
 }
 
 function render(scrollAnchor) {
   const thread = snapshot?.thread;
   const state = !streamConnected ? "reconnecting" : snapshot?.runtime?.state ?? "starting";
-  elements.title.textContent = thread?.title || "Codex";
+  const name = harnessName();
+  elements.title.textContent = thread?.title || name;
+  document.title = name;
+  elements.mark.textContent = name.charAt(0).toUpperCase();
+  elements.prompt.placeholder = `Message ${name}`;
+  elements.prompt.setAttribute("aria-label", `Message ${name}`);
   elements.cwd.textContent = thread?.cwd || "Connecting";
   elements.status.className = `status status-${state}`;
   elements.status.lastElementChild.textContent = state.charAt(0).toUpperCase() + state.slice(1);
@@ -242,7 +256,7 @@ elements.model.addEventListener("change", () => {
 });
 
 elements.effort.addEventListener("change", () => {
-  void updateSettings({ reasoningEffort: elements.effort.value });
+  void updateSettings({ reasoningEffort: elements.effort.value || null });
 });
 
 elements.composer.addEventListener("submit", async (event) => {

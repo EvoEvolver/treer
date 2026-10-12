@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <base href="./" />
-    <title>Codex</title>
+    <title>Agent</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -13,9 +13,9 @@
       <header class="topbar">
         <div class="identity">
           <button id="files-toggle" class="icon-button" type="button" aria-label="Browse files" title="Browse files" aria-expanded="false" aria-controls="file-browser">&#9776;</button>
-          <span class="brand-mark">C</span>
+          <span id="brand-mark" class="brand-mark">A</span>
           <div class="identity-copy">
-            <h1 id="title">Codex</h1>
+            <h1 id="title">Agent</h1>
             <p id="cwd">Connecting</p>
           </div>
         </div>
@@ -49,7 +49,7 @@
       </section>
       </div>
       <form id="composer" class="composer">
-        <textarea id="prompt" rows="1" placeholder="Message Codex" aria-label="Message Codex"></textarea>
+        <textarea id="prompt" rows="1" placeholder="Message agent" aria-label="Message agent"></textarea>
         <button id="send" class="icon-button primary" type="submit" aria-label="Send message" title="Send message">&#8593;</button>
       </form>
     </main>

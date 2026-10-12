@@ -1,4 +1,4 @@
-"""Replace only this managed Agent with Codex UI, keeping its native thread."""
+"""Replace only this managed Agent with the Agent UI, keeping its native session."""
 import argparse
 import json
 import os
@@ -11,11 +11,18 @@ import tempfile
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--thread-id", required=True)
+    parser.add_argument("--harness", choices=("codex", "acp"), default="codex")
+    parser.add_argument("--session-id", "--thread-id", dest="session_id", required=True,
+                        help="native session to resume (Codex thread ID or ACP session ID)")
+    parser.add_argument("--acp-command", help="ACP agent executable, required for --harness acp")
+    parser.add_argument("--acp-arg", action="append", default=[], help="argument for the ACP agent; repeatable")
+    parser.add_argument("--name", help="name shown in the UI")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if not args.thread_id.strip():
-        parser.error("--thread-id must not be empty")
+    if not args.session_id.strip():
+        parser.error("--session-id must not be empty")
+    if args.harness == "acp" and not args.acp_command:
+        parser.error("--harness acp requires --acp-command")
     for key in ("TREER_AGENT_ID", "TREER_WORKLOAD_CREDENTIAL", "TREER_AGENT_SERVER_URL"):
         if not os.environ.get(key):
             raise RuntimeError("Run switch.sh inside the target Treer-managed Agent")
@@ -26,25 +33,31 @@ def main():
     launcher = Path(__file__).resolve().with_name("treer-agent.sh")
     app = launcher.parent.parent
     if not os.access(launcher, os.X_OK) or not os.access(app / "node_modules/.bin/tsx", os.X_OK):
-        raise RuntimeError("Codex UI launcher/dependencies missing; run npm ci in apps/codex-ui")
-    for command in ("node", "codex", "curl"):
+        raise RuntimeError(f"Agent UI launcher/dependencies missing; run npm ci in {app}")
+    for command in ("node", "curl", "codex" if args.harness == "codex" else args.acp_command):
         if not shutil.which(command):
             raise RuntimeError(f"{command} is not on PATH")
     # startup --cwd is relative to the machine root, not to this Agent.
     # Keep the requested startup command rooted at '.', but pin the Codex cwd
-    # explicitly so migrating an Agent in a repository does not move its thread.
-    command = ["treer", "agent", "startup", "set", "--cwd", ".", "--", str(launcher), "--thread-id", args.thread_id,
-               "--cwd", str(Path.cwd())]
-    print(json.dumps({"agent_id": agent_id, "cwd": str(Path.cwd()), "thread_id": args.thread_id,
+    # explicitly so migrating an Agent in a repository does not move its session.
+    command = ["treer", "agent", "startup", "set", "--cwd", ".", "--", str(launcher), "--harness", args.harness,
+               "--session-id", args.session_id, "--cwd", str(Path.cwd())]
+    if args.harness == "acp":
+        command += ["--acp-command", args.acp_command]
+        for value in args.acp_arg:
+            command += ["--acp-arg", value]
+    if args.name:
+        command += ["--name", args.name]
+    print(json.dumps({"agent_id": agent_id, "cwd": str(Path.cwd()), "harness": args.harness, "session_id": args.session_id,
                       "startup_command": command, "restart_command": ["treer", "agent", "restart", "self"]}, indent=2), flush=True)
     if args.dry_run:
         return
     os.umask(0o077)
-    directory = Path.cwd() / ".treer/agents" / agent_id / "codex-ui-switches"
+    directory = Path.cwd() / ".treer/agents" / agent_id / "agent-ui-switches"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
     state = Path(tempfile.mkdtemp(prefix="switch-", dir=directory))
-    (state / "plan.json").write_text(json.dumps({"thread_id": args.thread_id, "startup_command": command}) + "\n")
+    (state / "plan.json").write_text(json.dumps({"harness": args.harness, "session_id": args.session_id, "startup_command": command}) + "\n")
     subprocess.run(command, check=True, timeout=30)
     print(f"Startup saved; detached self restart queued. Log: {state / 'restart.log'}", flush=True)
     pid = os.fork()

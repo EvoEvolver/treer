@@ -53,8 +53,14 @@ export class JsonRpcClient extends EventEmitter {
     this.output.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
   }
 
-  notify(method: string) {
-    this.output.write(`${JSON.stringify({ jsonrpc: "2.0", method })}\n`);
+  respondError(id: JsonRpcId, code: number, message: string) {
+    this.output.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
+  }
+
+  notify(method: string, params?: unknown) {
+    const payload: Record<string, unknown> = { jsonrpc: "2.0", method };
+    if (params !== undefined) payload.params = params;
+    this.output.write(`${JSON.stringify(payload)}\n`);
   }
 
   close() {
