@@ -11,7 +11,8 @@ import urllib.error
 import uuid
 
 p = argparse.ArgumentParser()
-p.add_argument("command", choices=["notify", "status"])
+p.add_argument("command", choices=["send", "notify", "status", "contacts"])
+p.add_argument("--endpoint", help="Tree path to a Managed App (default: sibling email-endpoint)")
 p.add_argument("--to")
 p.add_argument("--subject")
 p.add_argument("--summary")
@@ -21,12 +22,12 @@ p.add_argument("--idempotency-key", default=None)
 p.add_argument("--notification")
 p.add_argument(
     "--url",
-    default=os.environ.get("EMAIL_ENDPOINT_URL", "http://email-endpoint.treer/"),
+    default=os.environ.get("EMAIL_ENDPOINT_URL"),
 )
 a = p.parse_args()
 headers = {"Accept": "application/json"}
 data = None
-if a.command == "notify":
+if a.command in ("send", "notify"):
     if not a.to or not a.subject:
         p.error("notify requires --to and --subject")
     body = {
@@ -47,13 +48,47 @@ if a.command == "notify":
         }
     )
     path = "v1/notify"
-else:
+elif a.command == "status":
     if not a.notification:
         p.error("status requires --notification")
     path = "v1/notifications/" + a.notification
+else:
+    path = "v1/endpoint"
+if a.endpoint and a.url:
+    p.error("Choose --endpoint or explicit --url")
+if not a.url:
+    target = a.endpoint or "email-endpoint"
+    parent, name = target.rsplit("/", 1) if "/" in target else (".", target)
+    parent = parent or "/"
+    if not name or name in (".", ".."):
+        p.error("Endpoint must identify an App node")
+    try:
+        def cli(*args):
+            r = subprocess.run([os.environ.get("EMAIL_ENDPOINT_TREER_BIN", "treer"), *args],
+                               capture_output=True, text=True, timeout=20, check=True)
+            return json.loads(r.stdout)
+        tree = cli("agent", "ls", parent)
+        matches = [row for row in tree["agents"] if row.get("name") == name and row.get("kind") == "app"]
+        if len(matches) != 1:
+            raise ValueError("Endpoint is missing, ambiguous, or is not an App")
+        entry = matches[0]
+        app = cli("app", "show", entry["agent_id"])
+        app = app.get("app", app)
+        if (app.get("runtime_agent_id") or app.get("app_id")) != entry["agent_id"]:
+            raise ValueError("Endpoint identity changed; retry discovery")
+        service = app["service_id"]
+        if not service.startswith("svc_") or not all(c.isalnum() or c == "_" for c in service):
+            raise ValueError("Invalid service identity")
+        a.url = "http://" + service + ".treer/"
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        print(json.dumps({"error":{"code":"endpoint_resolution_failed","message":"Cannot resolve endpoint App; check tree path and tree/App read permissions"}}), file=sys.stderr)
+        sys.exit(1)
 # urllib honors inherited http_proxy for .treer identity injection.
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 try:
-    with urllib.request.urlopen(
+    with urllib.request.build_opener(NoRedirect()).open(
         urllib.request.Request(
             a.url.rstrip("/") + "/" + path, data=data, headers=headers
         ),

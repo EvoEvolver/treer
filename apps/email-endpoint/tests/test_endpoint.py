@@ -3,7 +3,7 @@ import os
 # Clean all inherited identities, harness settings and proxies before importing App code.
 for key in list(os.environ):
     if key.startswith(
-        ("TREER_", "AGENT_UI_", "CODEX_UI_", "EMAIL_ENDPOINT_")
+        ("TREER_", "AGENT_UI_", "CODEX_UI_", "EMAIL_ENDPOINT_", "SOUL_")
     ) or key.lower() in ("http_proxy", "https_proxy", "all_proxy"):
         del os.environ[key]
 import sys
@@ -26,6 +26,11 @@ class FakeAPI:
         self.requests = []
         self.fail = None
         self.email_requests = []
+        self.humans = [{"kind":"human","id":"u1","name":"Alice","role":"member"},
+                       {"kind":"human","id":"u2","name":"Bob","role":"member"}]
+        self.tree = {"agents":[{"agent_id":"app_test","kind":"app","name":"email","folder_id":"f1","path":"/team/email"},
+                               {"agent_id":"agent","kind":"command","folder_id":"f1","path":"/team/agent"},
+                               {"agent_id":"other-agent","kind":"command","folder_id":"f1","path":"/team/other-agent"}]}
 
     def request(self, method, path, access_token=None, body=None, form=None):
         self.requests.append((method, path, access_token, body))
@@ -51,12 +56,12 @@ class FakeAPI:
                 },
             }
         if path.endswith("/directory"):
-            return {
-                "principals": [
-                    {"kind": "human", "id": "u1", "name": "Alice"},
-                    {"kind": "human", "id": "u2", "name": "Bob"},
-                ]
-            }
+            humans = [p | {"role":"owner"} if access_token == "admin" and p["id"] == "u1" else p for p in self.humans]
+            return {"principals": humans + [{"kind":"agent", "id":a, "name":a} for a in ("agent","other-agent")]}
+        if path.endswith("/oauth/token"):
+            if form["code"] != "member-code":
+                raise e.mail.AppApiError("workspace_membership_required", "not a member")
+            return {"access_token":"human", "expires_at":"2099-01-01T00:00:00Z"}
         if path.endswith("/email"):
             self.email_requests.append(body)
             if self.fail:
@@ -107,12 +112,16 @@ class Tests(unittest.TestCase):
                 [],
                 retry_seconds=0.01,
                 max_attempts=2,
+                runtime_id="app_test",
             ),
             self.api,
+            tree_loader=lambda: self.api.tree, token_loader=lambda: "endpoint-token",
         )
         self.human = e.mail.BrowserSession(
             "", "human", "ws_test", "svc_test", "u1", "Alice", "member", 9999999999
         )
+
+        self.app.activate(e.mail.BrowserSession("", "admin", "ws_test", "svc_test", "u1", "Alice", "owner", 9999999999), {"enabled":True,"folder_id":"f1"})
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -187,7 +196,7 @@ class Tests(unittest.TestCase):
         with self.app.db() as db:
             n = dict(db.execute("SELECT * FROM notifications").fetchone())
         self.assertTrue(self.app.notification_result(n)["core_pending"])
-        recovered = e.Application(self.app.settings, self.api)
+        recovered = e.Application(self.app.settings, self.api, tree_loader=lambda: self.api.tree, token_loader=lambda: "endpoint-token")
         result = recovered.notify("agent", self.request(), "lost")
         self.assertFalse(result["core_pending"])
         self.assertEqual(len(self.api.messages), 1)
@@ -207,6 +216,8 @@ class Tests(unittest.TestCase):
 
     def test_proxy_fallback_retry_failed_and_restart(self):
         self.app.settings.mode = "proxy"
+        self.app.contacts[0]["email"] = "doomspec@outlook.com"
+        self.app.settings.allowlist = []
         with patch("email_endpoint.subprocess.run") as run:
             run.return_value.stdout = "app-token\n"
             self.api.fail = "email_not_configured"
@@ -221,7 +232,7 @@ class Tests(unittest.TestCase):
             self.assertEqual(self.app.status(n["id"], "agent")["status"], "queued")
             with self.app.db() as db:
                 db.execute("UPDATE notifications SET next_try=0")
-            recovered = e.Application(self.app.settings, self.api)
+            recovered = e.Application(self.app.settings, self.api, tree_loader=lambda: self.api.tree, token_loader=lambda: "endpoint-token")
             recovered.deliver()
             self.assertEqual(recovered.status(n["id"], "agent")["status"], "failed")
             self.assertNotIn("sensitive", json.dumps(self.api.email_requests))
@@ -241,6 +252,121 @@ class Tests(unittest.TestCase):
             self.assertEqual(r["wake"], "denied_or_unavailable_message_delivered")
             self.assertNotIn("SECRET", str(run.call_args))
             self.assertIn(r["message_id"], str(run.call_args))
+
+    def test_activation_live_folder_and_queue_rechecks(self):
+        admin = e.mail.BrowserSession("", "admin", "ws_test", "svc_test", "u1", "Alice", "owner", 9999999999)
+        self.app.activate(admin, {"enabled":False,"folder_id":"f1"})
+        with self.assertRaises(e.Error) as denied:
+            self.app.notify("agent", self.request(), "disabled")
+        self.assertEqual(denied.exception.code, "endpoint_disabled")
+        with self.assertRaises(e.Error):
+            self.app.activate(self.human, {"enabled":True,"folder_id":"f1"})
+        with self.assertRaises(e.Error):
+            self.app.activate(admin, {"enabled":True,"folder_id":"stale"})
+        self.app.activate(admin, {"enabled":True,"folder_id":"f1"})
+        self.api.tree["agents"][1]["folder_id"] = "f2"
+        with self.assertRaises(e.Error) as denied:
+            self.app.notify("agent", self.request(), "cross-folder")
+        self.assertEqual(denied.exception.code, "folder_denied")
+        self.api.tree["agents"][1]["folder_id"] = "f1"
+        n = self.app.notify("agent", self.request(), "queued")
+        self.api.tree["agents"][0]["folder_id"] = "f2"
+        self.app.deliver()
+        self.assertEqual(self.app.status(n["id"], "agent")["status"], "failed")
+        self.assertFalse((Path(self.tmp.name)/"outbox").exists())
+        self.api.tree["agents"][1]["folder_id"] = "f2"
+        with self.assertRaises(e.Error) as denied:
+            self.app.notify("agent", self.request(), "moved")
+        self.assertEqual(denied.exception.code, "endpoint_disabled")
+        self.app.activate(admin, {"enabled":True,"folder_id":"f2"})
+        self.app.notify("agent", self.request(), "re-enabled")
+
+    def test_contact_nonmember_current_binding_and_real_delivery_gate(self):
+        self.app.contacts.append({"id":"external","label":"External", "email":"outside@example.test", "enabled":True})
+        contacts = self.app.overview(e.mail.BrowserSession("", "admin", "ws_test", "svc_test", "u1", "Alice", "owner", 9999999999))["contacts"]
+        self.assertEqual(contacts[-1]["reply_status"], "reply_unavailable")
+        with self.assertRaises(e.Error) as denied:
+            self.app.notify("agent", self.request(to="external"), "outside")
+        self.assertEqual(denied.exception.code, "reply_unavailable")
+        n = self.app.notify("agent", self.request(), "binding")
+        self.app.contacts[0]["user_id"] = "u2"
+        for action in (lambda: self.app.thread(n["thread_id"], self.human),
+                       lambda: self.app.reply(n["thread_id"], self.human,{"body":"denied"},"r")):
+            with self.assertRaises(e.Error): action()
+        self.app.contacts[0]["user_id"] = "u1"
+        self.api.humans = [p for p in self.api.humans if p["id"] != "u1"]
+        with self.assertRaises(e.Error): self.app.thread(n["thread_id"], self.human)
+        self.app.deliver()
+        self.assertEqual(self.app.status(n["id"], "agent")["status"], "failed")
+        self.api.humans.append({"kind":"human","id":"u1","name":"Alice","role":"member"})
+        self.app.settings.mode = "proxy"
+        with self.assertRaises(e.Error) as denied:
+            self.app.notify("agent", self.request(), "real-blocked")
+        self.assertEqual(denied.exception.code, "recipient_denied")
+        self.assertEqual(self.api.email_requests, [])
+
+    def test_oauth_browser_binding_replay_expiry_and_nonmember(self):
+        def start(browser):
+            url = self.app.start_oauth("/", browser)
+            return e.urllib.parse.parse_qs(e.urllib.parse.urlsplit(url).query)["state"][0]
+        state = start("browser-one")
+        for browser in ("", "browser-two"):
+            with self.assertRaises(e.Error): self.app.finish_oauth("member-code", state, browser)
+        self.assertFalse(any(p.endswith("/oauth/token") for _,p,_,_ in self.api.requests))
+        raw, location, age = self.app.finish_oauth("member-code", state, "browser-one")
+        self.assertEqual(self.app.authenticated_session(raw).user_id, "u1")
+        self.assertEqual(location, "/")
+        self.assertGreater(age,0)
+        with self.assertRaises(e.Error): self.app.finish_oauth("member-code", state, "browser-one")
+        state = start("expired")
+        with self.app.db() as db: db.execute("UPDATE app_pending_oauth SET expires_at=0")
+        with self.assertRaises(e.Error): self.app.finish_oauth("member-code", state, "expired")
+        state = start("nonmember")
+        with self.assertRaises(e.mail.AppApiError): self.app.finish_oauth("nonmember-code", state, "nonmember")
+        with self.assertRaises(e.Error): self.app.start_oauth("https://evil.test/", "browser")
+
+    def test_legacy_migration_backup_default_disabled_and_state_identity(self):
+        import sqlite3
+        from dataclasses import replace
+        legacy = Path(self.tmp.name)/"legacy.sqlite3"
+        with sqlite3.connect(legacy) as db:
+            db.execute("CREATE TABLE threads(id TEXT PRIMARY KEY,agent TEXT,recipient TEXT,email TEXT,subject TEXT)")
+            db.execute("INSERT INTO threads VALUES('th_legacy','agent','u1','alice@example.test','Old')")
+        settings = replace(self.app.settings, config=replace(self.app.config,database_path=legacy))
+        app = e.Application(settings,self.api,tree_loader=lambda:self.api.tree,token_loader=lambda:"endpoint-token")
+        self.assertFalse(app.activation()["enabled"])
+        self.assertEqual(app.thread("th_legacy", self.human)["subject"], "Old")
+        backups = list(legacy.parent.glob("legacy.sqlite3.pre-v2-*"))
+        self.assertEqual(len(backups),1)
+        with sqlite3.connect(backups[0]) as db:
+            self.assertNotIn("contact",{r[1] for r in db.execute("PRAGMA table_info(threads)")})
+            self.assertEqual(db.execute("SELECT subject FROM threads").fetchone()[0],"Old")
+        db.close()
+        e.Application(settings,self.api,tree_loader=lambda:self.api.tree)
+        self.assertEqual(len(list(legacy.parent.glob("legacy.sqlite3.pre-v2-*"))),1)
+        wrong = replace(settings, config=replace(settings.config, service_id="svc_another"))
+        with self.assertRaises(ValueError): e.Application(wrong,self.api)
+
+    def test_two_instances_independent_contacts_activation_and_threads(self):
+        from dataclasses import replace
+        api2=FakeAPI()
+        api2.tree["agents"][0]["folder_id"]="f2"
+        settings=replace(self.app.settings, config=replace(self.app.config,database_path=Path(self.tmp.name)/"second.sqlite3"),
+                         members={},contacts=[{"id":"bob","email":"bob@example.test","user_id":"u2"}])
+        app2=e.Application(settings,api2,tree_loader=lambda:api2.tree,token_loader=lambda:"endpoint-token")
+        self.assertFalse(app2.activation()["enabled"])
+        self.assertTrue(self.app.activation()["enabled"])
+        self.assertEqual(app2.contacts[0]["id"],"bob")
+        self.assertNotEqual(self.app.contacts[0]["id"],"bob")
+        admin=e.mail.BrowserSession("", "admin", "ws_test", "svc_test", "u1", "Alice", "owner", 9999999999)
+        app2.activate(admin,{"enabled":True,"folder_id":"f2"})
+        with self.assertRaises(e.Error): app2.notify("agent",self.request(to="bob"),"wrong-folder")
+        api2.tree["agents"][1]["folder_id"]="f2"
+        n=app2.notify("agent",self.request(to="bob"),"second")
+        with self.assertRaises(e.Error): self.app.status(n["id"],"agent")
+        with self.assertRaises(e.Error): app2.thread(n["thread_id"],self.human)
+        with self.assertRaises(ValueError):
+            e.Application(replace(settings,contacts=[{"id":"x","email":"a@example.test"},{"id":"y","email":"a@example.test"}]),api2)
 
     def test_http_negotiation_header_auth_csrf_and_denied_page(self):
         server = e.Server(("127.0.0.1", 0), self.app)

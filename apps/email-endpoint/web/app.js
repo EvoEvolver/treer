@@ -6,7 +6,7 @@ const $ = s => document.querySelector(s);
 async function api(path, body, key) {
   const r = await fetch(new URL(path, root), body ? {method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify(body)} : {});
   const v = await r.json();
-  if (!r.ok) throw Object.assign(new Error(v.error?.message || 'Request failed'), {status:r.status});
+  if (!r.ok) throw Object.assign(new Error(v.error?.message || 'Request failed'), {status:r.status,code:v.error?.code});
   return v;
 }
 function showMessage(m, prepend=false) {
@@ -37,12 +37,37 @@ $('#reply').onsubmit=async e=>{
     $('#body').value='';pendingKey=null;await load();
   } catch(e) {$('#result').textContent=e.message;} finally {button.disabled=false;}
 };
+async function overview() {
+  const data=await api('v1/endpoint');
+  const node=data.endpoint;$('#endpoint').hidden=false;
+  $('#placement').textContent=node.path;
+  const active=node.activation.enabled && node.activation.folder_id===node.folder_id;
+  $('#activation-status').textContent=active?'Sending enabled in this folder.':'Sending disabled. Confirm placement before enabling.';
+  $('#contacts').replaceChildren();
+  data.contacts.forEach(c=>{
+    const item=document.createElement('p');item.textContent=`${c.label} · ${c.email} · ${c.reply_status}`;$('#contacts').append(item);
+  });
+  $('#threads').replaceChildren();
+  data.threads.forEach(t=>{
+    const p=document.createElement('p'),a=document.createElement('a');a.href=new URL('t/'+t.id+'/',root);a.textContent=t.subject;p.append(a);$('#threads').append(p);
+  });
+  if(data.admin){
+    const button=$('#activate');button.hidden=false;
+    button.textContent=active?'Disable sending':'Confirm this folder and enable sending';
+    button.onclick=async()=>{
+      button.disabled=true;
+      try{await api('v1/admin/activation',{enabled:!active,folder_id:node.folder_id},crypto.randomUUID());await overview();}
+      catch(e){$('#status').textContent=e.message;}finally{button.disabled=false;}
+    };
+  }
+}
 (async()=>{
   try {
     await api('api/auth/session');
     if(match) await load();
     else {
       $('#status').textContent='Open a notification link to read and reply to its conversation.';
+      await overview();
       try {
         const a=await api('v1/admin/outbox');$('#admin').hidden=false;
         a.notifications.forEach(n=>{
@@ -55,6 +80,6 @@ $('#reply').onsubmit=async e=>{
     }
   } catch(e){
     $('#status').textContent=e.status===401?'Sign in to view your conversation.':e.message;
-    if(e.status===401){const login=$('#login');login.hidden=false;login.href=new URL('api/auth/start?return_to='+encodeURIComponent(match?'/t/'+match[1]+'/':'/'),root);}
+    if(e.status===401 && !['identity_invalid','identity_required'].includes(e.code)){const login=$('#login');login.hidden=false;login.href=new URL('api/auth/start?return_to='+encodeURIComponent(match?'/t/'+match[1]+'/':'/'),root);}
   }
 })();

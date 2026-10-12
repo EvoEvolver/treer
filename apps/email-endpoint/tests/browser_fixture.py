@@ -12,6 +12,8 @@ import hmac
 import http.client
 import secrets
 import time
+import urllib.parse
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 state = tempfile.TemporaryDirectory()
@@ -25,7 +27,7 @@ c = e.mail.Config(
     Path(state.name) / "state.sqlite3",
 )
 api = FakeAPI()
-app = e.Application(e.Settings(c, "ws_test", {"u1": "alice@example.test"}, [], []), api)
+app = e.Application(e.Settings(c, "ws_test", {"u1": "alice@example.test"}, [], [], runtime_id="app_test", contacts=[{"id":"outside","label":"Outside contact","email":"external@example.test"}]), api, tree_loader=lambda: api.tree, token_loader=lambda: "endpoint-token")
 server = e.Server(("127.0.0.1", 0), app)
 origin = f"http://127.0.0.1:{server.server_address[1]}"
 app.config = e.mail.Config(
@@ -37,6 +39,7 @@ app.config = e.mail.Config(
     e.ROOT / "web",
     Path(state.name) / "state.sqlite3",
 )
+app.activate(e.mail.BrowserSession("", "admin", "ws_test", "svc_test", "u1", "Alice", "owner", 9999999999), {"enabled":True,"folder_id":"f1"})
 n = app.notify(
     "agent",
     {
@@ -63,6 +66,7 @@ signing_key = secrets.token_bytes(32)
 issued = set()
 verified = set()
 original_api_request = api.request
+oauth_codes = {}
 
 
 def decode_token(token):
@@ -77,6 +81,12 @@ def decode_token(token):
 
 
 def signed_api(method, path, access_token=None, body=None, form=None):
+    if path.endswith("/oauth/token"):
+        challenge = oauth_codes.pop(form["code"], None)
+        actual = base64.urlsafe_b64encode(hashlib.sha256(form["code_verifier"].encode()).digest()).rstrip(b"=").decode()
+        if not challenge or challenge != actual or form["redirect_uri"] != app.config.callback_url:
+            raise e.mail.AppApiError("invalid_grant", "invalid grant")
+        return original_api_request(method, path, form=form | {"code":"member-code"})
     if path.endswith("identity/verify") and "." in body["token"]:
         try:
             claims = decode_token(body["token"])
@@ -109,6 +119,18 @@ class Gateway(BaseHTTPRequestHandler):
         self.forward()
 
     def forward(self):
+        if self.path.startswith("/api/apps/oauth/authorize?"):
+            if "treer_test_platform=logged-in" not in self.headers.get("Cookie", ""):
+                self.send_error(401); return
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            if query.get("client_id") != ["svc_test"] or query.get("redirect_uri") != [app.config.callback_url] or query.get("code_challenge_method") != ["S256"]:
+                self.send_error(400); return
+            code = secrets.token_urlsafe(32)
+            oauth_codes[code] = query["code_challenge"][0]
+            self.send_response(302)
+            self.send_header("Location", app.config.callback_url + "?" + urllib.parse.urlencode({"code":code,"state":query["state"][0]}))
+            self.send_header("Content-Length", "0")
+            self.end_headers(); return
         if self.path == "/control-plane/":
             content = (
                 '<!doctype html><iframe title="Email endpoint" style="width:100%;height:100vh;border:0" src="'
@@ -185,6 +207,7 @@ class Gateway(BaseHTTPRequestHandler):
 gateway = ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
 gateway_origin = f"http://127.0.0.1:{gateway.server_address[1]}"
 app.settings.browser_origins = (gateway_origin,)
+app.config = replace(app.config, proxy_public_url=gateway_origin+"/")
 threading.Thread(target=server.serve_forever, daemon=True).start()
 print(
     json.dumps({"url": origin, "thread": n["thread_id"], "gateway": gateway_origin}),

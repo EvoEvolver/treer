@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 import hashlib
+import base64
 import html
 import json
 import os
@@ -14,10 +15,11 @@ import sys
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
 from http.server import ThreadingHTTPServer
+from http.cookies import SimpleCookie
 
 # Reuse the maintained App OAuth/PKCE/session and HTTP primitives, not Core internals.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mail"))
@@ -42,6 +44,8 @@ class Settings:
     retry_seconds: float = 30
     max_attempts: int = 5
     browser_origins: tuple = ()
+    contacts: list = field(default_factory=list)
+    runtime_id: str = ""
 
 
 def fields(value, allowed, required=()):
@@ -58,8 +62,11 @@ def text(value, name, size):
 
 
 class Application(mail.MailApplication):
-    def __init__(self, settings, api=None):
+    def __init__(self, settings, api=None, tree_loader=None, token_loader=None):
         self.settings = settings
+        self.tree_loader = tree_loader or self.load_tree
+        self.token_loader = token_loader or self.service_token
+        self.contacts = self.validate_contacts(settings)
         c = settings.config
         os.umask(0o077)
         c.database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -70,20 +77,167 @@ class Application(mail.MailApplication):
         )
         self.lock = threading.RLock()
         self.stop = threading.Event()
+        self.migrate()
         with self.db() as db:
             db.executescript("""
-            CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY, agent TEXT NOT NULL, recipient TEXT NOT NULL, email TEXT NOT NULL, subject TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY, agent TEXT NOT NULL, recipient TEXT NOT NULL, email TEXT NOT NULL, subject TEXT NOT NULL, contact TEXT);
             CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY, agent TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, thread TEXT NOT NULL, parent TEXT, message TEXT, subject TEXT NOT NULL, summary TEXT NOT NULL, urgency TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_try REAL NOT NULL, created REAL NOT NULL, transport TEXT, error TEXT, UNIQUE(agent,key));
             CREATE TABLE IF NOT EXISTS thread_messages(seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, message TEXT UNIQUE NOT NULL);
             CREATE TABLE IF NOT EXISTS replies(principal TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, thread TEXT NOT NULL, parent TEXT, message TEXT, wake TEXT, PRIMARY KEY(principal,key));
             """)
+
+    @staticmethod
+    def validate_contacts(settings):
+        contacts = [dict(c) for c in settings.contacts]
+        bound = {c.get("user_id") for c in contacts}
+        contacts += [{"id": "member-" + uid, "label": uid, "email": email,
+                      "user_id": uid} for uid, email in settings.members.items() if uid not in bound]
+        ids, emails = set(), set()
+        for c in contacts:
+            fields(c, ("id", "label", "email", "user_id", "enabled"), ("id", "email"))
+            cid = text(c["id"], "contact ID", 128)
+            email = text(c["email"], "email", 254).lower()
+            if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", email):
+                raise ValueError("Invalid contact email")
+            if cid in ids or email in emails:
+                raise ValueError("Duplicate contact ID or email")
+            ids.add(cid); emails.add(email)
+            if c.get("user_id") is not None:
+                text(c["user_id"], "user ID", 256)
+            if not isinstance(c.get("enabled", True), bool):
+                raise ValueError("Contact enabled must be boolean")
+            c.update(email=email, label=text(c.get("label", cid), "contact label", 256),
+                     enabled=c.get("enabled", True))
+        return contacts
+
+    def migrate(self):
+        # Existing state is backed up before any v2 schema/activation change.
+        with self.db() as db:
+            old = db.execute("SELECT name FROM sqlite_master WHERE name='threads'").fetchone()
+            columns = {r[1] for r in db.execute("PRAGMA table_info(threads)")}
+            if old and "contact" not in columns:
+                backup = self.config.database_path.with_name(self.config.database_path.name + ".pre-v2-" + secrets.token_hex(8))
+                target = sqlite3.connect(backup)
+                try:
+                    db.backup(target)
+                    target.execute("PRAGMA journal_mode=DELETE")
+                finally:
+                    target.close()
+            db.execute("CREATE TABLE IF NOT EXISTS endpoint_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            identity = json.dumps([self.settings.workspace, self.config.service_id])
+            row = db.execute("SELECT value FROM endpoint_state WHERE key='identity'").fetchone()
+            if row and row[0] != identity:
+                raise ValueError("State directory belongs to another endpoint")
+            db.execute("INSERT OR IGNORE INTO endpoint_state VALUES('identity',?)", (identity,))
+            if old and "contact" not in columns:
+                db.execute("ALTER TABLE threads ADD COLUMN contact TEXT")
+                for c in self.contacts:
+                    db.execute("UPDATE threads SET contact=? WHERE recipient=? AND lower(email)=?",
+                               (c["id"], c.get("user_id"), c["email"]))
+            # Old unbound OAuth login flows cannot safely cross the upgrade.
+            oauth_cols = {r[1] for r in db.execute("PRAGMA table_info(app_pending_oauth)")}
+            if "browser_hash" not in oauth_cols:
+                db.execute("DELETE FROM app_pending_oauth")
+                db.execute("ALTER TABLE app_pending_oauth ADD COLUMN browser_hash TEXT")
+
+    def service_token(self):
+        result = subprocess.run([os.environ.get("EMAIL_ENDPOINT_TREER_BIN", "treer"),
+                                 "token", "create", self.config.service_id], capture_output=True,
+                                text=True, timeout=15, check=True)
+        return result.stdout.strip()
+
+    def load_tree(self):
+        try:
+            result = subprocess.run([os.environ.get("EMAIL_ENDPOINT_TREER_BIN", "treer"),
+                                     "agent", "ls", "-R", "/"], capture_output=True,
+                                    text=True, timeout=15, check=True)
+            return json.loads(result.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise Error(503, "Current workspace tree unavailable", "tree_unavailable")
+
+    def placement(self, agent=None):
+        tree = self.tree_loader()
+        rows = tree.get("agents", [])
+        own = next((a for a in rows if a.get("agent_id") == self.settings.runtime_id), None)
+        if not own or own.get("kind") != "app":
+            raise Error(503, "Endpoint runtime is absent from the current tree", "endpoint_unplaced")
+        if agent:
+            caller = next((a for a in rows if a.get("agent_id") == agent), None)
+            if not caller or caller.get("kind") == "app" or caller.get("folder_id") != own.get("folder_id"):
+                raise Error(403, "Only Agents in this endpoint's current folder may send", "folder_denied")
+        return own
+
+    def activation(self):
+        with self.db() as db:
+            row = db.execute("SELECT value FROM endpoint_state WHERE key='activation'").fetchone()
+        return json.loads(row[0]) if row else {"enabled": False, "folder_id": None}
+
+    def require_enabled(self, agent=None):
+        own = self.placement(agent)
+        active = self.activation()
+        if not active["enabled"] or active["folder_id"] != own.get("folder_id"):
+            raise Error(409, "Confirm current placement and enable sending first", "endpoint_disabled")
+        return own
+
+    def activate(self, record, request):
+        self.require_admin(record)
+        fields(request, ("enabled", "folder_id"), ("enabled", "folder_id"))
+        if not isinstance(request["enabled"], bool):
+            raise Error(400, "enabled must be boolean", "request_invalid")
+        own = self.placement()
+        if request["folder_id"] != own.get("folder_id"):
+            raise Error(409, "Endpoint moved; inspect its placement again", "placement_changed")
+        with self.lock, self.db() as db:
+            db.execute("INSERT OR REPLACE INTO endpoint_state VALUES('activation',?)",
+                       (json.dumps(request),))
+        return request
+
+    def contact_view(self, token):
+        humans = {p["id"] for p in self.api.request("GET", f"/api/apps/{self.config.service_id}/directory",
+                                                   access_token=token)["principals"] if p["kind"] == "human"}
+        return [c | {"reply_available": bool(c["enabled"] and c.get("user_id") in humans),
+                     "reply_status": "available" if c["enabled"] and c.get("user_id") in humans else "reply_unavailable"}
+                for c in self.contacts]
+
+    def require_admin(self, record):
+        claims = self.principal(record.access_token, "human")
+        if claims["sub"] != record.user_id or claims.get("role") not in ("owner", "admin"):
+            raise Error(403, "Workspace administrator required", "admin_required")
+
+    def check_thread(self, t, record):
+        claims = self.principal(record.access_token, "human")
+        if claims["sub"] != record.user_id:
+            raise Error(401, "Identity changed", "identity_invalid")
+        c = next((c for c in self.contacts if t and c["id"] == t["contact"]), None)
+        if not t or t["recipient"] != record.user_id or not c or not c["enabled"] or c.get("user_id") != record.user_id or c["email"] != t["email"]:
+            raise Error(403, "You are not the current recipient of this thread", "thread_denied")
+
+    def overview(self, record):
+        claims = self.principal(record.access_token, "human")
+        own = self.placement()
+        contacts = self.contact_view(record.access_token)
+        admin = claims.get("role") in ("owner", "admin")
+        if not admin:
+            contacts = [c for c in contacts if c.get("user_id") == record.user_id]
+        with self.db() as db:
+            rows = db.execute("SELECT t.*, max(m.seq) AS recent FROM threads t LEFT JOIN thread_messages m ON m.thread=t.id WHERE recipient=? GROUP BY t.id ORDER BY recent DESC LIMIT 100", (record.user_id,)).fetchall()
+        threads = []
+        for t in rows:
+            try:
+                self.check_thread(t, record)
+                threads.append({"id": t["id"], "subject": t["subject"]})
+            except Error as error:
+                if error.status != 403: raise
+        return {"endpoint": {"service_id": self.config.service_id, "path": own["path"],
+                             "folder_id": own.get("folder_id"), "activation": self.activation()},
+                "contacts": contacts, "threads": threads, "admin": admin}
 
     def db(self):
         db = sqlite3.connect(self.config.database_path, timeout=15)
         db.row_factory = sqlite3.Row
         return db
 
-    def start_oauth(self, return_to):
+    def start_oauth(self, return_to, browser):
         # Mail's OAuth implementation validates root-only returns. Generate PKCE with it,
         # then store the validated local thread return, never an arbitrary URL.
         if return_to != "/" and not re.fullmatch(r"/t/th_[a-f0-9]{32}/", return_to):
@@ -92,10 +246,33 @@ class Application(mail.MailApplication):
         state = urllib.parse.parse_qs(urllib.parse.urlsplit(location).query)["state"][0]
         with self.sessions._connect() as db:
             db.execute(
-                "UPDATE app_pending_oauth SET return_path=? WHERE state_hash=?",
-                (return_to, mail._secret_hash(state)),
+                "UPDATE app_pending_oauth SET return_path=?,browser_hash=? WHERE state_hash=?",
+                (return_to, mail._secret_hash(browser), mail._secret_hash(state)),
             )
         return location
+
+    def finish_oauth(self, code, state, browser):
+        code, state = text(code, "OAuth code", 4096), text(state, "OAuth state", 4096)
+        with self.sessions._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM app_pending_oauth WHERE state_hash=? AND browser_hash=?",
+                             (mail._secret_hash(state), mail._secret_hash(browser))).fetchone()
+            if not row:
+                raise Error(401, "OAuth state does not belong to this browser", "oauth_state_invalid")
+            db.execute("DELETE FROM app_pending_oauth WHERE state_hash=?", (mail._secret_hash(state),))
+        if row["expires_at"] <= time.time():
+            raise Error(401, "OAuth state expired", "oauth_state_invalid")
+        response = self.api.request("POST", "/api/apps/oauth/token", form={
+            "grant_type": "authorization_code", "code": code, "client_id": self.config.service_id,
+            "redirect_uri": self.config.callback_url, "code_verifier": row["verifier"]})
+        token = text(response.get("access_token"), "access token", 8192)
+        claims = self.principal(token, "human")
+        expires = min(mail._timestamp(response.get("expires_at"), "token expiry"), claims["exp"])
+        if expires <= time.time():
+            raise Error(401, "OAuth identity expired", "oauth_identity_invalid")
+        raw = "eep_" + secrets.token_urlsafe(48)
+        self.sessions.save_session(raw, token, claims, expires)
+        return raw, row["return_path"], max(1, int(expires - time.time()))
 
     def principal(self, token, kind="agent"):
         if not token:
@@ -114,13 +291,19 @@ class Application(mail.MailApplication):
             or not c.get("sub")
         ):
             raise Error(401, "Invalid Treer service identity", "identity_invalid")
+        directory = self.api.request("GET", f"/api/apps/{self.config.service_id}/directory", access_token=token)["principals"]
+        p = next((p for p in directory if p.get("id") == c["sub"] and p.get("kind") == kind), None)
+        if not p:
+            raise Error(401, "Caller is no longer a workspace principal", "identity_invalid")
+        if kind == "human": c["role"] = p.get("role", "member")
         return c
 
     def authenticated_session(self, raw):
         record = super().authenticated_session(raw)
-        if record.workspace_id != self.settings.workspace:
+        claims = self.principal(record.access_token, "human")
+        if record.workspace_id != self.settings.workspace or claims["sub"] != record.user_id:
             raise Error(401, "Workspace identity mismatch", "identity_invalid")
-        return record
+        return self.sessions.update_principal(record, claims.get("name", record.preferred_name), claims["role"])
 
     def core(self, token, method, suffix="", body=None):
         return self.api.request(
@@ -131,49 +314,30 @@ class Application(mail.MailApplication):
         )
 
     def recipient(self, target, token):
-        directory = self.api.request(
-            "GET", f"/api/apps/{self.config.service_id}/directory", access_token=token
-        )["principals"]
-        humans = [p for p in directory if p["kind"] == "human"]
-        # Email addresses are never discovered from Core; administrator owns the bindings.
-        matches = [
-            p
-            for p in humans
-            if target in (p["id"], p["name"])
-            or self.settings.members.get(p["id"], "").lower() == target.lower()
-        ]
+        contacts = self.contact_view(token)
+        matches = [c for c in contacts if target in (c["id"], c.get("user_id"), c["label"])
+                   or target.lower() == c["email"]]
+        # Legacy display names remain accepted only through the current directory.
+        if not matches:
+            humans = self.api.request("GET", f"/api/apps/{self.config.service_id}/directory", access_token=token)["principals"]
+            ids = {p["id"] for p in humans if p["kind"] == "human" and p["name"] == target}
+            matches = [c for c in contacts if c.get("user_id") in ids]
         if len(matches) != 1:
-            raise Error(
-                403,
-                "Recipient requires one active workspace member with an administrator-configured email binding",
-                "recipient_denied",
-            )
-        p = matches[0]
-        address = self.settings.members.get(p["id"])
-        if not address or not re.fullmatch(
-            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", address
-        ):
-            raise Error(
-                403,
-                "Member has no valid administrator-configured email",
-                "recipient_denied",
-            )
-        # Member bindings are an explicit administrator admission. Optional allowlist
-        # further restricts them. Proxy independently validates its verified member data.
-        if self.settings.allowlist and not any(
-            address.lower() == a.lower()
-            or (
-                a.startswith("@") and address.rsplit("@", 1)[1].lower() == a[1:].lower()
-            )
-            for a in self.settings.allowlist
-        ):
-            raise Error(
-                403, "Recipient is outside the configured allowlist", "recipient_denied"
-            )
-        return p["id"], address.lower()
+            raise Error(403, "Recipient must match one configured contact", "recipient_denied")
+        c = matches[0]
+        if not c["reply_available"]:
+            raise Error(409, "Contact requires active workspace membership and administrator binding", "reply_unavailable")
+        address = c["email"]
+        if self.settings.allowlist and not any(address == a.lower() or
+                (a.startswith("@") and address.rsplit("@", 1)[1] == a[1:].lower()) for a in self.settings.allowlist):
+            raise Error(403, "Recipient is outside the configured allowlist", "recipient_denied")
+        if self.settings.mode == "proxy" and address != "doomspec@outlook.com":
+            raise Error(403, "Real delivery is restricted to the approved recipient", "recipient_denied")
+        return c["user_id"], address, c["id"]
 
     def notify(self, token, request, key):
         agent = self.principal(token)["sub"]
+        self.require_enabled(agent)
         fields(
             request,
             ("to", "subject", "body", "summary", "urgency", "thread_id"),
@@ -192,7 +356,7 @@ class Application(mail.MailApplication):
         urgency = request.get("urgency", "normal")
         if urgency not in ("normal", "high"):
             raise Error(400, "urgency must be normal or high", "request_invalid")
-        recipient, address = self.recipient(target, token)
+        recipient, address, contact = self.recipient(target, token)
         fingerprint = hashlib.sha256(
             json.dumps(request, sort_keys=True).encode()
         ).hexdigest()
@@ -235,6 +399,8 @@ class Application(mail.MailApplication):
                         not t
                         or t["agent"] != agent
                         or t["recipient"] != recipient
+                        or t["contact"] != contact
+                        or t["email"] != address
                         or t["email"] != address
                     ):
                         raise Error(
@@ -245,8 +411,8 @@ class Application(mail.MailApplication):
                 else:
                     thread_id = "th_" + secrets.token_hex(16)
                     db.execute(
-                        "INSERT INTO threads VALUES(?,?,?,?,?)",
-                        (thread_id, agent, recipient, address, subject),
+                        "INSERT INTO threads(id,agent,recipient,email,subject,contact) VALUES(?,?,?,?,?,?)",
+                        (thread_id, agent, recipient, address, subject, contact),
                     )
                 parent = db.execute(
                     "SELECT message FROM thread_messages WHERE thread=? ORDER BY seq DESC LIMIT 1",
@@ -313,10 +479,7 @@ class Application(mail.MailApplication):
     def thread(self, thread_id, record, before=0):
         with self.db() as db:
             t = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
-            if not t or t["recipient"] != record.user_id:
-                raise Error(
-                    403, "You are not the recipient of this thread", "thread_denied"
-                )
+            self.check_thread(t, record)
             rows = db.execute(
                 "SELECT seq,message FROM thread_messages WHERE thread=? AND (?=0 OR seq<?) ORDER BY seq DESC LIMIT 50",
                 (thread_id, before, before),
@@ -339,10 +502,7 @@ class Application(mail.MailApplication):
         fingerprint = hashlib.sha256((thread_id + "\0" + body).encode()).hexdigest()
         with self.lock, self.db() as db:
             t = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
-            if not t or t["recipient"] != record.user_id:
-                raise Error(
-                    403, "You are not the recipient of this thread", "thread_denied"
-                )
+            self.check_thread(t, record)
             old = db.execute(
                 "SELECT * FROM replies WHERE principal=? AND key=?",
                 (record.user_id, key),
@@ -437,11 +597,10 @@ class Application(mail.MailApplication):
         return self.notification_result(dict(n))
 
     def admin(self, record):
-        if record.role not in ("owner", "admin"):
-            raise Error(403, "Workspace administrator required", "admin_required")
+        self.require_admin(record)
         with self.db() as db:
             rows = db.execute(
-                "SELECT n.*,t.email FROM notifications n JOIN threads t ON t.id=n.thread ORDER BY n.created DESC LIMIT 100"
+                "SELECT n.*,t.email,t.recipient,t.contact FROM notifications n JOIN threads t ON t.id=n.thread ORDER BY n.created DESC LIMIT 100"
             ).fetchall()
         return {
             "mode": self.settings.mode,
@@ -456,7 +615,7 @@ class Application(mail.MailApplication):
         # Single active worker; SQLite serializes mutations with HTTP handlers.
         with self.lock, self.db() as db:
             rows = db.execute(
-                "SELECT n.*,t.email FROM notifications n JOIN threads t ON t.id=n.thread WHERE n.status='queued' AND n.message IS NOT NULL AND n.next_try<=? ORDER BY n.created LIMIT 1",
+                "SELECT n.*,t.email,t.recipient,t.contact FROM notifications n JOIN threads t ON t.id=n.thread WHERE n.status='queued' AND n.message IS NOT NULL AND n.next_try<=? ORDER BY n.created LIMIT 1",
                 (time.time(),),
             ).fetchall()
             for row in rows:
@@ -471,24 +630,19 @@ class Application(mail.MailApplication):
                 transport = self.settings.mode
                 error = None
                 try:
+                    self.require_enabled(n["agent"])
+                    token = self.token_loader()
+                    contact = next((c for c in self.contact_view(token) if c["id"] == n["contact"] and c["email"] == n["email"] and c.get("user_id") == n["recipient"] and c["reply_available"]), None)
+                    if not contact:
+                        raise Error(403, "Contact binding revoked", "recipient_denied")
+                    if transport == "proxy" and n["email"] != "doomspec@outlook.com":
+                        raise Error(403, "Real recipient denied", "recipient_denied")
                     if transport == "proxy":
-                        result = subprocess.run(
-                            [
-                                os.environ.get("EMAIL_ENDPOINT_TREER_BIN", "treer"),
-                                "token",
-                                "create",
-                                self.config.service_id,
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=15,
-                            check=True,
-                        )
                         try:
                             self.api.request(
                                 "POST",
                                 f"/api/apps/{self.config.service_id}/email",
-                                access_token=result.stdout.strip(),
+                                access_token=token,
                                 body={
                                     "to": n["email"],
                                     "subject": subject,
@@ -507,12 +661,12 @@ class Application(mail.MailApplication):
                 except Exception as exc:
                     error = (
                         exc.code
-                        if isinstance(exc, mail.AppApiError)
+                        if isinstance(exc, (mail.AppApiError, Error))
                         else "delivery_unavailable"
                     )
                     status = (
                         "failed"
-                        if n["attempts"] + 1 >= self.settings.max_attempts
+                        if (isinstance(exc, Error) and exc.status in (403, 409)) or n["attempts"] + 1 >= self.settings.max_attempts
                         else "queued"
                     )
                 db.execute(
@@ -565,11 +719,11 @@ class Handler(mail.MailHandler):
 
     def _session(self):
         token = self.headers.get("X-Treer-Identity-Token")
-        if token is not None:
-            c = self.server.application.principal(token, "human")
+        if token is not None or "Authorization" in self.headers:
+            c = self.server.application.principal(self._token(), "human")
             return mail.BrowserSession(
                 "",
-                token,
+                self._token(),
                 c["workspace_id"],
                 c["service_id"],
                 c["sub"],
@@ -583,6 +737,24 @@ class Handler(mail.MailHandler):
         value = super()._session_cookie(raw, max_age)
         path = urllib.parse.urlsplit(self.server.application.config.public_url).path
         return value.replace("Path=/", "Path=" + path)
+
+    def _oauth_cookie(self, raw, max_age):
+        return self._session_cookie(raw, max_age).replace(mail.SESSION_COOKIE + "=", "treer_email_endpoint_oauth=")
+
+    def _oauth_browser(self):
+        cookie = SimpleCookie()
+        try: cookie.load(self.headers.get("Cookie", ""))
+        except Exception: return ""
+        value = cookie.get("treer_email_endpoint_oauth")
+        return value.value if value else ""
+
+    def _redirect_cookies(self, location, cookies):
+        self.send_response(303)
+        self._security_headers()
+        self.send_header("Location", location)
+        for cookie in cookies: self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _bytes(self, *args, **kwargs):
         super()._bytes(*args, **kwargs)
@@ -618,7 +790,7 @@ class Handler(mail.MailHandler):
                     .geturl(),
                     *app.settings.browser_origins,
                 }
-                if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "same-site"):
                     raise Error(403, "Cross-site request denied", "csrf_denied")
                 if self.headers.get("Origin") not in allowed_origins:
                     raise Error(403, "Same-origin request required", "csrf_denied")
@@ -633,6 +805,19 @@ class Handler(mail.MailHandler):
                 )
             elif path.startswith("/v1/notifications/") and method == "GET":
                 self._json(200, app.status(path.rsplit("/", 1)[1], self._token()))
+            elif path == "/v1/endpoint" and method == "GET":
+                if "X-Treer-Identity-Token" in self.headers or "Authorization" in self.headers:
+                    token = self._token()
+                    # Endpoint discovery is also useful to same-folder Agent callers.
+                    result = app.api.request("POST", "/.treer/apps/identity/verify", body={"token": token, "audience": app.config.service_id})
+                    if (result.get("claims") or {}).get("principal_kind") == "agent":
+                        agent = app.principal(token)["sub"]
+                        own = app.placement(agent)
+                        self._json(200, {"endpoint": {"service_id": app.config.service_id, "path": own["path"], "folder_id": own.get("folder_id"), "activation": app.activation()}, "contacts": app.contact_view(token)})
+                        return
+                self._json(200, app.overview(self._session()))
+            elif path == "/v1/admin/activation" and method == "POST":
+                self._json(200, app.activate(self._session(), self._json_body()))
             elif path == "/v1/admin/outbox" and method == "GET":
                 self._json(200, app.admin(self._session()))
             elif re.fullmatch(r"/v1/threads/th_[a-f0-9]{32}", path):
@@ -655,6 +840,16 @@ class Handler(mail.MailHandler):
                     )
                 else:
                     raise Error(405, "Method not allowed", "method_not_allowed")
+            elif path == "/api/auth/start" and method == "GET":
+                browser = secrets.token_urlsafe(32)
+                location = app.start_oauth(urllib.parse.parse_qs(parsed.query).get("return_to", ["/"])[0], browser)
+                self._redirect_cookies(location, [self._oauth_cookie(browser, 600)])
+            elif path == "/api/auth/callback" and method == "GET":
+                query = urllib.parse.parse_qs(parsed.query)
+                raw, location, max_age = app.finish_oauth(query.get("code", [""])[0], query.get("state", [""])[0], self._oauth_browser())
+                # Return to allocated ingress, not the Proxy root when tunneled.
+                self._redirect_cookies(urllib.parse.urljoin(app.config.public_url, location.lstrip("/")),
+                                       [self._session_cookie(raw, max_age), self._oauth_cookie("", 0)])
             elif path in (
                 "/api/auth/start",
                 "/api/auth/callback",
@@ -699,22 +894,18 @@ class Handler(mail.MailHandler):
                 try:
                     record = self._session()
                 except Error as exc:
-                    if exc.status != 401 or self.headers.get("X-Treer-Identity-Token"):
+                    if exc.status != 401 or "X-Treer-Identity-Token" in self.headers or "Authorization" in self.headers:
                         raise
                     self._static("/", head=False)
                     return
-                # Check ownership at navigation as well as at every data mutation/read.
+                # Recheck current member/contact binding on navigation as on APIs.
                 with app.db() as db:
-                    t = db.execute(
-                        "SELECT recipient FROM threads WHERE id=?",
-                        (path.split("/")[2],),
-                    ).fetchone()
-                if not t or t[0] != record.user_id:
-                    self._bytes(
-                        403,
-                        "text/html; charset=utf-8",
-                        b'<!doctype html><meta name="viewport" content="width=device-width"><h1>Access denied</h1><p>You are not the recipient of this thread.</p>',
-                    )
+                    t = db.execute("SELECT * FROM threads WHERE id=?", (path.split("/")[2],)).fetchone()
+                try:
+                    app.check_thread(t, record)
+                except Error as exc:
+                    if exc.status != 403: raise
+                    self._bytes(403, "text/html; charset=utf-8", b'<!doctype html><meta name="viewport" content="width=device-width"><h1>Access denied</h1><p>You are not the current recipient of this thread.</p>')
                 else:
                     self._static("/", head=False)
             elif path in ("/app.js", "/style.css") and method in ("GET", "HEAD"):
@@ -782,12 +973,8 @@ def load_settings():
         c,
         value.get("workspace_id") or os.environ["TREER_WORKSPACE_ID"],
         value.get("members", {}),
-        [
-            entry.strip()
-            for entry in os.environ["EMAIL_ENDPOINT_ALLOWLIST"].split(",")
-            if entry.strip()
-        ]
-        if "EMAIL_ENDPOINT_ALLOWLIST" in os.environ
+        [entry.strip() for entry in os.environ.get("EMAIL_ENDPOINT_ALLOWLIST", os.environ.get("TREER_EMAIL_ALLOWLIST", "")).split(",") if entry.strip()]
+        if "EMAIL_ENDPOINT_ALLOWLIST" in os.environ or "TREER_EMAIL_ALLOWLIST" in os.environ
         else value.get("allowlist", []),
         value.get("wake_agents", []),
         value.get("mode", "outbox"),
@@ -797,6 +984,8 @@ def load_settings():
         int(value.get("max_attempts", 5)),
     )
     settings.browser_origins = tuple(value.get("browser_origins", []))
+    settings.contacts = value.get("contacts", [])
+    settings.runtime_id = value.get("runtime_agent_id") or os.environ.get("TREER_AGENT_ID", "")
     if (
         settings.mode not in ("outbox", "proxy")
         or min(
