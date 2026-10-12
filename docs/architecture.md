@@ -311,11 +311,10 @@ the workspace root); placement order is preserved. Organizing the tree does
 not change filesystem paths, machine ownership, process identity, or Policy.
 The Controller parses `treer agent mkdir/ls/mv/rmdir` and resolves tree paths.
 CLI Agent creation and profile launch resolve `--folder` before creation,
-defaulting to the calling Agent's placement (operators default to root), then
-place the returned Agent through the same Policy-checked Tree API. A failed
-post-create placement reports the created ID for a move retry rather than
-creating a second workload. This does not change the process `cwd` or the
-Proxy/Controller create and launch wire contracts.
+defaulting to the calling Agent's placement (operators default to root).
+The Proxy reserves the Agent's name and placement under the workspace Tree
+lock before dispatching process creation, so concurrent creates cannot claim
+the same sibling name. Placement does not change the process `cwd`.
 The thin CLI remains argv/I/O transport. New or renamed folders reject `/`,
 `.` and `..` names and duplicate sibling names under the workspace lock.
 Legacy ambiguous names remain addressable by folder ID. CLI `rmdir` sends
@@ -585,8 +584,11 @@ optional `ui_path` exposes an embedded browser interface on that same endpoint;
 HTTP and WebSocket traffic below the path is opaque to the semantic AIS contract.
 
 The Controller routes `prompt.submit` and `transcript.read` through AIS when the
-matching capability is present. A missing prompt capability falls back to the
-PTY compatibility path. Once an AIS request is dispatched, errors are returned
+matching capability is present. Explicit steering and legacy prompt commands
+can use the PTY compatibility path when no prompt interface is available.
+Default queued submission requires `prompt.queue`; missing support returns
+`queue_unsupported` rather than silently inserting text into the terminal.
+Once an AIS request is dispatched, errors are returned
 without a second PTY submission. Every prompt carries the Proxy command ID as
 an idempotency key. An interface with `state.observe` owns working, idle, and
 blocked state; Host exit state remains authoritative. Terminal attach, raw

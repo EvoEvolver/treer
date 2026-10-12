@@ -133,12 +133,12 @@ boundary.
 
 Repository launchers are optional code executed with the Agent's operating-
 system authority. Treer's binary installer, updater, and release artifacts do
-not fetch or install them. The ACP launcher is obtained separately and performs
-builds only during an explicit `apply.sh` operation; ordinary Agent startup
-does not fetch or update software. Its headless profiles expose no browser
-path. Selecting the Remote Codex UI profile explicitly trusts and builds the
-immutable upstream commit recorded in the launcher lock file, then serves it
-only through the existing private Agent Interface tunnel.
+not fetch or install them. The optional `launchers/agent` launcher is obtained
+separately; its explicitly invoked installer owns harness dependencies and UI
+setup. Ordinary Agent startup does not fetch or update software. Its browser
+UI is served through the private Agent Interface tunnel. Selecting a launcher
+trusts that launcher and its selected harness with the Agent's authority; a
+private UI tunnel does not create an operating-system sandbox.
 
 Treer does not install provider CLIs, capture network traffic, manage OS DNS,
 create namespaces, or configure a sandbox. Profiles and external launchers own

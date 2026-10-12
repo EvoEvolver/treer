@@ -55,6 +55,11 @@ the plan identifies every maintained document that must change at completion.
 
 ## Design proposals
 
+- [Architecture review, 2026-10-12](research/2026-10-12-architecture-review.md):
+  severity-ranked source audit of ownership, delivery, environment inheritance,
+  recovery, release compatibility, App deployment, and tree semantics; records
+  the focused virtual-host revision fix and larger proposals separately.
+
 - [External Agent identity and remote CLI access](research/2026-09-30-external-agent-cli-plan.md):
   proposed separation of identity from Host-managed processes, a public CLI
   gateway backed by the existing Agent Server parser, and optional explicit
