@@ -36,6 +36,10 @@ flowchart LR
 The Host is intentionally product-agnostic. Shared wire models live in protocol
 crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
+`treer-protocol/src/lib.rs` retains constants and the public export surface;
+private modules group inventory, Policy, identity, messages, Apps, workloads,
+binary frames, network services, events, transport, and enrollment models.
+Existing callers continue to import these types from the crate root.
 
 `treer-platform` contains machine-local transport, user paths, private-file
 permissions and replacement, and Windows process ownership. Host framing stays
