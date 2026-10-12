@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 pub mod cli;
 pub mod recovery;
 pub use recovery::*;
+mod prompt_delivery;
+pub use prompt_delivery::*;
 mod targets;
 pub use targets::*;
 mod workload_tree;

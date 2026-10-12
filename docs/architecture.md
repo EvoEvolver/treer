@@ -486,6 +486,71 @@ item storage.
 
 ## Agent Interface Server
 
+### Queued prompts and completion notifications
+
+AIS prompt delivery uses `POST /v1/prompts`. `delivery: "queue"` is the default:
+send immediately when idle, otherwise append to FIFO without steering the active
+turn. Only explicit `delivery: "steer"` may insert into the active turn. Controller
+builds `sender` from authenticated caller identity attested by the Proxy; public
+prompt bodies cannot supply it. Human/operator submissions have `sender: null`.
+
+```json
+{"operation_id":"cmd_123","mode":"prompt","text":"Review the patch",
+ "delivery":"queue",
+ "sender":{"agent_id":"ag_sender","path":"/team/reviewer","name":"reviewer"},
+ "notify":{"on":["done","failed","interrupted"],"to":"ag_sender"}}
+```
+
+The launcher persists the submission before replying HTTP 202:
+
+```json
+{"submission":{"id":"sub_123","disposition":"queued","position":1}}
+```
+
+Disposition is `queued`, `sent`, or `steered`; positions are one-based pending
+FIFO positions, or null for immediately dispatched work. Repeated operation IDs
+return the same receipt without a duplicate task (conflicting reuse is rejected).
+`prompt.queue` advertises durable delivery and submission correlation;
+`prompt.notify` advertises durable terminal notifications; `prompt.queue.read`
+advertises queue inspection, submission lookup, and cancellation. Controller
+checks verified manifest capabilities before dispatch. Missing support returns
+`queue_unsupported`, including queued delivery to PTY-only Agents; it must never
+silently fall back to terminal insertion. Explicit steer retains the terminal
+compatibility path, but a terminal cannot provide correlated wait or notification.
+
+`GET /v1/queue` returns `{"submissions":[...]}` for pending items.
+`GET /v1/submissions/{id}` returns `{"submission":{...}}`, including completed
+items, so `--wait` observes its own submission rather than a generic idle state.
+`DELETE /v1/queue/{id}` cancels only a pending item, returning the same submission
+envelope with state `interrupted` and an explanatory error. Running items return
+a conflict; abort remains a separate operation. Controller authorizes queue
+reads with `agent.queue.read`; the authenticated sender may inspect/cancel its own
+submission, while other cancellation requires `agent.queue.cancel`. These are
+Controller-to-AIS requests carrying the existing verified instance headers.
+
+Submission fields are `id`, `sender`, RFC3339 `created_at`, nullable `position`,
+`text_preview` (at most 1024 UTF-8 bytes), `state` (`queued`, `running`, `done`,
+`failed`, `interrupted`), nullable `turn_id`, `assistant_preview` (at most 4096
+UTF-8 bytes), and nullable `error`. `/v1/status` includes `busy` and
+`queue_length` (pending count, excluding the active turn). Queue, receipt,
+terminal result and notification outbox survive launcher/Agent restart. Pending
+work resumes in order; uncertain in-flight work is marked interrupted rather
+than submitted twice unless the harness can prove exact turn resumption.
+
+Optional `notify.on` selects terminal outcomes. `notify.to` is a Core Message
+recipient ID and defaults to the authenticated sender's Agent ID; an operator
+without an Agent identity must supply a recipient explicitly. A launcher uses
+its own Treer identity to send one idempotent Core Message with submission ID,
+turn ID, outcome and bounded assistant preview. Its recipient comes from the
+saved submission, never a completion event. A durable notification outbox retries
+failures under a stable idempotency key (`prompt-submission/<id>/terminal`), so
+completion does not require sender polling. Core Message Policy and workspace
+membership still apply; notification delivery failure does not rerun a task.
+
+Shared Rust wire models live in `treer-protocol::prompt_delivery` (re-exported
+at crate root). This contract is implemented by launcher owners; Core does not
+persist launcher-owned harness sessions or task queues.
+
 An Agent may register one versioned Agent Interface Server (AIS) with its local
 Controller. AIS is a semantic adapter beside the Agent's native application
 server; it does not replace Host process ownership. Registration is authenticated
