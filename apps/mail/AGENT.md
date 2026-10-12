@@ -17,7 +17,7 @@ Read and send Messages
     treer message receive --wait 30000 --limit 50
     treer message ack DELIVERY_ID --operation-id STABLE_OPERATION_ID
 
-Use `treer member list` and `treer agent list` to discover recipients. Prefer a
+Use `treer member list` and `treer agent ls -R /` to discover recipients. Prefer a
 durable Message for Agent coordination. A Message does not wake or type into a
 peer terminal; use `treer agent prompt` only when immediate attention is needed.
 

@@ -136,7 +136,7 @@ The CLI is both a human tool and the first agent-facing interface:
 ```text
 treer workspace list
 treer server list
-treer agent list
+treer agent ls -R /
 treer agent create --server <server-id> --kind codex --name reviewer
 treer agent prompt <agent-id> "Review the current change"
 treer agent read <agent-id> --lines 100

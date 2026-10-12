@@ -540,7 +540,7 @@ to the configured ASR vendor. After a transcript is available, `POST
 Responses or Chat Completions upstream. The model receives
 [the voice skill](../skills/treer-voice/SKILL.md) and a compact roster, then
 calls a `treer` tool. The Proxy executes allowed CLI-equivalent commands
-(`status`, `whoami`, `machine list`, `agent list|show|prompt|read`) in-process
+(`status`, `whoami`, `machine list`, `agent ls|show|prompt|read`) in-process
 as the signed-in user and returns a speakable reply. The native app reads that
 reply with system TTS on the media stream. Conversation mode runs an
 on-device speech gate (adaptive energy, zero-crossing rate, and a 360ms

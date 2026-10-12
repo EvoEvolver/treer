@@ -283,7 +283,7 @@ fn treer_tool() -> Value {
                 "argv": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "CLI argv after `treer`, e.g. [\"agent\",\"list\",\"--machine\",\"mac\"]"
+                    "description": "CLI argv after `treer`, e.g. [\"agent\",\"ls\",\"--machine\",\"mac\"]"
                 },
                 "command": {
                     "type": "string",
@@ -657,7 +657,7 @@ enum TreerInvocation {
     Whoami,
     Status,
     MachineList,
-    AgentList {
+    AgentLs {
         machine: Option<String>,
     },
     AgentShow {
@@ -711,14 +711,14 @@ fn parse_agent(args: &[String]) -> Result<TreerInvocation, ProtocolError> {
     };
     let mut flags = FlagSet::parse(&args[1..])?;
     match verb {
-        "list" => {
+        "ls" => {
             if !flags.rest.is_empty() {
                 return Err(ProtocolError::new(
                     "invalid_treer_command",
-                    "agent list does not take a target",
+                    "agent ls does not take a target",
                 ));
             }
-            Ok(TreerInvocation::AgentList {
+            Ok(TreerInvocation::AgentLs {
                 machine: flags.machine,
             })
         }
@@ -757,7 +757,7 @@ fn forbidden(parts: &[String]) -> Result<TreerInvocation, ProtocolError> {
     Err(ProtocolError::new(
         "voice_command_not_allowed",
         format!(
-            "voice cannot run `treer {}`; allowed: status, whoami, machine list, agent list/show/prompt/read",
+            "voice cannot run `treer {}`; allowed: status, whoami, machine list, agent ls/show/prompt/read",
             parts.join(" ")
         ),
     ))
@@ -897,7 +897,7 @@ async fn execute_treer(
         TreerInvocation::Status | TreerInvocation::MachineList => {
             Ok(status_json(&snapshot, request.session, None))
         }
-        TreerInvocation::AgentList { machine } => {
+        TreerInvocation::AgentLs { machine } => {
             let filter = match machine.as_deref() {
                 Some(target) => {
                     Some(resolve_machine(request.state, request.workspace_id, target).await?)
@@ -1478,7 +1478,7 @@ mod tests {
             request,
             &[
                 "agent".into(),
-                "list".into(),
+                "ls".into(),
                 "--machine".into(),
                 "Mac".into(),
             ],

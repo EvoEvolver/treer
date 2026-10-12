@@ -868,7 +868,7 @@ from peers without matching names.
 ```bash
 treer whoami
 treer status
-treer agent list
+treer agent ls -R /
 treer agent show reviewer
 treer agent start reviewer
 treer agent stop reviewer
@@ -903,13 +903,16 @@ treer agent mv reviewer /
 treer agent rmdir /research/runs
 ```
 
-These are workspace tree paths, resolved from `/` on every invocation, with
-case-sensitive names and no persistent cwd. `ls` returns JSON folders and
-Agent/App records, including dormant Apps; `-R` includes descendants. Folder
-IDs are accepted alongside paths for `ls`, `mv`, and `rmdir`. `mkdir -p` creates
-missing parents and accepts existing folders. `mv` moves an Agent/App by ID,
-unique name, `self`/`.`, or tree path into an existing directory; it can also
-move or rename folders. Workload renaming remains `treer agent admin rename`.
+These are case-sensitive workspace tree paths. An Agent's current folder is its
+placement in that tree; operators start at `/`. Relative paths, `.` and `..`
+resolve from there, while absolute paths start at `/`. `ls` without a path lists
+the current folder and includes a `..` entry outside root. `ls` returns JSON
+`path`, `folders`, and `agents` fields, including dormant Apps; `-R` includes
+descendants. Folder IDs are accepted alongside paths for `ls`, `mv`, and
+`rmdir`. `mkdir -p` creates missing parents and accepts existing folders. `mv`
+moves an Agent/App by ID, name in the current folder, `self`, or tree path into
+an existing directory; `.` is the current folder. It can also move or rename
+folders. Workload renaming remains `treer agent admin rename`.
 No destination folder is overwritten. `rmdir` removes only empty folders,
 checking emptiness under the same database lock as placement changes. It never
 deletes or stops a process. Browser folder deletion keeps its existing behavior

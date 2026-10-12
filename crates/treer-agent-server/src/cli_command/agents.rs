@@ -18,7 +18,6 @@ pub(super) async fn run_agent_command(
         AgentCommand::Start { target } => lifecycle_agent(client, &target, "start").await,
         AgentCommand::Stop { target } => stop_agent(client, &target).await,
         AgentCommand::Restart { target } => lifecycle_agent(client, &target, "restart").await,
-        AgentCommand::List => client.value(Method::GET, "api/agents", None).await,
         AgentCommand::Show { target } => {
             Ok(serde_json::to_value(client.get_agent(&target).await?)?)
         }

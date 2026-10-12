@@ -266,7 +266,7 @@ pub(super) enum AgentCommand {
     },
     #[command(about = "List folders and Agent/App workloads")]
     Ls {
-        #[arg(default_value = "/")]
+        #[arg(default_value = ".")]
         path: String,
         #[arg(short = 'R', long)]
         recursive: bool,
@@ -281,8 +281,6 @@ pub(super) enum AgentCommand {
     Stop { target: String },
     #[command(about = "Restart an Agent or App preserving its identity")]
     Restart { target: String },
-    #[command(about = "List agents in the current workspace")]
-    List,
     #[command(about = "Show one agent by unique name or id")]
     Show { target: String },
     #[command(about = "Print an Agent's primary HTTP service URL for curl or other HTTP clients")]

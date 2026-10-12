@@ -285,6 +285,13 @@ async fn execute() {
 
 async fn run_cli() -> anyhow::Result<()> {
     let raw = env::args().skip(2).collect::<Vec<_>>();
+    if let Some(message) = removed_command(&raw) {
+        return Err(CliFailure {
+            code: "command_removed".into(),
+            message: message.into(),
+        }
+        .into());
+    }
     let args = match Args::try_parse_from(std::iter::once("treer".to_owned()).chain(raw)) {
         Ok(args) => args,
         Err(error) => {
@@ -534,6 +541,12 @@ async fn run_cli() -> anyhow::Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+fn removed_command(argv: &[String]) -> Option<&'static str> {
+    (argv.first().map(String::as_str) == Some("agent")
+        && argv.get(1).map(String::as_str) == Some("list"))
+    .then_some("treer agent list was removed; use treer agent ls -R / to list the workspace tree")
 }
 
 async fn whoami(client: &ApiClient) -> anyhow::Result<Value> {

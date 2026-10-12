@@ -32,14 +32,14 @@ Allowed argv:
 - `status`
 - `whoami`
 - `machine list`
-- `agent list` optional `--machine <name-or-id>`
+- `agent ls` optional `--machine <name-or-id>`
 - `agent show <name-or-id>` optional `--machine <name-or-id>`
 - `agent prompt <name-or-id> <task>` optional `--machine <name-or-id>`
 - `agent read <name-or-id>` optional `--lines 80` `--machine <name-or-id>`
 
 A compact roster of the current workspace is attached below this skill. Use it
 to repair ASR (for example 麦克 / Mac → machine `mac`) before calling tools.
-If the roster is empty or a name is ambiguous, call `status` or `agent list`.
+If the roster is empty or a name is ambiguous, call `status` or `agent ls`.
 
 When the user names a machine and an Agent and a task, resolve both, then
 `agent prompt` with the intended task in the user's language, then confirm

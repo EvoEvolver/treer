@@ -9,6 +9,22 @@ fn key_names_encode_to_terminal_sequences() {
 }
 
 #[test]
+fn agent_ls_replaces_list_with_a_clear_migration_error() {
+    let parsed = Args::try_parse_from(["treer", "agent", "ls"]).unwrap();
+    assert!(
+        matches!(parsed.command, Some(Command::Agent { command: AgentCommand::Ls { path, recursive: false } }) if path == ".")
+    );
+    assert!(Args::try_parse_from(["treer", "agent", "ls", "../sibling", "-R"]).is_ok());
+    assert!(Args::try_parse_from(["treer", "agent", "list"]).is_err());
+    assert!(
+        removed_command(&["agent".into(), "list".into(), "--machine".into()])
+            .unwrap()
+            .contains("treer agent ls -R /")
+    );
+    assert!(removed_command(&["agent".into(), "ls".into()]).is_none());
+}
+
+#[test]
 fn path_targets_are_percent_encoded() {
     assert_eq!(path_segment("review agent"), "review%20agent");
 }

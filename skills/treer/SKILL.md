@@ -74,7 +74,7 @@ Discover current topology before choosing a peer or server:
 ```bash
 treer whoami
 treer status
-treer agent list
+treer agent ls -R /
 treer agent show self
 treer agent show reviewer
 ```
@@ -131,13 +131,16 @@ treer agent mv reviewer /
 treer agent rmdir /research/runs
 ```
 
-Paths are case-sensitive and start at workspace root on every invocation;
-there is no persistent directory or filesystem change. `mkdir -p` creates
-missing parents and accepts existing folders. `ls` prints JSON folders and
-workloads; `-R` includes descendants. `mv` moves an Agent/App by ID, unique name,
-`self`/`.`, or tree path into an existing folder. It also moves or renames a
-folder without overwriting another folder. To rename an Agent/App, use
-`treer agent admin rename TARGET NAME`. `rmdir` rejects nonempty folders and
+Paths are case-sensitive. For an Agent, relative paths start in the folder
+containing that Agent; for an operator they start at workspace root. `.` and
+`..` traverse from there, while `/` starts at workspace root. `ls` without a
+path lists the current folder and includes a `..` entry outside root. `ls`
+prints JSON `path`, `folders`, and `agents` fields; `ls -R /` lists the entire
+tree. `mkdir -p` creates missing parents and accepts existing folders. `-R`
+includes descendants. `mv` moves an Agent/App by ID, name in the current
+folder, `self`, or tree path into an existing folder. `.` means the current
+folder. It also moves or renames a folder without overwriting another folder.
+To rename an Agent/App, use `treer agent admin rename TARGET NAME`. `rmdir` rejects nonempty folders and
 never stops or deletes workloads. Folder IDs from `ls` are also accepted by
 `ls`, `mv`, and `rmdir` when names are ambiguous. These operations use the
 Agent's existing credential and the `agent.tree.read` / `agent.tree.manage`

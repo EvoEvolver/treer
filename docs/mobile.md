@@ -141,7 +141,7 @@ is the prior spoken turns in this Voice sheet, not including the current
 
 The LLM receives the bundled voice skill (`skills/treer-voice/SKILL.md`) plus a
 live workspace roster and that spoken history. It may call a `treer` tool whose argv matches
-`status`, `whoami`, `machine list`, and `agent list|show|prompt|read`. Those
+`status`, `whoami`, `machine list`, and `agent ls|show|prompt|read`. Those
 commands run in-process under the signed-in user. The phone then speaks the
 returned `reply` with system TTS (`zh-CN` when the text contains CJK, otherwise
 `en-US`). Vendor LLM keys never leave the Proxy. This is not the later Voice
