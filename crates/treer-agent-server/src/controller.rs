@@ -2294,6 +2294,7 @@ impl ControllerRuntime {
         } else {
             self.inner.workload_proxies.remove(&metadata.agent_id);
         }
+        let inventory_only = restored_text.is_none();
         let text = restored_text.unwrap_or_default();
         let status = if process.running {
             detect_status(&text).unwrap_or_else(|| {
@@ -2331,7 +2332,7 @@ impl ControllerRuntime {
             output_revision: process.next_revision.saturating_sub(1),
             interface,
         };
-        let agent = Arc::new(Mutex::new(ControllerAgent {
+        let mut agent = ControllerAgent {
             stream_epoch: process.stream_epoch,
             info: info.clone(),
             workload_credential: metadata.workload_credential,
@@ -2340,12 +2341,45 @@ impl ControllerRuntime {
             bracketed_paste: process.bracketed_paste,
             last_output: Instant::now(),
             last_metadata_event: Instant::now(),
-        }));
-        self.inner
-            .agents
-            .write()
-            .map_err(|_| ProtocolError::new("state_error", "agent registry lock poisoned"))?
-            .insert(metadata.agent_id, agent);
+        };
+        let info = {
+            let mut agents =
+                self.inner.agents.write().map_err(|_| {
+                    ProtocolError::new("state_error", "agent registry lock poisoned")
+                })?;
+            if let Some(current) = agents.get(&metadata.agent_id) {
+                let mut current = current
+                    .lock()
+                    .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+                if current.info.run_generation > agent.info.run_generation
+                    || (current.info.pid.is_some()
+                        && current.info.started_at > agent.info.started_at)
+                {
+                    return Ok(current.info.clone());
+                }
+                if current.stream_epoch == agent.stream_epoch
+                    && current.info.run_generation == agent.info.run_generation
+                {
+                    // Inventory describes process state, not a replacement of
+                    // its output. Keep the same-run cache, including exited
+                    // output, and never rewind output that arrived after Sync.
+                    if inventory_only || current.info.output_revision > agent.info.output_revision {
+                        agent.text = std::mem::take(&mut current.text);
+                        agent.info.output_revision =
+                            agent.info.output_revision.max(current.info.output_revision);
+                    }
+                    agent.prompt_queue = std::mem::take(&mut current.prompt_queue);
+                }
+                // Update the existing Arc under its lock so an output event
+                // cannot append to a detached cache while inventory replaces it.
+                *current = agent;
+                current.info.clone()
+            } else {
+                let info = agent.info.clone();
+                agents.insert(metadata.agent_id, Arc::new(Mutex::new(agent)));
+                info
+            }
+        };
         if !process.running {
             self.remove_cached_interface(&info.agent_id);
             if process.exit_code == Some(0) && info.kind != "app" {

@@ -1,6 +1,203 @@
 use super::*;
 
 #[tokio::test]
+async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
+    use tokio::io::AsyncWriteExt;
+    use treer_host_protocol::{
+        decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
+    };
+
+    let root = std::env::temp_dir().join(format!("trr-output-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    #[cfg(unix)]
+    let socket = root.join("host.sock");
+    #[cfg(windows)]
+    let socket = treer_platform::endpoint_name(
+        &Uuid::new_v4().to_string(),
+        &treer_platform::current_user_sid().unwrap(),
+    );
+    let mut listener = treer_platform::LocalListener::bind(&socket).unwrap();
+    // Host wire timestamps have millisecond precision on every inventory read.
+    let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
+    let mut processes = Vec::new();
+    let mut replay = Vec::new();
+    for kind in ["command", "app"] {
+        let metadata = AgentMetadata {
+            agent_id: kind.into(),
+            run_generation: 1,
+            workspace_id: "workspace".into(),
+            server_id: "server".into(),
+            kind: kind.into(),
+            name: kind.into(),
+            cwd: ".".into(),
+            workload_credential: new_workload_credential(),
+            http_proxy_port: None,
+        };
+        processes.push(HostProcessInfo {
+            process_id: kind.into(),
+            pid: Some(1234),
+            cwd: ".".into(),
+            running: true,
+            started_at: now,
+            last_output_at: now,
+            exited_at: None,
+            exit_code: None,
+            stream_epoch: format!("epoch-{kind}"),
+            first_revision: 1,
+            next_revision: 3,
+            bracketed_paste: false,
+            metadata: serde_json::to_string(&metadata).unwrap(),
+        });
+        replay.push(HostOutputReplay {
+            process_id: kind.into(),
+            stream_epoch: format!("epoch-{kind}"),
+            first_available_revision: 1,
+            next_revision: 3,
+            gap: false,
+            chunks: vec![HostOutputChunk {
+                process_id: kind.into(),
+                stream_epoch: format!("epoch-{kind}"),
+                revision: 2,
+                data: format!("retained {kind} output\n").into_bytes(),
+                bracketed_paste: false,
+                emitted_at: now,
+            }],
+        });
+    }
+    let initial = HostResponse::Synced {
+        host_epoch: "surviving-host".into(),
+        host_build: HostBuildInfo {
+            version: "test".into(),
+            git_commit: "test".into(),
+        },
+        processes: processes.clone(),
+        replay: replay.clone(),
+    };
+    for process in &mut processes {
+        process.running = false;
+        process.exited_at = Some(now);
+        process.exit_code = Some(0);
+    }
+    let mut exited = initial.clone();
+    if let HostResponse::Synced {
+        processes: inventory,
+        ..
+    } = &mut exited
+    {
+        *inventory = processes.clone();
+    }
+    let inventory = exited.clone();
+    let task = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        while let Ok(length) = stream.read_u32().await {
+            let mut bytes = vec![0; length as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            let request: HostRequest = decode_message(&bytes).unwrap();
+            assert!(matches!(request.command, HostCommand::Sync { .. }));
+            let encoded = encode_message(&HostMessage::Response {
+                request_id: request.request_id,
+                response: Some(inventory.clone()),
+                error: None,
+            })
+            .unwrap();
+            stream.write_u32(encoded.len() as u32).await.unwrap();
+            stream.write_all(&encoded).await.unwrap();
+        }
+    });
+    let (host, events) = HostClient::connect(&socket).await.unwrap();
+    let config = || ControllerConfig {
+        workspace_id: "workspace".into(),
+        server_id: "server".into(),
+        agent_server_url: "http://127.0.0.1:1".into(),
+        treer_binary: None,
+        interface_cache_path: root.join("interfaces.json"),
+        startup_store_path: root.join("startup.json"),
+        root: root.clone(),
+    };
+    let (runtime, _) =
+        ControllerRuntime::from_sync(host.clone(), initial, events, config()).unwrap();
+    for process in &processes {
+        runtime.apply_process(process.clone());
+        let before = runtime.read(&process.process_id, None).unwrap();
+        assert_eq!(
+            before.text,
+            format!("retained {} output\n", process.process_id)
+        );
+        assert_eq!(before.revision, 2);
+    }
+    for _ in 0..2 {
+        assert!(runtime.restore_startup_agents(&[]).await.is_empty());
+        for process in &processes {
+            let after = runtime.read(&process.process_id, None).unwrap();
+            assert_eq!(
+                after.text,
+                format!("retained {} output\n", process.process_id)
+            );
+            assert_eq!(after.revision, 2);
+        }
+    }
+    // A replacement Controller reconstructs the same exited runs from the
+    // still-running Host's bounded replay, then reconciles inventory again.
+    let replacement_events = HostEvents {
+        output: tokio::sync::broadcast::channel(1).1,
+        processes: tokio::sync::broadcast::channel(1).1,
+        disconnected: tokio::sync::watch::channel(false).1,
+    };
+    let replacement_sync = host.sync(Default::default()).await.unwrap();
+    let (replacement, _) =
+        ControllerRuntime::from_sync(host, replacement_sync, replacement_events, config()).unwrap();
+    assert!(replacement.restore_startup_agents(&[]).await.is_empty());
+    for process in &processes {
+        let after = replacement.read(&process.process_id, None).unwrap();
+        assert_eq!(
+            after.text,
+            format!("retained {} output\n", process.process_id)
+        );
+        assert_eq!(after.revision, 2);
+    }
+    for mut process in processes {
+        replacement.apply_output(HostOutputChunk {
+            process_id: process.process_id.clone(),
+            stream_epoch: process.stream_epoch.clone(),
+            revision: 3,
+            data: b"late output\n".to_vec(),
+            bracketed_paste: false,
+            emitted_at: now,
+        });
+        // Sync can race the output relay; neither metadata-only inventory nor
+        // an older replay may rewind a newer cached revision.
+        replacement.upsert_process(process.clone(), None).unwrap();
+        replacement
+            .upsert_process(process.clone(), Some("stale replay\n".into()))
+            .unwrap();
+        let after = replacement.read(&process.process_id, None).unwrap();
+        assert_eq!(after.revision, 3);
+        assert!(after.text.ends_with("late output\n"));
+
+        process.stream_epoch.push_str("-new-run");
+        process.next_revision = 1;
+        let mut metadata: AgentMetadata = serde_json::from_str(&process.metadata).unwrap();
+        metadata.run_generation += 1;
+        process.metadata = serde_json::to_string(&metadata).unwrap();
+        replacement.upsert_process(process.clone(), None).unwrap();
+        let new_run = replacement.read(&process.process_id, None).unwrap();
+        assert!(new_run.text.is_empty());
+        assert_eq!(new_run.revision, 0);
+        assert_eq!(
+            replacement
+                .list()
+                .iter()
+                .find(|a| a.agent_id == process.process_id)
+                .unwrap()
+                .run_generation,
+            2
+        );
+    }
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_restarts() {
     use tokio::io::AsyncWriteExt;
     use treer_host_protocol::{

@@ -11,6 +11,28 @@ The Host answers the initial cursor inheritance query required by portable-pty
 so child output can begin. The runtime tests cover split query bytes and the
 native Windows test covers argv, environment, input, resize, and process stop.
 
+### Output retention and recovery
+
+Controller inventory reconciliation must preserve the cached output and its
+revision for the same process generation and stream epoch, including exited
+Agent and App instances. An inventory-only update is not an empty transcript.
+Previously it rebuilt exited entries with empty text on each recovery scan,
+while retaining their nonzero output revision; short-lived Canary probes could
+therefore finish successfully but appear to produce no output.
+
+The Controller regression fixture covers output followed by exit, repeated Host
+inventory scans, and a replacement Controller replaying exited Agent and App
+output from a surviving Host. Same-run revisions cannot move backwards; a new
+run must not inherit the previous run's text. Output updates and inventory
+replacement share the existing entry lock to avoid losing concurrent output.
+
+Host replay is bounded and in memory, not a durable terminal log archive. A
+Controller hot restart can recover retained output from the surviving Host,
+subject to replay/history limits. After a Host cold restart, output of exited
+processes from the old Host is unavailable; restoring startup intent does not
+restore that transcript. This limitation is separate from inventory incorrectly
+erasing output that the current Host/Controller still retains.
+
 Run the complete gate on demand or while preparing a release:
 
 ```sh
