@@ -95,7 +95,7 @@ class SoulServerTest(unittest.TestCase):
             PRINCIPALS.append(TOKENS['other'])
 
     def test_scan_every_file_reject_or_acknowledge_without_leaks(self):
-        examples = [b'wlc_' + b'a'*64, b'enrollment_token="' + b'a'*32 + b'"', b'srv_abc.'+b'A'*32,
+        examples = [b'enr_v1_7773_enrollment.' + b'a'*64, b'wlc_' + b'a'*64, b'enrollment_token="' + b'a'*32 + b'"', b'srv_abc.'+b'A'*32,
                     b'sk-' + b'a'*24, b'ghp_' + b'A'*40, b'github_pat_'+b'Z'*30,
                     b'Bearer '+b'z'*28, b'eyJabcdef.abcdef.signature', b'-----BEGIN RSA PRIVATE KEY-----',
                     b'AKIA'+b'A'*16, b'password=hunter2', b'secret=abc123', b'api_key=abcdef']

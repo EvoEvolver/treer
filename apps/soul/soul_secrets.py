@@ -27,6 +27,11 @@ def redact(data):
     data, count = re.subn(pattern, b"[REDACTED:private_key]", data)
     if count:
         counts['private_key'] = count
+    # A truncated private-key block must not lose just its header while leaving
+    # the remaining key body undetectable. Remove the remainder conservatively.
+    data, count = re.subn(rb"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----[\s\S]*", b"[REDACTED:private_key]", data)
+    if count:
+        counts['private_key'] = counts.get('private_key', 0) + count
     for category, pattern in SECRET_PATTERNS.items():
         data, count = re.subn(pattern, ('[REDACTED:' + category + ']').encode(), data)
         if count:

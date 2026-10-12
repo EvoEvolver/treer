@@ -231,6 +231,9 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         installed=self.root/'bin/treer-soul'
         self.assertTrue(installed.is_file())
         self.assertEqual(subprocess.check_output([sys.executable,str(installed),'--version'],env=env).strip(),b'treer-soul 2.0.0')
+        listing=subprocess.run([sys.executable,str(installed),'list'],env=env,stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=10)
+        self.assertEqual(listing.returncode,0,listing.stderr)
+        self.assertEqual(json.loads(listing.stdout)['total'],0)
         self.assertEqual(list(self.tmp.iterdir()),[])
 
     def test_legacy_generic_startup_still_extracts_and_binds(self):
@@ -313,6 +316,21 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
             self.assertEqual(reached,[])
         finally:
             server.shutdown(); server.server_close()
+
+    def test_redaction_preserves_json_and_removes_complete_or_truncated_keys(self):
+        from soul_secrets import redact, scan_secrets
+        from client import redact_json
+        for raw in (b'-----BEGIN PRIVATE KEY-----\nKEY-BODY\n-----END PRIVATE KEY-----',
+                    b'-----BEGIN RSA PRIVATE KEY-----\nKEY-BODY'):
+            clean, findings = redact(raw)
+            self.assertNotIn(b'KEY-BODY', clean)
+            self.assertEqual(findings['private_key'],1)
+            self.assertEqual(scan_secrets(clean),{})
+        counts={}
+        clean=redact_json({'content':'password="hunter2" api_key=abcdef', 'secret':'hidden'},counts)
+        self.assertNotIn('hunter2',json.dumps(clean))
+        self.assertNotIn('hidden',json.dumps(clean))
+        self.assertGreaterEqual(sum(counts.values()),3)
 
 
 if __name__=='__main__':

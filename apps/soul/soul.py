@@ -108,7 +108,7 @@ def validate_member_path(value: object) -> str:
         raise SoulError(400, "invalid_path", "archive paths must be non-empty POSIX paths")
     path = PurePosixPath(value)
     if any(part in {"", ".", ".."} for part in value.rstrip("/").split("/")) or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise SoulError(400, "invalid_path", f"unsafe archive path: {value}")
+        raise SoulError(400, "invalid_path", "unsafe archive path")
     return str(path)
 
 
@@ -124,12 +124,12 @@ def validate_manifest(value: object, archive_files: set[str]) -> dict[str, objec
     clean_environment: dict[str, str] = {}
     for key, file_path in environment.items():
         if not isinstance(key, str) or not ENV_NAME_PATTERN.fullmatch(key):
-            raise SoulError(400, "invalid_environment", f"invalid environment variable name: {key}")
+            raise SoulError(400, "invalid_environment", "invalid environment variable name")
         if key in PROTECTED_ENVIRONMENT or key.startswith(("TREER_", "AGENT_UI_", "CODEX_UI_", "LD_", "DYLD_")):
-            raise SoulError(400, "invalid_environment", f"protected environment variable: {key}")
+            raise SoulError(400, "invalid_environment", "protected environment variable")
         clean_path = validate_member_path(file_path)
         if clean_path not in archive_files:
-            raise SoulError(400, "missing_file", f"environment path is absent from archive: {clean_path}")
+            raise SoulError(400, "missing_file", "environment path is absent from archive")
         clean_environment[key] = clean_path
 
     adapter = value.get("adapter")
@@ -224,9 +224,9 @@ def inspect_archive(path: Path) -> tuple[dict[str, object], list[dict[str, objec
             if member.isdir():
                 continue
             if not member.isfile():
-                raise SoulError(400, "invalid_archive", f"archive entry must be a regular file: {name}")
+                raise SoulError(400, "invalid_archive", "archive entry must be a regular file")
             if name in files:
-                raise SoulError(400, "invalid_archive", f"duplicate archive path: {name}")
+                raise SoulError(400, "invalid_archive", "duplicate archive path")
             expanded_size += member.size
             if expanded_size > MAX_EXPANDED_BYTES:
                 raise SoulError(413, "archive_too_large", f"expanded archive exceeds {MAX_EXPANDED_BYTES} bytes")

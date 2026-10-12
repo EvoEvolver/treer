@@ -67,6 +67,10 @@ def servers(root, max_count=10000, max_bytes=10*1024**3):
     from soul_auth import Auth
     url = 'http://127.0.0.1:' + str(server.server_port)
     server.public_url = url
+    from soul import bundled_client
+    import hashlib
+    server.client_bytes = bundled_client(app_root / 'client.py', url)
+    server.client_sha256 = hashlib.sha256(server.client_bytes).hexdigest()
     server.auth = Auth(server.store, f'http://127.0.0.1:{proxy.server_port}', 'svc_soul', 'ws_test', url)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, proxy

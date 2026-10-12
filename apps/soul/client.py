@@ -165,6 +165,12 @@ def self_session(harness, cwd=None):
                 if not isinstance(session, str) or not UUID.fullmatch(session):
                     raise RuntimeError('Saved own Agent session ID is invalid')
                 return session
+        keys = ('CLAUDE_SESSION_ID','TREER_SESSION_ID') if harness == 'claude' else ('CODEX_SESSION_ID','CODEX_THREAD_ID','TREER_SESSION_ID')
+        for key in keys:
+            if os.environ.get(key):
+                from soul_sessions import UUID
+                if not UUID.fullmatch(os.environ[key]): raise RuntimeError('Native self session environment ID is invalid')
+                return os.environ[key]
         return None
     port = descriptor.get('port')
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:

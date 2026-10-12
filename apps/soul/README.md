@@ -191,8 +191,7 @@ deployment/migration/remote-machine acceptance remains the leader's responsibili
 
 Native session formats vary by harness/version; JSONL includes historical source
 paths even though structured cwd is rebased for restore. Claude project storage is
-isolated by cwd, not an OS sandbox. Codex target login uses a local symlink and may
-change if the machine login changes. Missing self session identity needs explicit --session.
+isolated by cwd, not an OS sandbox. Provider login remains target-local and may change independently of the snapshot. Missing self session identity needs explicit --session.
 No cross-owner mutable sharing, refresh tokens, background migration, scheduling,
 secure disk erase, or remote download cache. Response/archive materialization and
 list filtering currently use bounded-request in-memory processing; quotas are
