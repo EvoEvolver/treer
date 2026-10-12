@@ -192,8 +192,6 @@ def self_session(harness, cwd=None):
 
 
 def command_save(args):
-    if getattr(args, 'include_shell_snapshot', False):
-        raise RuntimeError('Launcher session transfer excludes shell snapshots; --include-shell-snapshot is unsupported')
     # No provider credential files or original files are modified.
     with tempfile.TemporaryDirectory(prefix='treer-soul-save-') as temp:
         root=Path(temp)
@@ -479,7 +477,6 @@ def parser():
     capture.add_argument('--session',default='self')
     capture.add_argument('--cwd',default=str(Path.cwd()))
     capture.add_argument('--redact',action=argparse.BooleanOptionalAction,default=True)
-    capture.add_argument('--include-shell-snapshot',action='store_true',help='unsupported: launcher excludes shell snapshots')
     sharing(capture)
     capture.set_defaults(harness='codex',function=command_save)
     upload=sub.add_parser('upload')

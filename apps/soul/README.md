@@ -75,8 +75,10 @@ session; missing authority needs an explicit --session. Claude captures project 
 Codex captures its rollout; the current launcher transfer allowlist deliberately
 excludes shell snapshots because they can contain machine credentials. Legacy
 archives retain their snapshot file, which is never imported or executed.
-Codex save output explicitly reports omitted=[shell_snapshot], and the legacy
---include-shell-snapshot flag fails clearly instead of silently ignoring it. No auth/config credential
+Codex save output explicitly reports `omitted=["shell_snapshot"]`. There is no
+option to include shell snapshots; the launcher allowlist remains authoritative.
+The legacy `--include-shell-snapshot` argument is rejected as unknown. The upload
+`--allow-secrets` flag does not change session export selection. No auth/config credential
 files are exported. Launcher consistency checks reject changing source files; original sessions
 are never modified. `soul_sessions.py` is a thin bridge to the launcher-owned session export/import
 CLI. Native file selection, consistency and rebasing belong to launcher adapters.

@@ -28,6 +28,10 @@ only. The server rejects detected secrets unless --allow-secrets is explicit;
 transcripts remain sensitive even when scanning finds nothing. Generic upload
 supports --manifest and --file ARCHIVE_PATH=LOCAL_PATH.
 
+Codex saves omit shell snapshots and report `omitted=["shell_snapshot"]` in JSON.
+There is no inclusion option; `--allow-secrets` does not expand the launcher's
+export allowlist. Legacy archived shell snapshots are not imported or executed.
+
 All /v1 routes require per-request service-scoped Treer identity; injected headers
 are verified before Bearer or human OAuth. Owner alone deletes; private/reader/
 workspace visibility controls reads. The service never creates Agents. A new Agent
