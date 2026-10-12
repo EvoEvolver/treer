@@ -1,5 +1,8 @@
 use super::*;
 pub(super) fn interactive_shell() -> String {
+    #[cfg(windows)]
+    return std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+    #[cfg(not(windows))]
     std::env::var("SHELL")
         .ok()
         .filter(|shell| !shell.trim().is_empty())

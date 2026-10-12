@@ -136,6 +136,7 @@ function supervisionLabel(mode: NonNullable<Machine["supervision"]>["mode"]) {
   if (mode === "systemd_user") return "systemd user"
   if (mode === "launchd") return "LaunchAgent"
   if (mode === "nohup") return "nohup"
+  if (mode === "detached") return "Windows background"
   return "foreground"
 }
 
@@ -1260,8 +1261,13 @@ function WorkspaceApp() {
   const [launchMachineId, setLaunchMachineId] = useState("")
   const [launchAgentName, setLaunchAgentName] = useState("")
   const [renameName, setRenameName] = useState("")
-  const [installCommand, setInstallCommand] = useState("")
-  const [connectCommand, setConnectCommand] = useState("")
+  const [unixInstallCommand, setInstallCommand] = useState("")
+  const [unixConnectCommand, setConnectCommand] = useState("")
+  const [windowsInstallCommand, setWindowsInstallCommand] = useState("")
+  const [windowsConnectCommand, setWindowsConnectCommand] = useState("")
+  const [installPlatform, setInstallPlatform] = useState("unix")
+  const installCommand = installPlatform === "windows" ? windowsInstallCommand : unixInstallCommand
+  const connectCommand = installPlatform === "windows" ? windowsConnectCommand : unixConnectCommand
   const [inviteUrl, setInviteUrl] = useState("")
   const [members, setMembers] = useState<Member[]>([])
   const [groups, setGroups] = useState<OrganizationGroup[]>([])
@@ -1914,11 +1920,16 @@ function WorkspaceApp() {
       const origin = window.location.origin
       setInstallCommand(preview ? PREVIEW_INSTALL : `curl -fsSL '${origin}/install.sh' | sh`)
       setConnectCommand(preview ? PREVIEW_CONNECT : `treer-agent-server connect --key 'enr_v1_…' --proxy '${origin}/'`)
+      const windowsOrigin = preview ? "https://treer.example" : origin
+      setWindowsInstallCommand(`Invoke-WebRequest '${windowsOrigin}/install.ps1' -OutFile "$env:TEMP\\treer-install.ps1"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\treer-install.ps1"; if ($LASTEXITCODE -eq 0) { $env:Path += ";$env:LOCALAPPDATA\\Treer\\bin" }`)
+      setWindowsConnectCommand(preview ? PREVIEW_CONNECT : `treer-agent-server connect --key 'enr_v1_…' --proxy '${origin}/'`)
       setInstallOpen(true)
       return
     }
     try {
-      const data = await api<{ install_command: string; connect_command: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bootstrap`, { method: "POST", body: "{}" })
+      const data = await api<{ install_command: string; connect_command: string; windows_install_command?: string; windows_connect_command?: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bootstrap`, { method: "POST", body: "{}" })
+      setWindowsInstallCommand(data.windows_install_command ?? "Update the Proxy to obtain the Windows installer.")
+      setWindowsConnectCommand(data.windows_connect_command ?? data.connect_command)
       setInstallCommand(data.install_command); setConnectCommand(data.connect_command); setInstallOpen(true)
     } catch (reason) { showError(reason) }
   }
@@ -2362,7 +2373,17 @@ function WorkspaceApp() {
     <Dialog open={Boolean(deletingApp)} onOpenChange={(open) => !open && setDeletingApp(null)}><DialogContent><DialogHeader><DialogTitle>Delete App</DialogTitle><DialogDescription>Delete {deletingApp?.name}, stop its process, and remove its service and virtual hostname?</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingApp(null)}>Cancel</Button><Button variant="destructive" onClick={deleteAppDeployment}>Delete App</Button></DialogFooter></DialogContent></Dialog>
 
 
-    <Dialog open={installOpen} onOpenChange={setInstallOpen}><DialogContent className="max-w-xl" data-tour="add-machine-dialog"><DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader><div className="space-y-4"><Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field><Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field></div><DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={installOpen} onOpenChange={setInstallOpen}>
+      <DialogContent className="max-w-xl" data-tour="add-machine-dialog">
+        <DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader>
+        <div className="space-y-4">
+          <Field label="Operating system"><Select value={installPlatform} onValueChange={setInstallPlatform}><SelectTrigger aria-label="Installation operating system"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unix">Linux / macOS</SelectItem><SelectItem value="windows">Windows · PowerShell</SelectItem></SelectContent></Select></Field>
+          <Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field>
+          <Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 

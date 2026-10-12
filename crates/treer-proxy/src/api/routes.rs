@@ -600,6 +600,7 @@ pub fn router(
         ));
     let control = Router::new()
         .route("/install.sh", get(install_script))
+        .route("/install.ps1", get(windows_install_script))
         .route("/api/machines/enroll", post(enroll_machine))
         .route("/artifacts/{platform}/{binary}", get(download_artifact))
         .route("/api/health", get(health))

@@ -57,10 +57,20 @@ deploy the Railway Proxy, Core Message code, or Mail/Telegram App processes.
 
 The `Build release artifacts` GitHub workflow runs only by manual dispatch or
 for a pushed `v*` tag. Its matrix uses native runners for `linux-x86_64`,
-`linux-aarch64`, `darwin-x86_64`, and `darwin-aarch64`. Each platform artifact
+`linux-aarch64`, `darwin-x86_64`, `darwin-aarch64`, and `windows-x86_64`. Windows
+uses a native MSVC runner and gates artifacts on IPC/ConPTY, Host lifecycle,
+Controller/CLI, installer checksum, and PATH tests. Each platform artifact
 contains the CLI, Host, Controller, source commit metadata, and checksums. The
 workflow has read-only repository permission and never publishes a GitHub
 Release or writes to R2.
+
+Windows binaries are PE `.exe` files in the build output. Staged artifacts and
+public download keys retain the three logical binary names without a suffix;
+the PowerShell installer saves them with `.exe`. Each platform directory also
+contains `SHA256SUMS`, available through `/artifacts/<platform>/SHA256SUMS` on a
+Proxy that carries the candidate artifact tree. Existing fallback release
+servers must supply `SHA256SUMS-<platform>` as well as the three binaries;
+Windows installation fails closed if that checksum asset is absent.
 
 After the workflow succeeds, collect the exact commit into the ignored local
 artifact tree:
@@ -70,7 +80,7 @@ just collect-artifacts HEAD
 ```
 
 This command requires authenticated `gh` and `jq`. It selects a successful run
-whose `headSha` is the requested commit, validates all four metadata files and
+whose `headSha` is the requested commit, validates all five metadata files and
 checksums, restores executable permissions, and writes `dist/<platform>/`.
 Set `TREER_ARTIFACT_RUN_ID` when a manually dispatched run must be selected
 explicitly. The existing `artifacts-prepare`, `artifacts-canary`, and
@@ -79,7 +89,7 @@ recompiling them.
 
 Hosted deployment automatically runs `scripts/ensure-machine-artifacts.sh`.
 It reuses verified `dist/` bytes or dispatches the native workflow with the exact
-source commit and waits for all four platforms. Manual dispatch can build a
+source commit and waits for all five platforms. Manual dispatch can build a
 specific commit with its `revision` input; its workflow `headSha` may differ from
 the built revision, so the source metadata is authoritative. Stale or incomplete
 local `dist/` trees fail validation rather than being overwritten. To prepare
@@ -148,7 +158,7 @@ just promote-production .treer/releases/<full-commit>/manifest.json
 ```
 
 Promotion requires `status: canary_passed`, verifies the commit and artifact
-checksum, verifies all four machine artifact sets, deploys the Production Proxy
+checksum, verifies all five machine artifact sets, deploys the Production Proxy
 and the exact Canary frontend artifact,
 then checks Proxy health, App health/configuration, and wildcard TLS routing.
 It updates the manifest to `status: production_deployed` with Production IDs.

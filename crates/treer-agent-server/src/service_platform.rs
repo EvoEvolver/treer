@@ -548,7 +548,11 @@ pub(super) mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+#[path = "service_windows.rs"]
+pub(super) mod platform;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(super) mod platform {
     use super::*;
 

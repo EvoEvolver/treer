@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/treer-platform",
   "crates/treer-agent-runtime",
   "crates/treer-agent-server",
   "crates/treer-agent-host",
@@ -51,6 +52,7 @@ tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 treer-build-info = { path = "crates/treer-build-info" }
+treer-platform = { path = "crates/treer-platform" }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 

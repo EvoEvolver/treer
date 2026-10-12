@@ -64,11 +64,22 @@ node scripts/check-docs.mjs
 | Distribution | NATS event/outbox and multi-Proxy routing tests, including terminal epoch/cursor delivery and bidirectional network payload/accounting | No automated partition/failure CI |
 | Host supervision | nohup default and PID identity, explicit systemd selection, partial-unit repair, stale-registration cleanup, TUI/Web diagnostics, and cold-Host restoration and explicit service probes | No normal macOS lifecycle CI; no Apple container machine setup CI |
 | Machine connection UX | Service workspace listing, `/api/health` `proxy_connected`, duplicate/stale reconnect, Proxy ping idle close, connect reuse, bind conflict, explicit plain-mode migration and service forwarding | No physical lid-close in CI; record a manual macOS sleep/wake check after deploy |
-| Release | Four-platform metadata/checksums, GHCR publish workflow, and signed-manifest Node tests | Installed machine updater does not enforce signatures |
+| Release | Five-platform metadata/checksums, native Windows build/test job, GHCR publish workflow, and signed-manifest Node tests | Windows runner results pending; installed machine updater does not enforce signatures |
 | Self-host update | Updater unit tests; Proxy admin forward tests; `/admin` e2e | No unattended Compose apply against live Docker |
 | Security | Explicit trust tier and Policy tests | Allow-by-default Policy; external isolation is operator-owned |
 
 ## Review Triggers
+
+Native Windows changes require the Windows MSVC job in
+`.github/workflows/build-release-artifacts.yml`: local IPC reconnect and owner
+checks, private state replacement, PID identity, ConPTY argv/input/resize/stop,
+real Controller/CLI auth, detached Host idempotency and process survival across
+Controller replacement, plus native installer checksums/PATH. A cross-target
+`cargo check` or Clippy run on macOS only establishes compilation. Real Windows
+enrollment, HTTP service routing, App deployment, reboot recovery, and descendant
+cleanup under failure still require native acceptance before announcing support.
+Windows in-place binary update, automatic login tasks, and system services are
+outside the initial implementation.
 
 | Change | Minimum focused evidence |
 | --- | --- |

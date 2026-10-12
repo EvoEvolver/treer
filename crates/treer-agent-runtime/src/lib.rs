@@ -69,6 +69,8 @@ struct RuntimeInner {
 }
 
 struct HostProcess {
+    #[cfg(windows)]
+    process_tree: Mutex<Option<treer_platform::ProcessTreeGuard>>,
     info: Mutex<HostProcessInfo>,
     input: Mutex<Option<std_mpsc::Sender<InputWrite>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
@@ -272,12 +274,26 @@ impl HostRuntime {
         for (key, value) in request.env {
             builder.env(key, value);
         }
-        let child = pair
+        #[allow(unused_mut)]
+        let mut child = pair
             .slave
             .spawn_command(builder)
             .map_err(|error| RuntimeError::Spawn(error.to_string()))?;
         drop(pair.slave);
         let pid = child.process_id();
+        #[cfg(windows)]
+        let process_tree = match pid
+            .map(treer_platform::ProcessTreeGuard::for_process)
+            .transpose()
+        {
+            Ok(job) => job.flatten(),
+            Err(error) => {
+                let _ = child.kill();
+                return Err(RuntimeError::Spawn(format!(
+                    "failed to own workload process tree: {error}"
+                )));
+            }
+        };
         let reader = pair
             .master
             .try_clone_reader()
@@ -306,6 +322,8 @@ impl HostRuntime {
             metadata: request.metadata,
         };
         let process = Arc::new(HostProcess {
+            #[cfg(windows)]
+            process_tree: Mutex::new(process_tree),
             info: Mutex::new(info.clone()),
             input: Mutex::new(Some(input)),
             child: Mutex::new(Some(child)),
@@ -412,6 +430,12 @@ impl HostRuntime {
             .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?
             .kill()
             .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
+        #[cfg(windows)]
+        process
+            .process_tree
+            .lock()
+            .map_err(|_| RuntimeError::Terminal("process tree lock poisoned".into()))?
+            .take();
         self.inner
             .update_process(&process, |info| {
                 info.running = false;
@@ -480,6 +504,10 @@ impl RuntimeInner {
     }
 
     fn finish_process(&self, process: &HostProcess) {
+        #[cfg(windows)]
+        if let Ok(mut job) = process.process_tree.lock() {
+            job.take();
+        }
         if let Ok(mut input) = process.input.lock() {
             input.take();
         }
@@ -648,6 +676,7 @@ fn relative_display(root: &Path, cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::Instant;
@@ -696,6 +725,56 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_conpty_argv_input_resize_and_stop() {
+        let root = std::env::temp_dir().join(format!("treer 空格 {}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("agent test.ps1");
+        std::fs::write(&script, "Write-Output $args[0]\nWrite-Output $env:TREER_TEST_VALUE\n$value = Read-Host\nWrite-Output ('echo:' + $value)\nStart-Sleep -Seconds 30\n").unwrap();
+        let runtime = HostRuntime::new(&root).unwrap();
+        let request = HostSpawnRequest {
+            process_id: "windows-agent".into(),
+            command: "powershell.exe".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                script.to_string_lossy().into_owned(),
+                "hello world $ &".into(),
+            ],
+            cwd: ".".into(),
+            env: BTreeMap::from([("TREER_TEST_VALUE".into(), "environment-ok".into())]),
+            cols: 80,
+            rows: 24,
+            metadata: "{}".into(),
+        };
+        runtime.spawn(request.clone()).unwrap();
+        assert!(matches!(
+            runtime.spawn(request),
+            Err(RuntimeError::ProcessExists(_))
+        ));
+        wait_for_output(&runtime, "windows-agent", "hello world $ &");
+        wait_for_output(&runtime, "windows-agent", "environment-ok");
+        runtime.resize("windows-agent", 100, 35).unwrap();
+        runtime
+            .write(
+                "windows-agent",
+                &[HostWrite {
+                    data: b"input-ok\r\n".to_vec(),
+                    delay_ms: 0,
+                }],
+            )
+            .unwrap();
+        wait_for_output(&runtime, "windows-agent", "echo:input-ok");
+        let process = runtime.get("windows-agent").unwrap();
+        runtime.stop("windows-agent").unwrap();
+        wait_for_resources_released(&process);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -788,6 +867,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn exited_process_releases_live_resources_and_keeps_replay() {
         let temporary = std::env::temp_dir().join(format!(
             "treer-host-runtime-cleanup-{}",
@@ -818,6 +898,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn stopped_process_releases_live_resources() {
         let temporary = std::env::temp_dir().join(format!(
             "treer-host-runtime-stop-cleanup-{}",
@@ -846,6 +927,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn spawns_and_reads_a_real_pty() {
         let temporary = std::env::temp_dir().join(format!(
             "treer-host-runtime-test-{}",
@@ -869,6 +951,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn recovery_replaces_terminal_process_but_rejects_live_duplicate() {
         let temporary = std::env::temp_dir().join(format!(
             "treer-recovery-runtime-{}",
@@ -906,6 +989,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn real_pty_replay_is_incremental_from_a_cursor() {
         let temporary = std::env::temp_dir().join(format!(
             "treer-host-runtime-replay-{}",

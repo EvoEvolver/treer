@@ -23,6 +23,7 @@ const DEFAULT_PLATFORMS = [
   "linux-aarch64",
   "darwin-x86_64",
   "darwin-aarch64",
+  "windows-x86_64",
 ];
 const BINARIES = ["treer", "treer-agent-server", "treer-agent-host"];
 const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
@@ -195,8 +196,11 @@ export function buildArtifactRecords({ distDir, platforms, version }) {
       if (size > MAX_ARTIFACT_BYTES) {
         fail(`release artifact ${source} exceeds the 128 MiB updater limit`);
       }
-      if ((statSync(source).mode & 0o111) === 0) {
+      if (!platform.startsWith("windows-") && (statSync(source).mode & 0o111) === 0) {
         fail(`release artifact ${source} is not executable`);
+      }
+      if (platform.startsWith("windows-") && readFileSync(source).subarray(0, 2).toString() !== "MZ") {
+        fail(`release artifact ${source} is not a Windows executable`);
       }
       records.push({
         binary,

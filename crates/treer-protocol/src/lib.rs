@@ -102,6 +102,7 @@ pub enum MachineSupervisionMode {
     Launchd,
     Nohup,
     Foreground,
+    Detached,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1940,6 +1941,17 @@ pub struct MachineEnrollmentKey {
     pub workspace_id: String,
     pub enrollment_id: String,
     pub secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MachineBootstrapResponse {
+    pub install_command: String,
+    pub connect_command: String,
+    pub windows_install_command: String,
+    pub windows_connect_command: String,
+    pub enrollment_key: String,
+    pub script_url: String,
+    pub workspace_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

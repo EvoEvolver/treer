@@ -25,10 +25,7 @@ struct Connection {
     argv: Vec<String>,
 }
 fn config_directory() -> Option<PathBuf> {
-    let root = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(root.join("treer/agent-servers"))
+    treer_platform::config_directory()
 }
 fn installed_config(
     directory: &std::path::Path,

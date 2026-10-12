@@ -46,6 +46,12 @@ the plan identifies every maintained document that must change at completion.
   replaces the native transparent-network expansion direction. The working-tree
   implementation and its validation/remaining deployment gates are tracked there.
 
+- [Native Windows support](research/2026-10-11-native-windows.md): source audit,
+  Windows target compilation evidence, local IPC and process adaptations,
+  user-mode installation, manual recovery, and proposed native acceptance gates.
+  Initial implementation and native CI gates are in the working tree; Windows
+  runtime acceptance and artifact publication remain pending.
+
 ## Design proposals
 
 - [External Agent identity and remote CLI access](research/2026-09-30-external-agent-cli-plan.md):

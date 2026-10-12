@@ -151,15 +151,15 @@ fn persist(path: &Path, entries: &HashMap<String, CachedAgentInterface>) -> io::
         options.mode(0o600);
     }
     let result = (|| {
+        #[cfg(windows)]
+        treer_platform::secure_directory(parent)?;
         let mut file = options.open(&temporary)?;
+        #[cfg(windows)]
+        treer_platform::secure_file(&temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         drop(file);
-        #[cfg(windows)]
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        fs::rename(&temporary, path)
+        treer_platform::replace_file(&temporary, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

@@ -37,6 +37,15 @@ The Host is intentionally product-agnostic. Shared wire models live in protocol
 crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
 
+`treer-platform` contains machine-local transport, user paths, private-file
+permissions and replacement, and Windows process ownership. Host framing stays
+in `treer-host-protocol`: Unix sockets and Windows Named Pipes carry the same
+requests and events. Windows pipe names include user-SID and machine-ID hashes;
+only that user and SYSTEM can access them, and remote clients are rejected.
+Windows defaults to a detached user Host. The Host owns a kill-on-close Job
+Object, and runtime workloads get nested jobs; Controller replacement leaves
+these handles with the stable Host. They manage lifecycle, not sandboxing.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

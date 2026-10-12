@@ -52,6 +52,22 @@ test("release versions reject paths and mutable aliases", () => {
   }
 });
 
+test("Windows artifacts use logical manifest names and require PE files", (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { recursive: true, force: true }));
+  const platform = "windows-x86_64";
+  mkdirSync(join(data.distDir, platform));
+  for (const binary of ["treer", "treer-agent-server", "treer-agent-host"]) {
+    writeFileSync(join(data.distDir, platform, binary), `MZ fixture ${binary}`, { mode: 0o644 });
+  }
+  const options = { distDir: data.distDir, platforms: [platform], version: "v1.2.3" };
+  const records = buildArtifactRecords(options);
+  assert.equal(records.length, 3);
+  assert.equal(records[0].path, "releases/v1.2.3/windows-x86_64/treer");
+  writeFileSync(join(data.distDir, platform, "treer"), "ELF");
+  assert.throws(() => buildArtifactRecords(options), /not a Windows executable/);
+});
+
 test("manifest contains sorted immutable artifact records and a valid signature", () => {
   const data = fixture();
   try {

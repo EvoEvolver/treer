@@ -3606,6 +3606,7 @@ dependencies = [
  "treer-agent-runtime",
  "treer-build-info",
  "treer-host-protocol",
+ "treer-platform",
  "uuid",
 ]
 
@@ -3620,6 +3621,7 @@ dependencies = [
  "tokio",
  "tracing",
  "treer-host-protocol",
+ "treer-platform",
  "uuid",
 ]
 
@@ -3652,6 +3654,7 @@ dependencies = [
  "treer-agent-runtime",
  "treer-build-info",
  "treer-host-protocol",
+ "treer-platform",
  "treer-protocol",
  "url",
  "uuid",
@@ -3674,6 +3677,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "treer-build-info",
+ "treer-platform",
  "treer-protocol",
  "url",
  "uuid",
@@ -3686,6 +3690,14 @@ dependencies = [
  "bincode",
  "chrono",
  "serde",
+]
+
+[[package]]
+name = "treer-platform"
+version = "0.1.13"
+dependencies = [
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

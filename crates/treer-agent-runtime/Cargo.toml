@@ -10,6 +10,7 @@ portable-pty.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+treer-platform.workspace = true
 treer-host-protocol = { path = "../treer-host-protocol" }
 uuid.workspace = true
 

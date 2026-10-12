@@ -3,6 +3,16 @@
 Treer's current supported tier is trusted or mostly trusted machines and
 workspace members. It is not a safe multi-tenant execution sandbox.
 
+On Windows, local Named Pipes reject remote clients and use explicit current-user
+and SYSTEM DACLs. Credential-bearing configuration and recovery files use the
+same user boundary, with atomic file replacement. SID-scoped startup mutexes and
+PID creation-time checks avoid duplicate Host starts and terminating a reused
+PID. Job Objects provide process-tree cleanup, not resource isolation or an
+untrusted-code sandbox; processes under the same user remain mutually trusted.
+The Windows installer checks hashes supplied by the same artifact origin and
+matching binary build identities; this is not independent signature validation.
+Use a trusted HTTPS Proxy/artifact origin for public installation.
+
 ## Supported Claims
 
 - Machines enroll once, then authenticate with a workspace-bound credential.

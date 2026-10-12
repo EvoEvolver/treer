@@ -8,13 +8,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use treer_host_protocol::{
     decode_message, encode_message, HostCommand, HostError, HostMessage, HostOutputChunk,
     HostProcessInfo, HostRequest, HostResponse, OutputCursor, HOST_PROTOCOL_VERSION,
     MAX_HOST_FRAME_BYTES,
 };
+use treer_platform::connect_local;
 use uuid::Uuid;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -34,10 +34,10 @@ pub struct HostEvents {
 
 impl HostClient {
     pub async fn connect(path: &Path) -> Result<(Self, HostEvents)> {
-        let stream = UnixStream::connect(path)
+        let stream = connect_local(path)
             .await
             .with_context(|| format!("failed to connect to host {}", path.display()))?;
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<HostRequest>();
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
         let (output_tx, output_rx) = broadcast::channel(2048);

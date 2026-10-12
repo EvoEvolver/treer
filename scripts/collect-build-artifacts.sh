@@ -45,7 +45,7 @@ verify_checksums() {
     fi
 }
 
-platforms="linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64"
+platforms="linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64 windows-x86_64"
 
 for platform in $platforms; do
     source="$temporary/treer-$platform"

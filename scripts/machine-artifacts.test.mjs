@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 
 const commit = "a".repeat(40);
-const platforms = ["linux-x86_64", "linux-aarch64", "darwin-x86_64", "darwin-aarch64"];
+const platforms = ["linux-x86_64", "linux-aarch64", "darwin-x86_64", "darwin-aarch64", "windows-x86_64"];
 const binaries = ["treer", "treer-agent-host", "treer-agent-server"];
 const verifier = new URL("./verify-machine-artifacts.sh", import.meta.url).pathname;
 const servedVerifier = new URL("./verify-served-artifacts.sh", import.meta.url).pathname;
@@ -25,7 +25,7 @@ function fixture(t) {
       schema_version: 1, git_commit: commit, platform, version: "0.1.13",
     }));
     const hashes = binaries.map((binary) => {
-      const bytes = Buffer.from(`${platform}/${binary}`);
+      const bytes = Buffer.from(`${platform.startsWith("windows-") ? "MZ" : ""}${platform}/${binary}`);
       writeFileSync(join(directory, binary), bytes, { mode: 0o755 });
       return `${createHash("sha256").update(bytes).digest("hex")}  ${binary}\n`;
     });
@@ -56,7 +56,7 @@ for (const mode of ["matching", "redirect", "stale"]) {
     const check = exec("sh", [servedVerifier, url, root]);
     if (mode === "matching") {
       await check;
-      assert.equal(requests, 12);
+      assert.equal(requests, 15);
     } else {
       await assert.rejects(check);
     }
@@ -67,12 +67,14 @@ function verify(root) {
   return spawnSync("sh", [verifier, commit, root], { encoding: "utf8" });
 }
 
-test("accepts complete four-platform artifacts", (t) => {
+test("accepts complete five-platform artifacts", (t) => {
   const result = verify(fixture(t));
   assert.equal(result.status, 0, result.stderr);
 });
 
 for (const [name, mutate] of [
+  ["missing Windows binary", (root) => rmSync(join(root, "windows-x86_64", "treer-agent-host"))],
+  ["invalid Windows executable", (root) => writeFileSync(join(root, "windows-x86_64", "treer"), "ELF")],
   ["missing macOS binary", (root) => rmSync(join(root, "darwin-aarch64", "treer-agent-server"))],
   ["changed binary bytes", (root) => writeFileSync(join(root, "darwin-x86_64", "treer"), "old")],
   ["different source commit", (root) => {

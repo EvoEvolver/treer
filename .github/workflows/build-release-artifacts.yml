@@ -20,6 +20,55 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  windows:
+    name: Build windows-x86_64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      RUST_VERSION: 1.90.0
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - name: Record source commit
+        run: '"TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV'
+      - uses: Swatinem/rust-cache@v2
+      - name: Select MSVC Rust
+        run: |
+          rustup toolchain install "${env:RUST_VERSION}-x86_64-pc-windows-msvc" --profile minimal
+          rustup default "${env:RUST_VERSION}-x86_64-pc-windows-msvc"
+          rustc --version --verbose
+      - name: Test local transport, process ownership and ConPTY
+        run: |
+          cargo test --locked -p treer-platform -p treer-agent-runtime -p treer-agent-host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build machine binaries
+        run: cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
+      - name: Test real Controller and CLI
+        run: |
+          cargo build --locked -p treer-agent-host -p treer-agent-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-cli --test controller -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_real_host -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage artifacts
+        run: ./scripts/stage-release-artifacts.ps1 -Destination release-artifacts/windows-x86_64
+      - name: Test Windows installation and PATH
+        run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: treer-windows-x86_64
+          path: release-artifacts/windows-x86_64/
+          if-no-files-found: error
+          retention-days: 14
+
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}

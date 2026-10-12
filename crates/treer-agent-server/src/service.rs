@@ -4,8 +4,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -27,6 +25,7 @@ const MAX_UPDATE_BINARY_BYTES: usize = 128 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const UPDATE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROLLER_START_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(unix)]
 const NOHUP_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -36,6 +35,8 @@ pub enum ServiceMode {
     Launchd,
     Nohup,
     Foreground,
+    #[cfg(windows)]
+    Detached,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -66,6 +67,8 @@ impl std::fmt::Display for ServiceMode {
             Self::Launchd => "launchd",
             Self::Nohup => "nohup",
             Self::Foreground => "foreground",
+            #[cfg(windows)]
+            Self::Detached => "detached",
         })
     }
 }
@@ -77,6 +80,8 @@ pub enum ServiceManager {
     Launchd,
     Nohup,
     Foreground,
+    #[cfg(windows)]
+    Detached,
 }
 
 impl std::fmt::Display for ServiceManager {
@@ -86,6 +91,8 @@ impl std::fmt::Display for ServiceManager {
             Self::Launchd => "launchd",
             Self::Nohup => "nohup",
             Self::Foreground => "foreground",
+            #[cfg(windows)]
+            Self::Detached => "detached",
         })
     }
 }
@@ -123,6 +130,8 @@ impl ServiceSelection {
                     "treer: warning: falling back to foreground mode; keep this terminal open"
                 ),
                 ServiceManager::SystemdUser | ServiceManager::Launchd => {}
+                #[cfg(windows)]
+                ServiceManager::Detached => {}
             }
         } else if self.manager == ServiceManager::Nohup {
             eprintln!(
@@ -132,6 +141,10 @@ impl ServiceSelection {
             eprintln!(
                 "treer: foreground service mode selected; keep this terminal open or run the command under a process supervisor"
             );
+        }
+        #[cfg(windows)]
+        if self.manager == ServiceManager::Detached {
+            eprintln!("treer: Windows detached mode selected; run restore after Host exit or machine restart");
         }
     }
 }
@@ -276,6 +289,8 @@ impl ServiceConfig {
                 ServiceManager::Launchd => MachineSupervisionMode::Launchd,
                 ServiceManager::Nohup => MachineSupervisionMode::Nohup,
                 ServiceManager::Foreground => MachineSupervisionMode::Foreground,
+                #[cfg(windows)]
+                ServiceManager::Detached => MachineSupervisionMode::Detached,
             },
             fallback_reason: self.service_fallback_reason.clone(),
         }
@@ -411,14 +426,13 @@ pub fn register(config: ServiceConfig) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn host_is_running(socket: &Path) -> bool {
-    UnixStream::connect(socket).is_ok()
+    treer_platform::local_endpoint_active(socket)
 }
 
 pub enum ServiceActivation {
     Managed,
-    Foreground(tokio::process::Child),
+    Foreground(Box<tokio::process::Child>),
 }
 
 pub async fn refresh_registration_and_wait(mut config: ServiceConfig) -> Result<ServiceActivation> {
@@ -443,7 +457,6 @@ async fn activate_registered_service(
 ) -> Result<ServiceActivation> {
     // Registration can stop the old Host when switching supervisors. Probe
     // afterwards so a cold start never sends a restart request to a missing socket.
-    #[cfg(unix)]
     if !host_is_running(&config.host_socket) {
         return start_service_and_wait(paths, config).await;
     }
@@ -452,7 +465,6 @@ async fn activate_registered_service(
         let diagnostic = format!("Controller hot restart failed ({error:#}); Host recovery failed");
         let recovery = async {
             // The Host may have exited between the probe and the request.
-            #[cfg(unix)]
             if !host_is_running(&config.host_socket) {
                 return start_service_and_wait(paths, config).await;
             }
@@ -484,6 +496,7 @@ pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<Serv
     require_host_binary(&ServicePaths::new("preflight")?)?;
     host_socket_path("preflight")?;
     let selection = select_service_manager(mode)?;
+    #[cfg(unix)]
     if selection.manager == ServiceManager::Nohup {
         require_nohup()?;
     }
@@ -587,7 +600,20 @@ fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
+    let manager = match mode {
+        ServiceMode::Auto | ServiceMode::Detached => ServiceManager::Detached,
+        ServiceMode::Foreground => ServiceManager::Foreground,
+        _ => bail!("use --service-mode detached or foreground on Windows"),
+    };
+    Ok(ServiceSelection {
+        manager,
+        fallback_reason: None,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
     match mode {
         ServiceMode::Auto => Ok(ServiceSelection {
@@ -608,9 +634,17 @@ fn select_service_manager(mode: ServiceMode) -> Result<ServiceSelection> {
 
 pub fn host_socket_path(server_id: &str) -> Result<PathBuf> {
     validate_server_id(server_id)?;
-    let name = host_socket_filename(server_id);
-    let path = fit_unix_socket_path(runtime_dir()?.join(&name), &name)?;
-    Ok(path)
+    #[cfg(windows)]
+    return Ok(treer_platform::endpoint_name(
+        server_id,
+        &treer_platform::current_user_sid()?,
+    ));
+    #[cfg(unix)]
+    {
+        let name = host_socket_filename(server_id);
+        let path = fit_unix_socket_path(runtime_dir()?.join(&name), &name)?;
+        Ok(path)
+    }
 }
 
 pub fn start(workspace: &str) -> Result<()> {
@@ -642,7 +676,7 @@ async fn start_service_and_wait(
                     paths.host_executable.display()
                 )
             })?;
-        ServiceActivation::Foreground(child)
+        ServiceActivation::Foreground(Box::new(child))
     } else {
         platform::start(paths, config)?;
         ServiceActivation::Managed
@@ -653,6 +687,10 @@ async fn start_service_and_wait(
             let _ = child.kill().await;
             let _ = child.wait().await;
         } else if config.service_manager == ServiceManager::Nohup {
+            let _ = platform::stop(paths, config);
+        }
+        #[cfg(windows)]
+        if config.service_manager == ServiceManager::Detached {
             let _ = platform::stop(paths, config);
         }
         return Err(error);
@@ -701,10 +739,7 @@ fn should_migrate_host_socket(current: &Path, preferred: &Path) -> bool {
     if current == preferred {
         return false;
     }
-    #[cfg(unix)]
-    return !host_is_running(current);
-    #[cfg(not(unix))]
-    true
+    !host_is_running(current)
 }
 
 pub async fn wait_for_foreground(activation: ServiceActivation) -> Result<()> {
@@ -755,6 +790,9 @@ pub fn restart_controller(workspace: &str) -> Result<()> {
 }
 
 pub async fn update(proxy_override: Option<Url>) -> Result<()> {
+    if cfg!(windows) {
+        bail!("Windows in-place updates are not supported; stop Treer, reinstall the binaries, then run restore");
+    }
     let services = installed_services()?;
     let (paths, source_config) = services.first().context(
         "no agent-server services are installed on this host; connect a machine before updating",
@@ -1426,10 +1464,7 @@ pub(crate) struct ServicePaths {
 
 impl ServicePaths {
     fn new(server_id: &str) -> Result<Self> {
-        let home = home_dir()?;
-        let config_home = env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"));
+        let config_dir = config_dir()?;
         let state_dir = state_dir()?;
         let key = component_key(server_id);
         let executable = env::current_exe()
@@ -1438,7 +1473,6 @@ impl ServicePaths {
             .context("failed to resolve the treer-agent-server executable")?;
         let host_executable =
             executable.with_file_name(format!("treer-agent-host{}", std::env::consts::EXE_SUFFIX));
-        let config_dir = config_home.join("treer/agent-servers");
         Ok(Self {
             executable,
             host_executable,
@@ -1520,25 +1554,30 @@ pub fn require_install_hostname(config: &ServiceConfig) -> Result<()> {
 }
 
 fn config_dir() -> Result<PathBuf> {
-    let home = home_dir()?;
-    let config_home = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
-    Ok(config_home.join("treer/agent-servers"))
+    treer_platform::config_directory().context("user configuration directory is unavailable")
 }
 
 fn state_dir() -> Result<PathBuf> {
-    let home = home_dir()?;
-    Ok(env::var_os("TREER_STATE_DIR")
+    #[cfg(windows)]
+    return env::var_os("TREER_STATE_DIR")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("XDG_STATE_HOME").map(|path| PathBuf::from(path).join("treer")))
-        .unwrap_or_else(|| home.join(".local/state/treer")))
+        .or_else(|| env::var_os("LOCALAPPDATA").map(|root| PathBuf::from(root).join("Treer/state")))
+        .context("LOCALAPPDATA is required to store Treer state");
+    #[cfg(not(windows))]
+    {
+        let home = home_dir()?;
+        Ok(env::var_os("TREER_STATE_DIR")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("XDG_STATE_HOME").map(|path| PathBuf::from(path).join("treer")))
+            .unwrap_or_else(|| home.join(".local/state/treer")))
+    }
 }
 
 pub fn startup_state_path(server_id: &str) -> Result<PathBuf> {
     Ok(state_dir()?.join(format!("{server_id}-agent-startup.json")))
 }
 
+#[cfg(unix)]
 fn runtime_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("TREER_RUNTIME_DIR") {
         return Ok(PathBuf::from(path));
@@ -1597,6 +1636,7 @@ fn private_state_runtime_dir() -> Result<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg(unix)]
 fn prepare_private_runtime_dir(path: PathBuf) -> Result<PathBuf> {
     fs::create_dir_all(&path).with_context(|| {
         format!(
@@ -1618,6 +1658,7 @@ fn prepare_private_runtime_dir(path: PathBuf) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(unix)]
 fn current_uid() -> Result<String> {
     let output = Command::new("id")
         .arg("-u")
@@ -1630,10 +1671,12 @@ fn current_uid() -> Result<String> {
         .to_string())
 }
 
+#[cfg(unix)]
 fn host_socket_filename(server_id: &str) -> String {
     format!("h-{:016x}.sock", fnv1a64(server_id.as_bytes()))
 }
 
+#[cfg(unix)]
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325;
     for byte in bytes {
@@ -1646,9 +1689,10 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// Usable `sun_path` bytes, excluding the trailing NUL.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 
+#[cfg(unix)]
 fn fit_unix_socket_path(preferred: PathBuf, filename: &str) -> Result<PathBuf> {
     if unix_path_byte_len(&preferred) <= MAX_UNIX_SOCKET_PATH_BYTES {
         return Ok(preferred);
@@ -1666,6 +1710,7 @@ fn fit_unix_socket_path(preferred: PathBuf, filename: &str) -> Result<PathBuf> {
     )
 }
 
+#[cfg(unix)]
 fn unix_path_byte_len(path: &Path) -> usize {
     #[cfg(unix)]
     {
@@ -1678,6 +1723,7 @@ fn unix_path_byte_len(path: &Path) -> usize {
     }
 }
 
+#[cfg(unix)]
 fn home_dir() -> Result<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -1722,6 +1768,8 @@ fn component_key(value: &str) -> String {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(windows)]
+    treer_platform::secure_directory(path.parent().context("configuration has no parent")?)?;
     let temporary = path.with_extension("tmp");
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -1733,12 +1781,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = options
         .open(&temporary)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
+    #[cfg(windows)]
+    treer_platform::secure_file(&temporary)?;
     use std::io::Write;
     file.write_all(bytes)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
     file.sync_all()
         .with_context(|| format!("failed to sync {}", temporary.display()))?;
-    fs::rename(&temporary, path).with_context(|| format!("failed to replace {}", path.display()))
+    drop(file);
+    treer_platform::replace_file(&temporary, path)
+        .with_context(|| format!("failed to replace {}", path.display()))
 }
 
 fn save_json(value: &impl Serialize, path: &Path) -> Result<()> {
@@ -2052,6 +2104,7 @@ fn logs_nohup(
     run_checked(&mut command, "tail")
 }
 
+#[cfg(unix)]
 fn run_checked(command: &mut Command, description: &str) -> Result<()> {
     let status = command
         .status()

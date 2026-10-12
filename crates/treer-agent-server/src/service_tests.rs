@@ -3,6 +3,181 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 
+#[cfg(windows)]
+#[test]
+fn windows_supervision_and_identity_paths() {
+    assert_eq!(
+        select_service_manager(ServiceMode::Auto).unwrap().manager,
+        ServiceManager::Detached
+    );
+    assert_eq!(
+        select_service_manager(ServiceMode::Foreground)
+            .unwrap()
+            .manager,
+        ServiceManager::Foreground
+    );
+    assert!(select_service_manager(ServiceMode::Systemd).is_err());
+    let pipe = host_socket_path("srv_windows").unwrap();
+    assert!(pipe.to_string_lossy().starts_with(r"\\.\pipe\treer-"));
+    assert_eq!(pipe, host_socket_path("srv_windows").unwrap());
+    assert_ne!(pipe, host_socket_path("srv_other").unwrap());
+    assert!(config_dir().unwrap().ends_with("Treer/agent-servers"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires freshly built sibling Controller and Host binaries"]
+async fn windows_real_host_detached_restart_and_stop() {
+    use crate::host_client::HostClient;
+    use treer_host_protocol::{HostCommand, HostResponse, HostSpawnRequest};
+    let root = env::temp_dir().join(format!("treer-windows-host-{}", Uuid::new_v4().simple()));
+    treer_platform::secure_directory(&root).unwrap();
+    let binaries = env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let paths = ServicePaths {
+        executable: binaries.join("treer-agent-server.exe"),
+        host_executable: binaries.join("treer-agent-host.exe"),
+        config: root.join("controller.json"),
+        host_config: root.join("host.json"),
+        state_dir: root.clone(),
+    };
+    assert!(
+        paths.executable.is_file() && paths.host_executable.is_file(),
+        "build sibling binaries first"
+    );
+    let server_id = format!("srv_{}", Uuid::new_v4().simple());
+    let config = ServiceConfig {
+        proxy: "http://127.0.0.1:9/".into(),
+        workspace: "windows-test".into(),
+        server_id: server_id.clone(),
+        machine_token: "fixture-machine".into(),
+        operator_credential: "fixture-operator".into(),
+        root: root.clone(),
+        listen: allocate_loopback_address().unwrap().to_string(),
+        host_socket: host_socket_path(&server_id).unwrap(),
+        install_hostname: current_hostname().unwrap(),
+        network_mode: None,
+        service_manager: ServiceManager::Detached,
+        service_fallback_reason: None,
+    };
+    struct Cleanup(ServicePaths, ServiceConfig);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = platform::stop(&self.0, &self.1);
+            let _ = fs::remove_dir_all(&self.0.state_dir);
+        }
+    }
+    save_json(&config, &paths.config).unwrap();
+    save_json(
+        &HostDaemonConfig {
+            socket_path: config.host_socket.clone(),
+            controller_path: paths.executable.clone(),
+            controller_config_path: paths.config.clone(),
+            root,
+        },
+        &paths.host_config,
+    )
+    .unwrap();
+    let fixture = Cleanup(paths, config);
+    platform::register(&fixture.0, &fixture.1).unwrap();
+    platform::start(&fixture.0, &fixture.1).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !host_is_running(&fixture.1.host_socket) {
+        assert!(
+            Instant::now() < deadline,
+            "detached Host pipe did not become available"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let pid_file = fixture
+        .0
+        .state_dir
+        .join(format!("agent-host-{}.pid", fixture.1.server_id));
+    let host_identity = fs::read(&pid_file).unwrap();
+    let (host, _) = HostClient::connect(&fixture.1.host_socket).await.unwrap();
+    let spawn = HostSpawnRequest {
+        process_id: "survivor".into(),
+        command: "powershell.exe".into(),
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "Start-Sleep -Seconds 60".into(),
+        ],
+        cwd: ".".into(),
+        env: Default::default(),
+        rows: 24,
+        cols: 80,
+        metadata: "{}".into(),
+    };
+    let HostResponse::Process { process: before } = host
+        .request(
+            HostCommand::Spawn {
+                request: spawn.clone(),
+            },
+            Some("first-spawn".into()),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected process");
+    };
+    platform::start(&fixture.0, &fixture.1).unwrap();
+    assert_eq!(
+        fs::read(&pid_file).unwrap(),
+        host_identity,
+        "duplicate start preserves Host"
+    );
+    restart_controller_at(&fixture.0, &fixture.1.host_socket).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let HostResponse::Synced { processes, .. } = host.sync(Default::default()).await.unwrap()
+    else {
+        panic!("expected inventory");
+    };
+    assert_eq!(processes[0].pid, before.pid);
+    assert_eq!(processes[0].stream_epoch, before.stream_epoch);
+    assert!(processes[0].running);
+    let workload_created = treer_platform::process_created_at(before.pid.unwrap())
+        .unwrap()
+        .unwrap();
+    platform::stop(&fixture.0, &fixture.1).unwrap();
+    assert!(!host_is_running(&fixture.1.host_socket));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while treer_platform::process_created_at(before.pid.unwrap()).unwrap() == Some(workload_created)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "Host exit did not clean up the workload"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    platform::start(&fixture.0, &fixture.1).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !host_is_running(&fixture.1.host_socket) {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (recovered, _) = HostClient::connect(&fixture.1.host_socket).await.unwrap();
+    let HostResponse::Process { process: after } = recovered
+        .request(
+            HostCommand::Spawn { request: spawn },
+            Some("restored-spawn".into()),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected restored process");
+    };
+    assert_eq!(after.process_id, before.process_id);
+    assert_ne!(after.stream_epoch, before.stream_epoch);
+    platform::stop(&fixture.0, &fixture.1).unwrap();
+    platform::stop(&fixture.0, &fixture.1).unwrap();
+}
+
 #[test]
 fn workspace_keys_are_safe_for_service_names() {
     assert_eq!(workspace_key("team one/alpha"), "team_one_alpha");
@@ -10,6 +185,7 @@ fn workspace_keys_are_safe_for_service_names() {
 }
 
 #[test]
+#[cfg(unix)]
 fn identity_and_socket_paths_are_scoped_to_node_and_server() {
     let identity = machine_identity_path().expect("machine identity path");
     assert!(identity.ends_with("machine-identity.json"));
@@ -44,6 +220,7 @@ fn identity_and_socket_paths_are_scoped_to_node_and_server() {
 }
 
 #[test]
+#[cfg(unix)]
 fn host_socket_filename_is_a_stable_short_hash() {
     assert_eq!(
         host_socket_filename("srv_0123456789abcdef"),
@@ -56,6 +233,7 @@ fn host_socket_filename_is_a_stable_short_hash() {
 }
 
 #[test]
+#[cfg(unix)]
 fn host_socket_falls_back_when_the_runtime_directory_is_too_long() {
     let filename = host_socket_filename("srv_0123456789abcdef");
     let too_long =

@@ -77,20 +77,36 @@ pub(super) async fn bootstrap_info(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
     Path(workspace_id): Path<String>,
-) -> Result<Json<Value>, ApiFailure> {
+) -> Result<Json<treer_protocol::MachineBootstrapResponse>, ApiFailure> {
     state.snapshot(&workspace_id).await?;
     let enrollment = auth
         .create_machine_enrollment(&workspace_id, &session.user_id)
         .await?;
     let (install_command, connect_command) = bootstrap_commands(&config.public_url, &enrollment);
+    let (windows_install_command, windows_connect_command) =
+        windows_bootstrap_commands(&config.public_url, &enrollment);
     let script_url = install_script_url(&config.public_url);
-    Ok(Json(json!({
-        "install_command": install_command,
-        "connect_command": connect_command,
-        "enrollment_key": enrollment,
-        "script_url": script_url.as_str(),
-        "workspace_id": workspace_id,
-    })))
+    Ok(Json(treer_protocol::MachineBootstrapResponse {
+        install_command,
+        connect_command,
+        windows_install_command,
+        windows_connect_command,
+        enrollment_key: enrollment,
+        script_url: script_url.to_string(),
+        workspace_id,
+    }))
+}
+
+fn windows_bootstrap_commands(public_url: &Url, key: &str) -> (String, String) {
+    let mut url = public_url.clone();
+    url.set_path("/install.ps1");
+    url.set_query(None);
+    url.set_fragment(None);
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    (
+        format!("Invoke-WebRequest {} -OutFile \"$env:TEMP\\treer-install.ps1\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:TEMP\\treer-install.ps1\"; if ($LASTEXITCODE -eq 0) {{ $env:Path += \";$env:LOCALAPPDATA\\Treer\\bin\" }}", quote(url.as_str())),
+        format!("treer-agent-server connect --key {} --proxy {}", quote(key), quote(public_url.as_str())),
+    )
 }
 
 pub(super) fn bootstrap_commands(public_url: &Url, enrollment_key: &str) -> (String, String) {
@@ -178,7 +194,7 @@ pub(super) async fn download_artifact(
     if !valid_artifact_component(&platform)
         || !matches!(
             binary.as_str(),
-            "treer" | "treer-agent-host" | "treer-agent-server"
+            "treer" | "treer-agent-host" | "treer-agent-server" | "SHA256SUMS"
         )
     {
         return Err(ApiFailure::not_found(
@@ -190,7 +206,14 @@ pub(super) async fn download_artifact(
     match tokio::fs::read(&path).await {
         Ok(data) => Ok((
             [
-                (header::CONTENT_TYPE, "application/octet-stream"),
+                (
+                    header::CONTENT_TYPE,
+                    if binary == "SHA256SUMS" {
+                        "text/plain; charset=utf-8"
+                    } else {
+                        "application/octet-stream"
+                    },
+                ),
                 (header::CACHE_CONTROL, "no-cache"),
             ],
             data,
@@ -250,6 +273,31 @@ pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+pub(super) async fn windows_install_script(
+    Extension(config): Extension<BootstrapConfig>,
+) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        render_windows_install_script(&config.public_url),
+    )
+        .into_response()
+}
+
+fn render_windows_install_script(public_url: &Url) -> String {
+    let mut base = public_url.clone();
+    base.set_path("/artifacts/");
+    base.set_query(None);
+    base.set_fragment(None);
+    include_str!("../../../../scripts/install.ps1").replacen(
+        "__TREER_ARTIFACT_BASE__",
+        &base.as_str().replace('\'', "''"),
+        1,
+    )
+}
+
 pub(super) fn render_install_script(public_url: &Url) -> String {
     let mut artifact_base = public_url.clone();
     artifact_base.set_path("/artifacts/");
@@ -306,4 +354,31 @@ echo "treer: run the workspace connection command from the Proxy UI next"
         artifact_base = shell_quote(artifact_base.as_str().trim_end_matches('/')),
         path_setup = include_str!("../install-path.sh"),
     )
+}
+
+#[cfg(test)]
+mod windows_installer_tests {
+    use super::*;
+
+    #[test]
+    fn windows_bootstrap_quotes_values_as_powershell_data() {
+        let (install, connect) = windows_bootstrap_commands(
+            &Url::parse("https://proxy.example/").unwrap(),
+            "key'with quote",
+        );
+        assert!(install.contains("https://proxy.example/install.ps1"));
+        assert!(connect.contains("--key 'key''with quote'"));
+        assert!(!connect.contains("TREER_ENROLLMENT_KEY="));
+    }
+
+    #[test]
+    fn windows_installer_uses_proxy_artifacts_and_preserves_placeholder_guard() {
+        let script = render_windows_install_script(
+            &Url::parse("https://proxy.example/nested?token=hidden#fragment").unwrap(),
+        );
+        assert!(script.contains("[string]$ArtifactBase = 'https://proxy.example/artifacts/'"));
+        assert!(script.contains("$ArtifactBase -eq '__TREER_ARTIFACT_BASE__'"));
+        assert!(!script.contains("token=hidden"));
+        assert!(!script.contains("#fragment"));
+    }
 }

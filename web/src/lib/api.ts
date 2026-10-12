@@ -50,7 +50,7 @@ export interface BuildInfo {
 }
 
 export interface MachineSupervision {
-  mode: "systemd_user" | "launchd" | "nohup" | "foreground"
+  mode: "systemd_user" | "launchd" | "nohup" | "foreground" | "detached"
   fallback_reason?: string
 }
 

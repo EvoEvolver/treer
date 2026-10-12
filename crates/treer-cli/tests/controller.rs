@@ -1,5 +1,6 @@
 //! Run with `cargo build -p treer-agent-server -p treer-agent-host`, then
 //! `cargo test -p treer-cli --test controller -- --ignored`.
+
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
@@ -13,9 +14,15 @@ impl Drop for Processes {
                 continue;
             }
             if let Some(pid) = child.id() {
+                #[cfg(unix)]
                 let _ = std::process::Command::new("kill")
                     .args(["-TERM", "--", &format!("-{pid}")])
                     .status();
+                #[cfg(windows)]
+                {
+                    let _ = pid;
+                    let _ = child.start_kill();
+                }
             }
         }
     }
@@ -56,7 +63,14 @@ async fn real_controller_auth_parser_stdin_and_cancel() {
             });
         }
     });
+    #[cfg(unix)]
     let socket = root.join("host.sock");
+    #[cfg(windows)]
+    let socket = treer_platform::endpoint_name(
+        &uuid::Uuid::new_v4().to_string(),
+        &treer_platform::current_user_sid().unwrap(),
+    );
+    let sibling = |name: &str| binaries.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     let controller_config = root.join("controller.json");
     let host_config = root.join("host.json");
     std::fs::write(&controller_config, serde_json::to_vec(&serde_json::json!({
@@ -65,27 +79,29 @@ async fn real_controller_auth_parser_stdin_and_cancel() {
         "install_hostname":String::from_utf8(std::process::Command::new("hostname").output().unwrap().stdout).unwrap().trim(), "network_mode":"plain"
     })).unwrap()).unwrap();
     std::fs::write(&host_config, serde_json::to_vec(&serde_json::json!({
-        "socket_path":socket, "controller_path":binaries.join("treer-agent-server"), "controller_config_path":controller_config, "root":root
+        "socket_path":socket, "controller_path":sibling("treer-agent-server"), "controller_config_path":controller_config, "root":root
     })).unwrap()).unwrap();
-    let mut processes = Processes(vec![tokio::process::Command::new(
-        binaries.join("treer-agent-host"),
-    )
-    .args(["run", "--config"])
-    .arg(&host_config)
-    .env("XDG_CONFIG_HOME", root.join("config"))
-    .env("XDG_STATE_HOME", root.join("state"))
-    .env_remove("TREER_AGENT_ID")
-    .env_remove("TREER_WORKLOAD_CREDENTIAL")
-    .env_remove("TREER_IDENTITY_MODE")
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::inherit())
-    .process_group(0)
-    .kill_on_drop(true)
-    .spawn()
-    .unwrap()]);
+    let mut host = tokio::process::Command::new(sibling("treer-agent-host"));
+    #[cfg(unix)]
+    host.process_group(0);
+    let mut processes = Processes(vec![host
+        .args(["run", "--config"])
+        .arg(&host_config)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("LOCALAPPDATA", root.join("local"))
+        .env("TREER_STATE_DIR", root.join("state"))
+        .env_remove("TREER_AGENT_ID")
+        .env_remove("TREER_WORKLOAD_CREDENTIAL")
+        .env_remove("TREER_IDENTITY_MODE")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()]);
     let http = reqwest::Client::new();
     let mut online = false;
-    for _ in 0..100 {
+    for _ in 0..250 {
         if http
             .get(format!("http://{address}/api/health"))
             .send()
@@ -206,35 +222,41 @@ async fn real_controller_auth_parser_stdin_and_cancel() {
     .await
     .unwrap();
     assert!(String::from_utf8_lossy(&files.stderr).contains("pipe the body to stdin"));
-    let mut pending = command(&["status"]).spawn().unwrap();
-    let mut pending_stdin = pending.stdin.take().unwrap();
-    let large_stdin = tokio::spawn(async move {
-        let _ = pending_stdin.write_all(&vec![b'x'; 1024 * 1024]).await;
-    });
-    // Proxy sockets stay open without responding, so the business request remains pending.
-    tokio::time::timeout(std::time::Duration::from_secs(5), wait_request.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    std::process::Command::new("kill")
-        .args(["-INT", &pending.id().unwrap().to_string()])
-        .status()
-        .unwrap();
-    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.wait())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(cancelled.code(), Some(130));
-    large_stdin.await.unwrap();
+    #[cfg(unix)]
+    {
+        let mut pending = command(&["status"]).spawn().unwrap();
+        let mut pending_stdin = pending.stdin.take().unwrap();
+        let large_stdin = tokio::spawn(async move {
+            let _ = pending_stdin.write_all(&vec![b'x'; 1024 * 1024]).await;
+        });
+        // Proxy sockets stay open without responding, so the business request remains pending.
+        tokio::time::timeout(std::time::Duration::from_secs(5), wait_request.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        std::process::Command::new("kill")
+            .args(["-INT", &pending.id().unwrap().to_string()])
+            .status()
+            .unwrap();
+        let cancelled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.code(), Some(130));
+        large_stdin.await.unwrap();
+    }
     let help_again = command(&["--help"]).output().await.unwrap();
     assert!(
         help_again.status.success(),
         "cancel leaves Controller alive"
     );
+    #[cfg(unix)]
     std::process::Command::new("kill")
         .args(["-TERM", &processes.0[0].id().unwrap().to_string()])
         .status()
         .unwrap();
+    #[cfg(windows)]
+    processes.0[0].start_kill().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), processes.0[0].wait())
         .await
         .unwrap()

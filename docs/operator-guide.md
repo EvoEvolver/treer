@@ -196,6 +196,53 @@ from procps (Debian/Ubuntu: `apt-get install coreutils hostname procps`).
 `connect` checks startup dependencies before consuming its enrollment key.
 It does not require unshare or transparent-network tools.
 
+### Native Windows
+
+The initial native target is Windows 11 x64 with PowerShell and ConPTY. Download
+the PowerShell installer from the Proxy and run it in the current user session.
+The web Add machine dialog also offers **Windows · PowerShell** commands:
+
+```powershell
+Invoke-WebRequest https://PROXY_HOST/install.ps1 -OutFile "$env:TEMP\treer-install.ps1"
+& "$env:TEMP\treer-install.ps1"
+treer-agent-server connect --key 'enr_v1_...' --proxy 'https://PROXY_HOST/'
+```
+
+The installer verifies SHA-256 and matching build identities before installing
+`treer.exe`, `treer-agent-host.exe`, and `treer-agent-server.exe` together under
+`%LOCALAPPDATA%\Treer\bin`. It updates the current session and user PATH. Other
+already-open shells must be reopened. Installation needs no administrator rights
+and does not enroll the machine; run `connect` separately from the workspace
+directory. A session that blocks unsigned scripts can run the saved installer
+with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\treer-install.ps1"`;
+then open a fresh terminal to pick up PATH. No global execution-policy change is needed.
+
+Windows `auto` selects `detached`: a background user Host independent of the
+installing terminal. Configuration lives in `%LOCALAPPDATA%\Treer\agent-servers`,
+state and logs in `%LOCALAPPDATA%\Treer\state`; `TREER_STATE_DIR` still overrides
+state. Local IPC uses a current-user Named Pipe, not a filesystem socket.
+`--service-mode foreground` remains available for diagnosis. No login task or
+system service is registered, and the Host does not automatically restart after
+a crash or reboot. Restore saved workload intent with:
+
+```powershell
+treer-agent-server restore --workspace WORKSPACE_ID
+```
+
+Controller replacement preserves live Agent processes; stopping the Host cleans
+up its process tree. Recovery restarts saved commands, preserving workload
+identity and explicit stop intent, rather than restoring process memory.
+Install Agent/App dependencies yourself and use Windows executable/argv launch
+profiles. The interactive fallback is `%ComSpec%` (`cmd.exe`). Unix-specific
+recipes are not translated automatically. Use `curl.exe` for HTTP examples to
+avoid Windows PowerShell's `curl` alias; injected proxy identity works as on Unix.
+
+In-place `update` is deliberately unavailable on Windows. Stop each installed
+workspace with `treer-agent-server stop --workspace WORKSPACE_ID`, reinstall,
+then run `restore`. The installer refuses to replace live binaries in its target
+directory. The implementation has cross-compilation coverage; native Windows
+runtime acceptance is a separate release gate (see [quality](quality.md)).
+
 The CLI discovers local Controller configurations by their saved workspace and
 installation hostname. A single local installation needs no connection flags;
 use `treer --workspace WORKSPACE_ID …` when several workspaces are installed.

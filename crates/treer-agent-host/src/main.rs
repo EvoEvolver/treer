@@ -9,7 +9,6 @@ use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
@@ -19,6 +18,7 @@ use treer_host_protocol::{
     HostMessage, HostRequest, HostResponse, OutputCursor, HOST_PROTOCOL_VERSION,
     MAX_HOST_FRAME_BYTES,
 };
+use treer_platform::{connect_local, LocalListener, LocalStream};
 use uuid::Uuid;
 
 const RESULT_CACHE_LIMIT: usize = 1024;
@@ -104,9 +104,12 @@ fn load_config(path: &Path) -> Result<HostDaemonConfig> {
 }
 
 async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
+    #[cfg(windows)]
+    let _process_tree = treer_platform::ProcessTreeGuard::new()
+        .context("failed to establish Host process ownership")?;
     let runtime = HostRuntime::new(&config.root).map_err(anyhow::Error::from)?;
     prepare_socket(&config.socket_path)?;
-    let listener = UnixListener::bind(&config.socket_path)
+    let listener = LocalListener::bind(&config.socket_path)
         .with_context(|| format!("failed to bind {}", config.socket_path.display()))?;
     set_socket_permissions(&config.socket_path)?;
     let (restart_tx, mut restart_rx) = mpsc::unbounded_channel();
@@ -187,7 +190,10 @@ async fn shutdown_signal() -> Result<()> {
 
 async fn spawn_controller(config: &HostDaemonConfig) -> Result<Child> {
     info!(controller = %config.controller_path.display(), "starting controller");
-    Command::new(&config.controller_path)
+    let mut command = Command::new(&config.controller_path);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW; Agent terminals use ConPTY.
+    command
         .arg("run")
         .arg("--config")
         .arg(&config.controller_config_path)
@@ -200,9 +206,9 @@ async fn spawn_controller(config: &HostDaemonConfig) -> Result<Child> {
         })
 }
 
-async fn serve(listener: UnixListener, state: Arc<HostState>) -> Result<()> {
+async fn serve(mut listener: LocalListener, state: Arc<HostState>) -> Result<()> {
     loop {
-        let (stream, _) = listener
+        let stream = listener
             .accept()
             .await
             .context("failed to accept host client")?;
@@ -215,10 +221,10 @@ async fn serve(listener: UnixListener, state: Arc<HostState>) -> Result<()> {
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<HostState>) -> Result<()> {
+async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result<()> {
     let mut output_events = state.runtime.subscribe_output();
     let mut process_events = state.runtime.subscribe_processes();
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<HostMessage>();
     let writer_task = tokio::spawn(async move {
         while let Some(message) = outgoing_rx.recv().await {
@@ -424,7 +430,7 @@ fn send_response(
 }
 
 async fn request_controller_restart(socket: &Path) -> Result<()> {
-    let mut stream = UnixStream::connect(socket)
+    let mut stream = connect_local(socket)
         .await
         .with_context(|| format!("failed to connect to {}", socket.display()))?;
     let request_id = format!("req_{}", Uuid::new_v4().simple());
@@ -497,18 +503,36 @@ where
 }
 
 fn prepare_socket(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
     }
-    remove_socket(path)
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        remove_socket(path)
+    }
 }
 
 fn remove_socket(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to remove {}", path.display()))
+            }
+        }
     }
 }
 
@@ -530,6 +554,20 @@ mod tests {
     use super::*;
     use serde_json::json;
     use treer_host_protocol::HostSpawnRequest;
+
+    fn test_command() -> (String, Vec<String>) {
+        #[cfg(windows)]
+        return (
+            "powershell.exe".into(),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 5".into(),
+            ],
+        );
+        #[cfg(unix)]
+        ("/bin/sh".into(), vec!["-c".into(), "sleep 5".into()])
+    }
 
     #[tokio::test]
     async fn repeated_operation_id_spawns_once() {
@@ -553,8 +591,8 @@ mod tests {
             command: HostCommand::Spawn {
                 request: HostSpawnRequest {
                     process_id: "p1".to_string(),
-                    command: "/bin/sh".to_string(),
-                    args: vec!["-c".to_string(), "sleep 5".to_string()],
+                    command: test_command().0,
+                    args: test_command().1,
                     cwd: ".".to_string(),
                     env: BTreeMap::new(),
                     cols: 80,

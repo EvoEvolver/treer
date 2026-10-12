@@ -472,10 +472,16 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
         decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
     };
     use treer_protocol::RuntimeRestoreState;
-    let root = PathBuf::from("/tmp").join(format!("trr-{}", Uuid::new_v4().simple()));
+    let root = std::env::temp_dir().join(format!("trr-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&root).unwrap();
+    #[cfg(unix)]
     let socket = root.join("host.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    #[cfg(windows)]
+    let socket = treer_platform::endpoint_name(
+        &Uuid::new_v4().to_string(),
+        &treer_platform::current_user_sid().unwrap(),
+    );
+    let mut listener = treer_platform::LocalListener::bind(&socket).unwrap();
     let sync = HostResponse::Synced {
         host_epoch: "new-host".into(),
         host_build: HostBuildInfo {
@@ -491,7 +497,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
     let inventory_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let host_inventory_failed = inventory_failed.clone();
     let host_task = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut stream = listener.accept().await.unwrap();
         let mut processes: Vec<HostProcessInfo> = vec![];
         while let Ok(length) = stream.read_u32().await {
             let mut bytes = vec![0; length as usize];

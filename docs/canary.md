@@ -73,9 +73,9 @@ installation or App links. The Proxy deployment explicitly enables
 `TREER_ENABLE_CORE_MESSAGES=true`; self-hosted launches default this gate off.
 
 Before changing Canary resources, deployment collects CLI, Host, and Controller
-artifacts for both Linux and macOS architectures from the native GitHub workflow
-at the exact candidate commit. All four sets must pass metadata and checksum
-validation. The hosted Proxy image bundles them; deployment checks all twelve
+artifacts for Linux and macOS architectures and Windows x64 from the native GitHub
+workflow at the exact candidate commit. All five sets must pass metadata and
+checksum validation. The hosted Proxy image bundles them; deployment checks all fifteen
 public downloads against those bytes and rejects redirects to older Releases.
 See [Machine artifacts](releases.md#machine-artifacts) for preparation and retry
 details. Installed Controllers still require a separate update/restart.
