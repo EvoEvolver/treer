@@ -17,6 +17,7 @@ import { GoalError, goalUpdate } from "./goals.js";
 import { QueueError, submissionOptions } from "./prompt-submission.js";
 import { notifySubmission } from "./prompt-notify.js";
 import { verifyInterfaceCaller } from "./interface-identity.js";
+import { SessionTransferError } from "./session-transfer.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -190,6 +191,11 @@ const server = createServer(async (request, response) => {
   try {
     const queueRoute = path === "/v1/prompts" || path === "/v1/queue" || path.startsWith("/v1/queue/") || path.startsWith("/v1/submissions/");
     const attested = queueRoute ? verifyInterfaceCaller(request.headers, agentId, interfaceInstanceId) : false;
+    if (path === "/api/session/export" && method === "GET") {
+      if (!runtime.exportSession) throw new SessionTransferError("unsupported", "This harness does not support session export");
+      send(response, 200, await runtime.exportSession());
+      return;
+    }
     if (path === "/v1/files/tree" || path === "/v1/files") {
       if (method !== "GET") {
         response.setHeader("allow", "GET");
@@ -356,7 +362,7 @@ const server = createServer(async (request, response) => {
     send(response, 404, { error: "not found" });
   } catch (error) {
     console.error(error);
-    send(response, error instanceof GoalError || error instanceof QueueError ? error.status : error instanceof InvalidPromptMode ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
+    send(response, error instanceof GoalError || error instanceof QueueError ? error.status : error instanceof InvalidPromptMode ? 400 : error instanceof SessionTransferError ? error.code === "unsupported" ? 501 : error.code === "not_ready" ? 409 : error.code === "too_large" ? 413 : 400 : 500, { error: error instanceof Error ? error.message : String(error) });
   }
 });
 

@@ -396,8 +396,8 @@ for the explicit feature removals. The workspace TOWER App remains separate.
 relative POSIX `path`, `encoding: "base64"`, `content` and SHA-256 of its bytes.
 Adapters optionally implement `exportSession()` and
 `importSession(bundle, {directory, sessionId?})`; `harness.capabilities.sessionTransfer` advertises actual
-support (omitted means unsupported). This initial contract does not yet advertise
-any implementation. ACP must reject transfer without provider support.
+support (omitted means unsupported). Native Codex and Claude implement both;
+ACP does not advertise transfer and returns 501 without provider support.
 
 Only native session files, this project's memory and explicit instruction files
 belong in a bundle. Never include provider auth, settings/configuration, Treer
@@ -411,13 +411,31 @@ environment}`; environment contains only provider storage selectors. It neither
 switches nor restarts the current Agent. The caller authenticates the restored
 provider separately and launches using the returned cwd/session/storage settings.
 
-The companion local CLI contract (implementation follows this contract commit)
-is `scripts/session.sh export --harness codex|claude --session-id ID --cwd DIR`,
+The offline CLI is `scripts/session.sh export --harness codex|claude --session-id ID --cwd DIR`,
 writing a `SessionBundle` JSON to stdout, and `scripts/session.sh import
 --directory NEW_DIR [--session-id NEW_UUID]`, reading that JSON on stdin and
 writing `ImportedSession` JSON to stdout. `--input FILE` may replace stdin.
 Diagnostics go to stderr; nonzero exit means failure. Current-session HTTP
-export will be `GET /api/session/export`; unsupported adapters return 501.
+export is `GET /api/session/export`; unsupported adapters return 501. Export
+requires a confirmed native session file; a newly allocated Claude UUID without
+any persisted messages is not yet exportable. Export while idle; a file changing
+during the snapshot produces a retryable error.
+
+The allowlist includes the native JSONL (Claude subagent JSONL too), Claude's
+project auto-memory Markdown, project `.codex/memory/**/*.md` and
+`.claude/memory/**/*.md`, and `AGENTS.md`, `CLAUDE.md`, `MEMORY.md` and
+`.claude/CLAUDE.md`. Limits are 64 MiB of decoded bytes and 1,024 files. No provider
+configuration, auth, shell snapshots, arbitrary project files, queue or running
+background processes are transferred. Restore project code separately.
+
+Codex imports use a private `.harness/codex` under the destination and return
+`CODEX_HOME`. Only the destination machine's existing `auth.json` and
+`config.toml` are referenced by local symlinks; neither enters the archive.
+Claude imports use a fresh project entry in the destination machine's native
+`CLAUDE_CONFIG_DIR/projects` store, retaining local login and configuration.
+The returned `CLAUDE_CONFIG_DIR` refers to that local store. Native IDs and cwd
+fields are rewritten, including subagent records; historical message contents
+remain unchanged. Imports never launch a process or mutate the current session.
 
 ## Checks
 
@@ -434,6 +452,9 @@ CODEX_UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run 
 # Covers start/model, tool-boundary steer, queue, background output, interrupt,
 # JSONL resume/continuation, and missing-session rejection; no Treer mutations.
 npm --prefix launchers/agent run test:claude
+# Opt-in: new native Codex/Claude sessions, export/import with a fresh UUID,
+# provider resume and continuation. Needs both providers logged in locally.
+npm --prefix launchers/agent exec -- tsx tests/live-session-transfer.ts
 # Low-level protocol probes (also only new temporary sessions):
 node launchers/agent/tests/probe-claude.mjs
 CLAUDE_PROBE_PRIORITY=now node launchers/agent/tests/probe-claude.mjs

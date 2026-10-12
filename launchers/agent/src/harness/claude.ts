@@ -11,6 +11,8 @@ import { GoalError } from "../goals.js";
 import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import { unifiedDiff } from "./diff.js";
+import { SessionTransferError, type SessionBundle, type SessionImportOptions } from "../session-transfer.js";
+import { exportNativeSession, importNativeSession } from "./session-files.js";
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {};
@@ -57,7 +59,7 @@ export function mapClaudeBlock(block: RecordValue, id: string, cwd: string): His
 }
 
 export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
-  readonly harness: HarnessInfo = { id: "claude", name: "Claude", capabilities: { steer: true, backgroundTasks: true, goal: { pause: false, budget: false } } };
+  readonly harness: HarnessInfo = { id: "claude", name: "Claude", capabilities: { steer: true, backgroundTasks: true, goal: { pause: false, budget: false }, sessionTransfer: { export: true, import: true } } };
   private goal: Goal | null = null;
   private goalKey = "";
   private goalHistoryPath = "";
@@ -83,6 +85,16 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private streamBlocks = new Map<number, { block: RecordValue; json: string; id: string }>();
   private interrupted = false;
   private pendingUsers: Array<{ text: string; id: string }> = [];
+
+  async exportSession() {
+    if (!this.ready || !this.thread) throw new SessionTransferError("not_ready", "No confirmed Claude session to export");
+    return exportNativeSession("claude", this.sessionId, this.cwd, this.options.configDir);
+  }
+
+  async importSession(bundle: SessionBundle, options: SessionImportOptions) {
+    if (bundle.harness !== "claude") throw new SessionTransferError("unsupported", "Claude cannot import another harness session");
+    return importNativeSession(bundle, options, this.options.configDir);
+  }
 
   constructor(private command: string, private cwd: string,
     private options: { sessionId?: string; stateFile?: string; model?: string; configDir?: string; args?: string[] } = {}) {

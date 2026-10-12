@@ -6,6 +6,8 @@ import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadSta
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import type { Goal, GoalUpdate } from "../model.js";
 import { GoalError, mapGoal } from "../goals.js";
+import { SessionTransferError, type SessionBundle, type SessionImportOptions } from "../session-transfer.js";
+import { exportNativeSession, importNativeSession } from "./session-files.js";
 import {
   fallbackModelOption,
   mapItem,
@@ -29,7 +31,7 @@ interface LiveItem {
 }
 
 export class CodexRuntime extends EventEmitter implements HarnessRuntime {
-  readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false, goal: { pause: true, budget: true } } };
+  readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false, goal: { pause: true, budget: true }, sessionTransfer: { export: true, import: true } } };
   private goal: Goal | null = null;
   private child: ChildProcessWithoutNullStreams | null = null;
   private client: JsonRpcClient | null = null;
@@ -47,6 +49,16 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     private readonly options: { threadId?: string; stateFile?: string } = {},
   ) {
     super();
+  }
+
+  async exportSession() {
+    if (!this.ready || !this.thread) throw new SessionTransferError("not_ready", "No confirmed Codex session to export");
+    return exportNativeSession("codex", this.thread.id, this.cwd);
+  }
+
+  async importSession(bundle: SessionBundle, options: SessionImportOptions) {
+    if (bundle.harness !== "codex") throw new SessionTransferError("unsupported", "Codex cannot import another harness session");
+    return importNativeSession(bundle, options);
   }
 
   async start() {
