@@ -1,4 +1,4 @@
-# Agent UI
+# Agent Launcher
 
 Agent UI is Treer's single-Agent browser interface for coding agents. One
 command Agent owns one harness session, one AIS registration, and one embedded
@@ -28,21 +28,40 @@ state, and abort operations. `GET /v1/transcript` pages by turn (`page`/`cursor`
 `limit` default 1). Treer reaches it through the Agent network bridge; no
 service record or published port is required.
 
-From a Treer-managed Agent in this checkout:
+## Installation and updates
+
+Node.js 22+, npm, Git, tar and the Treer CLI must be on PATH. Install provider
+CLIs and authenticate them separately; the launcher does not read another
+provider's credentials. From a checkout, save one or more profiles:
 
 ```bash
-./launchers/agent/scripts/apply.sh --name codex-ui
-# Native Claude Code, saved as the "Claude + UI" profile:
-./launchers/agent/scripts/apply.sh --harness claude --name claude-ui
-# Other agents can still use ACP:
-./launchers/agent/scripts/apply.sh --harness acp --name acp-ui --acp-command my-acp-agent --display-name Agent
+./launchers/agent/install.sh --agent codex --agent claude
+# Install a committed local revision instead of fetching upstream:
+./launchers/agent/scripts/apply.sh --agent codex
+# Update to a full commit (or a branch/tag resolved to a full commit):
+./launchers/agent/install.sh --ref COMMIT --agent codex
+treer agent admin profile show "Codex + UI"
+# Creating an Agent is a separate, explicit action:
+treer agent admin profile launch "Codex + UI" --name reviewer
 ```
 
-The script installs the local Node dependencies, saves the launch profile,
-creates the first command Agent, and waits for its verified Interface
-descriptor. Additional Agents can be created from that profile. The provider
-command (`codex`, `claude`, or the ACP agent) must already be
-installed and authenticated.
+Omit `--agent` to save all six profiles from `profiles.json`: Codex, Claude,
+Gemini, Grok, Cursor and OpenCode. Codex/Claude use native adapters; the others
+share ACP. Missing provider binaries are checked at runtime, not installed by
+this command. Custom ACP profiles can pass `--harness acp --acp-command BIN`
+and repeat `--acp-arg VALUE` to `scripts/treer-agent.sh`.
+
+The installer sparse-fetches only `launchers/agent` into
+`<machine.root>/.treer/launchers/agent/<full commit>/`, runs lockfile-pinned
+`npm ci --omit=dev`, then atomically changes `current`. Profiles use its absolute
+launcher path and the caller's machine-relative cwd (override with `--cwd`).
+Every saved command/argv/cwd is read back and verified. Failed installs restore
+the previous `current`; previous version directories remain available. Versions
+are immutable; a running launcher resolves its physical directory once, so
+updates cannot replace its assets. Installation never creates or restarts an
+Agent. `--source CHECKOUT` archives committed files, ignoring dirty changes;
+`--repository URL` supports self-hosted/local Git mirrors. Run the script from
+its checkout, rather than piping it into a shell.
 
 For local development outside a managed Agent:
 
@@ -56,8 +75,9 @@ AGENT_UI_HARNESS=acp AGENT_UI_ACP_COMMAND=claude-agent-acp AGENT_UI_CWD="$PWD" n
 The server binds an OS-selected free port on `127.0.0.1` by default. Each Agent
 has its own listener; the launcher registers the actual port, not a guessed
 port. Set `AGENT_UI_PORT` to pin a private port (a conflict fails startup).
-`AGENT_UI_*` settings also accept the older `CODEX_UI_*` names, and
-`apps/codex-ui/scripts/` forwards Agents saved with the old path.
+`AGENT_UI_*` settings also accept the older `CODEX_UI_*` names. Saved startup
+commands must use `launchers/agent/scripts/treer-agent.sh` or an installed
+version's launcher, rather than retired `apps/` paths.
 
 ## Resume and recovery
 
@@ -121,8 +141,8 @@ current Agent process is deliberately replaced.
 Select `AGENT_UI_HARNESS=claude` or `--harness claude` on the launcher, installer,
 or switch script. `CLAUDE_BIN` overrides the executable (default `claude`);
 `CLAUDE_MODEL` optionally selects the initial model. Claude must already be
-authenticated. This adapter talks directly to Claude Code, without ACP or the
-legacy `apps/claude-ais` sidecar. It shares the same HTTP server and page.
+authenticated. This adapter talks directly to Claude Code without ACP and
+shares the same HTTP server and page.
 
 The process uses `--print --verbose --output-format stream-json --input-format
 stream-json --include-partial-messages --dangerously-skip-permissions`, plus
@@ -308,6 +328,23 @@ and summary can be null. `GET /api/tasks/:id/output?tail=65536` returns
 positive byte count capped at 64 KiB; unregistered task IDs return 404. Reads
 must remain in the adapter's trusted output roots, reject external symlinks and
 non-regular files, and never accept an output path from a client.
+
+## Add a harness adapter
+
+Prefer an ACP profile when the provider already speaks ACP. Otherwise implement
+`HarnessRuntime` from `src/runtime.ts` in `src/harness/<name>.ts`, then select it
+in `src/index.ts` and the launcher scripts. The adapter owns only subprocess
+protocol, session resume, event/history mapping and capability reporting. Reuse
+`src/harness/diff.ts` for file changes and the shared models for plans/tools.
+Keep the HTTP API, file browser, prompt queue and browser UI shared. Unsupported
+capabilities stay false/null and requested resume failures never create a new
+conversation. Add fake-backend tests with `tests/hermetic.mjs` before a profile
+in `profiles.json`; installation must not start or authenticate the provider.
+
+The retired Pi/DSH interfaces, Rust ACP runtime, Remote Codex UI and TOWER
+capture are no longer bundled. See the
+[migration decision](../../docs/research/2026-10-12-single-agent-launcher.md)
+for the explicit feature removals. The workspace TOWER App remains separate.
 
 ## Checks
 

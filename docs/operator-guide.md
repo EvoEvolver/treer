@@ -719,9 +719,11 @@ treer agent admin profile launch reviewer --machine build-machine \
 ```
 
 Optional repository launchers package more involved runtimes behind the same
-profile contract. The [ACP launcher](../launchers/acp/README.md) provides headless
-Grok, Cursor, Codex, Claude, and OpenCode ACP profiles; its Remote Codex browser
-adapter is a separate explicit install and profile. Treer's binary installer,
+profile contract. The [Agent launcher](../launchers/agent/README.md) provides one
+shared browser UI/AIS server with native Codex/Claude and generic ACP adapters
+for Gemini, Grok, Cursor and OpenCode. Install or update it explicitly with
+`launchers/agent/install.sh`; it saves and verifies reusable profiles without
+creating or restarting Agents. Treer's binary installer,
 updater, and release artifacts do not fetch or install repository launchers.
 
 The web Create Agent dialog includes a built-in Terminal option. It starts the
@@ -1048,11 +1050,10 @@ The Controller keeps a local, process-bound registration cache and revalidates
 the Interface manifest before restoring it after a hot restart. Interface
 processes register once at startup and should deduplicate prompts by
 `operation_id`. Raw keys, terminal attach, stop, and delete remain PTY/Host
-operations. The bundled Pi UI and single-Agent [Agent UI](../apps/agent-ui/README.md)
-(Codex or any ACP agent) perform this registration automatically. Launch-profile sidecars without a
-bundled page live under `apps/codex-ais`, `apps/opencode-ais`, `apps/dsh-ais`,
-`apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`. Built-in `--kind
-codex` and `--kind claude` stay on the terminal path.
+operations. The single [Agent launcher](../launchers/agent/README.md) performs
+registration automatically and serves the same embedded UI for all harnesses.
+Provider adapters live under `launchers/agent/src/harness/`; `apps/` contains
+workspace services. Terminal-only Agents use ordinary command/shell profiles.
 
 Agents can discover humans who belong to the workspace's organization. The
 directory deliberately returns stable user IDs, preferred names, and roles

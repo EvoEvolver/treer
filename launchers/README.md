@@ -1,7 +1,7 @@
 # Agent Launchers
 
 Launchers package optional Agent runtimes as ordinary Treer launch profiles.
-They may build dependencies, start an Agent-scoped adapter, and register an
+They may install dependencies, start an Agent-scoped adapter, and register an
 Agent Interface, but they are not Treer Apps or platform components.
 They are not included in Treer's binary installation or update flow. An
 operator fetches launcher source separately, preferably with a shallow sparse
@@ -15,15 +15,17 @@ A launcher must preserve these boundaries:
   saved launch profile. Profiles remain plaintext and contain no secrets.
 - The Controller sees an ordinary command or shell Agent. It must not gain a
   launcher-specific Agent kind, provider catalog, or lifecycle rule.
-- Headless interfaces omit `ui_path`. An optional browser interface is a
-  separate, explicitly named profile and remains on Agent-private loopback.
+- The shared browser interface remains on Agent-private loopback. Ordinary
+  terminal-only Agents can still use user-owned command profiles.
 - Launcher state is scoped to the Agent or launcher checkout. It must not write
   shared runtime state owned by Host, Controller, Proxy, or Core.
 
-Available launchers:
+There is one launcher:
 
-- [`acp`](acp/README.md) runs one ACP provider session per Treer Agent and
-  registers a headless AIS by default. Remote Codex presentation is optional.
+- [`agent`](agent/README.md) owns the AIS HTTP server, browser UI, installation,
+  switching and profiles. Native Codex/Claude and generic ACP are adapters under
+  `src/harness/`; new providers reuse an adapter or implement `HarnessRuntime`.
+  Agent interfaces do not belong under `apps/`.
 
 ## Instructions For Agents
 

@@ -33,7 +33,7 @@ profiles use native app-server, not the obsolete embedded writer.
 TOWER capture is removed, including `TOWER_URL`/`TOWER_TOKEN`, canonical frame
 hashes, SQLite spool, batching and restart-safe retries (`runtime/src/tower.rs`
 was substantially more than a small forwarding hook). The TOWER App and its
-stored data remain. Old AIS environment aliases and automatic reuse of Codex
+stored data remain. Old sidecar-only environment aliases and automatic reuse of Codex
 credentials for unrelated providers are removed; provider authentication belongs
 to each provider's own setup. Headless AIS presentation is replaced by the shared
 embedded UI; ordinary CLI-only Agents still use user-owned profiles.

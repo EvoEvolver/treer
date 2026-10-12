@@ -51,8 +51,8 @@ second manual.
 | `crates/treer-cli` | Thin authenticated argv/stream client; command parsing lives in Agent Server |
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
-| `apps` | Ordinary workspace services, channel presentation, configuration, state, and docs |
-| `launchers` | Optional profile-driven Agent runtimes and explicitly selected Agent Interfaces; not platform services |
+| `apps` | Managed workspace Apps, channel presentation, configuration, state, and docs; no Agent adapters or AIS |
+| `launchers/agent` | Single optional Agent launcher: AIS/browser UI, harness adapters, profiles, installation and switching |
 | `web` | Standalone React control plane with runtime Proxy URL configuration |
 
 ## Change discipline

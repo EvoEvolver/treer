@@ -278,14 +278,15 @@ process-bound descriptor and revalidates it after a hot restart:
 treer interface clear
 ```
 
-In-tree adapters register the same protocol from launch profiles. Use
-`apps/pi-ui` and `apps/codex-ui` for bundled browser UIs, `apps/codex-ais` for a
-Codex app-server sidecar without HTML, `apps/opencode-ais` for OpenCode HTTP,
-`apps/dsh-ais` for DeepSeek Harness, `apps/claude-ais` for Claude Code
-stream-json, `apps/grok-ais` for Grok Build ACP, and `apps/cursor-ais` for
-Cursor ACP. Launch Cursor with `cursor-agent`, not `agent`. Each Agent is one
-thread/session. Provider-specific runtimes belong in explicit commands or
-launch profiles; they are not built-in Agent kinds.
+The single `launchers/agent` launcher registers this protocol and serves the
+shared browser UI. Its `src/harness/` adapters speak native Codex app-server,
+native Claude stream-json, or generic ACP (Gemini, Grok, Cursor, OpenCode).
+Install/update explicitly with `launchers/agent/install.sh --agent PROVIDER`,
+then inspect the saved profile with `treer agent admin profile show NAME`.
+Installation does not create or restart an Agent. Launch Cursor with
+`cursor-agent`, not `agent`. Each Agent owns one thread/session. New integrations
+implement `HarnessRuntime` and reuse the server/UI; do not add another AIS App.
+Provider runtimes belong in explicit commands/profiles, not built-in Agent kinds.
 
 ## Communicate with another Agent over HTTP
 
