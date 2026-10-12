@@ -158,8 +158,42 @@ Background task state comes from `background_tasks_changed`, `task_started`,
 100 finished tasks stay visible; none are restored after restart. Task outputs
 are read only from the working directory or this session's Claude task-output
 directory under the local temporary roots (`claude-<uid>/<encoded cwd>/<session>/tasks`).
-Model choices come from Claude's initialize response. Reasoning effort is not
-exposed by this adapter.
+Model choices come from Claude's initialize response, including its
+`resolvedModel` mapping from aliases to actual IDs. The picker uses these actual
+IDs, deduplicates Default when it resolves to an existing choice, and always
+includes the current `system/init.model` even when absent from the catalog.
+Before the first init, a configured initial model or Claude's reported Default
+resolution is shown. Resume uses the most recent actual model from JSONL until
+the next init confirms it. Older CLIs without a catalog fall back to unversioned
+`default`, `sonnet`, `opus`, and `haiku` aliases plus the reported current model;
+there is no hardcoded model-version list. Hovering the picker shows the actual ID.
+
+**Model and effort changes were tested with Claude Code 2.1.296 in disposable
+sessions.** `set_model` works during a foreground Bash command without interrupting
+it or restarting Claude. The next inference request, including the continuation
+after a tool in the same turn, can use the new model. Settings changes are
+serialized; prompts submitted while a change is pending wait for its native
+acknowledgement. A rejected change retains the prior setting and pending prompts
+still send. Queue mode remains FIFO at result boundaries, without session changes.
+
+The model catalog's `supportsEffort` and `supportedEffortLevels` drive the effort
+picker. An empty `apply_flag_settings` overlay probes live protocol support;
+unsupported CLIs/models hide the picker on desktop and mobile. Supported models
+use `apply_flag_settings` with `settings: {effortLevel: LEVEL}`; null resets to
+the native default. These changes are session-only and do not write user settings.
+Native `/model` confirmed the changed effort in the real test. `/effort medium`
+also works in stream-json and its native acknowledgement updates the page;
+`set_effort` is not a supported control subtype. Managed policy may clamp effort.
+The default effort is shown as Default until an explicit setting or native
+acknowledgement identifies it. Narrow screens put supported controls on a second
+header row instead of hiding the effort picker.
+
+`npm run test:claude:settings:fake` checks the actual browser at desktop and 390px
+with supported and unsupported effort protocols. `npm run test:claude:settings`
+uses authenticated Claude in a new temporary session: set the initial model,
+switch during a foreground tool, retain a queued prompt, verify its assistant
+model in native JSONL, and confirm effort via `/model`. Both save screenshots to
+the printed temporary directory and leave managed Agent processes untouched.
 
 ## Browser interface
 

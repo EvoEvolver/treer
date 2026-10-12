@@ -220,9 +220,10 @@ function renderSettings() {
     "Effort",
   );
   elements.model.disabled = settingsBusy || !thread || models.length === 0;
+  elements.model.title = thread?.model || "Model";
   elements.effort.disabled = settingsBusy || !thread || efforts.length === 0;
   // Harnesses without reasoning levels get no empty picker.
-  elements.effort.closest(".select-wrap").hidden = Boolean(thread) && efforts.length === 0;
+  elements.effort.closest(".select-wrap").hidden = efforts.length === 0;
 }
 
 function render(scrollAnchor) {

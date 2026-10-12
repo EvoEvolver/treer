@@ -153,13 +153,20 @@ h1 { overflow: hidden; margin: 0; font-size: 14px; line-height: 17px; text-overf
   .file-browser.show-preview .file-tree { display: none; }
   .file-row { min-height: 40px; }
   .topbar { padding: 0 10px; }
-  .status > :last-child, .effort-wrap { display: none; }
+  .status > :last-child { display: none; }
   .select-wrap select { max-width: 128px; }
   .identity p { max-width: 28vw; }
   .timeline { padding: 18px 12px 30px; }
   .message-user { max-width: 92%; }
   .message-assistant { padding-right: 0; }
   .composer { width: calc(100% - 16px); margin-bottom: 8px; }
+}
+
+@media (max-width: 480px) {
+  .app-shell:has(.effort-wrap:not([hidden])) { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+  .topbar:has(.effort-wrap:not([hidden])) { flex-wrap: wrap; padding-block: 8px; }
+  .topbar:has(.effort-wrap:not([hidden])) .controls { flex: 1 0 100%; justify-content: flex-end; }
+  .topbar:has(.effort-wrap:not([hidden])) .select-wrap:not(.effort-wrap) select { max-width: 128px; }
 }
 
 /* Runtime controls share the existing plain browser surface and theme tokens. */

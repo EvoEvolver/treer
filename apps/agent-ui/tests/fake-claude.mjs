@@ -11,12 +11,17 @@ const system = (subtype, rest = {}) => send({ type: "system", subtype, ...rest }
 let hold = false;
 let timer;
 let sequence = 0;
+const resolved = process.env.FAKE_CLAUDE_RESOLVED_MODELS;
+const aliases = { default: "claude-sonnet-test", sonnet: "claude-sonnet-test", opus: "claude-opus-test", legacy: "claude-legacy-test" };
+let currentModel = args.includes("--model") ? arg("--model") : "sonnet";
+const resolveModel = (model) => resolved ? aliases[model] || model : model;
+currentModel = resolveModel(currentModel);
 const history = process.env.FAKE_CLAUDE_CONFIG ? join(process.env.FAKE_CLAUDE_CONFIG, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`) : null;
 const persist = (event) => {
   if (history) { mkdirSync(dirname(history), { recursive: true }); appendFileSync(history, JSON.stringify(event) + "\n"); }
 };
 function message(type, content, id = `m${++sequence}`, rest = {}) {
-  const event = { type, uuid: `${id}-uuid`, message: { id, role: type, content }, ...rest };
+  const event = { type, uuid: `${id}-uuid`, message: { id, role: type, content, ...(type === "assistant" ? { model: currentModel } : {}) }, ...rest };
   persist(event); send(event);
 }
 const result = (extra = {}) => { hold = false; system("session_state_changed", { state: "idle" }); send({ type: "result", result: "Done", ...extra }); };
@@ -25,14 +30,20 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (process.env.FAKE_CLAUDE_CALLS) appendFileSync(process.env.FAKE_CLAUDE_CALLS, line + "\n");
   if (input.type === "control_request") {
     const subtype = input.request.subtype;
-    const error = subtype === "initialize" && sessionId === "reject" ? "Cannot resume this session" : subtype === "set_model" && input.request.model === "invalid" ? "Invalid model" : null;
-    send({ type: "control_response", response: { subtype: error ? "error" : "success", request_id: input.request_id, ...(error ? { error } : { response: subtype === "initialize" ? { commands: process.env.FAKE_CLAUDE_NO_GOAL ? [] : [{ name: "goal" }], models: [{ value: "sonnet", displayName: "Sonnet" }, { value: "opus", displayName: "Opus" }] } : {} }) } });
+    const error = subtype === "initialize" && sessionId === "reject" ? "Cannot resume this session" : subtype === "set_model" && input.request.model === "invalid" ? "Invalid model" : subtype === "apply_flag_settings" && process.env.FAKE_CLAUDE_NO_EFFORT ? "Unsupported control request subtype: apply_flag_settings" : null;
+    const models = resolved ? Object.entries(aliases).map(([value, resolvedModel]) => ({ value, resolvedModel, displayName: value === "default" ? "Default" : `${value} test`, supportsEffort: value !== "legacy", supportedEffortLevels: ["low", "medium", "high", "future-unknown"] })) : [{ value: "sonnet", displayName: "Sonnet" }, { value: "opus", displayName: "Opus" }];
+    const respond = () => {
+      if (!error && subtype === "set_model") currentModel = resolveModel(input.request.model);
+      send({ type: "control_response", response: { subtype: error ? "error" : "success", request_id: input.request_id, ...(error ? { error } : { response: subtype === "initialize" ? { commands: process.env.FAKE_CLAUDE_NO_GOAL ? [] : [{ name: "goal" }], ...(process.env.FAKE_CLAUDE_NO_MODELS ? {} : { models }) } : {} }) } });
+    };
+    if (subtype === "set_model" && process.env.FAKE_CLAUDE_SLOW_SETTINGS) setTimeout(respond, 50);
+    else respond();
     if (subtype === "interrupt") { clearTimeout(timer); result(); }
     continue;
   }
   if (input.type !== "user") continue;
   const value = input.message.content[0].text;
-  system("init", { model: "sonnet" });
+  system("init", { model: currentModel });
   system("session_state_changed", { state: "running" });
   // Real Claude does not echo ordinary user inputs to stdout, but saves them.
   persist({ ...input, uuid: input.uuid || `u${++sequence}`, timestamp: new Date().toISOString() });

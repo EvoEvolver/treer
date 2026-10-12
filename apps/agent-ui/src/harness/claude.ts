@@ -6,7 +6,7 @@ import { readFile, readdir, realpath, writeFile, rename } from "node:fs/promises
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { mapPlanSteps, type BackgroundTask, type Goal, type GoalUpdate, type HistoryItem, type ModelOption, type TurnDto } from "../model.js";
+import { mapPlanSteps, mapReasoningEffort, type BackgroundTask, type Goal, type GoalUpdate, type HistoryItem, type ModelOption, type TurnDto } from "../model.js";
 import { GoalError } from "../goals.js";
 import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
@@ -75,6 +75,9 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private turns: TurnDto[] = [];
   private tasks = new Map<string, BackgroundTask>();
   private models: ModelOption[] = [];
+  private modelAliases = new Map<string, string>();
+  private settingsChange: Promise<void> = Promise.resolve();
+  private effortSupported = false;
   private controls = new Map<string, { resolve: (value: RecordValue) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private streamMessage = "";
   private streamBlocks = new Map<number, { block: RecordValue; json: string; id: string }>();
@@ -129,10 +132,31 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       const initialized = await this.control({ subtype: "initialize" });
       if (Array.isArray(initialized.commands) && !initialized.commands.some((command) => record(command).name === "goal")) this.harness.capabilities.goal = null;
       const models = Array.isArray(initialized.models) ? initialized.models : [];
-      this.models = models.map((entry) => { const model = record(entry); const id = text(model.value) || text(model.id); return {
-        id, model: id, displayName: text(model.displayName) || id, description: text(model.description), isDefault: id === "default",
-        hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: null,
-      }; }).filter((model) => model.id);
+      // Alias values (sonnet) and system/init's actual model IDs differ. Use
+      // Claude's own resolution, never a locally pinned model-version table.
+      const reported = models.length ? models : ["default", "sonnet", "opus", "haiku"].map((value) => ({ value }));
+      const unique = new Map<string, ModelOption>();
+      for (const entry of reported) {
+        const info = record(entry);
+        const alias = text(info.value) || text(info.id);
+        if (!alias) continue;
+        const model = text(info.resolvedModel) || alias;
+        this.modelAliases.set(alias, model);
+        const efforts = info.supportsEffort && Array.isArray(info.supportedEffortLevels)
+          ? info.supportedEffortLevels.map(mapReasoningEffort).filter((value) => value !== null) : [];
+        const option: ModelOption = { id: alias, model, displayName: text(info.displayName) || model, description: text(info.description), isDefault: alias === "default", hidden: false,
+          supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort, description: "" })), defaultReasoningEffort: null };
+        if (!unique.has(model) || unique.get(model)!.isDefault) unique.set(model, option);
+      }
+      this.models = [...unique.values()];
+      if (this.models.some((model) => model.supportedReasoningEfforts.length)) {
+        // Older CLIs may report model-level effort support without exposing
+        // the live setter. An empty, session-only overlay probes it safely.
+        try { await this.control({ subtype: "apply_flag_settings", settings: {} }); this.effortSupported = true; }
+        catch (error) { this.emit("log", `Claude effort controls unavailable: ${error}`); }
+      }
+      if (!this.effortSupported) for (const model of this.models) model.supportedReasoningEfforts = [];
+      this.setCurrentModel(this.thread.model || this.modelAliases.get("default") || "default");
       // A new --session-id is only reserved until the first user input. Claude
       // has no resumable JSONL yet, so persist it on system/init instead.
       if (resumed) saveThreadId(this.options.stateFile, this.sessionId);
@@ -145,6 +169,9 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   async prompt(value: string) {
+    // Keep a prompt submitted during a setting change: send it after the
+    // native acknowledgement, even if the change was rejected (old settings).
+    await this.settingsChange.catch(() => {});
     if (!this.ready || !this.thread) throw new Error("Claude is not ready");
     if (this.thread.status !== "running") this.beginTurn();
     const id = randomUUID();
@@ -162,13 +189,35 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     await this.control({ subtype: "interrupt" });
   }
 
-  async updateSettings(input: { model?: string; reasoningEffort?: string | null }) {
-    if (input.reasoningEffort != null) throw new Error("Claude reasoning effort is not supported by this adapter");
+  updateSettings(input: { model?: string; reasoningEffort?: string | null }): Promise<void> {
+    const change = this.settingsChange.catch(() => {}).then(() => this.changeSettings(input));
+    this.settingsChange = change;
+    return change;
+  }
+
+  private async changeSettings(input: { model?: string; reasoningEffort?: string | null }) {
+    const target = this.modelAliases.get(input.model || "") || input.model || this.thread?.model;
+    const model = this.models.find((option) => option.model === target);
+    if (input.reasoningEffort !== undefined && (!this.effortSupported || input.reasoningEffort !== null && !model?.supportedReasoningEfforts.some((option) => option.reasoningEffort === input.reasoningEffort))) {
+      throw new Error("Claude reasoning effort is not supported for this model");
+    }
     if (input.model) {
       await this.control({ subtype: "set_model", model: input.model });
-      if (this.thread) this.thread.model = input.model;
+      this.setCurrentModel(input.model);
+      if (this.thread && !this.models.find((option) => option.model === this.thread!.model)?.supportedReasoningEfforts.some((option) => option.reasoningEffort === this.thread!.reasoningEffort)) this.thread.reasoningEffort = null;
       this.publish();
     }
+    if (input.reasoningEffort !== undefined) {
+      await this.control({ subtype: "apply_flag_settings", settings: { effortLevel: input.reasoningEffort } });
+      if (this.thread) this.thread.reasoningEffort = mapReasoningEffort(input.reasoningEffort);
+      this.publish();
+    }
+  }
+
+  private setCurrentModel(value: string) {
+    const model = this.modelAliases.get(value) || value;
+    if (this.thread) this.thread.model = model;
+    if (!this.models.some((option) => option.model === model)) this.models.push({ id: model, model, displayName: model, description: "Current model reported by Claude", isDefault: false, hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: null });
   }
 
   async updateGoal(input: GoalUpdate) {
@@ -277,6 +326,16 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     if (event.isSidechain) return;
     if (!historical) this.goalEvent(event);
     const message = record(event.message);
+    if (!historical && event.type === "assistant" && typeof message.model === "string" && message.model !== "<synthetic>") this.setCurrentModel(message.model);
+    if (!historical && message.model === "<synthetic>" && typeof event.local_command_source === "string" && this.thread) {
+      const command = record(event.local_command_run);
+      const value = contentText(message.content);
+      if (command.command === "effort" && /^Set effort level to /.test(value)) this.thread.reasoningEffort = mapReasoningEffort(text(command.args));
+      if (command.command === "model") {
+        const effort = /\(effort: (low|medium|high|xhigh|max)\)/.exec(value);
+        if (effort) this.thread.reasoningEffort = mapReasoningEffort(effort[1]);
+      }
+    }
     const blocks = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content.map(record) : [];
     const isUser = event.type === "user";
     if (isUser && blocks.some((block) => block.type !== "tool_result")) {
@@ -375,7 +434,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       if (event.subtype === "init") {
         if (event.session_id && event.session_id !== this.sessionId) throw new Error(`Claude returned a different session (${event.session_id}); refusing replacement`);
         saveThreadId(this.options.stateFile, this.sessionId);
-        if (this.thread && typeof event.model === "string") this.thread.model = event.model;
+        if (typeof event.model === "string") this.setCurrentModel(event.model);
       }
       if (["background_tasks_changed", "task_started", "task_updated", "task_notification"].includes(text(event.subtype))) this.background(event);
       if (event.subtype === "session_state_changed") {
@@ -500,6 +559,8 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       if (!line.trim()) continue;
       const event = record(JSON.parse(line));
       this.goalEvent(event, true);
+      const message = record(event.message);
+      if (!this.options.model && event.type === "assistant" && typeof message.model === "string" && message.model !== "<synthetic>" && this.thread) this.thread.model = message.model;
       if (event.type !== "user" && event.type !== "assistant") continue;
       if (event.uuid && seen.has(text(event.uuid))) continue;
       seen.add(text(event.uuid));
