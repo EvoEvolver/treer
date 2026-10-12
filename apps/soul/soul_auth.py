@@ -136,26 +136,35 @@ class Auth:
             raise Error(401, 'oauth_state_invalid', 'OAuth browser correlation is missing or invalid')
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT * FROM oauth WHERE state=? AND browser=? AND expires>?',
-                             (digest(state), digest(browser), time.time())).fetchone()
+            row = db.execute('SELECT * FROM oauth WHERE state=? AND browser=?',
+                             (digest(state), digest(browser))).fetchone()
+            expired = bool(row and row['expires'] <= time.time())
             if row:
                 db.execute('DELETE FROM oauth WHERE state=? AND browser=?', (digest(state), digest(browser)))
             db.execute('DELETE FROM oauth WHERE expires<=?', (time.time(),))
-        if not row:
-            raise Error(401, 'oauth_state_invalid', 'OAuth state invalid or expired')
-        result = self.request('POST', '/api/apps/oauth/token', form={
-            'grant_type': 'authorization_code', 'code': code, 'client_id': self.service_id,
-            'redirect_uri': self.public_url + 'api/auth/callback', 'code_verifier': row['verifier']})
-        token = result['access_token']
-        principal, _ = self.verify(token)
-        if principal['kind'] != 'human':
-            raise Error(401, 'oauth_identity_invalid', 'Human OAuth identity required')
-        expires = datetime.fromisoformat(result['expires_at'].replace('Z', '+00:00')).timestamp()
-        raw = secrets.token_urlsafe(48)
-        with self.store.connect() as db:
-            db.execute('DELETE FROM sessions WHERE expires<=?', (time.time(),))
-            db.execute('INSERT INTO sessions VALUES(?,?,?)', (digest(raw), token, expires))
-        return raw, max(0, int(expires - time.time()))
+        if not row or expired:
+            error = Error(401, 'oauth_state_invalid', 'OAuth state invalid or expired')
+            # A mismatch may be another valid flow in this browser. Preserve its
+            # cookie as well as its DB state; clear only a matched expired flow.
+            error.clear_oauth_cookie = expired
+            raise error
+        try:
+            result = self.request('POST', '/api/apps/oauth/token', form={
+                'grant_type': 'authorization_code', 'code': code, 'client_id': self.service_id,
+                'redirect_uri': self.public_url + 'api/auth/callback', 'code_verifier': row['verifier']})
+            token = result['access_token']
+            principal, _ = self.verify(token)
+            if principal['kind'] != 'human':
+                raise Error(401, 'oauth_identity_invalid', 'Human OAuth identity required')
+            expires = datetime.fromisoformat(result['expires_at'].replace('Z', '+00:00')).timestamp()
+            raw = secrets.token_urlsafe(48)
+            with self.store.connect() as db:
+                db.execute('DELETE FROM sessions WHERE expires<=?', (time.time(),))
+                db.execute('INSERT INTO sessions VALUES(?,?,?)', (digest(raw), token, expires))
+            return raw, max(0, int(expires - time.time()))
+        except Error as error:
+            error.clear_oauth_cookie = True
+            raise
 
     def session_token(self, raw):
         with self.store.connect() as db:

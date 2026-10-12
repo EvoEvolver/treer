@@ -254,7 +254,7 @@ class SoulServerTest(unittest.TestCase):
             status,headers=browser(callback_a,cookie)
             self.assertEqual(status,401)
             self.assertFalse(any(k=='Set-Cookie' and v.startswith('soul_session=') for k,v in headers))
-            self.assertTrue(any(k=='Set-Cookie' and 'Max-Age=0' in v for k,v in headers))
+            self.assertFalse(any(k=='Set-Cookie' for k,v in headers))
         # Failed callbacks did not consume either originating browser's valid flow.
         status,headers=browser(callback_a,cookie_a)
         self.assertEqual(status,303)
@@ -265,7 +265,9 @@ class SoulServerTest(unittest.TestCase):
         expired,cookie=start()
         with self.server.store.connect() as db:
             db.execute('UPDATE oauth SET expires=0')
-        self.assertEqual(browser('/api/auth/callback?code=test&state='+quote(expired),cookie)[0],401)
+        status, headers=browser('/api/auth/callback?code=test&state='+quote(expired),cookie)
+        self.assertEqual(status,401)
+        self.assertTrue(any(k=='Set-Cookie' and 'Max-Age=0' in v for k,v in headers))
         with self.server.store.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM oauth').fetchone()[0],0)
 

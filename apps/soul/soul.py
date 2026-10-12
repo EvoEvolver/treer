@@ -880,7 +880,7 @@ class SoulHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        if urlsplit(self.path).path.rstrip('/') == '/api/auth/callback' and status >= 400:
+        if urlsplit(self.path).path.rstrip('/') == '/api/auth/callback' and status >= 400 and getattr(self, 'clear_oauth_cookie', False):
             self.send_header('Set-Cookie', self._cookie('soul_oauth', '', 0))
         self.end_headers()
         if not head:
@@ -890,6 +890,7 @@ class SoulHandler(BaseHTTPRequestHandler):
         self._bytes(status, (json.dumps(value, sort_keys=True) + "\n").encode(), "application/json; charset=utf-8", head=head)
 
     def _error(self, error: SoulError, head: bool = False) -> None:
+        self.clear_oauth_cookie = getattr(error, "clear_oauth_cookie", False)
         self._json(error.status, {"error": {"code": error.code, "message": error.message, **getattr(error, "details", {})}}, head=head)
 
     def log_message(self, format: str, *args: object) -> None:

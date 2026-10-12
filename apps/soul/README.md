@@ -120,8 +120,9 @@ order: injected X-Treer-Identity-Token, explicit Bearer, then human OAuth sessio
 Invalid supplied headers never fall back to cookies. OAuth uses PKCE plus a
 separate 10-minute HttpOnly/SameSite=Lax browser correlation cookie, stored hashed
 alongside state; callback validates the initiating browser before consuming code.
-Missing/wrong cookies cannot consume another browser's flow; success/invalid
-callbacks clear correlation cookies and replay fails. Unbound old OAuth flows are
+Missing/wrong cookies cannot consume another browser's flow or clear its valid
+correlation cookie; successful or matched-expired callbacks clear cookies and
+replay fails. Unbound old OAuth flows are
 invalidated on upgrade. No local account system and
 no trusted caller ID/name/role fields. Human mutations require X-Soul-Request: 1;
 all browser writes check Origin against configured App/Proxy origins and reject
