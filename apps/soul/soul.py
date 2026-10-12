@@ -36,6 +36,12 @@ MAX_EXPANDED_BYTES = 128 * 1024 * 1024
 PROTECTED_ENVIRONMENT = {
     "BASH_ENV",
     "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "PYTHONSTARTUP",
+    "RUBYOPT",
+    "PERL5OPT",
     "ENV",
     "HOME",
     "LD_LIBRARY_PATH",
@@ -119,7 +125,7 @@ def validate_manifest(value: object, archive_files: set[str]) -> dict[str, objec
     for key, file_path in environment.items():
         if not isinstance(key, str) or not ENV_NAME_PATTERN.fullmatch(key):
             raise SoulError(400, "invalid_environment", f"invalid environment variable name: {key}")
-        if key in PROTECTED_ENVIRONMENT or key.startswith("TREER_"):
+        if key in PROTECTED_ENVIRONMENT or key.startswith(("TREER_", "AGENT_UI_", "CODEX_UI_", "LD_", "DYLD_")):
             raise SoulError(400, "invalid_environment", f"protected environment variable: {key}")
         clean_path = validate_member_path(file_path)
         if clean_path not in archive_files:
@@ -184,12 +190,15 @@ def inspect_archive(path: Path) -> tuple[dict[str, object], list[dict[str, objec
     except (tarfile.TarError, OSError) as error:
         raise SoulError(400, "invalid_archive", "cannot read tar archive") from error
     with archive:
-        members = archive.getmembers()
-        if len(members) > MAX_ARCHIVE_MEMBERS:
-            raise SoulError(400, "too_many_files", f"archive may contain at most {MAX_ARCHIVE_MEMBERS} entries")
         files: dict[str, tarfile.TarInfo] = {}
         expanded_size = 0
-        for member in members:
+        count = 0
+        for member in archive:
+            count += 1
+            if count > MAX_ARCHIVE_MEMBERS:
+                raise SoulError(400, 'too_many_files', 'Archive contains too many entries')
+            if member.size < 0:
+                raise SoulError(400, 'invalid_archive', 'Archive entry has invalid size')
             name = validate_member_path(member.name)
             if member.isdir():
                 continue

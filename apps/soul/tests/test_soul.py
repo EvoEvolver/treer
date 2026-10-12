@@ -196,6 +196,40 @@ class SoulServerTest(unittest.TestCase):
         # Backup is a usable v1 directory, no v2 database or altered archive.
         self.assertFalse((backup/'index.sqlite3').exists())
 
+    def test_oauth_fallback_cookie_and_invalid_header_precedence(self):
+        from urllib.parse import urlsplit, parse_qs, quote
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
+        connection.request('GET','/api/auth/login')
+        response = connection.getresponse()
+        self.assertEqual(response.status,303)
+        redirect=response.getheader('Location'); response.read()
+        state=parse_qs(urlsplit(redirect).query)['state'][0]
+        connection.request('GET','/api/auth/callback?code=test&state='+quote(state))
+        response=connection.getresponse()
+        self.assertEqual(response.status,303)
+        cookie=response.getheader('Set-Cookie').split(';',1)[0]
+        response.read(); connection.close()
+        status, me=self.request('GET','/v1/me',token=None,headers={'Cookie':cookie})
+        self.assertEqual((status,me['principal']['id']),(200,'u_human'))
+        self.assertEqual(self.request('GET','/v1/me',token='forged',headers={'Cookie':cookie})[0],401)
+        self.assertEqual(self.request('POST','/v1/souls',bundle(),token=None,headers={'Cookie':cookie})[0],403)
+        headers={'Cookie':cookie,'X-Soul-Request':'1','Origin':self.server.public_url}
+        self.assertEqual(self.request('POST','/v1/souls',bundle(),token=None,headers=headers)[0],201)
+        self.assertEqual(self.request('GET','/api/auth/callback?code=test&state='+quote(state),token=None)[0],401)
+
+    def test_malformed_archives_and_expansion_limits_reject_before_storage(self):
+        def malformed(name, size=0, kind=tarfile.REGTYPE, payload=b''):
+            stream=io.BytesIO()
+            with tarfile.open(fileobj=stream,mode='w') as archive:
+                info=tarfile.TarInfo(name); info.size=size; info.type=kind
+                archive.addfile(info,io.BytesIO(payload) if payload else None)
+            return stream.getvalue()
+        for raw in (b'not tar',malformed('../escape'),malformed('files/link',kind=tarfile.SYMTYPE),
+                    malformed('enormous',size=129*1024*1024)):
+            status,_=self.request('POST','/v1/souls',raw)
+            self.assertIn(status,(400,413))
+        self.assertEqual(list(self.server.store.blobs.iterdir()),[])
+
 
 if __name__ == '__main__':
     # No inherited managed-Agent environment affects configuration/test endpoints.

@@ -68,7 +68,8 @@ for generic environment-bound archives. `list`, `show NAME_OR_ID[@VERSION]` and
 ID pins a specific immutable snapshot. List supports `--name`, `--harness`,
 `--owner`, `--limit`, `--offset`; follow next_offset until null.
 
-Self selection prefers explicit runtime session IDs, then an unambiguous session
+Self selection first asks its own Controller-registered AIS for the current thread,
+then uses confirmed session environment IDs or an unambiguous session
 matching the resolved cwd; it refuses ambiguity rather than choosing the newest
 shared session. Claude captures project JSONL, project `memory/`, and `CLAUDE.md`.
 Codex captures rollout plus matching shell snapshot. No auth/config credential
@@ -89,6 +90,8 @@ refuses before creating and suggests an explicitly workspace-visible new version
 
 The target downloads the single-file client, acquires its own fresh Soul token,
 verifies archive size/hash and restores declaratively from manifest.adapter.
+Each incarnation receives a new native session UUID (the source UUID remains in
+snapshot metadata), preventing global resume from selecting an unrelated original.
 Each Agent has its own `~/.local/state/treer-soul/AGENT_ID/workspace` and restore
 marker. Startup after completed restoration never downloads/reimports or overwrites
 new learning. Claude uses the dedicated cwd's unique project directory and memory;
@@ -98,7 +101,7 @@ archived but never executed. Generic souls support an explicit command after `--
 
 Launcher path comes from `TREER_AGENT_LAUNCHER`, or
 `TREER_AGENT_INSTALL_ROOT/current`, or
-`TREER_MACHINE_ROOT/.treer/launchers/agent/current` (HOME fallback). It invokes
+`whoami.machine.root/.treer/launchers/agent/current`. It invokes
 `launchers/agent/scripts/treer-agent.sh --harness H --session-id ID --cwd DIR`.
 Install the unified launcher on target first; no source-machine path is embedded.
 `TREER_SOUL_STATE_DIR` overrides restore storage; `TREER_SOUL_SERVICE` defaults to

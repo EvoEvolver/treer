@@ -82,3 +82,14 @@ A newly created Agent has a different owner ID: a private Soul needs an explicit
 reader grant at upload (when target ID already exists), or workspace visibility.
 The client must explain this before creating a new Agent; server offers no bypass,
 no delegation of creator credentials and no mutable ACL endpoint.
+
+## Declarative native adapters
+
+manifest.adapter.name accepts claude, codex or generic. Claude/Codex declare
+session_id (UUID), session_file (archive path), cwd, optional cli_version.
+Codex also declares session_relative_path (.jsonl), optional shell_snapshot_file
+and shell_snapshot_name. Claude may declare memory_files (paths strictly below
+files/memory/) and project_instructions_file. All referenced files must exist.
+The archive never contains a restore script. On incarnation the client generates
+a fresh native session UUID, rebases structured cwd/session metadata and imports
+into the target Agent's dedicated stores; shell snapshots are never executed.

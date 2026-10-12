@@ -20,6 +20,11 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 class Auth:
     def __init__(self, store, proxy_url, service_id, workspace_id, public_url):
         self.store = store
@@ -42,7 +47,7 @@ class Auth:
         request = urllib.request.Request(urllib.parse.urljoin(self.proxy_url, path.lstrip('/')),
                                          data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=10) as response:
                 result = json.loads(response.read(2 * 1024 * 1024))
                 if not isinstance(result, dict):
                     raise ValueError()

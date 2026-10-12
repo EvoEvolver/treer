@@ -43,7 +43,7 @@ def export_session(harness, session, cwd, destination):
     cwd = Path(cwd).resolve()
     destination = Path(destination)
     if session in (None, 'self'):
-        keys = ('CLAUDE_SESSION_ID', 'AGENT_UI_SESSION_ID', 'TREER_SESSION_ID') if harness == 'claude' else ('CODEX_SESSION_ID', 'CODEX_THREAD_ID', 'AGENT_UI_SESSION_ID', 'TREER_SESSION_ID')
+        keys = ('CLAUDE_SESSION_ID', 'TREER_SESSION_ID') if harness == 'claude' else ('CODEX_SESSION_ID', 'CODEX_THREAD_ID', 'TREER_SESSION_ID')
         session = next((os.environ[k] for k in keys if os.environ.get(k)), None)
     if session and not UUID.fullmatch(session):
         raise RuntimeError('Session ID must be a UUID')
@@ -123,11 +123,14 @@ def import_session(bundle, adapter, workspace, state_root):
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise RuntimeError('Session JSONL record must be an object')
+            if 'sessionId' in value:
+                value['sessionId'] = session
             if 'cwd' in value:
                 value['cwd'] = str(workspace)
             payload = value.get('payload')
-            if isinstance(payload, dict) and 'cwd' in payload:
-                payload['cwd'] = str(workspace)
+            if isinstance(payload, dict):
+                if 'cwd' in payload: payload['cwd'] = str(workspace)
+                if value.get('type') == 'session_meta': payload['id'] = session
             records.append(json.dumps(value, ensure_ascii=False) + '\n')
     environment = {}
     if harness == 'codex':
@@ -158,14 +161,14 @@ def import_session(bundle, adapter, workspace, state_root):
     return environment
 
 
-def launcher_path():
+def launcher_path(machine_root=None):
     override = os.environ.get('TREER_AGENT_LAUNCHER')
     if override:
         path = Path(override).expanduser()
         if not path.is_file() or not os.access(path, os.X_OK):
             raise RuntimeError('Configured launcher is not executable')
         return path.resolve()
-    root = Path(os.environ.get('TREER_AGENT_INSTALL_ROOT', Path(os.environ.get('TREER_MACHINE_ROOT', str(Path.home()))) / '.treer/launchers/agent')) / 'current'
+    root = Path(os.environ.get('TREER_AGENT_INSTALL_ROOT', Path(machine_root or os.environ.get('TREER_MACHINE_ROOT', str(Path.home()))) / '.treer/launchers/agent')) / 'current'
     for relative in ('launchers/agent/scripts/treer-agent.sh', 'scripts/treer-agent.sh', 'treer-agent.sh'):
         path = root / relative
         if path.is_file() and os.access(path, os.X_OK):

@@ -24,7 +24,12 @@ class Proxy(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
+        raw = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        if self.path == '/api/apps/oauth/token':
+            from datetime import datetime, timezone, timedelta
+            self.reply({'access_token':'human','expires_at':(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()})
+            return
+        body = json.loads(raw)
         token = body.get('token')
         if self.path == '/.treer/apps/identity/verify':
             principal = TOKENS.get(token)
@@ -110,12 +115,9 @@ if __name__ == '__main__':
     gateway_url = f'http://127.0.0.1:{gateway.server_port}'
     server.auth.proxy_url = gateway_url + '/'
     # Identity verification remains on the fake Proxy, browser Origin uses gateway.
-    original_request = server.auth.request
-    server.auth.request = lambda *args,**kwargs: original_request_fixture(*args,**kwargs)
     from soul_auth import Auth
     identity_auth = Auth(server.store,f'http://127.0.0.1:{proxy.server_port}','svc_soul','ws_test',gateway_url)
-    def original_request_fixture(*args,**kwargs):
-        return identity_auth.request(*args,**kwargs)
+    server.auth.request = identity_auth.request
     server.auth.public_url = gateway_url + '/'
     raw_manifest = {'schema_version':1,'name':'<img src=x onerror=alert(1)>','environment':{}}
     import io, tarfile

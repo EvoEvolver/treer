@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 from soul_secrets import redact
 from soul_sessions import export_session, import_session, launcher_path
@@ -24,7 +24,7 @@ from soul_sessions import export_session, import_session, launcher_path
 VERSION = '2.0.0'
 MAX_BYTES = 128 * 1024 * 1024
 ID = re.compile(r'soul_[0-9a-f]{32}')
-PROTECTED = {'PATH','HOME','CODEX_HOME','CLAUDE_CONFIG_DIR','LD_PRELOAD','LD_LIBRARY_PATH','PYTHONPATH','NODE_OPTIONS','BASH_ENV','ENV','SHELL','TMPDIR'}
+PROTECTED = {'PATH','HOME','CODEX_HOME','CLAUDE_CONFIG_DIR','LD_PRELOAD','LD_LIBRARY_PATH','PYTHONPATH','NODE_OPTIONS','BASH_ENV','ENV','SHELL','TMPDIR','LD_AUDIT','DYLD_INSERT_LIBRARIES','PYTHONSTARTUP','RUBYOPT','PERL5OPT'}
 
 
 def treer(*argv):
@@ -35,7 +35,15 @@ def treer(*argv):
     return result.stdout
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
 def request(server, method, path, body=None):
+    origin = urlsplit(server)
+    if origin.scheme not in ('http','https') or not origin.netloc or origin.username or origin.password or origin.query or origin.fragment:
+        raise RuntimeError('Soul server must be a trusted HTTP(S) App URL')
     headers = {'Accept':'application/json'}
     # Every request acquires a fresh service token; never expose workload credentials.
     service = os.environ.get('TREER_SOUL_SERVICE', 'soul')
@@ -48,7 +56,7 @@ def request(server, method, path, body=None):
     if method != 'GET':
         headers['X-Soul-Request'] = '1'
     try:
-        with urlopen(Request(server.rstrip('/')+'/'+path.lstrip('/'), data=body, headers=headers, method=method), timeout=60) as response:
+        with build_opener(NoRedirect()).open(Request(server.rstrip('/')+'/'+path.lstrip('/'), data=body, headers=headers, method=method), timeout=60) as response:
             data = response.read(MAX_BYTES+1)
             if len(data)>MAX_BYTES:
                 raise RuntimeError('Soul response exceeds limit')
@@ -134,12 +142,42 @@ def redact_file(path, counts):
             counts[category] = counts.get(category, 0) + count
 
 
+def self_session(harness):
+    # Ask the authenticated Controller for THIS Agent's registered AIS port.
+    # Never use a default UI port which may belong to a different Agent.
+    try:
+        descriptor = json.loads(treer('interface', 'show'))
+    except (RuntimeError, ValueError):
+        return None
+    if not descriptor:
+        return None
+    port = descriptor.get('port')
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise RuntimeError('Own Agent Interface has an invalid port')
+    from urllib.request import build_opener, ProxyHandler
+    try:
+        with build_opener(ProxyHandler({})).open(f'http://127.0.0.1:{port}/api/state', timeout=5) as response:
+            state = json.loads(response.read(2 * 1024 * 1024))
+        actual = state.get('harness', {})
+        actual = actual.get('name') if isinstance(actual, dict) else actual
+        if actual != harness:
+            raise RuntimeError('Current Agent Interface harness differs from requested capture')
+        session = state.get('thread', {}).get('id')
+        from soul_sessions import UUID
+        if not isinstance(session, str) or not UUID.fullmatch(session):
+            raise RuntimeError('Current Agent Interface has no active native session')
+        return session
+    except (OSError, ValueError) as error:
+        raise RuntimeError('Cannot read current Agent Interface state; pass --session explicitly') from error
+
+
 def command_save(args):
     # No provider credential files or original files are modified.
     with tempfile.TemporaryDirectory(prefix='treer-soul-save-') as temp:
         root=Path(temp)
         root.chmod(0o700)
-        adapter=export_session(args.harness,args.session,args.cwd,root)
+        session = self_session(args.harness) if args.session == 'self' else args.session
+        adapter=export_session(args.harness,session or args.session,args.cwd,root)
         who=json.loads(treer('whoami'))
         source_machine=who.get('machine',{}).get('server_id')
         manifest={'schema_version':1,'name':args.name or f"{args.harness} {adapter['session_id'][:8]}",
@@ -194,6 +232,7 @@ def resolve(server,target):
 PREFLIGHT = '''import json,os,shutil,subprocess,sys
 from pathlib import Path
 harness=sys.argv[1]
+machine_root=Path(sys.argv[2])
 exe=shutil.which('python3' if harness=='generic' else harness)
 version=''
 if exe:
@@ -211,8 +250,12 @@ elif harness=='codex':
     logged_in=(config/'auth.json').is_file() or bool(os.environ.get('OPENAI_API_KEY'))
 else:
     config=Path(os.environ.get('CLAUDE_CONFIG_DIR',home/'.claude'))
-    logged_in=(config/'.credentials.json').is_file() or (home/'.claude.json').is_file() or bool(os.environ.get('ANTHROPIC_API_KEY'))
-root=Path(os.environ.get('TREER_AGENT_INSTALL_ROOT',Path(os.environ.get('TREER_MACHINE_ROOT',str(home)))/'.treer/launchers/agent'))/'current'
+    logged_in=(config/'.credentials.json').is_file() or bool(os.environ.get('ANTHROPIC_API_KEY'))
+    if sys.platform=='darwin' and shutil.which('security'):
+        try:
+            logged_in = logged_in or subprocess.run(['security','find-generic-password','-s','Claude Code-credentials'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0
+        except Exception: pass
+root=Path(os.environ.get('TREER_AGENT_INSTALL_ROOT',machine_root/'.treer/launchers/agent'))/'current'
 candidates=[Path(os.environ['TREER_AGENT_LAUNCHER'])] if os.environ.get('TREER_AGENT_LAUNCHER') else [root/p for p in ['launchers/agent/scripts/treer-agent.sh','scripts/treer-agent.sh','treer-agent.sh']]
 launcher=next((str(p.resolve()) for p in candidates if p.is_file() and os.access(p,os.X_OK)),None)
 print(json.dumps(dict(executable=bool(exe),version=version,logged_in=logged_in,launcher=launcher,free_bytes=shutil.disk_usage(home).free)))
@@ -220,7 +263,11 @@ print(json.dumps(dict(executable=bool(exe),version=version,logged_in=logged_in,l
 
 
 def preflight(machine,harness,size):
-    probe=json.loads(treer('exec','--machine',machine,'--cwd','.','--timeout','20000','--','python3','-c',PREFLIGHT,harness))
+    machine_record = json.loads(treer('machine', 'show', machine))
+    machine_root = machine_record.get('root')
+    if not isinstance(machine_root, str) or not machine_root.startswith('/'):
+        raise RuntimeError('Target machine has no absolute root')
+    probe=json.loads(treer('exec','--machine',machine,'--cwd','.','--timeout','20000','--','python3','-c',PREFLIGHT,harness,machine_root))
     problems=[]
     if not probe.get('executable'): problems.append('Install '+harness)
     if not probe.get('logged_in'): problems.append('Log in to '+harness+' on target machine')
@@ -276,9 +323,11 @@ def safe_extract(raw,destination):
     total=0
     seen=set()
     with tarfile.open(fileobj=io.BytesIO(raw),mode='r:*') as archive:
-        members=archive.getmembers()
-        if len(members)>256: raise RuntimeError('Too many archive entries')
-        for member in members:
+        count = 0
+        for member in archive:
+            count += 1
+            if count > 256: raise RuntimeError('Too many archive entries')
+            if member.size < 0: raise RuntimeError('Invalid archive size')
             path=archive_path(member.name.rstrip('/') if member.isdir() else member.name)
             if path in seen: raise RuntimeError('Duplicate archive entry')
             seen.add(path)
@@ -327,7 +376,13 @@ def command_run(args):
             with tempfile.TemporaryDirectory(prefix='treer-soul-restore-',dir=root) as temp:
                 bundle=Path(temp)/'bundle'
                 manifest=safe_extract(raw,bundle)
-                adapter=manifest.get('adapter',{})
+                adapter=dict(manifest.get('adapter',{}))
+                if adapter.get('name') in ('claude','codex'):
+                    import uuid
+                    adapter['source_session_id'] = adapter['session_id']
+                    adapter['session_id'] = str(uuid.uuid4())
+                    if adapter['name'] == 'codex':
+                        adapter['session_relative_path'] = 'imported/' + adapter['session_id'] + '.jsonl'
                 if adapter.get('name', 'generic') == 'generic':
                     adapter = {'name': 'generic'}
                     files_root = root / 'generic'
@@ -337,7 +392,7 @@ def command_run(args):
                     workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
                     environment = {}
                     for key, path in manifest.get('environment', {}).items():
-                        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', key) or key in PROTECTED or key.startswith('TREER_'):
+                        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', key) or key in PROTECTED or key.startswith(('TREER_','AGENT_UI_','CODEX_UI_','LD_','DYLD_')):
                             raise RuntimeError('Protected environment binding')
                         path = archive_path(path)
                         if not (files_root / path).is_file():
@@ -359,7 +414,12 @@ def command_run(args):
         if argv and argv[0] == '--': argv = argv[1:]
         if not argv: raise RuntimeError('Generic Soul requires a command after --')
     else:
-        argv=[str(launcher_path()),'--harness',adapter['name'],'--session-id',adapter['session_id'],'--cwd',str(workspace)]
+        machine_root = None
+        if not os.environ.get('TREER_AGENT_LAUNCHER') and not os.environ.get('TREER_AGENT_INSTALL_ROOT'):
+            machine_root = json.loads(treer('whoami')).get('machine', {}).get('root')
+            if not isinstance(machine_root, str) or not Path(machine_root).is_absolute():
+                raise RuntimeError('Cannot locate launcher without an absolute machine root')
+        argv=[str(launcher_path(machine_root)),'--harness',adapter['name'],'--session-id',adapter['session_id'],'--cwd',str(workspace)]
     os.chdir(workspace)
     os.execvpe(argv[0],argv,environment)
 

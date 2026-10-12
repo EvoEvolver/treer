@@ -37,6 +37,8 @@ args=sys.argv[1:]
 with open(os.environ['FAKE_LOG'],'a') as log: log.write(json.dumps(args)+'\\n')
 if args[:2]==['token','create']: print(os.environ.get('FAKE_TOKEN','owner'))
 elif args==['whoami']: print(json.dumps({'agent':{'agent_id':'ag_owner'},'machine':{'server_id':'srv_self'}}))
+elif args[:2]==['machine','show']: print(json.dumps({'root':os.environ['HOME']}))
+elif args[:2]==['interface','show']: print('null')
 elif args[0]=='exec': print(os.environ['FAKE_PROBE'])
 elif args[:3]==['agent','admin','create']: print(json.dumps({'agent_id':'ag_new','name':'reborn'}))
 else: sys.exit(2)
@@ -172,12 +174,14 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertEqual((workspace/'CLAUDE.md').read_text(),'project instruction\n')
         restored=self.home/'.claude/projects'/project_key(workspace)
         (restored/'memory/MEMORY.md').write_text('new learning\n')
-        (restored/(SID+'.jsonl')).write_text('evolved\n')
+        restored_session = next(restored.glob('*.jsonl'))
+        self.assertNotEqual(restored_session.stem, SID)
+        restored_session.write_text('evolved\n')
         log_before=self.log.read_text()
         self.call('run',record['soul_id'])
         self.assertEqual(self.log.read_text(),log_before)
         self.assertEqual((restored/'memory/MEMORY.md').read_text(),'new learning\n')
-        self.assertEqual((restored/(SID+'.jsonl')).read_text(),'evolved\n')
+        self.assertEqual(restored_session.read_text(),'evolved\n')
         self.assertEqual((original_project/(SID+'.jsonl')).read_bytes(),original)
 
     def test_codex_restore_login_stays_local_session_is_isolated(self):
@@ -207,6 +211,86 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertTrue(installed.is_file())
         self.assertEqual(subprocess.check_output([sys.executable,str(installed),'--version'],env=env).strip(),b'treer-soul 2.0.0')
         self.assertEqual(list(self.tmp.iterdir()),[])
+
+    def test_legacy_generic_startup_still_extracts_and_binds(self):
+        from test_soul import bundle
+        soul_id = 'soul_' + 'a'*32
+        legacy = self.root/'legacy'
+        (legacy/'souls').mkdir(parents=True)
+        (legacy/'souls'/f'{soul_id}.tar').write_bytes(bundle())
+        (legacy/'souls'/f'{soul_id}.json').write_text(json.dumps({'soul_id':soul_id,'created_at':'2025-01-01T00:00:00Z'}))
+        from soul import SoulStore
+        self.server.store.close()
+        self.server.store = SoulStore(legacy)
+        self.server.auth.store = self.server.store
+        record = json.loads(self.call('show', soul_id).stdout)
+        self.assertEqual((record['owner'],record['visibility']),('legacy','workspace'))
+        # Exact shape of the old service launcher run command, with target's identity.
+        result = self.call('run', soul_id, '--', sys.executable, '-c',
+                          'import os; print(open(os.environ["SOUL_FILE"]).read().strip())')
+        self.assertEqual(result.stdout.strip(), 'remember me')
+
+    def test_native_import_and_extraction_reject_unsafe_inputs(self):
+        import client
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream,mode='w') as archive:
+            member=tarfile.TarInfo('files/link')
+            member.type=tarfile.SYMTYPE
+            member.linkname='/etc/passwd'
+            archive.addfile(member)
+        with self.assertRaises(RuntimeError):
+            client.safe_extract(stream.getvalue(), self.root/'unsafe')
+        self.claude()
+        project=self.home/'.claude/projects'/project_key(self.cwd)
+        (project/'memory/link').symlink_to(self.root)
+        self.call('save','--harness','claude',success=False)
+        self.assertEqual(list(self.tmp.iterdir()),[])
+
+    def test_self_uses_registered_ais_current_id_and_never_default_port(self):
+        import client
+        from unittest.mock import patch
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        class State(BaseHTTPRequestHandler):
+            def do_GET(self):
+                data=json.dumps({'harness':{'name':'claude'},'thread':{'id':SID}}).encode()
+                self.send_response(200); self.end_headers(); self.wfile.write(data)
+            def log_message(self,*_): pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),State)
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        try:
+            with patch.object(client,'treer',return_value=json.dumps({'port':server.server_port})) as cli:
+                self.assertEqual(client.self_session('claude'),SID)
+                cli.assert_called_once_with('interface','show')
+                with self.assertRaises(RuntimeError): client.self_session('codex')
+            with patch.object(client,'treer',return_value='null'):
+                self.assertIsNone(client.self_session('codex'))
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_auth_bearer_never_follows_http_redirect(self):
+        import client
+        from unittest.mock import patch
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        reached=[]
+        class Redirect(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path=='/target':
+                    reached.append(self.headers.get('Authorization'))
+                    self.send_response(200); self.end_headers()
+                else:
+                    self.send_response(302); self.send_header('Location','/target'); self.end_headers()
+            def log_message(self,*_): pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),Redirect)
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        try:
+            with patch.object(client,'treer',return_value='owner'):
+                with self.assertRaises(RuntimeError):
+                    client.request(f'http://127.0.0.1:{server.server_port}','GET','redirect')
+            self.assertEqual(reached,[])
+        finally:
+            server.shutdown(); server.server_close()
 
 
 if __name__=='__main__':
