@@ -43,8 +43,11 @@ release-channel updater remains the ordinary distribution path.
 `launchers/agent`; the runtime HTTP source is a byte-identical move. The new
 installer resolves committed Git source, bounds profile cwd to machine root,
 installs into immutable commit directories, verifies saved profiles and swaps
-`current` atomically. Failure restores the previous current link; multi-profile
-updates are not a database transaction. It does not stop a Host or Controller.
+`current` atomically. `f63d795` additionally snapshots all profiles before
+mutation and restores changed profiles in reverse order before rolling back the
+link. If profile restoration fails, it reports incomplete rollback and retains
+the candidate executable entry point; multi-profile updates are not a database
+transaction. It does not stop a Host or Controller.
 `switch.py` verifies its injected Agent ID against whoami and changes/restarts
 only `self`; it stores a session/startup plan, not workload credentials. Full
 installer/source selection is user-owned executable code, not signed Core
@@ -61,3 +64,19 @@ origin boundary. This pre-exists the move and is not fixed by Proxy ingress
 authentication for direct localhost access. Reported to `launcher-dev` and
 `core-dev` for a shared authenticated-tunnel/local-UI origin contract and hostile
 origin regression tests; no cross-owner implementation change made here.
+
+## Console paths and documentation addendum (through `f63d795`)
+
+`0f1fa9d` and `8d7c157` keep tree paths in presentation/copy controls while
+retaining stable IDs for API routes and policy decisions. The fallback uses the
+backend canonical path or ID when folder data is incomplete. A ref prevents URL
+canonicalization from replacing the navigation callback and restarting workspace
+subscriptions; socket cleanup remains tied to workspace/component lifetime.
+Mobile startup editing uses the same existing API authorization. No new trust
+boundary or credential persistence was found in these changes. Cross-review
+used source inspection and the owner's reported 89 browser passes plus eight
+targeted repeats; no enrolled machine was used. `6f08e14` aligns architecture
+documentation with the single launcher without changing runtime behavior.
+
+Soul server/client v2 implementation is still pending merge at this review
+point; its contract review above must not be read as implementation approval.
