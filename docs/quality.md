@@ -38,6 +38,14 @@ cargo test -p treer-agent-server real_service_environment_boundary -- --ignored
 Run this subprocess fixture on macOS and Linux; Windows cross-target checking
 only establishes compilation, not native process-environment behavior.
 
+### Virtual-host routing revisions
+
+Virtual-host database polling preserves the routing revision when projected
+content is unchanged. The PostgreSQL regression covers repeated empty and
+populated refreshes, a remote service-port change, and deletion leaving an empty
+workspace cache entry. Revision changes are routing changes, not polling ticks;
+the revision remains local to a Proxy process rather than a durable global clock.
+
 ### Output retention and recovery
 
 Controller inventory reconciliation must preserve the cached output and its

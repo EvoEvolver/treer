@@ -326,6 +326,105 @@ async fn virtual_network_hosts_are_normalized_resolved_and_cleaned_up() {
 }
 
 #[tokio::test]
+async fn unchanged_virtual_host_refresh_preserves_revision_and_remote_changes_advance_it() {
+    let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("default").await;
+    let initial = store
+        .virtual_network_hosts_snapshot("default")
+        .await
+        .unwrap();
+    store.refresh_virtual_network_hosts().await.unwrap();
+    assert_eq!(
+        store
+            .virtual_network_hosts_snapshot("default")
+            .await
+            .unwrap(),
+        initial
+    );
+    let service = store
+        .create_machine_service(
+            "default",
+            "admin",
+            CreateMachineServiceRequest {
+                name: "revision-test".into(),
+                server_id: "destination".into(),
+                target_agent_id: None,
+                primary: false,
+                target_host: "127.0.0.1".into(),
+                target_port: 8080,
+                protocol: MachineServiceProtocol::Http,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .create_virtual_network_host(
+            "default",
+            "admin",
+            CreateVirtualNetworkHostRequest {
+                hostname: "revision.example".into(),
+                service_id: service.service_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let created = store
+        .virtual_network_hosts_snapshot("default")
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        store.refresh_virtual_network_hosts().await.unwrap();
+        assert_eq!(
+            store
+                .virtual_network_hosts_snapshot("default")
+                .await
+                .unwrap(),
+            created
+        );
+    }
+    // A different Proxy's durable service change must still reach this cache.
+    sqlx::query("UPDATE machine_services SET target_port = 8081 WHERE service_id = $1")
+        .bind(&service.service_id)
+        .execute(&store.pool())
+        .await
+        .unwrap();
+    store.refresh_virtual_network_hosts().await.unwrap();
+    let changed = store
+        .virtual_network_hosts_snapshot("default")
+        .await
+        .unwrap();
+    assert!(changed.revision > created.revision);
+    assert_eq!(changed.hosts[0].target_port, Some(8081));
+    store.refresh_virtual_network_hosts().await.unwrap();
+    assert_eq!(
+        store
+            .virtual_network_hosts_snapshot("default")
+            .await
+            .unwrap(),
+        changed
+    );
+    store
+        .delete_machine_service("default", &service.service_id)
+        .await
+        .unwrap();
+    let deleted = store
+        .virtual_network_hosts_snapshot("default")
+        .await
+        .unwrap();
+    assert!(deleted.hosts.is_empty());
+    for _ in 0..3 {
+        store.refresh_virtual_network_hosts().await.unwrap();
+        assert_eq!(
+            store
+                .virtual_network_hosts_snapshot("default")
+                .await
+                .unwrap(),
+            deleted
+        );
+    }
+}
+
+#[tokio::test]
 async fn machine_service_updates_refresh_aliases_and_delete_cascades() {
     let store = AuthStore::for_test("owner-password").await;
     store.seed_test_workspace("default").await;

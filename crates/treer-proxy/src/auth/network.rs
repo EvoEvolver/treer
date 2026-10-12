@@ -421,8 +421,15 @@ impl AuthStore {
                 .or_default()
                 .insert(host.hostname.clone(), host);
         }
-        *self.virtual_hosts.write().await = refreshed;
-        self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        let mut current = self.virtual_hosts.write().await;
+        // Empty workspace entries left by local deletion are equivalent to
+        // absent entries in the database projection. A polling tick is not a
+        // routing change: preserve the revision when the content is equal.
+        current.retain(|_, hosts| !hosts.is_empty());
+        if *current != refreshed {
+            *current = refreshed;
+            self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 
