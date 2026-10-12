@@ -56,7 +56,10 @@ The installer sparse-fetches only `launchers/agent` into
 `npm ci --omit=dev`, then atomically changes `current`. Profiles use its absolute
 launcher path and the caller's machine-relative cwd (override with `--cwd`).
 Every saved command/argv/cwd is read back and verified. Failed installs restore
-the previous `current`; previous version directories remain available. Versions
+previous profiles (or remove newly created ones), then restore the previous
+`current`; previous version directories remain available. If profile rollback
+itself fails, the error is explicit and the candidate entry point stays usable
+for remaining profiles. Versions
 are immutable; a running launcher resolves its physical directory once, so
 updates cannot replace its assets. Installation never creates or restarts an
 Agent. `--source CHECKOUT` archives committed files, ignoring dirty changes;

@@ -17,13 +17,16 @@ const [action, name] = args.slice(3), file = path.join(root, name+'.json');
 if (action === 'show') {
  if (!fs.existsSync(file)) { console.error('profile_not_found'); process.exit(1); }
  const value = JSON.parse(fs.readFileSync(file));
- if (process.env.BAD_SHOW) value.args=[];
+ if ((process.env.BAD_SHOW || process.env.BAD_SHOW_PROFILE===name) && fs.existsSync(path.join(root,'modified-'+name))) value.args=[];
  console.log(JSON.stringify(value));
 } else if (action === 'create' || action === 'update') {
  const cwd=args[args.indexOf('--cwd')+1];
  const command=action==='create'?args[args.indexOf('--cwd')+2]:args[args.indexOf('--command')+1];
  const tail=action==='create'?args.slice(args.indexOf('--')+1):args.flatMap((arg,i)=>arg==='--arg'?[args[i+1]]:[]);
  fs.writeFileSync(file,JSON.stringify({cwd,command,args:tail}));
+ if (process.env.BAD_SHOW || process.env.BAD_SHOW_PROFILE===name) fs.writeFileSync(path.join(root,'modified-'+name),'1');
+} else if (action === 'delete') {
+ fs.unlinkSync(file);
 } else throw Error('Unexpected action: '+action);
 `;
 const mockNpm = `#!/usr/bin/env node
@@ -86,6 +89,28 @@ test("npm failure and profile verification failure leave current on the previous
   assert.throws(() => f.install(undefined, { BAD_SHOW: "1" }), /Profile verification failed/);
   assert.equal(realpathSync(join(f.base, "current")), join(f.base, f.first));
   assert.equal(existsSync(join(f.base, ".install-lock")), false);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, "Codex + UI.json"), "utf8")).args, ["--harness", "codex"]);
+});
+
+test("first-install verification failure removes the newly created profile before removing current", (t) => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  assert.throws(() => f.install(undefined, { BAD_SHOW: "1" }), /Profile verification failed/);
+  assert.equal(existsSync(join(f.base, "current")), false);
+  assert.equal(existsSync(join(f.root, "Codex + UI.json")), false);
+});
+
+test("failure verifying a second profile restores earlier edits and removes new profiles", (t) => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  f.install();
+  const previous = readFileSync(join(f.root, "Codex + UI.json"), "utf8");
+  const manifestPath = join(f.source, "launchers/agent/profiles.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.profiles.find((p: { id: string }) => p.id === "codex").args.push("--name", "Updated Codex");
+  writeFileSync(manifestPath, JSON.stringify(manifest)); f.commit();
+  assert.throws(() => f.install(["--source", f.source, "--agent", "codex", "--agent", "claude"], { BAD_SHOW_PROFILE: "Claude + UI" }), /Profile verification failed/);
+  assert.equal(realpathSync(join(f.base, "current")), join(f.base, f.first));
+  assert.equal(readFileSync(join(f.root, "Codex + UI.json"), "utf8"), previous);
+  assert.equal(existsSync(join(f.root, "Claude + UI.json")), false);
 });
 
 test("invalid provider and cwd outside machine root fail before installing", (t) => {

@@ -13,15 +13,23 @@ function show(name) {
     return null;
   }
 }
-function saveProfile(profile, command, cwd) {
-  const exists = show(profile.name);
+function saveProfile(profile, command, cwd, existing) {
   const prefix = ["agent", "admin", "profile"];
-  run("treer", exists
+  run("treer", existing
     ? [...prefix, "update", profile.name, "--description", profile.description, "--cwd", cwd, "--command", command, ...profile.args.flatMap((arg) => ["--arg", arg])]
     : [...prefix, "create", profile.name, "--description", profile.description, "--cwd", cwd, command, "--", ...profile.args]);
   const saved = show(profile.name);
   if (!saved || saved.command !== command || saved.cwd !== cwd || JSON.stringify(saved.args) !== JSON.stringify(profile.args)) throw new Error(`Profile verification failed: ${profile.name}`);
   console.log(`Verified profile: ${profile.name}`);
+}
+function restoreProfile({ name, previous }) {
+  const prefix = ["agent", "admin", "profile"];
+  if (!previous) { run("treer", [...prefix, "delete", name]); return; }
+  const args = previous.args ?? [];
+  run("treer", [...prefix, "update", previous.profile_id ?? name,
+    "--description", previous.description ?? "", "--cwd", previous.cwd,
+    "--command", previous.command,
+    ...(args.length ? args.flatMap((arg) => ["--arg", arg]) : ["--clear-args"])]);
 }
 function activate(root, target) {
   const temporary = join(root, `.current-${process.pid}`);
@@ -58,6 +66,7 @@ function main() {
   const lock = join(root, ".install-lock");
   try { mkdirSync(lock); } catch { throw new Error(`Another installation owns ${lock}`); }
   let stage, previous, activated = false;
+  const changedProfiles = [];
   try {
     stage = mkdtempSync(join(root, ".install-"));
     const checkout = join(stage, "source");
@@ -89,14 +98,29 @@ function main() {
       if (!existsSync(join(candidate, "node_modules/.bin/tsx")) || !existsSync(join(candidate, "node_modules/ws/package.json"))) throw new Error("Runtime dependencies missing after npm ci");
       renameSync(checkout, version);
     }
+    // Read every original profile before activation or mutation. A later
+    // verification/write error must not leave profiles on a missing entry point.
+    const originals = new Map(profiles.map((profile) => [profile.name, show(profile.name)]));
     previous = existsSync(join(root, "current")) ? realpathSync(join(root, "current")) : null;
     activate(root, commit);
     activated = true;
     const command = join(root, "current/launchers/agent/scripts/treer-agent.sh");
-    for (const profile of profiles) saveProfile(profile, command, cwd);
+    for (const profile of profiles) {
+      changedProfiles.push({ name: profile.name, previous: originals.get(profile.name) });
+      saveProfile(profile, command, cwd, originals.get(profile.name));
+    }
     console.log(`Agent launcher installed: ${version}`);
   } catch (error) {
-    if (activated) {
+    const rollbackErrors = [];
+    for (const profile of changedProfiles.reverse()) {
+      try { restoreProfile(profile); }
+      catch (rollbackError) { rollbackErrors.push(`${profile.name}: ${rollbackError.message}`); }
+    }
+    if (rollbackErrors.length) {
+      // If the control plane is unavailable, keep an executable entry point
+      // for any profile that could not be undone, including a first install.
+      console.error(`Profile rollback incomplete; keeping usable candidate current: ${rollbackErrors.join("; ")}`);
+    } else if (activated) {
       if (previous) activate(root, previous);
       else unlinkSync(join(root, "current"));
     }
