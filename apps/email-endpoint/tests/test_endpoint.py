@@ -308,6 +308,49 @@ class Tests(unittest.TestCase):
                 ).code,
                 401,
             )
+            verified = self.api.request(
+                "POST", "/.treer/apps/identity/verify", body={"token": "human"}
+            )
+            self.app.sessions.save_session(
+                "valid-cookie", "human", verified["claims"], 9999999999
+            )
+            for token in ("", "forged", "expired", "wrong-audience"):
+                self.assertEqual(
+                    get(
+                        "api/auth/session",
+                        {
+                            "X-Treer-Identity-Token": token,
+                            "Cookie": "treer_email_endpoint_session=valid-cookie",
+                        },
+                    ).code,
+                    401,
+                )
+            self.assertEqual(
+                get(
+                    "api/auth/session",
+                    {"Cookie": "treer_email_endpoint_session=valid-cookie"},
+                ).status,
+                200,
+            )
+            for origin, site in (
+                ("null", "same-origin"),
+                ("https://evil.test", "same-origin"),
+                (self.app.config.public_url.rstrip("/"), "cross-site"),
+            ):
+                self.assertEqual(
+                    get(
+                        "v1/threads/" + n["thread_id"],
+                        {
+                            "X-Treer-Identity-Token": "human",
+                            "Origin": origin,
+                            "Sec-Fetch-Site": site,
+                            "Content-Type": "application/json",
+                            "Idempotency-Key": "csrf",
+                        },
+                        {"body": "denied"},
+                    ).code,
+                    403,
+                )
             self.assertEqual(get("unknown").code, 404)
             self.assertEqual(
                 get("v1/admin/outbox", {"X-Treer-Identity-Token": "human"}).code, 403

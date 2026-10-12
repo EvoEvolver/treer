@@ -558,13 +558,14 @@ class Application(mail.MailApplication):
 
 class Handler(mail.MailHandler):
     def _token(self):
-        return self.headers.get("X-Treer-Identity-Token") or self.headers.get(
-            "Authorization", ""
-        ).removeprefix("Bearer ")
+        token = self.headers.get("X-Treer-Identity-Token")
+        if token is not None:
+            return token
+        return self.headers.get("Authorization", "").removeprefix("Bearer ")
 
     def _session(self):
         token = self.headers.get("X-Treer-Identity-Token")
-        if token:
+        if token is not None:
             c = self.server.application.principal(token, "human")
             return mail.BrowserSession(
                 "",
@@ -617,6 +618,8 @@ class Handler(mail.MailHandler):
                     .geturl(),
                     *app.settings.browser_origins,
                 }
+                if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                    raise Error(403, "Cross-site request denied", "csrf_denied")
                 if self.headers.get("Origin") not in allowed_origins:
                     raise Error(403, "Same-origin request required", "csrf_denied")
             if path == "/v1/notify" and method == "POST":
@@ -687,8 +690,9 @@ class Handler(mail.MailHandler):
                 if not path.endswith("/"):
                     self._redirect(path + "/")
                     return
-                if not self._raw_session() and not self.headers.get(
-                    "X-Treer-Identity-Token"
+                if (
+                    not self._raw_session()
+                    and self.headers.get("X-Treer-Identity-Token") is None
                 ):
                     self._static("/", head=False)
                     return

@@ -64,6 +64,101 @@ No complete Core Message body is copied to SQLite or email. Do not put sensitive
 content in an explicit `--summary` or subject. Logs never contain bodies,
 recipients, access tokens, or provider responses.
 
+## Switch an existing App without changing its address
+
+The sender is read from the mode-600 `EMAIL_ENDPOINT_CONFIG` JSON file **once
+at process startup**, not from immutable Managed App argv. `treer app restart
+email-endpoint` runs the existing command again and rereads that file. It is the
+minimal switch; there is no need for `app update`, another service registration,
+or deletion/recreation. Restart retains the App ID, runtime Agent identity,
+service ID, allocated public URL and ingress access. Keep the same config/state
+paths and member bindings so existing thread links, email mappings and sessions
+remain valid. A short service interruption during restart is expected.
+
+For the local deployment, the fixed command is `/bin/sh` with the private
+launcher `/Users/dooms/.local/share/treer/apps/email-endpoint/start.sh`. It exports
+`EMAIL_ENDPOINT_CONFIG=/Users/dooms/.local/share/treer/apps/email-endpoint/config.json`
+and the unchanged `EMAIL_ENDPOINT_STATE_DIR` before executing the App from local
+main. Updating local main therefore requires restarting **only this App** to
+load changed Python code. The launcher also supplies the private recipient
+allowlist as an environment variable. Do not print its contents or put its
+values in saved deployment argv.
+
+Preparation is read-only. Check `treer app show email-endpoint` and
+`curl http://email-endpoint.treer/health`; record `service_id`, `public_url`,
+`access=workspace`, and the reported mode. Confirm the Proxy has the email route,
+its own sender configuration, the authorized recipient admission, and
+`email.send` Policy. Never obtain or copy its Cloudflare token. Inspect SQLite
+queue metadata (no bodies or addresses) before any switch:
+
+```sh
+python3 - <<'PYTHON'
+import sqlite3
+from pathlib import Path
+state = Path('/Users/dooms/.local/share/treer/apps/email-endpoint/state/email-endpoint.sqlite3')
+with sqlite3.connect('file:' + str(state) + '?mode=ro', uri=True) as db:
+    queued = db.execute("SELECT count(*) FROM notifications WHERE status='queued' AND message IS NOT NULL").fetchone()[0]
+    print('Ready-to-send queued notifications:', queued)
+PYTHON
+```
+
+**Do not switch or restart into proxy during a preparation-only request.** The
+worker resumes ready queued notifications immediately after startup; switching
+with a nonempty queue could send real emails before a new `notify` command.
+Completed outbox notifications stay `sent` and are not replayed into Proxy.
+Failed entries are also not retried merely by restarting.
+
+After explicit go-ahead, if health still says `outbox` and the ready queue is
+empty, the operator can perform these steps:
+
+1. Back up the private config with permissions preserved and back up SQLite
+   consistently. Record the current service ID and URL.
+2. Set `mode` to `proxy` in the same private configuration, preserving members,
+   allowlist, state directory and other fields. For a single-email acceptance,
+   also set `max_attempts=1` before step 3 and record its old value for restoration.
+   The minimal transport-only switch uses this atomic write:
+
+   ```sh
+   python3 - <<'PYTHON'
+   import json, os, tempfile
+   from pathlib import Path
+   path = Path('/Users/dooms/.local/share/treer/apps/email-endpoint/config.json')
+   if path.stat().st_mode & 0o077:
+       raise SystemExit('Config must have permissions 600')
+   value = json.loads(path.read_text())
+   value['mode'] = 'proxy'
+   with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as out:
+       json.dump(value, out)
+       temporary = out.name
+   os.chmod(temporary, 0o600)
+   os.replace(temporary, path)
+   PYTHON
+   ```
+
+3. Run `treer app restart email-endpoint`, then inspect health and `app show`.
+   Verify `mode=proxy`, `access=workspace`, and unchanged service ID/public URL.
+   This does not restart Host, Controller or any other Agent.
+4. Before the acceptance notification, announce its subject and summary. Use
+   the explicitly authorized recipient, one stable idempotency key, and a
+   temporary `max_attempts=1` setting loaded by that same restart to avoid
+   automatic acceptance retries. Send once, inspect status, and require
+   `status=sent`, `transport=proxy`, `attempts=1`; outbox fallback does not prove
+   real delivery. Do not issue another key if the provider outcome is ambiguous.
+   After a completed attempt, restore the normal retry limit for future
+   notifications. A further App-only restart loads it without replaying a
+   completed acceptance notification.
+5. Verify the existing link after the Proxy identity-forwarding release: while
+   already signed into Treer, open workspace ingress and the Managed App iframe
+   without an App OAuth click or App cookie. Check the thread is recipient-bound
+   and a reply reaches the initiating Agent. These checks can reuse an existing
+   conversation; a new email is not necessary to test automatic identification.
+
+To revert future delivery to local preview, set `mode` back to `outbox` in the
+same file and restart only the App, again inspecting the pending queue first.
+Deleting/recreating an App would allocate a new service ID and URL, invalidate
+old emailed links/OAuth audience, and require migrating channel bindings; it is
+not part of this procedure.
+
 ## Identity and permissions
 
 Agent notification/status routes require a verified service-audience Treer token,
@@ -81,7 +176,9 @@ Every thread read/reply checks the bound recipient, including workspace admins;
 admins have a separate read-only outbox preview/status page at `/`. Data APIs
 return structured JSON errors. Text uses `textContent`, never HTML rendering.
 
-POST browser routes require `Origin` equal to the App origin. When using a
+POST browser routes reject cross-site `Sec-Fetch-Site` and require `Origin`
+equal to the App origin. An invalid or empty supplied identity header is
+rejected even when a valid OAuth cookie exists. When using a
 control-plane browser tunnel, add its exact trusted origin to the config's
 `browser_origins` array. Assets and data URLs preserve the tunnel prefix. App
 OAuth callbacks still require the dedicated workspace ingress; an installation
@@ -157,7 +254,12 @@ The tests remove inherited `TREER_*`, `AGENT_UI_*`, `CODEX_UI_*`,
 and temporary SQLite/outbox; no installed Controller is called. Browser tests
 spawn only the local fake, verify header identity, replies, literal XSS text,
 denial, direct/tunnel paths, desktop and 390px dark screenshots in
-`/tmp/email-endpoint-browser`. The Rust Proxy tests use an isolated PostgreSQL
+`/tmp/email-endpoint-browser`. A local gateway additionally signs a fresh
+60-second identity per request, strips client identity headers and cookies,
+rewrites upstream Host, and exercises workspace ingress and a Managed App iframe
+at desktop/390px without App OAuth or an App session cookie. These tests use
+ephemeral test signing keys only. The actual forwarding/signing boundary is
+covered by the Proxy tests shipped with the human-identity change. The Rust Proxy tests use an isolated PostgreSQL
 schema and local fake Cloudflare HTTP sender:
 
 ```sh
