@@ -376,7 +376,13 @@ lease. The newest authenticated connection owns the `server_id` and the previous
 socket is closed with `duplicate_machine_connection`. Duplicate and
 `stale_connection` are retryable: the loser stays in the reconnect loop with
 capped exponential backoff until it is owner again, the credential is revoked,
-or the server is deleted. The Proxy sends WebSocket pings at most every 20
+or the server is deleted. An absent/expired distributed lease is not a duplicate:
+the locally current authenticated connection may recreate it using atomic
+create-if-absent. Renewal uses revision checks and retries ownership races;
+it never overwrites a different connection's live lease. Backplane errors are
+reported separately from a confirmed competing owner. Registration still lets
+a new authenticated connection take over immediately, and old socket cleanup
+cannot release its replacement's lease. The Proxy sends WebSocket pings at most every 20
 seconds and closes a silent socket within 60 seconds so a sleeping Mac is not
 advertised Online. On Unix `SIGCONT` (lid open / thaw), the Controller aborts a
 socket whose last activity is older than that dead interval and reconnects.

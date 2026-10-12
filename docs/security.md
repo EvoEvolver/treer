@@ -62,6 +62,13 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
 
 ## Process environment
 
+Machine WebSocket registration is authenticated against the enrolled machine's
+workspace and server ID before it may claim distributed ownership. A current
+connection can recover an expired lease only through atomic create-if-absent;
+renewal cannot overwrite a different connection's owner record. Lease revision
+checks also prevent cleanup of an old socket from releasing its replacement's
+ownership. A missing lease alone is not evidence of another Controller.
+
 Host/Controller do not inherit a caller's Treer workload identity or Agent UI
 session. A shared platform environment filter removes Treer identity and
 credential variables, `TREER_BIN`, `AGENT_UI_*`, `CODEX_UI_*`, and proxies whose

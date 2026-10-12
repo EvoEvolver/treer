@@ -513,26 +513,49 @@ impl ClusterBus {
             return Ok(true);
         };
         let key = server_key(workspace_id, server_id);
-        let Some(entry) = backend.leases.entry(&key).await.map_err(cluster_error)? else {
-            return Ok(false);
-        };
-        let current: ConnectionOwner = decode_protocol(&entry.value)?;
-        if current.proxy_id != self.instance_id || current.connection_id != connection_id {
-            return Ok(false);
-        }
         let owner = ConnectionOwner {
             proxy_id: self.instance_id.clone(),
             connection_id,
         };
-        match backend
-            .leases
-            .update(&key, encode_protocol(&owner)?.into(), entry.revision)
-            .await
-        {
-            Ok(_) => {}
-            Err(_) => return Ok(false),
+        let encoded = encode_protocol(&owner)?;
+        // The live lease can expire before the WebSocket's dead interval (for
+        // example during sleep or a stalled event loop). Absence is not proof
+        // of a competing Controller. CAS creation recovers only an unowned key;
+        // it must never overwrite a replacement connection's ownership.
+        for _ in 0..3 {
+            let entry = backend.leases.entry(&key).await.map_err(cluster_error)?;
+            if let Some(entry) = entry.filter(|entry| entry.operation == Operation::Put) {
+                let current: ConnectionOwner = decode_protocol(&entry.value)?;
+                if current != owner {
+                    return Ok(false);
+                }
+                match backend
+                    .leases
+                    .update(&key, encoded.clone().into(), entry.revision)
+                    .await
+                {
+                    Ok(_) => return Ok(true),
+                    Err(error) if error.kind() == kv::UpdateErrorKind::WrongLastRevision => {
+                        continue
+                    }
+                    Err(error) => return Err(cluster_error(error)),
+                }
+            } else {
+                match backend.leases.create(&key, encoded.clone().into()).await {
+                    Ok(_) => {
+                        info!(%workspace_id, %server_id, %connection_id,
+                            "recovered expired Controller ownership lease");
+                        return Ok(true);
+                    }
+                    Err(error) if error.kind() == kv::CreateErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(cluster_error(error)),
+                }
+            }
         }
-        Ok(true)
+        Err(ProtocolError::new(
+            "cluster_unavailable",
+            format!("ownership lease for {server_id} kept changing; retry renewal"),
+        ))
     }
 
     pub async fn publish_snapshot(
@@ -932,6 +955,163 @@ mod tests {
     use treer_protocol::{ServerInfo, ServerStatus};
 
     use super::*;
+
+    #[tokio::test]
+    async fn expired_lease_does_not_fence_the_current_controller() {
+        let Ok(nats_url) = std::env::var("TREER_TEST_NATS_URL") else {
+            return;
+        };
+        let suffix = Uuid::new_v4().simple().to_string();
+        let workspace_id = format!("workspace-{suffix}");
+        let server_id = format!("server-{suffix}");
+        let mut bus = ClusterBus::connect(
+            &nats_url,
+            format!("proxy-a-{suffix}"),
+            format!("treer.test.reconnect.{suffix}"),
+        )
+        .await
+        .unwrap();
+        let backend = bus.backend.as_mut().unwrap();
+        let context = jetstream::new(backend.client.clone());
+        let bucket = format!("RECONNECT_TEST_{suffix}");
+        backend.leases = context
+            .create_key_value(kv::Config {
+                bucket: bucket.clone(),
+                max_age: Duration::from_secs(1),
+                storage: jetstream::stream::StorageType::Memory,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let state =
+            AppState::with_backplanes(crate::event_bus::EventBus::in_process(), bus.clone());
+        let now = Utc::now();
+        let server = ServerInfo {
+            server_id: server_id.clone(),
+            workspace_id: workspace_id.clone(),
+            name: "reconnect test".into(),
+            hostname: "test".into(),
+            root: "/tmp".into(),
+            controller_build: treer_protocol::BuildInfo {
+                version: "test".into(),
+                git_commit: "test".into(),
+            },
+            host_build: treer_protocol::BuildInfo {
+                version: "test".into(),
+                git_commit: "test".into(),
+            },
+            supervision: None,
+            labels: Default::default(),
+            available_agents: None,
+            status: ServerStatus::Online,
+            connected_at: now,
+            last_seen_at: now,
+        };
+        let connection_id = Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), connection_id, tx)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while bus
+                .owner(&workspace_id, &server_id)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("lease actually expires before regression check");
+        state
+            .heartbeat(&workspace_id, &server_id, connection_id)
+            .await
+            .expect("a missing lease is not evidence of another Controller");
+        assert_eq!(
+            bus.owner(&workspace_id, &server_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .connection_id,
+            connection_id
+        );
+        state
+            .apply_snapshot(
+                connection_id,
+                AgentServerSnapshot {
+                    server: server.clone(),
+                    agents: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err(), "recovery must not close the socket");
+
+        let reconnected_id = Uuid::new_v4();
+        let (reconnected_tx, _reconnected_rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server(server.clone(), reconnected_id, reconnected_tx)
+            .await
+            .unwrap();
+        state
+            .disconnect_server(&workspace_id, &server_id, connection_id)
+            .await;
+        state
+            .heartbeat(&workspace_id, &server_id, reconnected_id)
+            .await
+            .expect("fast reconnect takes over without waiting for old socket cleanup");
+        assert_eq!(
+            bus.owner(&workspace_id, &server_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .connection_id,
+            reconnected_id
+        );
+
+        // A different authenticated connection still supersedes this one.
+        let mut replacement = bus.clone();
+        replacement.instance_id = format!("proxy-b-{suffix}");
+        let replacement_id = Uuid::new_v4();
+        replacement
+            .claim(
+                &workspace_id,
+                &server_id,
+                replacement_id,
+                AgentServerSnapshot {
+                    server,
+                    agents: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .heartbeat(&workspace_id, &server_id, reconnected_id)
+                .await
+                .unwrap_err()
+                .code,
+            "duplicate_machine_connection"
+        );
+        state
+            .disconnect_server(&workspace_id, &server_id, reconnected_id)
+            .await;
+        assert_eq!(
+            replacement
+                .owner(&workspace_id, &server_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .connection_id,
+            replacement_id
+        );
+        replacement
+            .release(&workspace_id, &server_id, replacement_id)
+            .await;
+        context.delete_key_value(bucket).await.unwrap();
+    }
 
     #[test]
     fn routed_ids_round_trip_proxy_identity() {
