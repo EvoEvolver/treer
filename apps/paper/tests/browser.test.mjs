@@ -196,7 +196,7 @@ test("real collaborative page creates and accepts an insertion suggestion", asyn
     await page.waitForFunction(() => document.querySelector("#sync-state")?.textContent === "Saved live");
     await page.locator("#suggest-edit").click();
     await page.locator(".cm-content").click();
-    await page.keyboard.press("Control+End");
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowDown" : "Control+End");
     await page.keyboard.type(" tracked");
     await page.waitForSelector(".cm-review-insertion");
 
@@ -219,7 +219,7 @@ test("real collaborative page replaces a selection and exposes review actions", 
     await page.waitForFunction(() => document.querySelector("#sync-state")?.textContent === "Saved live");
     await page.locator("#suggest-edit").click();
     await page.locator(".cm-content").click();
-    await page.keyboard.press("Control+f");
+    await page.keyboard.press("ControlOrMeta+f");
     await page.keyboard.type("shared live");
     await page.keyboard.press("Enter");
     await page.keyboard.press("Escape");
