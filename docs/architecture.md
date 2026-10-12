@@ -55,6 +55,10 @@ types; this is an in-process organization boundary, not a deployment boundary.
 The React app in `web/` is the browser control plane. Workspace views cover
 terminals, launch profiles, managed Apps, network, machine overview, bounded
 file upload, and audit.
+`web/src/App.tsx` composes routes. Control-plane views and panels live in
+`web/src/components/`; shared presentation helpers and preview fixtures live in
+`web/src/lib/control-plane.ts`. Workspace state and its existing hooks stay
+together in `components/workspace-app.tsx`.
 `/admin` is the platform-administrator inventory: user, machine, and Agent
 counts expand into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
