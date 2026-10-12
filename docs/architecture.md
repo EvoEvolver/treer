@@ -36,6 +36,13 @@ flowchart LR
 The Host is intentionally product-agnostic. Shared wire models live in protocol
 crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
+`treer-protocol/src/lib.rs` retains constants and the public export surface;
+private modules group inventory, Policy, identity, messages, Apps, workloads,
+binary frames, network services, events, transport, and enrollment models.
+Existing callers continue to import these types from the crate root.
+Controller CLI composition remains in `cli_command.rs`; `cli_command/` owns
+argument models and the App, Agent, message, profile, machine, service, and
+Agent I/O command groups. The existing CLI transport contract is unchanged.
 
 `treer-platform` contains machine-local transport, user paths, private-file
 permissions and replacement, and Windows process ownership. Host framing stays
@@ -51,10 +58,18 @@ HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,
 network, and cluster behavior. The parent modules retain composition and shared
 types; this is an in-process organization boundary, not a deployment boundary.
+`api/network.rs` retains the existing handler exports. Its `network/` modules
+separate service registration, runtime recovery, ingress authorization, HTTP
+tunneling, Agent-facing operations, stream relay, discovery, metadata refresh,
+and public TCP listeners; route wiring remains in `api.rs`.
 
 The React app in `web/` is the browser control plane. Workspace views cover
 terminals, launch profiles, managed Apps, network, machine overview, bounded
 file upload, and audit.
+`web/src/App.tsx` composes routes. Control-plane views and panels live in
+`web/src/components/`; shared presentation helpers and preview fixtures live in
+`web/src/lib/control-plane.ts`. Workspace state and its existing hooks stay
+together in `components/workspace-app.tsx`.
 `/admin` is the platform-administrator inventory: user, machine, and Agent
 counts expand into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
