@@ -103,6 +103,10 @@ export async function testRuntimeControls(browser, screenshots) {
     await expect(prompt).toHaveValue("");
     busy(true);
     await expect(page.locator("#send")).toHaveAttribute("aria-label", "Steer current run");
+    await expect(page.locator(".send-actions button:visible")).toHaveCount(2);
+    await expect(page.locator("#send")).toHaveText("Steer");
+    await expect(page.locator("#queue-send")).toBeVisible();
+    await expect(page.locator("#queue-send")).toHaveText("Queue");
     await prompt.fill("live Enter");
     await prompt.press("Enter");
     await expect.poll(() => prompts.length).toBe(2);
@@ -140,6 +144,10 @@ export async function testRuntimeControls(browser, screenshots) {
     failPrompt = false;
     setState({ harness: { ...state.harness, capabilities: { ...state.harness.capabilities, steer: false } } });
     await expect(page.locator("#send")).toHaveAttribute("aria-label", "Queue message (steering unavailable)");
+    await expect(page.locator(".send-actions button:visible")).toHaveCount(1);
+    await expect(page.locator("#send")).toHaveText("Queue");
+    await expect(page.locator("#queue-send")).toBeHidden();
+    await expect(page.locator("#prompt-shortcuts")).toContainText("Enter to queue (steering unavailable)");
     await prompt.press("Enter");
     await expect(page.locator("#feedback")).toContainText("does not support steering");
     assert.equal(prompts.at(-1).mode, "queue");
@@ -270,7 +278,7 @@ export async function testRuntimeControls(browser, screenshots) {
 
     await page.setViewportSize({ width: 390, height: 844 });
     await prompt.fill("touch queued");
-    await page.getByRole("button", { name: "Queue message", exact: true }).click();
+    await page.getByRole("button", { name: "Queue message (steering unavailable)", exact: true }).click();
     await expect(page.locator("#prompt-queue")).toContainText("touch queued");
     await page.screenshot({ path: join(screenshots, "controls-mobile-goal-queue.png") });
     await page.getByRole("button", { name: "Browse files", exact: true }).click();

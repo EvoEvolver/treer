@@ -259,7 +259,7 @@ function renderComposer() {
   elements.send.title = label;
   elements.send.textContent = steering ? canSteer ? "Steer" : "Queue" : "↑";
   elements.send.classList.toggle("send-labeled", steering);
-  elements.queueSend.hidden = !steering;
+  elements.queueSend.hidden = !steering || !canSteer;
   elements.queueSend.disabled = !canSend;
   elements.shortcuts.textContent = steering
     ? `${canSteer ? "Enter to steer" : "Enter to queue (steering unavailable)"} · Tab to queue · Shift+Enter for a new line`
