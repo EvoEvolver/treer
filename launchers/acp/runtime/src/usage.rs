@@ -1,4 +1,5 @@
 //! Token accounting shared by ACP adapters, persistence, and history responses.
+#[cfg(any(feature = "remote-codex-ui", test))]
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,7 @@ pub(crate) fn normalize_usage(raw: &Value) -> Option<Value> {
     }))
 }
 
+#[cfg(any(feature = "remote-codex-ui", test))]
 fn pricing() -> &'static Value {
     static CONFIG: OnceLock<Value> = OnceLock::new();
     CONFIG.get_or_init(|| {
@@ -126,6 +128,7 @@ fn pricing() -> &'static Value {
     })
 }
 
+#[cfg(any(feature = "remote-codex-ui", test))]
 fn pricing_model(model: &str) -> Option<String> {
     let model = model.trim();
     for candidate in [
@@ -165,6 +168,7 @@ fn pricing_model(model: &str) -> Option<String> {
     None
 }
 
+#[cfg(any(feature = "remote-codex-ui", test))]
 pub(crate) fn estimate_price(
     usage: &Value,
     model: Option<&str>,
@@ -232,6 +236,7 @@ pub(crate) fn estimate_price(
     )
 }
 
+#[cfg(feature = "remote-codex-ui")]
 pub(crate) fn public_usage(value: &Value) -> Option<Value> {
     Some(
         json!({"total": Tokens::parse(value.get("total")?)?, "last": Tokens::parse(value.get("last")?)?, "modelContextWindow": value.get("modelContextWindow").filter(|v| v.is_number())}),

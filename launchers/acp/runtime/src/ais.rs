@@ -31,6 +31,8 @@ use crate::tower::{TowerCollector, TowerConfig};
 use crate::transcript::transcript_page_from_entries;
 use crate::types::{now_rfc3339, AIS_CAPABILITIES};
 
+mod builtin_ui;
+
 #[cfg(feature = "remote-codex-ui")]
 #[path = "optional_ui/remote_codex.rs"]
 mod remote_codex;
@@ -55,6 +57,7 @@ pub struct AisConfig {
     pub state_dir: PathBuf,
     pub port: u16,
     pub ui_dist: Option<PathBuf>,
+    pub builtin_ui: bool,
     pub harness: HarnessSpec,
     pub bind_session_id: Option<String>,
     pub startup_timeout_ms: u64,
@@ -112,6 +115,9 @@ struct AppState {
 }
 
 pub async fn serve(config: AisConfig) -> Result<AisServer> {
+    if config.builtin_ui && config.ui_dist.is_some() {
+        anyhow::bail!("builtin UI and Remote Codex UI dist cannot be combined");
+    }
     augment_path();
     #[cfg(not(feature = "remote-codex-ui"))]
     if config.ui_dist.is_some() {
@@ -172,9 +178,9 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
 
     let instance_id = format!("acp_{}", Uuid::new_v4().simple());
     #[cfg(feature = "remote-codex-ui")]
-    let ui_path = config.ui_dist.as_ref().map(|_| "/".to_string());
+    let ui_path = (config.builtin_ui || config.ui_dist.is_some()).then(|| "/".to_string());
     #[cfg(not(feature = "remote-codex-ui"))]
-    let ui_path = None;
+    let ui_path = config.builtin_ui.then(|| "/".to_string());
     #[cfg(feature = "remote-codex-ui")]
     let (ui_events, _) = broadcast::channel(256);
     let state = Arc::new(AppState {
@@ -208,6 +214,12 @@ pub async fn serve(config: AisConfig) -> Result<AisServer> {
         .route("/v1/abort", post(abort))
         .route("/v1/files/tree", get(files_tree))
         .route("/v1/files", get(files_read).put(files_write));
+
+    let router = if config.builtin_ui {
+        router.merge(builtin_ui::routes())
+    } else {
+        router
+    };
     #[cfg(feature = "remote-codex-ui")]
     let router = if let Some(ui_dist) = &config.ui_dist {
         router
@@ -574,6 +586,7 @@ mod tests {
             state_dir: PathBuf::from("/tmp/treer-acp-test"),
             port: 0,
             ui_dist: None,
+            builtin_ui: false,
             harness: HarnessSpec::Configured {
                 name: "codex".into(),
                 base_command: "/profile/bin/codex".into(),

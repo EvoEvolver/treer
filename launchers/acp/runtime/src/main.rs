@@ -41,6 +41,8 @@ struct Args {
         help = "Explicit optional UI dist; requires a build with remote-codex-ui support"
     )]
     ui_dist: Option<PathBuf>,
+    #[arg(long, value_parser = ["builtin"], conflicts_with = "ui_dist", help = "Serve the launcher-owned browser UI")]
+    ui: Option<String>,
     #[arg(long, value_enum, help = "Real ACP harness when --fake is not set")]
     harness: Option<Harness>,
     #[arg(long, help = "Provider availability command declared by the profile")]
@@ -125,6 +127,7 @@ async fn main() -> Result<()> {
         state_dir,
         port: args.port,
         ui_dist,
+        builtin_ui: args.ui.is_some(),
         harness,
         bind_session_id: args.session_id,
         startup_timeout_ms: 20_000,

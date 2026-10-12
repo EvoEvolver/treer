@@ -16,6 +16,10 @@ async fn start_fake() -> Running {
 }
 
 async fn start_fake_with(setup: impl FnOnce(&std::path::Path)) -> Running {
+    start_fake_ui(false, setup).await
+}
+
+async fn start_fake_ui(builtin_ui: bool, setup: impl FnOnce(&std::path::Path)) -> Running {
     let dir = TempDir::new().unwrap();
     let cwd = dir.path().join("cwd");
     let state_dir = dir.path().join("state");
@@ -27,6 +31,7 @@ async fn start_fake_with(setup: impl FnOnce(&std::path::Path)) -> Running {
         state_dir: state_dir.clone(),
         port: 0,
         ui_dist: None,
+        builtin_ui,
         harness: HarnessSpec::Fake,
         bind_session_id: None,
         startup_timeout_ms: 8_000,
@@ -45,6 +50,79 @@ async fn start_fake_with(setup: impl FnOnce(&std::path::Path)) -> Running {
 
 async fn get_json(url: &str) -> Value {
     reqwest::get(url).await.unwrap().json().await.unwrap()
+}
+
+#[tokio::test]
+async fn builtin_ui_is_embedded_and_uses_the_existing_ais() {
+    let running = start_fake_ui(true, |cwd| {
+        std::fs::create_dir(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src/large.txt"), "x".repeat(70_000)).unwrap();
+    })
+    .await;
+    let base = &running.base;
+    assert_eq!(running.server.ui_path.as_deref(), Some("/"));
+    assert_eq!(
+        get_json(&format!("{base}/v1/manifest")).await["ui_path"],
+        "/"
+    );
+    for (path, content_type, marker) in [
+        ("/", "text/html", "./builtin.js"),
+        ("/builtin.css", "text/css", "data-theme=\"dark\""),
+        ("/builtin.js", "text/javascript", "treer:embed-theme"),
+    ] {
+        let response = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with(content_type));
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert!(response.text().await.unwrap().contains(marker));
+    }
+    let tree = get_json(&format!("{base}/v1/files/tree")).await;
+    assert_eq!(tree["entries"][0]["path"], "src");
+    let nested = get_json(&format!("{base}/v1/files/tree?path=src")).await;
+    assert_eq!(nested["entries"][0]["path"], "src/large.txt");
+    let preview = get_json(&format!("{base}/v1/files?path=src/large.txt")).await;
+    assert_eq!(preview["truncated"], true);
+    assert_eq!(preview["size"], 70_000);
+    assert_eq!(preview["content"].as_str().unwrap().len(), 64 * 1024);
+    assert_eq!(
+        prompt(base, "builtin-turn", "quick-success").await.status(),
+        202
+    );
+    wait_idle(base).await;
+    let transcript = get_json(&format!("{base}/v1/transcript?limit=100")).await;
+    assert!(transcript["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == "builtin-turn:user"));
+    running.server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn builtin_and_external_ui_are_mutually_exclusive() {
+    let dir = TempDir::new().unwrap();
+    let result = serve(AisConfig {
+        agent_id: "invalid-ui".into(),
+        cwd: dir.path().join("cwd"),
+        state_dir: dir.path().join("state"),
+        port: 0,
+        ui_dist: Some(dir.path().join("ui")),
+        builtin_ui: true,
+        harness: HarnessSpec::Fake,
+        bind_session_id: None,
+        startup_timeout_ms: 1000,
+        tower: None,
+    })
+    .await;
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("cannot be combined"));
+    assert!(!dir.path().join("cwd").exists());
 }
 
 async fn wait_idle(base: &str) {
@@ -89,6 +167,10 @@ async fn manifest_prompt_duplicate_and_transcript_paging() {
     assert!(caps.contains(&"state.observe"));
     assert!(caps.contains(&"abort"));
     assert_eq!(manifest["ui_path"], Value::Null);
+    assert_eq!(
+        reqwest::get(format!("{base}/")).await.unwrap().status(),
+        404
+    );
 
     #[cfg(not(feature = "remote-codex-ui"))]
     assert_eq!(
@@ -317,6 +399,7 @@ async fn serves_host_ui_dist_at_root() {
         state_dir,
         port: 0,
         ui_dist: Some(ui_dist),
+        builtin_ui: false,
         harness: HarnessSpec::Fake,
         bind_session_id: None,
         startup_timeout_ms: 8_000,
@@ -349,6 +432,7 @@ async fn journal_survives_restart() {
         state_dir: state_dir.clone(),
         port: 0,
         ui_dist: None,
+        builtin_ui: false,
         harness: HarnessSpec::Fake,
         bind_session_id: None,
         startup_timeout_ms: 8_000,

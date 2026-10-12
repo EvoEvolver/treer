@@ -21,12 +21,14 @@ class AcpLauncherProfilesTest(unittest.TestCase):
                 for profile in self.profiles
                 if profile["provider"] == provider
             }
-            self.assertEqual(set(variants), {"headless", "remote-codex-ui"})
+            self.assertEqual(set(variants), {"headless", "remote-codex-ui", "builtin-ui"})
             self.assertNotIn("--ui", variants["headless"]["run"]["args"])
             self.assertEqual(
                 variants["remote-codex-ui"]["run"]["args"][-2:],
                 ["--ui", "remote-codex"],
             )
+            self.assertEqual(variants["builtin-ui"]["run"]["args"][-2:], ["--ui", "builtin"])
+            self.assertEqual(variants["builtin-ui"]["id"], f"{provider}-builtin-ui")
 
     def test_profiles_use_only_the_ordinary_launcher_command(self):
         for profile in self.profiles:

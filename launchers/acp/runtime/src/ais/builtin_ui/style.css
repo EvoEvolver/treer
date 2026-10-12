@@ -1,0 +1,27 @@
+:root { color-scheme: light; --bg: #f4f5f3; --panel: #fff; --ink: #232d29; --muted: #69756f; --line: #dce2dd; --accent: #24644e; --wash: #edf4ef; --warning: #865414; --warning-bg: #fff1d8; }
+:root[data-theme="dark"] { color-scheme: dark; --bg: #151b18; --panel: #1b231f; --ink: #e2ebe5; --muted: #9eaea3; --line: #35433a; --accent: #91ceb0; --wash: #293b30; --warning: #efc487; --warning-bg: #392e1d; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, sans-serif; }
+button, textarea { font: inherit; }
+button { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); padding: 5px 11px; cursor: pointer; }
+button:hover:not(:disabled) { background: var(--wash); }
+button:disabled { opacity: .45; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.masthead { height: 48px; padding: 0 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); gap: 12px; }
+.brand { font-weight: 700; letter-spacing: .04em; }.brand span { color: var(--muted); font-weight: 400; letter-spacing: 0; margin-left: 8px; }
+#agent-name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+main { height: calc(100dvh - 48px); min-height: 560px; display: grid; grid-template-rows: minmax(240px, 1fr) minmax(260px, .85fr); }
+.workspace { min-height: 0; display: grid; grid-template-columns: clamp(180px, 26%, 320px) minmax(0, 1fr); border-bottom: 1px solid var(--line); }
+.files { overflow: auto; border-right: 1px solid var(--line); }.preview { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+h1, h2 { font-size: 13px; font-weight: 600; margin: 0; }#file-name { overflow-wrap: anywhere; }
+.badge { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.note { font-size: 12px; color: var(--muted); margin: 8px 16px; overflow-wrap: anywhere; }.note:empty { display: none; }
+.tree, .tree ul { list-style: none; padding: 0; margin: 0; }.tree { padding: 8px; }.tree ul { margin-left: 16px; border-left: 1px solid var(--line); }
+.tree button { display: block; width: 100%; border: 0; border-radius: 4px; text-align: left; padding: 5px 8px; overflow-wrap: anywhere; }.tree button[aria-current="true"] { background: var(--wash); color: var(--accent); }.tree .note { margin: 5px 8px; }
+.notice { margin: 0; padding: 6px 16px; background: var(--warning-bg); color: var(--warning); font-size: 12px; }
+#file-content { flex: 1; overflow: auto; margin: 0; padding: 14px 16px; font: 12px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 4; }
+.conversation { min-height: 0; display: flex; flex-direction: column; background: var(--panel); }.controls { display: flex; align-items: center; gap: 12px; }#status { color: var(--muted); font-size: 12px; }
+#transcript { flex: 1; min-height: 60px; overflow: auto; padding: 8px 16px; }.entry { border-left: 2px solid var(--line); margin: 10px 0; padding: 0 12px; }.entry[data-role="user"] { border-color: var(--accent); }.entry-header { font-size: 11px; color: var(--muted); }.entry-content { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; font: inherit; }
+#prompt-form { border-top: 1px solid var(--line); padding: 10px 16px; }label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }.composer { display: flex; align-items: stretch; gap: 8px; }textarea { flex: 1; min-width: 0; resize: vertical; max-height: 150px; border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--bg); color: var(--ink); }#send { color: var(--accent); }.composer-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 11px; }
+@media (max-width: 540px) { .section-heading { padding: 8px; }.workspace { grid-template-columns: 145px minmax(0, 1fr); }.note { margin: 6px 8px; }.masthead { padding: 0 10px; }.badge { display: none; } }

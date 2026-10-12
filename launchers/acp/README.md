@@ -17,15 +17,15 @@ this README, clone the source, or build the runtime.
 
 1. Determine the requested provider. Supported values are `grok`, `cursor`,
    `codex`, `claude`, and `opencode`. Do not install every provider.
-2. Use the headless profile unless the operator explicitly requests a UI.
-   UI selection is never implicit.
+2. Use the headless profile unless the operator explicitly requests the built-in
+   browser UI or Remote Codex UI. UI selection is never implicit.
 3. Use the one-command installer below to install or update a versioned launcher.
    Do not add launchers to Treer's normal installation.
 4. Confirm the provider commands listed in `profiles.json` are installed and
    authenticated. Report a missing command; do not install provider software
    without a separate operator request.
 5. Run `apply.sh` with `--no-launch` to save the profile. Add
-   `--ui remote-codex` only when explicitly requested.
+   `--ui builtin` or `--ui remote-codex` only when explicitly requested.
 6. Run `treer agent admin profile show <profile-name>` and report the saved
    command, arguments, cwd, and profile ID. The task is incomplete if this
    verification fails.
@@ -126,6 +126,43 @@ Controller behavior.
 
 An Agent has no browser UI unless the operator explicitly installs a UI
 profile:
+
+```bash
+./launchers/acp/scripts/apply.sh --agent codex --ui builtin
+```
+
+This creates `Codex ACP + Built-in UI`, separate from the headless `Codex ACP`
+profile. Every provider has a `<provider>-builtin-ui` profile. The launcher owns
+this original, framework-free HTML/CSS/JS presentation; `include_str!` embeds
+its assets in `treer-acp`. Installation requires no Node, package manager,
+frontend build, or external UI repository. The runtime option is `--ui builtin`;
+it cannot be combined with the Remote Codex `--ui-dist` option.
+
+The upper pane has a lazily expanded file tree and read-only file previews,
+including an explicit notice when a preview is truncated at 64 KiB. The lower
+pane shows the latest 100 transcript turns, prompt input, live status, and an
+abort button. It only calls the existing AIS `/v1/files/tree`, `/v1/files`,
+`/v1/transcript`, `/v1/prompts`, `/v1/status`, and `/v1/abort` APIs. File browsing
+uses the existing cwd jail. Paths and transcript content are rendered as text.
+Requests and asset URLs are relative so they work through the Interface tunnel.
+The UI follows `?theme=light|dark` and parent `treer:embed-theme` messages; both
+UI presentations explicitly register `ui_path=/` and use the same generic
+Treer embed mechanism. Headless profiles still register no UI.
+
+An optional browser regression check uses the repository's existing Web
+Playwright development dependencies (not a launcher build dependency):
+
+```bash
+cargo build --manifest-path launchers/acp/runtime/Cargo.toml
+node launchers/acp/tests/builtin_ui_browser.mjs
+```
+
+It starts the fake ACP runtime behind a tunnel prefix and verifies lazy
+expansion, safe file rendering, truncation, embed themes, transcript, prompt
+retry idempotency, and abort. In a worktree, `TREER_UI_TEST_MODULE_ROOT` can
+point to another checkout's `web/package.json` with installed dependencies.
+
+The existing Remote Codex presentation remains an explicit alternative:
 
 ```bash
 ./launchers/acp/scripts/apply.sh --agent grok --ui remote-codex

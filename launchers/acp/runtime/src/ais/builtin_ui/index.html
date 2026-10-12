@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>ACP Workspace</title>
+  <link rel="stylesheet" href="./builtin.css">
+  <script src="./builtin.js" defer></script>
+</head>
+<body>
+  <header class="masthead"><span class="brand">ACP <span>Workspace</span></span><span id="agent-name"></span></header>
+  <main>
+    <section class="workspace" aria-label="Workspace files">
+      <aside class="files">
+        <div class="section-heading"><h1>Files</h1><button id="refresh-files" type="button">Refresh</button></div>
+        <p id="tree-note" class="note" role="status"></p>
+        <ul id="file-tree" class="tree" aria-label="Files and folders"></ul>
+      </aside>
+      <section class="preview" aria-label="Read-only file preview">
+        <div class="section-heading"><h2 id="file-name">File preview</h2><span class="badge">Read only</span></div>
+        <p id="file-meta" class="note">Choose a file from the tree.</p>
+        <p id="truncated" class="notice" hidden>Truncated — only the first 64 KiB are shown.</p>
+        <pre id="file-content" tabindex="0" aria-label="File contents"></pre>
+      </section>
+    </section>
+    <section class="conversation" aria-label="Agent conversation">
+      <div class="section-heading"><h2>Transcript</h2><div class="controls"><span id="status" role="status">Connecting…</span><button id="abort" type="button" disabled>Abort</button></div></div>
+      <p id="conversation-note" class="note" role="status"></p>
+      <div id="transcript" tabindex="0" aria-label="Transcript entries"></div>
+      <form id="prompt-form">
+        <label for="prompt">Message the agent</label>
+        <div class="composer"><textarea id="prompt" rows="2" placeholder="Describe your task…" required></textarea><button id="send" type="submit" disabled>Send</button></div>
+        <div class="composer-footer"><span>Ctrl / ⌘ + Enter to send · latest 100 turns</span><span id="prompt-note" role="status"></span></div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

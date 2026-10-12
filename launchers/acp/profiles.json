@@ -2,6 +2,56 @@
   "schema": "treer.launcher-profiles/v1",
   "profiles": [
     {
+      "id": "grok-builtin-ui",
+      "provider": "grok",
+      "presentation": "builtin-ui",
+      "name": "Grok ACP + Built-in UI",
+      "agent_name": "grok-acp-builtin-ui",
+      "description": "One Grok Build ACP session with the launcher-owned file browser and transcript UI.",
+      "requires": ["grok"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "grok", "--base-command", "grok", "--server-command", "grok agent stdio", "--ui", "builtin"] }
+    },
+    {
+      "id": "cursor-builtin-ui",
+      "provider": "cursor",
+      "presentation": "builtin-ui",
+      "name": "Cursor ACP + Built-in UI",
+      "agent_name": "cursor-acp-builtin-ui",
+      "description": "One Cursor Agent ACP session with the launcher-owned file browser and transcript UI.",
+      "requires": ["cursor-agent"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "cursor", "--base-command", "cursor-agent", "--server-command", "cursor-agent acp", "--ui", "builtin"] }
+    },
+    {
+      "id": "codex-builtin-ui",
+      "provider": "codex",
+      "presentation": "builtin-ui",
+      "name": "Codex ACP + Built-in UI",
+      "agent_name": "codex-acp-builtin-ui",
+      "description": "One Codex ACP session with the launcher-owned file browser and transcript UI.",
+      "requires": ["codex", "codex-acp"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "codex", "--base-command", "codex", "--server-command", "codex-acp", "--ui", "builtin"] }
+    },
+    {
+      "id": "claude-builtin-ui",
+      "provider": "claude",
+      "presentation": "builtin-ui",
+      "name": "Claude ACP + Built-in UI",
+      "agent_name": "claude-acp-builtin-ui",
+      "description": "One Claude Agent ACP session with the launcher-owned file browser and transcript UI.",
+      "requires": ["claude", "claude-agent-acp"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "claude", "--base-command", "claude", "--server-command", "claude-agent-acp", "--ui", "builtin"] }
+    },
+    {
+      "id": "opencode-builtin-ui",
+      "provider": "opencode",
+      "presentation": "builtin-ui",
+      "name": "OpenCode ACP + Built-in UI",
+      "agent_name": "opencode-acp-builtin-ui",
+      "description": "One OpenCode ACP session with the launcher-owned file browser and transcript UI.",
+      "requires": ["opencode"],
+      "run": { "command": "./launchers/acp/scripts/treer-agent.sh", "args": ["--harness", "opencode", "--base-command", "opencode", "--server-command", "opencode acp", "--ui", "builtin"] }
+    },
+    {
       "id": "grok",
       "provider": "grok",
       "presentation": "headless",
