@@ -161,6 +161,10 @@ case "$UI" in
   remote-codex) RUNTIME="$LAUNCHER_ROOT/.build/runtime-remote-codex/release/treer-acp" ;;
 esac
 [ -x "$RUNTIME" ] || { echo "ACP runtime is missing: $RUNTIME" >&2; exit 1; }
+if [ "$UI" = remote-codex ] && [ ! -f "$LAUNCHER_ROOT/.build/remote-codex-ui/source/apps/agent-ui-web/dist/index.html" ]; then
+  echo 'Remote Codex UI assets are missing; rebuild with --ui remote-codex' >&2
+  exit 1
+fi
 
 [ "$BUILD_ONLY" -eq 0 ] || exit 0
 

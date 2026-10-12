@@ -14,7 +14,7 @@ while [ "$#" -gt 0 ]; do
     --source) SOURCE="$2"; shift 2 ;;
     --ui) UI="$2"; shift 2 ;;
     --help)
-      echo 'Usage: install.sh --agent PROVIDER [--agent PROVIDER] [--ref REF] [--source CHECKOUT] [--ui remote-codex]'
+      echo 'Usage: install.sh --agent PROVIDER [--agent PROVIDER] [--ref BRANCH_OR_TAG] [--source CHECKOUT] [--ui builtin|remote-codex]'
       exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -64,22 +64,44 @@ else
 fi
 VERSION="$INSTALL_ROOT/$COMMIT"
 
-fetch_precompiled() {
+download_and_verify_precompiled() {
   # Future releases: download a commit/platform archive into PACKAGE, then its
   # SHA256SUMS; verify every runtime/UI byte before returning success. Never
   # activate an unverified download. There is no artifact publication yet.
   echo 'ACP precompiled artifacts are not published; using local cargo build' >&2
   return 1
 }
-if [ ! -d "$VERSION" ]; then
-  if ! fetch_precompiled; then
+case "$UI" in
+  ""|builtin) VARIANT=runtime-headless ;;
+  remote-codex) VARIANT=runtime-remote-codex ;;
+  *) echo "unsupported --ui value: $UI" >&2; exit 2 ;;
+esac
+NEEDS_BUILD=0
+[ -x "$VERSION/launchers/acp/.build/$VARIANT/release/treer-acp" ] || NEEDS_BUILD=1
+if [ "$UI" = remote-codex ] && [ ! -f "$VERSION/launchers/acp/.build/remote-codex-ui/source/apps/agent-ui-web/dist/index.html" ]; then
+  NEEDS_BUILD=1
+fi
+if [ "$NEEDS_BUILD" -eq 1 ]; then
+  if ! download_and_verify_precompiled; then
     command -v cargo >/dev/null 2>&1 || { echo 'cargo is required for the source build' >&2; exit 1; }
     set -- "$PACKAGE/launchers/acp/scripts/apply.sh" --dir "$PACKAGE" --build-only
     for agent in $AGENTS; do set -- "$@" --agent "$agent"; done
     if [ -n "$UI" ]; then set -- "$@" --ui "$UI"; fi
     sh "$@"
   fi
-  if [ "$PACKAGE" = "$STAGE" ]; then
+  if [ -d "$VERSION" ]; then
+    # A second presentation can add its missing build directories for the same
+    # source commit. Never replace any previously installed binary or assets.
+    python3 - "$PACKAGE/launchers/acp/.build" "$VERSION/launchers/acp/.build" <<'PY'
+import os,sys
+from pathlib import Path
+source,destination=map(Path,sys.argv[1:])
+destination.mkdir(parents=True,exist_ok=True)
+for entry in source.iterdir():
+    target=destination/entry.name
+    if not target.exists(): os.rename(entry,target)
+PY
+  elif [ "$PACKAGE" = "$STAGE" ]; then
     mv "$STAGE" "$VERSION"
     STAGE=""
   else
