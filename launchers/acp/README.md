@@ -17,10 +17,10 @@ this README, clone the source, or build the runtime.
 
 1. Determine the requested provider. Supported values are `grok`, `cursor`,
    `codex`, `claude`, and `opencode`. Do not install every provider.
-2. Use the headless profile unless the operator explicitly requests Remote
-   Codex UI. UI selection is never implicit.
-3. If this launcher is not already present, perform the shallow sparse checkout
-   shown below. Do not add launchers to Treer's normal installation.
+2. Use the headless profile unless the operator explicitly requests a UI.
+   UI selection is never implicit.
+3. Use the one-command installer below to install or update a versioned launcher.
+   Do not add launchers to Treer's normal installation.
 4. Confirm the provider commands listed in `profiles.json` are installed and
    authenticated. Report a missing command; do not install provider software
    without a separate operator request.
@@ -42,6 +42,44 @@ verify the resulting Agent separately with `treer agent show`. Profile creation
 must still happen first.
 
 ## Install
+
+From a managed Agent on the target machine:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/EvoEvolver/treer/main/launchers/acp/install.sh \
+  | sh -s -- --agent codex
+# Explicitly select a presentation:
+curl -fsSL https://raw.githubusercontent.com/EvoEvolver/treer/main/launchers/acp/install.sh \
+  | sh -s -- --agent claude --ui builtin
+```
+
+The script reads `machine.root` from `treer whoami`, fetches an immutable source
+commit, and compiles locally with Cargo. It does not install or authenticate
+provider commands: Codex still requires `codex` and `codex-acp`; Claude requires
+`claude` and `claude-agent-acp` on PATH. Git and Python 3 are also required.
+The download/verification hook is reserved for future precompiled artifacts;
+none are published by this installer yet, so it always builds missing versions.
+A future downloaded binary must pass SHA256 verification before activation;
+download or verification failure must fall back to the local build.
+
+Versions live at `<machine.root>/.treer/launchers/acp/<full-commit>/`. The atomic
+`current` symlink selects the version for future launches. Repeating the command
+fetches the latest `main`, builds a new commit if needed, and updates the saved
+profile. Old version directories are retained: a running launcher resolves its
+physical directory at startup and keeps using its existing binary and assets.
+There is no automatic garbage collection of versions still used by Agents.
+Concurrent installs are rejected by `.install-lock`; after a hard interruption,
+remove that lock only after confirming no installer is running.
+
+Installation ends with `apply.sh --no-launch` and verifies the saved profile
+using `treer agent admin profile show`. Its command is the absolute
+`<machine.root>/.treer/launchers/acp/current/launchers/acp/scripts/treer-agent.sh`
+path; its default cwd is the machine root (`.`). Override cwd when launching.
+A build failure leaves `current` unchanged; profile/verification failure rolls
+the pointer back. `--source /path/to/treer` installs the source checkout's
+committed HEAD for local testing; uncommitted files are never packaged.
+
+### Source Checkout Alternative
 
 Treer's normal installer and updater do not place this launcher on a user's
 machine. From a managed Agent on the machine that will run the new Agent,
@@ -116,6 +154,81 @@ workspace-wide session-discovery API is added to Core.
 
 Generated binaries, UI checkouts, dependencies, and assets stay under
 `launchers/acp/.build/` and are ignored by Git.
+
+### Switch A Running TUI Agent
+
+Have the parent prompt the **target Agent** to run this command inside its own
+working directory (do not run it in the parent or copy the target's credential):
+
+```sh
+"<machine.root>/.treer/launchers/acp/current/launchers/acp/scripts/switch.sh" \
+  --agent codex --ui builtin
+# Inspect discovery and argv without changing startup or restarting:
+"<machine.root>/.treer/launchers/acp/current/launchers/acp/scripts/switch.sh" \
+  --agent claude --dry-run
+```
+
+The script matches the native transcript's cwd to the target's current directory
+and chooses the most recently modified session: Codex searches
+`~/.codex/sessions/**/*.jsonl`; Claude searches top-level session files in
+`~/.claude/projects/<encoded-cwd>/`. Canonical cwd comparison also supports
+symlinked project paths. Multiple active sessions sharing a cwd are ambiguous;
+use `--session-id <native-id>` to select one explicitly. `--summary-file` supplies
+your own handoff summary instead of a bounded excerpt of the initial task and
+recent user/assistant text. The default excerpt redacts common credential
+patterns, but is not a general-purpose secret detector.
+
+The script saves `treer agent startup set` with the selected version's physical
+launcher command and `--session-id`. A double-forked helper in a new process
+session then runs `treer agent restart self`, surviving termination of the old
+PTY process group on Linux/macOS. It does not rely on `nohup` alone. Startup
+always stays self-only and cwd remains relative to `machine.root`.
+
+The existing runtime first tries ACP session loading. If loading fails, it
+starts a fresh session. The helper waits for the new run generation and AIS
+registration, reads the actual session ID from that Agent's local journal, and
+only on fallback submits the summary as the first handoff prompt through the
+private AIS. This prompt has a stable operation ID for deduplication. It also
+updates saved startup to the new session ID so later restarts retain the new
+conversation. Avoid sending other prompts during the handoff. A successful load
+does not receive an extra prompt.
+
+Local handoff files are private to the machine account under
+`<machine.root>/.treer/launchers/acp/switches/<agent-id>/<operation-id>/`:
+`plan.json`, `restart.log`, and either `result.json` or `error.txt`. A readiness
+timeout leaves the summary there for a manual retry; the helper does not loop
+forever or restart the Agent repeatedly. Native Windows is not supported by
+these POSIX launcher scripts. No Core session-discovery API, new Agent kind,
+credential forwarding, or sandbox is introduced.
+
+### Native Session Load Measurements
+
+On 2026-10-11 (Toronto), macOS arm64, `codex-cli 0.162.1` and Claude Code
+`2.1.296`, read-only ACP probes initialized the real adapters and called
+`session/load` on existing native TUI transcripts. No model prompt was sent.
+
+| Adapter package | Native history load |
+| --- | --- |
+| `@zed-industries/codex-acp 0.16.0` | Succeeded; 375 replay updates |
+| `@agentclientprotocol/codex-acp 2.2.2` | Rejected the same ID with ACP `-32600`; no replay |
+| `@zed-industries/claude-agent-acp 0.23.1` | Succeeded; 193 replay updates |
+| `@agentclientprotocol/claude-agent-acp 0.89.1` | Succeeded; 145 replay updates |
+
+The deprecated Zed package names and newer package names both expose the same
+CLI executable names. These are local compatibility observations, not a claim
+that every native transcript or adapter version can load. Replay establishes
+history loading; it does not establish successful model continuation after a
+live Treer restart. The fallback and detached restart paths are covered by
+isolated script tests with a simulated Treer Controller/AIS.
+
+Run launcher checks with:
+
+```sh
+python3 -m unittest discover -s launchers/acp/tests -v
+cargo test --locked --manifest-path launchers/acp/runtime/Cargo.toml
+sh -n launchers/acp/install.sh launchers/acp/scripts/apply.sh \
+  launchers/acp/scripts/treer-agent.sh launchers/acp/scripts/switch.sh
+```
 
 ## Optional TOWER Capture
 

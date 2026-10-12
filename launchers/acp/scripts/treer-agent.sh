@@ -47,7 +47,7 @@ if [ -z "$BASE_COMMAND" ] || [ -z "$SERVER_COMMAND" ]; then
 fi
 
 case "$UI" in
-  "")
+  ""|builtin)
     RUNTIME="$LAUNCHER_ROOT/.build/runtime-headless/release/treer-acp"
     ;;
   remote-codex)
@@ -76,5 +76,8 @@ if [ -n "$SESSION_ID" ]; then
 fi
 if [ "$UI" = "remote-codex" ]; then
   set -- "$@" --ui-dist "$UI_DIST"
+fi
+if [ "$UI" = "builtin" ]; then
+  set -- "$@" --ui builtin
 fi
 exec "$@"

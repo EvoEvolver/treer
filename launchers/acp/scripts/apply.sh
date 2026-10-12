@@ -7,6 +7,9 @@ AGENTS=""
 UI=""
 LAUNCH=1
 LIST=0
+BUILD_ONLY=0
+SKIP_BUILD=0
+PROFILE_ROOT=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -30,6 +33,9 @@ while [ "$#" -gt 0 ]; do
       LAUNCH=0
       shift
       ;;
+    --build-only) BUILD_ONLY=1; LAUNCH=0; shift ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
+    --profile-root) PROFILE_ROOT="$2"; shift 2 ;;
     *)
       echo "unknown argument: $1" >&2
       exit 2
@@ -54,7 +60,7 @@ if [ -z "${AGENTS# }" ]; then
   exit 2
 fi
 
-for command in cargo python3 treer; do
+for command in python3; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "$command is not on PATH" >&2
     exit 1
@@ -65,6 +71,7 @@ case "$UI" in
   "")
     PRESENTATION="headless"
     ;;
+  builtin) PRESENTATION="builtin-ui" ;;
   remote-codex)
     PRESENTATION="remote-codex-ui"
     ;;
@@ -82,6 +89,7 @@ for agent in $AGENTS; do
     --check
 done
 
+if [ "$BUILD_ONLY" -eq 0 ]; then
 WHOAMI="$(treer whoami)"
 MACHINE_SERVER_ID="$(python3 -c 'import json,sys
 server_id = json.loads(sys.argv[1])["machine"].get("server_id", "").strip()
@@ -97,9 +105,12 @@ if relative == ".." or relative.startswith("../") or os.path.isabs(relative):
     raise SystemExit(f"Treer checkout {repo} is outside machine root {machine_root}")
 print(relative)
 ' "$REPO_ROOT" "$WHOAMI")"
+fi
 
+if [ "$SKIP_BUILD" -eq 0 ]; then
+command -v cargo >/dev/null 2>&1 || { echo 'cargo is not on PATH' >&2; exit 1; }
 case "$UI" in
-  "")
+  ""|builtin)
     echo "building headless ACP runtime"
     cargo build \
       --locked \
@@ -143,6 +154,34 @@ case "$UI" in
     exit 2
     ;;
 esac
+fi
+
+case "$UI" in
+  ""|builtin) RUNTIME="$LAUNCHER_ROOT/.build/runtime-headless/release/treer-acp" ;;
+  remote-codex) RUNTIME="$LAUNCHER_ROOT/.build/runtime-remote-codex/release/treer-acp" ;;
+esac
+[ -x "$RUNTIME" ] || { echo "ACP runtime is missing: $RUNTIME" >&2; exit 1; }
+
+[ "$BUILD_ONLY" -eq 0 ] || exit 0
+
+# Installed profiles use a stable absolute command through current. Preserve
+# the machine-root-relative checkout cwd for source-only apply.sh users.
+TEMP_MANIFEST=""
+if [ -n "$PROFILE_ROOT" ]; then
+  case "$PROFILE_ROOT" in /*) ;; *) echo '--profile-root must be absolute' >&2; exit 2 ;; esac
+  TEMP_MANIFEST="$(mktemp)"
+  trap 'rm -f -- "$TEMP_MANIFEST"' EXIT
+  python3 - "$MANIFEST" "$TEMP_MANIFEST" "$PROFILE_ROOT" <<'PY'
+import json,sys
+source,dest,root=sys.argv[1:]
+with open(source) as handle: data=json.load(handle)
+for profile in data["profiles"]:
+    profile["run"]["command"]=root+"/launchers/acp/scripts/treer-agent.sh"
+with open(dest,"w") as handle: json.dump(data,handle)
+PY
+  MANIFEST="$TEMP_MANIFEST"
+  REPO_CWD=.
+fi
 
 for agent in $AGENTS; do
   set -- "$PROFILE_TOOL" "$MANIFEST" \
@@ -155,3 +194,18 @@ for agent in $AGENTS; do
   fi
   python3 "$@"
 done
+
+# Do not treat successful upsert as proof that the saved launch is correct.
+python3 - "$MANIFEST" "$PRESENTATION" $AGENTS <<'PY'
+import json,subprocess,sys
+manifest,presentation,*agents=sys.argv[1:]
+with open(manifest) as handle: profiles=json.load(handle)["profiles"]
+for profile in profiles:
+    if profile["provider"] not in agents or profile["presentation"] != presentation: continue
+    result=subprocess.run(["treer","agent","admin","profile","show",profile["name"]],check=True,capture_output=True,text=True)
+    saved=json.loads(result.stdout)
+    saved=saved.get("profile",saved)
+    if saved["command"] != profile["run"]["command"] or saved["args"] != profile["run"].get("args",[]):
+        raise SystemExit("saved profile command/args did not match: "+profile["name"])
+    print(result.stdout.strip())
+PY

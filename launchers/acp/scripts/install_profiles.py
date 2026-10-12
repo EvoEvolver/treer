@@ -56,7 +56,7 @@ def main() -> None:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--agent", action="append", default=[])
     parser.add_argument(
-        "--presentation", choices=["headless", "remote-codex-ui"], default="headless"
+        "--presentation", choices=["headless", "builtin-ui", "remote-codex-ui"], default="headless"
     )
     parser.add_argument("--repo-cwd")
     parser.add_argument("--machine")
@@ -89,6 +89,8 @@ def main() -> None:
         if profile["provider"] in options.agent
         and profile["presentation"] == options.presentation
     ]
+    if not selected:
+        raise SystemExit(f"no profiles for the selected presentation: {options.presentation}")
     for profile in selected:
         missing = [name for name in profile.get("requires", []) if shutil.which(name) is None]
         if missing:
