@@ -22,16 +22,12 @@ check:
     node scripts/check-docs.mjs
     python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
     node --test scripts/release-r2.test.mjs scripts/machine-artifacts.test.mjs
-    node --test scripts/install-path.test.mjs
+    node --test scripts/install-path.test.mjs scripts/ais-e2e.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
     cd web && pnpm test:e2e
     python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
-    python3 -m unittest discover -s launchers/acp/tests -p 'test_*.py' -v
-    cargo test --manifest-path launchers/acp/runtime/Cargo.toml
-    cargo test --manifest-path launchers/acp/runtime/Cargo.toml --features remote-codex-ui
-    cargo clippy --manifest-path launchers/acp/runtime/Cargo.toml --all-targets --all-features -- -D warnings
-    cargo fmt --manifest-path launchers/acp/runtime/Cargo.toml -- --check
+    just agent-launcher-test
     cargo build --workspace
     cargo fmt --all -- --check
     cargo test --workspace
@@ -79,20 +75,17 @@ app-test:
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
     npm --prefix apps/paper test
-    node --test apps/ais-kit/*.test.mjs
-    node --test apps/pi-ui/*.test.mjs
-    node --test apps/codex-ais/*.test.mjs
-    node --test apps/opencode-ais/*.test.mjs
-    node --test apps/dsh-ais/*.test.mjs
-    node --test apps/claude-ais/*.test.mjs
-    node --test apps/grok-ais/*.test.mjs
-    node --test apps/cursor-ais/*.test.mjs
+    just agent-launcher-test
 
+agent-launcher-test:
+    npm --prefix launchers/agent ci
+    npm --prefix launchers/agent run check
+    npm --prefix launchers/agent test
+    npm --prefix launchers/agent run test:browser
+
+# Compatibility recipe name; the duplicate ACP runtime is retired.
 acp-launcher-test:
-    python3 -m unittest discover -s launchers/acp/tests -p 'test_*.py' -v
-    cargo test --manifest-path launchers/acp/runtime/Cargo.toml
-    cargo test --manifest-path launchers/acp/runtime/Cargo.toml --features remote-codex-ui
-    cargo clippy --manifest-path launchers/acp/runtime/Cargo.toml --all-targets --all-features -- -D warnings
+    just agent-launcher-test
 
 ais-e2e:
     node scripts/ais-e2e.mjs

@@ -70,3 +70,37 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
+
+  agent-launcher:
+    name: Agent launcher types, fake harnesses and browser
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: launchers/agent/package-lock.json
+      - name: Install launcher dependencies
+        run: npm --prefix launchers/agent ci
+      - name: Install isolated browser runtime
+        run: cd launchers/agent && npx playwright install --with-deps chromium
+      - name: Check launcher and browser sources
+        run: npm --prefix launchers/agent run check
+      - name: Unit and installer tests (fake harnesses only)
+        run: npm --prefix launchers/agent test
+      - name: Closed Codex, ACP and Claude Interface regression
+        run: |
+          node --test scripts/ais-e2e.test.mjs
+          node scripts/ais-e2e.mjs
+      - name: Browser controls and screenshots
+        run: npm --prefix launchers/agent run test:browser
+        env:
+          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: agent-launcher-screenshots
+          path: ${{ runner.temp }}/launcher-screenshots
+          if-no-files-found: ignore
