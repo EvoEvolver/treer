@@ -386,6 +386,14 @@ pub fn router(state: LocalApiState) -> Router {
         )
         .route("/api/local/agents", get(list_local_agents))
         .route("/api/agents", get(list_agents).post(create_agent))
+        .route(
+            "/api/agents/{agent_id}/admin/startup",
+            get(get_admin_agent_startup).put(set_admin_agent_startup),
+        )
+        .route(
+            "/api/agents/{agent_id}/restart-with-startup",
+            post(restart_agent_with_startup),
+        )
         .route("/api/workload-tree", get(get_workload_tree))
         .route("/api/workload-tree/folders", post(create_workload_folder))
         .route(

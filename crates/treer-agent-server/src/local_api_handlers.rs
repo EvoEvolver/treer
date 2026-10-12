@@ -721,6 +721,65 @@ pub(super) async fn get_agent_startup(
     ))
 }
 
+pub(super) async fn get_admin_agent_startup(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source = validated_source_agent(&state, &headers)?;
+    Ok(Json(
+        state
+            .get_as(
+                &format!("agents/{}/admin/startup", encode_path_segment(&agent_id)),
+                source.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+pub(super) async fn set_admin_agent_startup(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    Json(request): Json<treer_protocol::ReplaceAgentStartupRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source = validated_source_agent(&state, &headers)?;
+    let body =
+        serde_json::to_value(request).map_err(|e| LocalApiError::bad_request(e.to_string()))?;
+    Ok(Json(
+        state
+            .put_as(
+                &format!("agents/{}/admin/startup", encode_path_segment(&agent_id)),
+                &body,
+                source.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+pub(super) async fn restart_agent_with_startup(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    Json(request): Json<treer_protocol::ReplaceAgentStartupRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source = validated_source_agent(&state, &headers)?;
+    let body =
+        serde_json::to_value(request).map_err(|e| LocalApiError::bad_request(e.to_string()))?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!(
+                    "agents/{}/restart-with-startup",
+                    encode_path_segment(&agent_id)
+                ),
+                &body,
+                source.as_ref(),
+            )
+            .await?,
+    ))
+}
+
 pub(super) async fn set_agent_startup(
     State(state): State<LocalApiState>,
     headers: HeaderMap,

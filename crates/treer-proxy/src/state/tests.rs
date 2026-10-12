@@ -1,4 +1,81 @@
 use super::*;
+
+#[tokio::test]
+async fn legacy_controller_rejects_startup_admin_without_losing_connection() {
+    let state = AppState::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            Uuid::new_v4(),
+            "old-controller".into(),
+            vec![
+                treer_protocol::CAPABILITY_AGENT_STARTUP.into(),
+                treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into(),
+            ],
+            tx,
+        )
+        .await
+        .unwrap();
+    for command in [
+        AgentCommand::StartupAdminGet {
+            agent_id: "target".into(),
+        },
+        AgentCommand::StartupAdminSet {
+            agent_id: "target".into(),
+            request: treer_protocol::ReplaceAgentStartupRequest {
+                cwd: None,
+                command: "sh".into(),
+                args: vec![],
+            },
+        },
+        AgentCommand::RestartWithStartup {
+            agent_id: "target".into(),
+            request: treer_protocol::ReplaceAgentStartupRequest {
+                cwd: None,
+                command: "sh".into(),
+                args: vec![],
+            },
+        },
+    ] {
+        let error = state
+            .send_command("alpha", "server", command)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "unsupported_command");
+        assert!(error
+            .message
+            .contains(treer_protocol::CAPABILITY_AGENT_STARTUP_ADMIN));
+        assert!(rx.try_recv().is_err());
+    }
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        async move {
+            state
+                .send_command(
+                    "alpha",
+                    "server",
+                    AgentCommand::StartupGet {
+                        agent_id: "target".into(),
+                    },
+                )
+                .await
+        }
+    });
+    let SocketFrame::Text(frame) = rx.recv().await.unwrap() else {
+        panic!("expected text command")
+    };
+    let ProxyMessage::Command { envelope } = serde_json::from_str(&frame).unwrap() else {
+        panic!("expected command")
+    };
+    state
+        .complete_command(CommandResult::success(
+            envelope.command_id,
+            serde_json::json!({"still_connected":true}),
+        ))
+        .await;
+    assert_eq!(waiting.await.unwrap().unwrap()["still_connected"], true);
+}
 use treer_protocol::AgentStatus;
 
 fn expect_text(frame: SocketFrame) -> String {

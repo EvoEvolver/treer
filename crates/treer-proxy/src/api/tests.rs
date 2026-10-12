@@ -11,6 +11,298 @@ use treer_protocol::{
 };
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
+#[test]
+fn original_startup_stays_self_only() {
+    let source = PolicySubject::Agent {
+        server_id: "machine-a".into(),
+        agent_id: "agent-a".into(),
+    };
+    assert!(require_self_agent(&source, "agent-a").is_ok());
+    assert!(require_self_agent(&source, "agent-b").is_err());
+    assert!(require_self_agent(
+        &PolicySubject::Human {
+            user_id: "owner".into()
+        },
+        "agent-a"
+    )
+    .is_err());
+}
+
+#[tokio::test]
+async fn admin_startup_cross_agent_policy_denies_before_controller_dispatch() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let store = WorkspacePolicyStore::new(auth.pool());
+    store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([(
+                    ACTION_AGENT_STARTUP_MANAGE.into(),
+                    PolicyEffect::Deny,
+                )]),
+                groups: BTreeMap::new(),
+                rules: vec![],
+            },
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let policy = PolicyEngine::durable(store);
+    let mut headers = HeaderMap::new();
+    headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+    let machine = Some(Extension(MachineSession {
+        server_id: Some("machine-a".into()),
+        workspace_id: Some("default".into()),
+    }));
+    let error = set_admin_agent_startup(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Extension(policy.clone()),
+        None,
+        machine.clone(),
+        headers.clone(),
+        Path(("default".into(), "reviewer".into())),
+        Json(ReplaceAgentStartupRequest {
+            cwd: None,
+            command: "sh".into(),
+            args: vec![],
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+    let error = get_admin_agent_startup(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Extension(policy.clone()),
+        None,
+        machine.clone(),
+        headers.clone(),
+        Path(("default".into(), "agent-b".into())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+    let error = restart_agent_with_startup(
+        State(state),
+        Extension(auth),
+        Extension(policy),
+        None,
+        machine,
+        headers,
+        Path(("default".into(), "agent-b".into())),
+        Json(ReplaceAgentStartupRequest {
+            cwd: None,
+            command: "sh".into(),
+            args: vec![],
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_startup_human_and_operator_routes_dispatch_canonical_id_and_reject_apps() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+    let mut agent = app_workload_agent(&app);
+    agent.agent_id = "agent-existing".into();
+    agent.kind = "command".into();
+    agent.name = "recover-me".into();
+    state.test_insert_agent(agent.clone()).await;
+    let server = state.resolve_server("default", "machine-a").await.unwrap();
+    let (tx, new_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server,
+            Uuid::new_v4(),
+            "startup-controller".into(),
+            vec![treer_protocol::CAPABILITY_AGENT_STARTUP_ADMIN.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    // Replacement may enqueue fencing/close frames on the old connection.
+    while let Ok(frame) = rx.try_recv() {
+        if let SocketFrame::Text(text) = frame {
+            assert!(!matches!(
+                serde_json::from_str::<ProxyMessage>(&text).unwrap(),
+                ProxyMessage::Command { .. }
+            ));
+        }
+    }
+    rx = new_rx;
+    // Browser session requests carry no MachineSession; existing workspace
+    // middleware authenticates the human before invoking this handler.
+    let held_guard = auth
+        .workload_lifecycle_guard("default", &agent.agent_id)
+        .await
+        .unwrap();
+    let task = tokio::spawn({
+        let state = state.clone();
+        let auth = auth.clone();
+        async move {
+            get_admin_agent_startup(
+                State(state),
+                Extension(auth),
+                Extension(PolicyEngine::allow_all()),
+                Some(Extension(CurrentSession {
+                    token: "test".into(),
+                    user_id: "owner".into(),
+                    email: "owner@example.com".into(),
+                    preferred_name: "Owner".into(),
+                })),
+                None,
+                HeaderMap::new(),
+                Path(("default".into(), "recover-me".into())),
+            )
+            .await
+        }
+    });
+    let envelope = next_lifecycle_command(&mut rx).await;
+    assert!(
+        matches!(envelope.command, AgentCommand::StartupAdminGet { agent_id } if agent_id == agent.agent_id)
+    );
+    state
+        .complete_command(CommandResult::success(
+            envelope.command_id,
+            json!({"command":"sh","args":[],"cwd":"."}),
+        ))
+        .await;
+    assert!(task.await.unwrap().is_ok());
+    drop(held_guard); // Startup reads must not wait for the lifecycle mutation lock.
+    let task = tokio::spawn({
+        let state = state.clone();
+        let auth = auth.clone();
+        async move {
+            set_admin_agent_startup(
+                State(state),
+                Extension(auth),
+                Extension(PolicyEngine::allow_all()),
+                None,
+                Some(Extension(MachineSession {
+                    server_id: Some("machine-a".into()),
+                    workspace_id: Some("default".into()),
+                })),
+                HeaderMap::new(),
+                Path(("default".into(), "recover-me".into())),
+                Json(ReplaceAgentStartupRequest {
+                    cwd: None,
+                    command: "replacement".into(),
+                    args: vec!["literal arg".into()],
+                }),
+            )
+            .await
+        }
+    });
+    let envelope = next_lifecycle_command(&mut rx).await;
+    assert!(
+        matches!(envelope.command, AgentCommand::StartupAdminSet { agent_id, request } if agent_id == agent.agent_id && request.command == "replacement" && request.cwd.is_none())
+    );
+    state
+        .complete_command(CommandResult::success(
+            envelope.command_id,
+            json!({"command":"replacement"}),
+        ))
+        .await;
+    assert!(task.await.unwrap().is_ok());
+    let credential = auth
+        .create_agent_credential("default", "machine-a", &agent.agent_id)
+        .await
+        .unwrap();
+    auth.set_agent_recovery_enabled("default", &agent.agent_id, false)
+        .await
+        .unwrap();
+    let before_hash: String =
+        sqlx::query_scalar("SELECT secret_hash FROM agent_credentials WHERE agent_id=$1")
+            .bind(&agent.agent_id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
+    let mut source = agent.clone();
+    source.agent_id = "agent-source".into();
+    source.name = "caller".into();
+    state.test_insert_agent(source).await;
+    let task = tokio::spawn({
+        let state = state.clone();
+        let auth = auth.clone();
+        async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-source"));
+            restart_agent_with_startup(
+                State(state),
+                Extension(auth),
+                Extension(PolicyEngine::allow_all()),
+                None,
+                Some(Extension(MachineSession {
+                    server_id: Some("machine-a".into()),
+                    workspace_id: Some("default".into()),
+                })),
+                headers,
+                Path(("default".into(), "recover-me".into())),
+                Json(ReplaceAgentStartupRequest {
+                    cwd: Some("repo".into()),
+                    command: "new-command".into(),
+                    args: vec!["literal arg".into()],
+                }),
+            )
+            .await
+        }
+    });
+    let envelope = next_lifecycle_command(&mut rx).await;
+    assert!(
+        matches!(envelope.command, AgentCommand::RestartWithStartup { agent_id, request } if agent_id == agent.agent_id && request.command == "new-command" && request.cwd.as_deref() == Some("repo"))
+    );
+    state
+        .complete_command(CommandResult::success(
+            envelope.command_id,
+            json!({"agent_id":agent.agent_id,"run_generation":2}),
+        ))
+        .await;
+    let result = task.await.unwrap().unwrap().0;
+    assert_eq!(result["agent_id"], agent.agent_id);
+    assert_eq!(result["run_generation"], 2);
+    let after_hash: String =
+        sqlx::query_scalar("SELECT secret_hash FROM agent_credentials WHERE agent_id=$1")
+            .bind(&agent.agent_id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
+    assert_eq!(before_hash, after_hash);
+    assert!(auth
+        .stopped_agent_recovery_ids(
+            "default",
+            "machine-a",
+            std::slice::from_ref(&agent.agent_id)
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!result.to_string().contains(&credential));
+    let error = get_admin_agent_startup(
+        State(state),
+        Extension(auth),
+        Extension(PolicyEngine::allow_all()),
+        None,
+        None,
+        HeaderMap::new(),
+        Path(("default".into(), app.app_id)),
+    )
+    .await
+    .unwrap_err();
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(rx.try_recv().is_err());
+}
+
 async fn state_with_managed_agent() -> AppState {
     let state = AppState::new();
     let now = chrono::Utc::now();

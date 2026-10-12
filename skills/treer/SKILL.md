@@ -108,6 +108,28 @@ treer agent read reviewer --lines 100
 ```
 
 These lifecycle commands also accept managed App runtime IDs and unique names.
+To repair a stuck peer without deleting its identity, use the separate
+Policy-controlled startup management commands:
+
+```bash
+treer agent admin startup show reviewer
+treer agent admin startup set reviewer --cwd repo -- ./scripts/start-agent.sh
+treer agent restart reviewer
+# Atomically save new argv and restart once:
+treer agent restart reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
+```
+
+Targets accept ID, unique name, or `self`. Omitted `--cwd` keeps the target's
+saved directory. Admin set alone preserves stopped intent and does not launch.
+Admin show/set require `agent.startup.manage` on the target; atomic restart also
+requires ordinary lifecycle permissions. This does not change the self-only
+startup commands above. App runtimes reject startup edits with
+`app_startup_managed`; their command belongs to the App deployment. Controllers
+without `agent.startup-admin.v1` return `unsupported_command` without disconnecting.
+Keep resume/session arguments when switching launchers to retain context. Never
+embed credentials in argv. A failed launch leaves the new command saved for
+repair/retry. The browser Agent menu also offers **Edit startup command**.
+
 `treer app start/stop/restart` and `treer agent admin start/stop/restart` remain
 compatibility commands. Restart keeps the Agent ID and workload credential;
 `run_generation` in Agent output increases for a replacement process. The

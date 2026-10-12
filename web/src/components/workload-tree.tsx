@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ChevronDown, ChevronRight, Folder, MoreVertical, Plus } from "lucide-react"
+import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
 export interface NewAgentFolder { folderId: string; path: string }
 type Item = { kind: "folder" | "agent"; id: string; name: string }
@@ -26,6 +27,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   const [reload, setReload] = useState(0)
   const [copyNotice, setCopyNotice] = useState("")
   const [manualCopyPath, setManualCopyPath] = useState<string | null>(null)
+  const [startupAgent, setStartupAgent] = useState<Agent | null>(null)
   const copyInput = useRef<HTMLInputElement>(null)
   const mutation = useRef(false)
   const readGeneration = useRef(0)
@@ -171,6 +173,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     const siblings = orderedRows(parent)
     const index = agent ? siblings.findIndex((entry) => entry.agent_id === agent.agent_id) : -1
     return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Actions for ${item.name}`}><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+      {agent && !app && agent.kind !== "app" && <DropdownMenuItem disabled={busy || preview || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => setStartupAgent(agent)}>Edit startup command</DropdownMenuItem>}
       {agent ? <><DropdownMenuItem disabled={busy || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => void lifecycle(agent, "start")}>Start</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "stop")}>Stop</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "restart")}>Restart</DropdownMenuItem><DropdownMenuItem onSelect={() => onOpen(agent.agent_id, true)}>Logs</DropdownMenuItem>{app && <DropdownMenuItem onSelect={() => onSettings(app)}>App settings</DropdownMenuItem>}<DropdownMenuItem onSelect={() => onRename(agent)}>Rename</DropdownMenuItem></> : <><DropdownMenuItem disabled={!workspaceId || busy || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew({ folderId: item.id, path: itemPath(item, parent) })}>New Agent</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("create", item.id)}>New folder</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("rename", parent, item)}>Rename</DropdownMenuItem></>}
       <DropdownMenuItem onSelect={() => void copyPath(itemPath(item, parent))}>Copy path</DropdownMenuItem>
       <DropdownMenuItem onSelect={() => edit("move", parent, item)}>Move to folder</DropdownMenuItem>
@@ -204,6 +207,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     </div> })}</>
   }
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-tour="agents-tab">
+    {startupAgent && workspaceId && <AgentStartupDialog key={`${workspaceId}/${startupAgent.agent_id}`} workspaceId={workspaceId} agent={startupAgent} onClose={() => setStartupAgent(null)} onSaved={() => setCopyNotice(`Saved startup command and restarted ${startupAgent.name}`)} />}
     <div className="flex h-10 shrink-0 items-center justify-between px-3 text-[11px] font-medium text-muted-foreground"><span>Tree</span><div className="flex"><Button variant="ghost" size="sm" className="h-7 px-2" disabled={!workspaceId || busy || loading} onClick={() => edit("create", null)} aria-label="New folder"><Folder className="size-3.5" /><Plus className="size-3" /></Button><span data-tour="create-agent"><Button variant="ghost" size="sm" className="h-7 px-2" aria-label={!preview && !machines.length ? "Set up a machine before creating an agent" : undefined} disabled={!workspaceId || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onClick={() => onNew()}><Plus className="size-3.5" />New</Button></span></div></div>
     {copyNotice && <p role="status" className="px-3 py-2 text-xs break-all">{copyNotice}</p>}
     {loading && <p role="status" className="px-3 text-xs">Loading folders…</p>}{error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>Reload folders</Button></div>}

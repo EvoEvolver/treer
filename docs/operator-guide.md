@@ -457,6 +457,37 @@ validate the Agent before recovery. This does not start Treer after an
 operating-system reboot; configure systemd, LaunchAgent, or the container init
 system for the Host itself.
 
+### Repair another Agent's launch
+
+A workspace human/operator or Policy-authorized Agent can inspect and replace
+another Agent's saved command without changing its ID or workload credential:
+
+```bash
+treer agent admin startup show reviewer
+treer agent admin startup set reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
+treer agent restart reviewer
+# Or save the command and restart atomically in one Controller operation:
+treer agent restart reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
+```
+
+Targets accept ID, unique name, or `self` for a managed caller. Omitting `--cwd`
+preserves the saved directory. Admin set alone does not start a stopped Agent or
+change its recovery intent; restart increments `run_generation`. The webpage's
+Agent menu offers **Edit startup command**, displaying saved argv and cwd and
+submitting one save-and-restart request on desktop and mobile. Commands are an
+executable plus literal arguments: use `sh -lc '...'` explicitly for shell syntax.
+Do not embed credentials or other secrets in argv. To retain a coding agent's
+context, preserve its resume/thread arguments when repairing its launcher.
+
+Admin read/set require `agent.startup.manage` on the target; replace-and-restart
+also requires the usual stop/create lifecycle permissions. Existing self-only
+`treer agent startup set/show/clear` behavior is unchanged. App runtimes reject
+startup management with `app_startup_managed`; update their deployment instead.
+The target Controller must advertise `agent.startup-admin.v1`; otherwise the
+request returns `unsupported_command` and leaves the connection usable. Saving
+occurs before stopping the old process. If launching fails, the new command
+remains saved for repair/retry; there is no implicit rollback to the old command.
+
 ## Users, administrators, and invitations
 
 The platform administrator is not a Treer user and does not belong to an

@@ -109,6 +109,14 @@ pub fn router(
                 .delete(clear_agent_startup),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/admin/startup",
+            get(get_admin_agent_startup).put(set_admin_agent_startup),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/agents/{agent_id}/restart-with-startup",
+            post(restart_agent_with_startup),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/startup/validate",
             post(validate_agent_startup),
         )
@@ -547,6 +555,14 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/restart",
             post(restart_agent),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/admin/startup",
+            get(get_admin_agent_startup).put(set_admin_agent_startup),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/restart-with-startup",
+            post(restart_agent_with_startup),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/abort",

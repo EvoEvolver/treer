@@ -280,7 +280,15 @@ pub(super) enum AgentCommand {
     #[command(about = "Stop an Agent or App")]
     Stop { target: String },
     #[command(about = "Restart an Agent or App preserving its identity")]
-    Restart { target: String },
+    Restart {
+        target: String,
+        /// Replace the saved working directory along with COMMAND.
+        #[arg(long, requires = "command")]
+        cwd: Option<String>,
+        /// Replace the saved argv and restart once (Agents only).
+        #[arg(last = true, value_name = "COMMAND", num_args = 1..)]
+        command: Vec<String>,
+    },
     #[command(about = "Show one agent by unique name or id")]
     Show { target: String },
     #[command(about = "Print an Agent's primary HTTP service URL for curl or other HTTP clients")]
@@ -367,6 +375,11 @@ pub(super) enum AgentStartupCommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum AgentAdminCommand {
+    #[command(about = "Read or replace an Agent's saved startup command (Policy controlled)")]
+    Startup {
+        #[command(subcommand)]
+        command: AgentAdminStartupCommand,
+    },
     Start {
         target: String,
     },
@@ -418,6 +431,22 @@ pub(super) enum AgentAdminCommand {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum AgentAdminStartupCommand {
+    #[command(
+        about = "Replace saved argv without restarting; preserve stopped intent and identity"
+    )]
+    Set {
+        target: String,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    #[command(about = "Show saved argv (Agents only)")]
+    Show { target: String },
 }
 
 #[derive(Debug, Subcommand)]

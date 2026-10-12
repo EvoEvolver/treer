@@ -180,6 +180,15 @@ and persist intent before spawning. A stopped workload remains in snapshots
 even when a cold Host has no process for it. Explicit start and restart reuse
 the saved launch and credential, and increment the persisted run generation
 before launching a replacement. Stale Host events cannot overwrite a later run.
+`StartupAdminGet`, `StartupAdminSet`, and `RestartWithStartup` require
+`agent.startup-admin.v1`; older Controllers return `unsupported_command` without
+receiving an unknown frame or losing their connection. Admin set replaces only
+argv and optional cwd, retaining identity, credential, geometry, ports,
+generation, and stopped intent. Atomic replace-and-restart holds the same
+Controller recovery lock from durable replacement through Host stop and spawn.
+Proxy startup mutations share the workload lifecycle guard with start/stop/delete.
+App runtime edits are rejected: their durable launch comes from App deployment
+metadata and must not be overridden by a local Agent startup edit.
 Explicit App start/restart first sends `EnsureLifecycle(start_missing=false)`
 to declare or adopt the workload without launching. This temporarily disables
 local recovery, including for a surviving process, until the following explicit

@@ -19,6 +19,15 @@ export interface WorkloadFolder { folder_id: string; name: string; parent_id: st
 export interface WorkloadPlacement { agent_id: string; folder_id: string | null; position: number }
 export interface WorkloadTreeState { folders: WorkloadFolder[]; placements: WorkloadPlacement[] }
 
+export interface AgentStartupSpec { agent_id: string; server_id: string; kind: string; name: string; cwd: string; command: string; args: string[]; enabled: boolean; generation: number }
+export interface ReplaceAgentStartupRequest { cwd?: string; command: string; args: string[] }
+export function getAgentStartup(workspaceId: string, agentId: string) {
+  return api<AgentStartupSpec>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/admin/startup`)
+}
+export function restartAgentWithStartup(workspaceId: string, agentId: string, request: ReplaceAgentStartupRequest) {
+  return api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/restart-with-startup`, { method: "POST", body: JSON.stringify(request) })
+}
+
 export async function appendAgentToTreeFolder(workspaceId: string, agentId: string, folderId: string) {
   const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/workload-tree`
   const tree = await api<WorkloadTreeState>(base)

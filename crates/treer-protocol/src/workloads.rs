@@ -303,6 +303,17 @@ pub struct AgentServerSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AgentCommand {
+    StartupAdminGet {
+        agent_id: String,
+    },
+    StartupAdminSet {
+        agent_id: String,
+        request: ReplaceAgentStartupRequest,
+    },
+    RestartWithStartup {
+        agent_id: String,
+        request: ReplaceAgentStartupRequest,
+    },
     RestoreRuntime {},
     EnsureLifecycle {
         agent_id: String,
@@ -399,6 +410,9 @@ pub enum AgentCommand {
 impl AgentCommand {
     pub fn required_capability(&self) -> Option<&'static str> {
         match self {
+            Self::StartupAdminGet { .. }
+            | Self::StartupAdminSet { .. }
+            | Self::RestartWithStartup { .. } => Some(CAPABILITY_AGENT_STARTUP_ADMIN),
             Self::EnsureLifecycle { .. } | Self::Start { .. } | Self::Restart { .. } => {
                 Some(CAPABILITY_AGENT_LIFECYCLE)
             }
@@ -422,6 +436,56 @@ impl AgentCommand {
             | Self::ProbeNetwork { .. }
             | Self::ShutdownMachine => None,
         }
+    }
+}
+
+/// Replaces argv, retaining the target's saved cwd when omitted. Identity,
+/// credentials, ports, and generation are not client-controlled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceAgentStartupRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl ReplaceAgentStartupRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.command.trim().is_empty()
+            || self.cwd.as_ref().is_some_and(|cwd| cwd.contains('\0'))
+            || std::iter::once(&self.command)
+                .chain(self.args.iter())
+                .any(|arg| arg.contains('\0'))
+        {
+            return Err(ProtocolError::new(
+                "invalid_agent_startup",
+                "startup command must be nonempty and paths/argv must not contain NUL",
+            ));
+        }
+        // Reject Treer workload/operator secrets, including another Agent's credential.
+        // Arbitrary third-party secrets cannot be recognized: callers must use
+        // private files or inherited environment instead of embedding them.
+        if std::iter::once(&self.command)
+            .chain(self.args.iter())
+            .chain(self.cwd.iter())
+            .any(|arg| {
+                ["wlc_", "opc_"].iter().any(|prefix| {
+                    arg.match_indices(*prefix).any(|(offset, _)| {
+                        arg.as_bytes()
+                            .get(offset + 4..offset + 68)
+                            .is_some_and(|secret| secret.iter().all(u8::is_ascii_hexdigit))
+                    })
+                })
+            })
+        {
+            return Err(ProtocolError::new(
+                "invalid_agent_startup",
+                "startup spec must not contain workload or operator credentials",
+            ));
+        }
+        Ok(())
     }
 }
 

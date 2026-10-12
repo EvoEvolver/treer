@@ -21,10 +21,10 @@ use treer_protocol::{
     GetMessageResponse, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
     LegacyMailMessage, MachineExecRequest, MachineService, MachineServiceProtocol,
     MessageExternalSource, ReceiveMessagesRequest, RegisterAgentInterfaceRequest, RenameRequest,
-    SendMessageRequest, ServerInfo, SetAgentStartupRequest, UpdateAgentLaunchProfileRequest,
-    WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse, WorkspaceSnapshot,
-    AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL, OPERATOR_CREDENTIAL_HEADER,
-    WORKLOAD_CREDENTIAL_HEADER,
+    ReplaceAgentStartupRequest, SendMessageRequest, ServerInfo, SetAgentStartupRequest,
+    UpdateAgentLaunchProfileRequest, WorkloadIdentityTokenRequest, WorkloadIdentityTokenResponse,
+    WorkspaceSnapshot, AGENT_ID_HEADER, AGENT_INTERFACE_PROTOCOL_V1, INSTALL_SKILL,
+    OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
 

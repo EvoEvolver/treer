@@ -1,5 +1,267 @@
 use super::*;
 
+#[tokio::test]
+async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_restarts() {
+    use tokio::io::AsyncWriteExt;
+    use treer_host_protocol::{
+        decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
+    };
+    let root = std::env::temp_dir().join(format!(
+        "trr-admin-{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    ));
+    std::fs::create_dir_all(root.join("repo")).unwrap();
+    #[cfg(unix)]
+    let socket = root.join("host.sock");
+    #[cfg(windows)]
+    let socket = treer_platform::endpoint_name(
+        &Uuid::new_v4().to_string(),
+        &treer_platform::current_user_sid().unwrap(),
+    );
+    let mut listener = treer_platform::LocalListener::bind(&socket).unwrap();
+    let sync = HostResponse::Synced {
+        host_epoch: "admin-test".into(),
+        host_build: HostBuildInfo {
+            version: "test".into(),
+            git_commit: "test".into(),
+        },
+        processes: vec![],
+        replay: vec![],
+    };
+    let host_sync = sync.clone();
+    let spawns = Arc::new(Mutex::new(Vec::<HostSpawnRequest>::new()));
+    let observed_spawns = spawns.clone();
+    let saved_path = root.join("startup.json");
+    let host_saved_path = saved_path.clone();
+    let task = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        let mut processes: Vec<HostProcessInfo> = vec![];
+        while let Ok(length) = stream.read_u32().await {
+            let mut bytes = vec![0; length as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            let request: HostRequest = decode_message(&bytes).unwrap();
+            let response = match request.command {
+                HostCommand::Sync { .. } => {
+                    let HostResponse::Synced {
+                        host_epoch,
+                        host_build,
+                        replay,
+                        ..
+                    } = host_sync.clone()
+                    else {
+                        unreachable!()
+                    };
+                    HostResponse::Synced {
+                        host_epoch,
+                        host_build,
+                        processes: processes.clone(),
+                        replay,
+                    }
+                }
+                HostCommand::Spawn { request } => {
+                    observed_spawns.lock().unwrap().push(request.clone());
+                    let now = Utc::now();
+                    let metadata: AgentMetadata = serde_json::from_str(&request.metadata).unwrap();
+                    let process = HostProcessInfo {
+                        process_id: request.process_id,
+                        pid: Some(1000 + metadata.run_generation as u32),
+                        cwd: request.cwd,
+                        running: true,
+                        started_at: now,
+                        last_output_at: now,
+                        exited_at: None,
+                        exit_code: None,
+                        stream_epoch: format!("run-{}", metadata.run_generation),
+                        first_revision: 1,
+                        next_revision: 1,
+                        bracketed_paste: false,
+                        metadata: request.metadata,
+                    };
+                    processes.retain(|old| old.process_id != process.process_id);
+                    processes.push(process.clone());
+                    HostResponse::Process { process }
+                }
+                HostCommand::Stop { process_id } => {
+                    let saved = StartupStore::load(host_saved_path.clone())
+                        .unwrap()
+                        .get(&process_id)
+                        .unwrap();
+                    assert_eq!(
+                        saved.spec.command, "new-command",
+                        "new argv must be durable before stopping the old process"
+                    );
+                    let process = processes
+                        .iter_mut()
+                        .find(|p| p.process_id == process_id)
+                        .unwrap();
+                    process.running = false;
+                    process.exit_code = Some(0);
+                    process.exited_at = Some(Utc::now());
+                    HostResponse::Process {
+                        process: process.clone(),
+                    }
+                }
+                _ => panic!("unexpected command"),
+            };
+            let encoded = encode_message(&HostMessage::Response {
+                request_id: request.request_id,
+                response: Some(response),
+                error: None,
+            })
+            .unwrap();
+            stream.write_u32(encoded.len() as u32).await.unwrap();
+            stream.write_all(&encoded).await.unwrap();
+        }
+    });
+    let (host, events) = HostClient::connect(&socket).await.unwrap();
+    let (runtime, _) = ControllerRuntime::from_sync(
+        host,
+        sync,
+        events,
+        ControllerConfig {
+            workspace_id: "workspace".into(),
+            server_id: "server".into(),
+            agent_server_url: "http://127.0.0.1:1".into(),
+            treer_binary: None,
+            interface_cache_path: root.join("interfaces.json"),
+            startup_store_path: saved_path.clone(),
+            root: std::fs::canonicalize(&root).unwrap(),
+        },
+    )
+    .unwrap();
+    let credential = new_workload_credential();
+    let original = runtime
+        .create(
+            "create",
+            "stable-id".into(),
+            credential.clone(),
+            CreateAgentRequest {
+                server_id: None,
+                kind: "command".into(),
+                name: "target".into(),
+                cwd: "repo".into(),
+                args: vec!["old-command".into()],
+                cols: 80,
+                rows: 24,
+                publish_ports: vec![],
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+    let generation = original.run_generation;
+    let replace = || ReplaceAgentStartupRequest {
+        cwd: None,
+        command: "new-command".into(),
+        args: vec!["literal $() ' spaces".into()],
+    };
+    let saved = runtime
+        .replace_startup("stable-id", replace())
+        .await
+        .unwrap();
+    assert_eq!(saved.cwd, "repo");
+    assert_eq!(saved.generation, generation);
+    assert_eq!(
+        spawns.lock().unwrap().len(),
+        1,
+        "set alone must not restart"
+    );
+    let before = runtime.get_startup("stable-id").unwrap();
+    for invalid in [
+        ReplaceAgentStartupRequest {
+            cwd: None,
+            command: " ".into(),
+            args: vec![],
+        },
+        ReplaceAgentStartupRequest {
+            cwd: Some("../outside".into()),
+            ..replace()
+        },
+        ReplaceAgentStartupRequest {
+            args: vec![credential.clone()],
+            ..replace()
+        },
+    ] {
+        assert!(runtime.replace_startup("stable-id", invalid).await.is_err());
+        assert_eq!(runtime.get_startup("stable-id").unwrap(), before);
+    }
+    let (a, b) = tokio::join!(
+        runtime.restart_with_startup("restart-a", "stable-id", replace()),
+        runtime.start("restart-b", "stable-id", true)
+    );
+    let a = a.unwrap();
+    let b = b.unwrap();
+    assert_eq!(a.agent_id, "stable-id");
+    assert_eq!(b.agent_id, "stable-id");
+    assert_eq!(a.run_generation, generation + 1);
+    assert_eq!(b.run_generation, generation + 2);
+    let launches = spawns.lock().unwrap().clone();
+    assert_eq!(launches.len(), 3);
+    for launch in &launches[1..] {
+        assert_eq!(launch.command, "new-command");
+        assert_eq!(launch.args, replace().args);
+        assert_eq!(launch.env["TREER_WORKLOAD_CREDENTIAL"], credential);
+        assert_eq!(launch.cols, 80);
+        assert_eq!(launch.rows, 24);
+    }
+    let old = &launches[0];
+    runtime.apply_process(HostProcessInfo {
+        process_id: old.process_id.clone(),
+        pid: original.pid,
+        cwd: old.cwd.clone(),
+        running: false,
+        started_at: original.started_at,
+        last_output_at: Utc::now(),
+        exited_at: Some(Utc::now()),
+        exit_code: Some(0),
+        stream_epoch: "run-1".into(),
+        first_revision: 1,
+        next_revision: 1,
+        bracketed_paste: false,
+        metadata: old.metadata.clone(),
+    });
+    assert_eq!(runtime.list()[0].run_generation, generation + 2);
+    assert!(runtime.get_startup("stable-id").unwrap().enabled);
+    runtime
+        .inner
+        .startup_store
+        .update("stable-id", |entry| entry.spec.enabled = false)
+        .unwrap();
+    assert!(
+        !runtime
+            .replace_startup("stable-id", replace())
+            .await
+            .unwrap()
+            .enabled,
+        "set preserves stopped intent"
+    );
+    assert_eq!(
+        StartupStore::load(saved_path.clone())
+            .unwrap()
+            .get("stable-id")
+            .unwrap()
+            .workload_credential,
+        credential
+    );
+    runtime
+        .inner
+        .startup_store
+        .update("stable-id", |entry| entry.spec.kind = "app".into())
+        .unwrap();
+    assert_eq!(
+        runtime
+            .replace_startup("stable-id", replace())
+            .await
+            .unwrap_err()
+            .code,
+        "app_startup_managed"
+    );
+    task.abort();
+    runtime.inner.workload_proxies.remove("stable-id");
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires cargo build -p treer-agent-host immediately before this isolated real-Host test"]
@@ -461,6 +723,70 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
         .restore_startup_agents(&["app-unit".into()])
         .await
         .is_empty());
+    let credential = new_workload_credential();
+    let shell = hot
+        .create(
+            "admin-shell-create",
+            "admin-shell".into(),
+            credential.clone(),
+            CreateAgentRequest {
+                server_id: None,
+                kind: "shell".into(),
+                name: "temporary admin shell".into(),
+                cwd: ".".into(),
+                args: vec![],
+                cols: 80,
+                rows: 24,
+                publish_ports: vec![],
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+    let replacement = ReplaceAgentStartupRequest {
+        cwd: None,
+        command: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            "printf new-command > admin-marker; exec sleep 120".into(),
+        ],
+    };
+    hot.replace_startup("admin-shell", replacement)
+        .await
+        .unwrap();
+    assert!(
+        !root.join("admin-marker").exists(),
+        "saving does not run the command"
+    );
+    let restarted = hot
+        .start("admin-shell-restart", "admin-shell", true)
+        .await
+        .unwrap();
+    assert_eq!(restarted.agent_id, shell.agent_id);
+    assert_eq!(restarted.run_generation, shell.run_generation + 1);
+    assert_eq!(
+        hot.inner
+            .startup_store
+            .get("admin-shell")
+            .unwrap()
+            .workload_credential,
+        credential
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !root.join("admin-marker").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "replacement command did not execute on real Host"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("admin-marker")).unwrap(),
+        "new-command"
+    );
+    hot.stop("admin-shell-delete", "admin-shell").await.unwrap();
+    hot.clear_startup("admin-shell").unwrap();
+    hot.inner.agents.write().unwrap().remove("admin-shell");
     shutdown(&mut second_host).await;
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -748,6 +1074,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
                 publish_ports: vec![],
             },
         )
+        .await
         .unwrap();
     assert_eq!(
         registered.generation, 0,

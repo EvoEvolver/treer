@@ -21,8 +21,8 @@ use treer_protocol::{
     AgentInfo, AgentInterfaceDescriptor, AgentPrompt, AgentPromptQueueResponse, AgentStartupSpec,
     AgentStatus, AgentTranscriptResponse, CreateAgentRequest, MachineExecRequest,
     MachineExecResponse, ProtocolError, ReadAgentOutputResponse, RegisterAgentInterfaceRequest,
-    SetAgentStartupRequest, TerminalCursor, UploadMachineFileResponse, VirtualNetworkHostsSnapshot,
-    AGENT_INTERFACE_PROTOCOL_V1,
+    ReplaceAgentStartupRequest, SetAgentStartupRequest, TerminalCursor, UploadMachineFileResponse,
+    VirtualNetworkHostsSnapshot, AGENT_INTERFACE_PROTOCOL_V1,
 };
 #[cfg(test)]
 use uuid::Uuid;
@@ -751,6 +751,15 @@ impl ControllerRuntime {
         restart: bool,
     ) -> Result<AgentInfo, ProtocolError> {
         let _guard = self.inner.recovery_lock.lock().await;
+        self.start_locked(operation_id, agent_id, restart).await
+    }
+
+    async fn start_locked(
+        &self,
+        operation_id: &str,
+        agent_id: &str,
+        restart: bool,
+    ) -> Result<AgentInfo, ProtocolError> {
         // Inventory is authoritative even when a previous spawn ACK was lost.
         let response = self
             .inner
@@ -805,11 +814,125 @@ impl ControllerRuntime {
         self.spawn_startup(&entry).await
     }
 
-    pub fn set_startup(
+    pub async fn replace_startup(
+        &self,
+        agent_id: &str,
+        request: ReplaceAgentStartupRequest,
+    ) -> Result<AgentStartupSpec, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
+        self.replace_startup_locked(agent_id, request)
+    }
+
+    pub async fn restart_with_startup(
+        &self,
+        operation_id: &str,
+        agent_id: &str,
+        request: ReplaceAgentStartupRequest,
+    ) -> Result<AgentInfo, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
+        // Persist before touching the process. The lock covers replacement,
+        // inventory adoption, stop, generation allocation, and spawn.
+        self.replace_startup_locked(agent_id, request)?;
+        self.start_locked(operation_id, agent_id, true).await
+    }
+
+    pub fn get_admin_startup(&self, agent_id: &str) -> Result<AgentStartupSpec, ProtocolError> {
+        let spec = self.get_startup(agent_id)?;
+        if spec.kind == "app" {
+            return Err(ProtocolError::new(
+                "app_startup_managed",
+                "App startup is managed by its deployment; edit the App deployment instead",
+            ));
+        }
+        Ok(spec)
+    }
+
+    fn replace_startup_locked(
+        &self,
+        agent_id: &str,
+        request: ReplaceAgentStartupRequest,
+    ) -> Result<AgentStartupSpec, ProtocolError> {
+        request.validate()?;
+        let mut entry = match self.inner.startup_store.get(agent_id) {
+            Some(entry) => entry,
+            None => {
+                let agent = self.get(agent_id)?;
+                let agent = agent
+                    .lock()
+                    .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+                StoredAgentStartup {
+                    spec: AgentStartupSpec {
+                        agent_id: agent_id.into(),
+                        server_id: self.inner.server_id.clone(),
+                        kind: agent.info.kind.clone(),
+                        name: agent.info.name.clone(),
+                        cwd: agent.info.cwd.clone(),
+                        command: String::new(),
+                        args: vec![],
+                        publish_ports: vec![],
+                        enabled: !agent.info.status.is_terminal(),
+                        generation: agent.info.run_generation,
+                    },
+                    workspace_id: self.inner.workspace_id.clone(),
+                    workload_credential: agent.workload_credential.clone(),
+                    last_host_epoch: self.inner.host_epoch.clone(),
+                    initial_writes: vec![],
+                    cols: 120,
+                    rows: 36,
+                }
+            }
+        };
+        if entry.spec.kind == "app" {
+            return Err(ProtocolError::new(
+                "app_startup_managed",
+                "App startup is managed by its deployment; edit the App deployment instead",
+            ));
+        }
+        if entry.workspace_id != self.inner.workspace_id
+            || entry.spec.server_id != self.inner.server_id
+        {
+            return Err(ProtocolError::new(
+                "host_identity_mismatch",
+                "saved startup belongs to another workspace or Controller",
+            ));
+        }
+        // Workload credentials are inherited from the private store, never
+        // serialized into the public startup spec or command line.
+        if !entry.workload_credential.is_empty()
+            && std::iter::once(&request.command)
+                .chain(request.args.iter())
+                .any(|arg| arg.contains(&entry.workload_credential))
+        {
+            return Err(ProtocolError::new(
+                "invalid_agent_startup",
+                "startup argv must not contain the workload credential",
+            ));
+        }
+        if let Some(cwd) = request.cwd {
+            self.resolve_machine_directory(&cwd)?;
+            entry.spec.cwd = if cwd.trim().is_empty() {
+                ".".into()
+            } else {
+                cwd
+            };
+        }
+        entry.spec.command = request.command;
+        entry.spec.args = request.args;
+        entry.initial_writes.clear();
+        let spec = entry.spec.clone();
+        self.inner
+            .startup_store
+            .upsert(entry)
+            .map_err(startup_store_error)?;
+        Ok(spec)
+    }
+
+    pub async fn set_startup(
         &self,
         agent_id: &str,
         request: SetAgentStartupRequest,
     ) -> Result<AgentStartupSpec, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
         if request.command.trim().is_empty() {
             return Err(ProtocolError::new(
                 "invalid_agent_startup",

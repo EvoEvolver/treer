@@ -792,9 +792,27 @@ impl ProxyClient {
                     ),
                 }
             }
+            AgentCommand::StartupAdminGet { agent_id } => self
+                .runtime
+                .get_admin_startup(&agent_id)
+                .map(|spec| CommandResult::success(command_id.clone(), spec))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::StartupAdminSet { agent_id, request } => self
+                .runtime
+                .replace_startup(&agent_id, request)
+                .await
+                .map(|spec| CommandResult::success(command_id.clone(), spec))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::RestartWithStartup { agent_id, request } => self
+                .runtime
+                .restart_with_startup(&command_id, &agent_id, request)
+                .await
+                .map(|agent| CommandResult::success(command_id.clone(), agent))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::StartupSet { agent_id, request } => self
                 .runtime
                 .set_startup(&agent_id, request)
+                .await
                 .map(|spec| CommandResult::success(command_id.clone(), spec))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::StartupGet { agent_id } => self

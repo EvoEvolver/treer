@@ -1,4 +1,206 @@
 use super::*;
+
+#[allow(clippy::too_many_arguments)]
+async fn admin_startup_handler(
+    state: AppState,
+    auth: AuthStore,
+    policy: PolicyEngine,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    workspace_id: String,
+    target: String,
+    request: Option<ReplaceAgentStartupRequest>,
+    restart: bool,
+) -> Result<Json<Value>, ApiFailure> {
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|m| &m.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?
+    .or_else(|| {
+        session.as_ref().map(|session| PolicySubject::Human {
+            user_id: session.user_id.clone(),
+        })
+    });
+    let target = if target == "self" {
+        match &subject {
+            Some(PolicySubject::Agent { agent_id, .. }) => agent_id.clone(),
+            _ => {
+                return Err(ApiFailure::bad_request(
+                    "agent_identity_required",
+                    "self requires an authenticated Agent",
+                ))
+            }
+        }
+    } else {
+        target
+    };
+    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
+    require_machine_target(subject.as_ref(), &agent.server_id)?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_STARTUP_MANAGE,
+        agent_policy_resource(&agent),
+    )
+    .await?;
+    if agent.kind == "app"
+        || auth
+            .resolve_app_deployment_by_runtime(&workspace_id, &agent.agent_id)
+            .await?
+            .is_some()
+    {
+        return Err(ApiFailure::bad_request(
+            "app_startup_managed",
+            "App startup is managed by its deployment; edit the App deployment instead",
+        ));
+    }
+    if restart {
+        authorize_control(
+            &policy,
+            &workspace_id,
+            subject.as_ref(),
+            ACTION_AGENT_STOP,
+            agent_policy_resource(&agent),
+        )
+        .await?;
+        authorize_control(
+            &policy,
+            &workspace_id,
+            subject.as_ref(),
+            ACTION_AGENT_CREATE,
+            PolicyResource::new(RESOURCE_MACHINE, &agent.server_id),
+        )
+        .await?;
+    }
+    let Some(request) = request else {
+        // A read needs no lifecycle guard: an offline Controller must not hold
+        // the shared mutation lock while the request waits for its response.
+        return Ok(Json(
+            state
+                .send_command(
+                    &workspace_id,
+                    &agent.server_id,
+                    AgentCommand::StartupAdminGet {
+                        agent_id: agent.agent_id,
+                    },
+                )
+                .await?,
+        ));
+    };
+    request.validate()?;
+    // Serialize with start/stop/delete across Proxy requests. Controller holds
+    // its recovery lock across persistence and restart as well.
+    let guard = auth
+        .workload_lifecycle_guard(&workspace_id, &agent.agent_id)
+        .await?;
+    let command = if restart {
+        AgentCommand::RestartWithStartup {
+            agent_id: agent.agent_id.clone(),
+            request,
+        }
+    } else {
+        AgentCommand::StartupAdminSet {
+            agent_id: agent.agent_id.clone(),
+            request,
+        }
+    };
+    // Saving alone preserves stopped intent. Explicit restart records running
+    // intent before dispatch, matching the existing lifecycle recovery path.
+    if restart {
+        auth.set_agent_recovery_enabled(&workspace_id, &agent.agent_id, true)
+            .await?;
+    }
+    let data = state
+        .send_command(&workspace_id, &agent.server_id, command)
+        .await?;
+    guard
+        .commit()
+        .await
+        .map_err(|error| ApiFailure::internal("lifecycle_lock_failed", &error.to_string()))?;
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: if restart {
+                "agent.startup.restarted"
+            } else {
+                "agent.startup.admin_set"
+            },
+            resource_kind: "agent",
+            resource_id: &agent.agent_id,
+            resource_name: Some(&agent.name),
+            payload: json!({"server_id": &agent.server_id}),
+        })
+        .await
+    {
+        tracing::warn!(?error, "failed to record startup management audit");
+    }
+    Ok(Json(data))
+}
+
+macro_rules! admin_startup_route {
+    ($name:ident, $restart:expr) => {
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) async fn $name(
+            State(state): State<AppState>,
+            Extension(auth): Extension<AuthStore>,
+            Extension(policy): Extension<PolicyEngine>,
+            session: Option<Extension<CurrentSession>>,
+            machine: Option<Extension<MachineSession>>,
+            headers: HeaderMap,
+            Path((workspace_id, target)): Path<(String, String)>,
+            Json(request): Json<ReplaceAgentStartupRequest>,
+        ) -> Result<Json<Value>, ApiFailure> {
+            admin_startup_handler(
+                state,
+                auth,
+                policy,
+                session,
+                machine,
+                headers,
+                workspace_id,
+                target,
+                Some(request),
+                $restart,
+            )
+            .await
+        }
+    };
+}
+admin_startup_route!(set_admin_agent_startup, false);
+admin_startup_route!(restart_agent_with_startup, true);
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn get_admin_agent_startup(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiFailure> {
+    admin_startup_handler(
+        state,
+        auth,
+        policy,
+        session,
+        machine,
+        headers,
+        workspace_id,
+        target,
+        None,
+        false,
+    )
+    .await
+}
 pub(crate) fn require_self_agent(
     subject: &PolicySubject,
     agent_id: &str,

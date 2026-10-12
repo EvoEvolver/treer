@@ -313,6 +313,75 @@ test.beforeEach(async ({ page }) => {
   await mockApi(page)
 })
 
+for (const mobile of [false, true]) {
+  test.describe(`startup command on ${mobile ? "mobile" : "desktop"}`, () => {
+    test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile })
+    test("shows current argv and saves one atomic restart with the same identity", async ({ page }) => {
+      let replacements = 0
+      await page.route("**/agents/ag-1/admin/startup", (route) => ok(route, { ...agentA, cwd: "repo", command: "codex", args: ["resume", "original-thread", "literal value"], enabled: true, generation: 3 }))
+      await page.route("**/agents/ag-1/restart-with-startup", async (route) => {
+        replacements++
+        expect(route.request().postDataJSON()).toEqual({ cwd: "other repo", command: "codex", args: ["--no-daemon", "resume", "original-thread", "two words"] })
+        await ok(route, { ...agentA, run_generation: 4 })
+      })
+      await page.goto("/")
+      await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
+      const dialog = page.getByRole("dialog")
+      await expect(dialog.getByRole("textbox", { name: "Startup command", exact: true })).toHaveValue("codex resume original-thread 'literal value'")
+      await expect(dialog.getByRole("textbox", { name: "Startup working directory" })).toHaveValue("repo")
+      await dialog.getByRole("textbox", { name: "Startup command", exact: true }).fill("codex --no-daemon resume original-thread 'two words'")
+      await dialog.getByRole("textbox", { name: "Startup working directory" }).fill("other repo")
+      await dialog.getByRole("button", { name: "Save and restart" }).click()
+      await expect(dialog).not.toBeVisible()
+      await expect(page.getByRole("status")).toContainText("Saved startup command and restarted api-server")
+      expect(replacements).toBe(1)
+      await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
+      await expect(page.getByRole("menuitem", { name: "Edit startup command", exact: true })).toHaveCount(0)
+    })
+    test("keeps errors visible and never restarts after an unsupported read", async ({ page }) => {
+      let replacements = 0
+      await page.route("**/agents/ag-1/admin/startup", (route) => route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: { code: "unsupported_command", message: "Controller requires agent.startup-admin.v1" } }) }))
+      await page.route("**/agents/ag-1/restart-with-startup", (route) => { replacements++; return ok(route, {}) })
+      await page.goto("/")
+      await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText("agent.startup-admin.v1")
+      await expect(page.getByRole("button", { name: "Save and restart" })).toBeDisabled()
+      expect(replacements).toBe(0)
+    })
+    test("preserves multiline shell argv when saving the displayed command", async ({ page }) => {
+      const script = "set -eu\necho '$HOME'\nexec sleep 120"
+      await page.route("**/agents/ag-1/admin/startup", (route) => ok(route, { command: "sh", args: ["-lc", script], cwd: "." }))
+      const saved = page.waitForRequest("**/agents/ag-1/restart-with-startup")
+      await page.route("**/agents/ag-1/restart-with-startup", (route) => ok(route, agentA))
+      await page.goto("/")
+      await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
+      await expect(page.getByRole("textbox", { name: "Startup command", exact: true })).toHaveValue(/exec sleep 120/)
+      await page.getByRole("button", { name: "Save and restart" }).click()
+      expect((await saved).postDataJSON()).toEqual({ command: "sh", args: ["-lc", script], cwd: "." })
+    })
+    test("rejects shell operators and preserves the editor on denied save", async ({ page }) => {
+      let replacements = 0
+      await page.route("**/agents/ag-1/admin/startup", (route) => ok(route, { command: "sh", args: [], cwd: "." }))
+      await page.route("**/agents/ag-1/restart-with-startup", (route) => { replacements++; return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "policy_denied", message: "startup management denied" } }) }) })
+      await page.goto("/")
+      await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
+      await expect(page.getByRole("textbox", { name: "Startup command", exact: true })).toHaveValue("sh")
+      await page.getByRole("textbox", { name: "Startup command", exact: true }).fill("sh && echo bad")
+      await page.getByRole("button", { name: "Save and restart" }).click()
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText("one executable")
+      expect(replacements).toBe(0)
+      await page.getByRole("textbox", { name: "Startup command", exact: true }).fill("sh")
+      await page.getByRole("button", { name: "Save and restart" }).click()
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText("startup management denied")
+      expect(replacements).toBe(1)
+    })
+  })
+}
+
 // Helpers — machine entries in workspace settings are <button>s whose accessible
 // name includes the machine name, root path and build label.
 const workstationRow = (page: Page) => page.getByRole("button", { name: /^workstation / })

@@ -46,10 +46,19 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
-- An Agent may register, read, or clear only its own Host-restart startup spec.
+- The original Agent startup register/read/clear interface remains self-only.
   The Proxy applies distinct `agent.startup.read` and `agent.startup.manage`
   actions, and a restored process is launched only while its durable Agent
   credential remains active and bound to the same machine.
+- The separate admin startup read/set routes evaluate `agent.startup.manage`
+  on the target Agent, including cross-Agent callers. Browser users require
+  workspace access and are evaluated as humans; local operators use their
+  authenticated machine identity. Replace-and-restart additionally requires
+  the existing `agent.stop` on the Agent and `agent.create` on its machine.
+  App runtime edits are rejected in favor of the App deployment configuration.
+  Startup management bodies and responses contain no credential field; known
+  Treer workload/operator credential literals in new specifications are rejected. Audit events
+  record actor/target IDs, never the command, arguments, or credentials.
 
 ## Unsupported Claims
 

@@ -56,6 +56,93 @@ fn lifecycle_declaration_defaults_to_starting_missing_for_older_senders() {
 use super::*;
 
 #[test]
+fn admin_startup_commands_round_trip_and_require_a_new_capability() {
+    let request = ReplaceAgentStartupRequest {
+        cwd: None,
+        command: "/bin/sh".into(),
+        args: vec!["-c".into(), "literal $HOME ; quotes '".into()],
+    };
+    for command in [
+        AgentCommand::StartupAdminGet {
+            agent_id: "target".into(),
+        },
+        AgentCommand::StartupAdminSet {
+            agent_id: "target".into(),
+            request: request.clone(),
+        },
+        AgentCommand::RestartWithStartup {
+            agent_id: "target".into(),
+            request,
+        },
+    ] {
+        assert_eq!(
+            command.required_capability(),
+            Some(CAPABILITY_AGENT_STARTUP_ADMIN)
+        );
+        let wire = serde_json::to_value(&command).unwrap();
+        assert!(!wire.to_string().contains("credential"));
+        assert_eq!(
+            serde_json::from_value::<AgentCommand>(wire).unwrap(),
+            command
+        );
+    }
+    assert!(serde_json::from_value::<ReplaceAgentStartupRequest>(
+        serde_json::json!({"command":"sh","workload_credential":"secret"})
+    )
+    .is_err());
+    assert_eq!(
+        AgentCommand::StartupGet {
+            agent_id: "self".into()
+        }
+        .required_capability(),
+        Some(CAPABILITY_AGENT_STARTUP)
+    );
+}
+
+#[test]
+fn startup_replacement_rejects_secret_literals_and_malformed_argv() {
+    let valid = ReplaceAgentStartupRequest {
+        cwd: None,
+        command: "sh".into(),
+        args: vec!["-lc".into(), "exec agent --key-file .private/key".into()],
+    };
+    assert!(valid.validate().is_ok());
+    for prefix in ["wlc_", "opc_"] {
+        let secret = format!("{prefix}{}", "a".repeat(64));
+        assert!(ReplaceAgentStartupRequest {
+            args: vec![format!("--key={secret}")],
+            ..valid.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(ReplaceAgentStartupRequest {
+            cwd: Some(secret),
+            ..valid.clone()
+        }
+        .validate()
+        .is_err());
+    }
+    assert!(ReplaceAgentStartupRequest {
+        command: " ".into(),
+        ..valid.clone()
+    }
+    .validate()
+    .is_err());
+    assert!(ReplaceAgentStartupRequest {
+        args: vec!["a\0b".into()],
+        ..valid.clone()
+    }
+    .validate()
+    .is_err());
+    assert!(ReplaceAgentStartupRequest {
+        cwd: Some("a\0b".into()),
+        ..valid
+    }
+    .validate()
+    .is_err());
+}
+
+#[test]
 fn managed_app_public_access_is_explicit_and_backward_compatible() {
     let legacy: CreateAppDeploymentRequest = serde_json::from_value(serde_json::json!({
         "name": "docs",

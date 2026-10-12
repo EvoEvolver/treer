@@ -17,7 +17,17 @@ pub(super) async fn run_agent_command(
         AgentCommand::Rmdir { path } => workload_tree::rmdir(client, &path).await,
         AgentCommand::Start { target } => lifecycle_agent(client, &target, "start").await,
         AgentCommand::Stop { target } => stop_agent(client, &target).await,
-        AgentCommand::Restart { target } => lifecycle_agent(client, &target, "restart").await,
+        AgentCommand::Restart {
+            target,
+            cwd,
+            command,
+        } => {
+            if command.is_empty() {
+                lifecycle_agent(client, &target, "restart").await
+            } else {
+                replace_agent_startup(client, &target, cwd, command, true).await
+            }
+        }
         AgentCommand::Show { target } => {
             Ok(serde_json::to_value(client.get_agent(&target).await?)?)
         }
@@ -94,6 +104,23 @@ pub(super) async fn run_agent_admin_command(
     command: AgentAdminCommand,
 ) -> anyhow::Result<Value> {
     match command {
+        AgentAdminCommand::Startup { command } => match command {
+            AgentAdminStartupCommand::Set {
+                target,
+                cwd,
+                command,
+            } => replace_agent_startup(client, &target, cwd, command, false).await,
+            AgentAdminStartupCommand::Show { target } => {
+                let target = normalize_target(&target)?;
+                client
+                    .value(
+                        Method::GET,
+                        &format!("api/agents/{}/admin/startup", path_segment(&target)),
+                        None,
+                    )
+                    .await
+            }
+        },
         AgentAdminCommand::Start { target } => lifecycle_agent(client, &target, "start").await,
         AgentAdminCommand::Restart { target } => lifecycle_agent(client, &target, "restart").await,
         AgentAdminCommand::Create {
@@ -149,6 +176,36 @@ pub(super) async fn lifecycle_agent(
             Method::POST,
             &format!("api/agents/{}/{action}", path_segment(&target)),
             Some(json!({})),
+        )
+        .await
+}
+
+async fn replace_agent_startup(
+    client: &ApiClient,
+    target: &str,
+    cwd: Option<String>,
+    mut command: Vec<String>,
+    restart: bool,
+) -> anyhow::Result<Value> {
+    let target = normalize_target(target)?;
+    let executable = command.remove(0);
+    client
+        .value(
+            if restart { Method::POST } else { Method::PUT },
+            &format!(
+                "api/agents/{}/{}",
+                path_segment(&target),
+                if restart {
+                    "restart-with-startup"
+                } else {
+                    "admin/startup"
+                }
+            ),
+            Some(serde_json::to_value(ReplaceAgentStartupRequest {
+                cwd,
+                command: executable,
+                args: command,
+            })?),
         )
         .await
 }

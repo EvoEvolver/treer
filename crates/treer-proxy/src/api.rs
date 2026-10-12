@@ -31,7 +31,7 @@ use treer_protocol::{
     GetMessageResponse, ImportMessagesRequest, InputAgentRequest, LaunchAgentProfileRequest,
     ListMessagesQuery, MachineEnrollmentRequest, MachineEnrollmentResponse, MachineExecRequest,
     MachineService, MessagePrincipal, MessagePrincipalKind, PromptAgentRequest, ProtocolError,
-    ReceiveMessagesRequest, RenameRequest, ResolveAppRecipientsRequest,
+    ReceiveMessagesRequest, RenameRequest, ReplaceAgentStartupRequest, ResolveAppRecipientsRequest,
     ResolveAppRecipientsResponse, SendMessageRequest, ServerStatus, ServiceIngress,
     ServiceIngressAccess, SetAgentStartupRequest, TerminalClientMessage, TerminalCursor,
     TerminalServerMessage, UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest,

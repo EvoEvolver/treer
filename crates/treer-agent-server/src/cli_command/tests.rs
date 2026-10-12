@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn admin_startup_and_restart_argv_parse_without_shell_interpretation() {
+    let set = Args::try_parse_from([
+        "treer",
+        "agent",
+        "admin",
+        "startup",
+        "set",
+        "reviewer",
+        "--cwd",
+        "repo",
+        "--",
+        "codex",
+        "--no-daemon",
+        "literal $() ' spaces",
+    ])
+    .unwrap();
+    assert!(
+        matches!(set.command, Some(Command::Agent { command: AgentCommand::Admin { command: AgentAdminCommand::Startup { command: AgentAdminStartupCommand::Set { target, cwd: Some(cwd), command } } } }) if target == "reviewer" && cwd == "repo" && command == ["codex", "--no-daemon", "literal $() ' spaces"])
+    );
+    for target in ["self", "reviewer", "ag_stable"] {
+        Args::try_parse_from(["treer", "agent", "admin", "startup", "show", target]).unwrap();
+    }
+    let restart = Args::try_parse_from([
+        "treer",
+        "agent",
+        "restart",
+        "self",
+        "--",
+        "sh",
+        "-lc",
+        "echo hello",
+    ])
+    .unwrap();
+    assert!(
+        matches!(restart.command, Some(Command::Agent { command: AgentCommand::Restart { cwd: None, command, .. } }) if command == ["sh", "-lc", "echo hello"])
+    );
+    assert!(
+        Args::try_parse_from(["treer", "agent", "restart", "reviewer", "--cwd", "repo"]).is_err()
+    );
+    assert!(
+        Args::try_parse_from(["treer", "agent", "admin", "startup", "set", "reviewer"]).is_err()
+    );
+    let original = Args::try_parse_from(["treer", "agent", "startup", "set", "--", "sh"]).unwrap();
+    assert!(
+        matches!(original.command, Some(Command::Agent { command: AgentCommand::Startup { command: AgentStartupCommand::Set { cwd, command, .. } } }) if cwd == "." && command == ["sh"])
+    );
+}
+
+#[test]
 fn key_names_encode_to_terminal_sequences() {
     assert_eq!(
         encode_keys(&["ctrl-c".into(), "enter".into(), "up".into()]).expect("encode"),

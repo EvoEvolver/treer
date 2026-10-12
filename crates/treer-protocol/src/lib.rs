@@ -16,6 +16,7 @@ pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKIL
 pub const SERVICE_STREAM_EOF: &str = "treer-service-eof-v1";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
+pub const CAPABILITY_AGENT_STARTUP_ADMIN: &str = "agent.startup-admin.v1";
 pub const CAPABILITY_AGENT_LIFECYCLE: &str = "agent.lifecycle.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
 pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
@@ -24,6 +25,7 @@ pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,
+    CAPABILITY_AGENT_STARTUP_ADMIN,
     CAPABILITY_AGENT_LIFECYCLE,
     CAPABILITY_MACHINE_EXEC,
     CAPABILITY_MACHINE_UPLOAD,
