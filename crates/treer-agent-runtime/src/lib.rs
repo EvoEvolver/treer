@@ -599,6 +599,8 @@ fn spawn_output_reader(
 ) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
+        #[cfg(windows)]
+        let mut cursor_query = ConPtyCursorQuery::default();
         loop {
             let count = match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -610,6 +612,22 @@ fn spawn_output_reader(
                     break;
                 }
             };
+            // portable-pty requests PSEUDOCONSOLE_INHERIT_CURSOR. A headless
+            // Host must answer the initial query itself, before a browser is
+            // attached, or ConPTY blocks the child process's output.
+            #[cfg(windows)]
+            if cursor_query.observe(&buffer[..count]) {
+                let (result, _) = std_mpsc::sync_channel(1);
+                if let Ok(input) = process.input.lock() {
+                    if let Some(input) = input.as_ref() {
+                        let _ = input.send(InputWrite {
+                            data: b"\x1b[1;1R".to_vec(),
+                            delay: Duration::ZERO,
+                            result,
+                        });
+                    }
+                }
+            }
             let Some(runtime) = runtime.upgrade() else {
                 break;
             };
@@ -639,6 +657,35 @@ fn spawn_output_reader(
             let _ = runtime.output_events.send(chunk);
         }
     });
+}
+
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct ConPtyCursorQuery {
+    matched: usize,
+    answered: bool,
+}
+
+#[cfg(any(windows, test))]
+impl ConPtyCursorQuery {
+    fn observe(&mut self, bytes: &[u8]) -> bool {
+        const QUERY: &[u8] = b"\x1b[6n";
+        if self.answered {
+            return false;
+        }
+        for &byte in bytes {
+            if byte == QUERY[self.matched] {
+                self.matched += 1;
+                if self.matched == QUERY.len() {
+                    self.answered = true;
+                    return true;
+                }
+            } else {
+                self.matched = usize::from(byte == QUERY[0]);
+            }
+        }
+        false
+    }
 }
 
 fn spawn_process_monitor(runtime: Weak<RuntimeInner>, process: Arc<HostProcess>) {
@@ -681,6 +728,22 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Instant;
 
+    #[test]
+    fn conpty_startup_cursor_query_handles_chunk_boundaries_once() {
+        for split in 0..=4 {
+            let mut query = ConPtyCursorQuery::default();
+            let bytes = b"\x1b[6n";
+            let first = query.observe(&bytes[..split]);
+            let second = query.observe(&bytes[split..]);
+            assert!(first ^ second);
+            assert!(!query.observe(bytes));
+        }
+        let mut query = ConPtyCursorQuery::default();
+        assert!(!query.observe(b"\x1b[31mhello\x1b["));
+        assert!(!query.observe(b"0m\x1b"));
+        assert!(query.observe(b"\x1b[6n"));
+    }
+
     fn decoded(replay: &HostOutputReplay) -> String {
         String::from_utf8_lossy(
             &replay
@@ -699,7 +762,11 @@ mod tests {
             if decoded(&replay).contains(needle) {
                 return replay;
             }
-            assert!(Instant::now() < deadline, "process output did not arrive");
+            assert!(
+                Instant::now() < deadline,
+                "process output did not contain {needle:?}; received {:?}",
+                decoded(&replay)
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }

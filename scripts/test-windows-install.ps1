@@ -6,19 +6,19 @@ $temporary = Join-Path ([IO.Path]::GetTempPath()) ('treer-installer-test-' + [Gu
 $installation = Join-Path $temporary 'bin with spaces'
 $previousUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $previousPath = $env:Path
-$script:checksumOverride = $null
+$fixture = @{ ArtifactDirectory = $ArtifactDirectory; ChecksumOverride = $null }
 # Exercise the actual installer with native release executables. Keep network
 # responses deterministic; installation, process checks, hashes and PATH are real.
-function Invoke-WebRequest {
+${function:Invoke-WebRequest} = {
     param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)
     $binary = ([Uri]$Uri).Segments[-1]
     if ($binary -eq 'SHA256SUMS') {
-        $content = Get-Content -LiteralPath (Join-Path $ArtifactDirectory $binary) -Raw
-        if ($script:checksumOverride) { $content = $script:checksumOverride }
+        $content = Get-Content -LiteralPath (Join-Path $fixture.ArtifactDirectory $binary) -Raw
+        if ($fixture.ChecksumOverride) { $content = $fixture.ChecksumOverride }
         return [PSCustomObject]@{ Content = $content }
     }
-    Copy-Item -LiteralPath (Join-Path $ArtifactDirectory $binary) -Destination $OutFile
-}
+    Copy-Item -LiteralPath (Join-Path $fixture.ArtifactDirectory $binary) -Destination $OutFile
+}.GetNewClosure()
 try {
     foreach ($scriptFile in @('scripts/install.ps1', 'scripts/stage-release-artifacts.ps1')) {
         $tokens = $null
@@ -35,7 +35,7 @@ try {
     if (@($entries).Count -ne 1) { throw 'Installer duplicated the PATH entry.' }
     $before = (Get-FileHash (Join-Path $installation 'treer.exe')).Hash
     $remaining = Get-Content (Join-Path $ArtifactDirectory 'SHA256SUMS') | Select-Object -Skip 1
-    $script:checksumOverride = ((@(('0' * 64) + '  treer') + @($remaining)) -join "`n") + "`n"
+    $fixture.ChecksumOverride = ((@(('0' * 64) + '  treer') + @($remaining)) -join "`n") + "`n"
     $rejected = $false
     try {
         & ./scripts/install.ps1 -ArtifactBase 'https://fixture.invalid/artifacts/' -InstallDir $installation
