@@ -7,13 +7,12 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler

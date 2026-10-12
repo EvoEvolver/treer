@@ -135,4 +135,11 @@ if __name__ == '__main__':
     record=server.store.save(Path(path),TOKENS['human'],{})
     Path(path).unlink()
     print(json.dumps({'url':gateway_url,'prefix':prefix,'soul_id':record['soul_id']}),flush=True)
+    def stop(*_):
+        gateway.shutdown(); gateway.server_close()
+        server.shutdown(); server.server_close()
+        proxy.shutdown(); proxy.server_close()
+        temporary.cleanup()
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
     signal.pause()

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-const {chromium} = await import(process.env.SOUL_PLAYWRIGHT_MODULE || '/Users/dooms/treer/apps/paper/node_modules/playwright/index.mjs');
+const {chromium} = await import(process.env.SOUL_PLAYWRIGHT_MODULE || 'playwright');
 const root=fileURLToPath(new URL('../',import.meta.url));
 for(const width of [1280,390]) for(const tunnel of [false,true]) {
   test(`human auto identity ${tunnel?'iframe tunnel':'ingress'} ${width}px`,async()=>{
