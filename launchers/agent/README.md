@@ -31,11 +31,11 @@ service record or published port is required.
 From a Treer-managed Agent in this checkout:
 
 ```bash
-./apps/agent-ui/scripts/apply.sh --name codex-ui
+./launchers/agent/scripts/apply.sh --name codex-ui
 # Native Claude Code, saved as the "Claude + UI" profile:
-./apps/agent-ui/scripts/apply.sh --harness claude --name claude-ui
+./launchers/agent/scripts/apply.sh --harness claude --name claude-ui
 # Other agents can still use ACP:
-./apps/agent-ui/scripts/apply.sh --harness acp --name acp-ui --acp-command my-acp-agent --display-name Agent
+./launchers/agent/scripts/apply.sh --harness acp --name acp-ui --acp-command my-acp-agent --display-name Agent
 ```
 
 The script installs the local Node dependencies, saves the launch profile,
@@ -47,10 +47,10 @@ installed and authenticated.
 For local development outside a managed Agent:
 
 ```bash
-npm --prefix apps/agent-ui install
-AGENT_UI_CWD="$PWD" npm --prefix apps/agent-ui start
-AGENT_UI_HARNESS=claude AGENT_UI_CWD="$PWD" npm --prefix apps/agent-ui start
-AGENT_UI_HARNESS=acp AGENT_UI_ACP_COMMAND=claude-agent-acp AGENT_UI_CWD="$PWD" npm --prefix apps/agent-ui start
+npm --prefix launchers/agent install
+AGENT_UI_CWD="$PWD" npm --prefix launchers/agent start
+AGENT_UI_HARNESS=claude AGENT_UI_CWD="$PWD" npm --prefix launchers/agent start
+AGENT_UI_HARNESS=acp AGENT_UI_ACP_COMMAND=claude-agent-acp AGENT_UI_CWD="$PWD" npm --prefix launchers/agent start
 ```
 
 The server binds an OS-selected free port on `127.0.0.1` by default. Each Agent
@@ -66,8 +66,8 @@ Resume an existing native session, including one created by the terminal CLI
 importing or summarizing its context:
 
 ```bash
-/absolute/path/to/apps/agent-ui/scripts/treer-agent.sh --session-id THREAD_ID
-/absolute/path/to/apps/agent-ui/scripts/treer-agent.sh --harness claude --session-id SESSION_ID
+/absolute/path/to/launchers/agent/scripts/treer-agent.sh --session-id THREAD_ID
+/absolute/path/to/launchers/agent/scripts/treer-agent.sh --harness claude --session-id SESSION_ID
 # Equivalently: AGENT_UI_SESSION_ID=ID .../scripts/treer-agent.sh (--thread-id is an alias)
 ```
 
@@ -96,11 +96,11 @@ ID have no automatic Agent-scoped record.
 From **inside the Agent you intend to replace**, first inspect the plan:
 
 ```bash
-/absolute/path/to/apps/agent-ui/scripts/switch.sh --session-id THREAD_ID --dry-run
+/absolute/path/to/launchers/agent/scripts/switch.sh --session-id THREAD_ID --dry-run
 # Then, only when ready to replace this process:
-/absolute/path/to/apps/agent-ui/scripts/switch.sh --session-id THREAD_ID
+/absolute/path/to/launchers/agent/scripts/switch.sh --session-id THREAD_ID
 # A Claude Code TUI Agent, resuming its own native session:
-/absolute/path/to/apps/agent-ui/scripts/switch.sh --harness claude --session-id SESSION_ID
+/absolute/path/to/launchers/agent/scripts/switch.sh --harness claude --session-id SESSION_ID
 ```
 
 The script verifies its managed identity, saves a self-only startup command
@@ -312,25 +312,25 @@ non-regular files, and never accept an output path from a client.
 ## Checks
 
 ```bash
-npm --prefix apps/agent-ui ci
-npm --prefix apps/agent-ui run check
-npm --prefix apps/agent-ui test
+npm --prefix launchers/agent ci
+npm --prefix launchers/agent run check
+npm --prefix launchers/agent test
 # Unit tests use fake Codex, ACP, and native Claude processes.
 # Browser regression and desktop/390px screenshots, with an isolated fake Codex.
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
-npm --prefix apps/agent-ui exec -- playwright install chromium
-CODEX_UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix apps/agent-ui run test:browser
+npm --prefix launchers/agent exec -- playwright install chromium
+CODEX_UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run test:browser
 # Opt-in: real Claude credentials/inference, new sessions in a temporary cwd only.
 # Covers start/model, tool-boundary steer, queue, background output, interrupt,
 # JSONL resume/continuation, and missing-session rejection; no Treer mutations.
-npm --prefix apps/agent-ui run test:claude
+npm --prefix launchers/agent run test:claude
 # Low-level protocol probes (also only new temporary sessions):
-node apps/agent-ui/tests/probe-claude.mjs
-CLAUDE_PROBE_PRIORITY=now node apps/agent-ui/tests/probe-claude.mjs
-CLAUDE_PROBE_BACKGROUND=1 node apps/agent-ui/tests/probe-claude.mjs
+node launchers/agent/tests/probe-claude.mjs
+CLAUDE_PROBE_PRIORITY=now node launchers/agent/tests/probe-claude.mjs
+CLAUDE_PROBE_BACKGROUND=1 node launchers/agent/tests/probe-claude.mjs
 # Opt-in: managed Treer environment, real Codex credentials/inference needed.
 # Creates two temporary Agents and a temporary Codex + UI recipe profile,
 # checks independent ports and restart/context recall, and removes both Agents
 # and the profile on completion. Does not restart Host/Controller or self.
-npm --prefix apps/agent-ui run test:live
+npm --prefix launchers/agent run test:live
 ```

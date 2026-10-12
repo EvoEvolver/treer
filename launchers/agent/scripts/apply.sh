@@ -125,7 +125,7 @@ create_agent() {
     --kind command \
     --name "$NAME" \
     --cwd "$AGENT_CWD" \
-    -- ./apps/agent-ui/scripts/treer-agent.sh "$@"
+    -- ./launchers/agent/scripts/treer-agent.sh "$@"
 }
 # Restore the JSON launch arguments as positional parameters, preserving spaces.
 eval "set -- $(python3 -c 'import json, shlex, sys; print(" ".join(shlex.quote(a) for a in json.loads(sys.argv[1])))' "$LAUNCH_ARGS")"
