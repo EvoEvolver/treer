@@ -22,6 +22,8 @@ import json,os,sys
 from pathlib import Path
 state=Path(os.environ['MOCK_STATE'])
 args=sys.argv[1:]
+# The real thin client streams stdin to the Controller.
+if os.getenv('MOCK_DRAIN_STDIN'): sys.stdin.read()
 with (state/'calls.jsonl').open('a') as f: f.write(json.dumps(args)+'\n')
 if args==['agent','startup','set'] or args[:3]==['agent','startup','set']:
  (state/'startup.json').write_text(json.dumps(args))
@@ -129,6 +131,31 @@ class InstallTest(unittest.TestCase):
         calls = [json.loads(line) for line in (self.state / "calls.jsonl").read_text().splitlines()]
         self.assertFalse(any("launch" in call for call in calls))
         self.assertGreaterEqual(sum(call[:4] == ["agent", "admin", "profile", "show"] for call in calls), 6)
+
+    def test_piped_install_survives_stdin_streaming_treer(self):
+        # `curl ... | sh` feeds the script on stdin; the treer client must not eat it.
+        result = subprocess.run(["sh", "-s", "--", "--source", str(self.source), "--agent", "codex"],
+                                input=(ROOT / "install.sh").read_text(), env={**self.env, "MOCK_DRAIN_STDIN": "1"},
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ACP launcher installed", result.stdout)
+
+    def test_sparse_checkout_covers_protocol_compile_inputs(self):
+        import re
+        repo = ROOT.parents[1]
+        includes = set()
+        for source in (repo / "crates/treer-protocol/src").rglob("*.rs"):
+            for path in re.findall(r'include_(?:str|bytes)!\("([^"]+)"\)', source.read_text()):
+                includes.add((source.parent / path).resolve().relative_to(repo).as_posix())
+        self.assertTrue(includes)
+        install = (ROOT / "install.sh").read_text()
+        readme = (ROOT / "README.md").read_text()
+        install_set = re.search(r'sparse-checkout set ([^\n]+)', install).group(1).split()
+        readme_set = re.search(r'sparse-checkout set \\\n\s+([^\n]+)', readme).group(1).split()
+        for entries in (install_set, readme_set):
+            for path in includes:
+                self.assertTrue(any(path == entry or path.startswith(entry + "/") for entry in entries),
+                                f"{path} is not in sparse checkout {entries}")
 
     def test_failed_verification_rolls_back_current(self):
         self.install()

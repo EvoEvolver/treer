@@ -90,7 +90,7 @@ TREER_ACP_SOURCE="${XDG_DATA_HOME:-$HOME/.local/share}/treer/acp-launcher"
 git clone --depth 1 --filter=blob:none --sparse \
   https://github.com/EvoEvolver/treer.git "$TREER_ACP_SOURCE"
 git -C "$TREER_ACP_SOURCE" sparse-checkout set \
-  launchers/acp crates/treer-protocol
+  launchers/acp crates/treer-protocol skills/treer-install
 cd "$TREER_ACP_SOURCE"
 ```
 

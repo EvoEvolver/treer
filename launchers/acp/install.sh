@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+# `curl ... | sh` feeds this script on stdin. Parse the whole body before running
+# it and give it /dev/null as stdin, so commands such as the stdin-streaming
+# `treer` client cannot consume the rest of the script.
+{
+
 AGENTS=""
 REF=main
 REPOSITORY=https://github.com/EvoEvolver/treer.git
@@ -48,7 +53,8 @@ if [ -n "$SOURCE" ]; then
   COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 else
   git clone --depth 1 --filter=blob:none --sparse --branch "$REF" "$REPOSITORY" "$STAGE/source"
-  git -C "$STAGE/source" sparse-checkout set launchers/acp crates/treer-protocol
+  # Keep this list in sync with treer-protocol's compile-time include_str! inputs.
+  git -C "$STAGE/source" sparse-checkout set launchers/acp crates/treer-protocol skills/treer-install
   COMMIT="$(git -C "$STAGE/source" rev-parse HEAD)"
   # The published version is a normal source tree, without a mutable Git checkout.
   cp -R "$STAGE/source/." "$STAGE/tree"
@@ -143,3 +149,4 @@ PY
   exit 1
 fi
 echo "ACP launcher installed: $VERSION (profiles use $INSTALL_ROOT/current)"
+} </dev/null
