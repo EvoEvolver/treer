@@ -5,14 +5,15 @@ import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ChevronDown, ChevronRight, Folder, MoreVertical, Plus } from "lucide-react"
+import { agentPath, folderPath as resolveFolderPath } from "@/lib/workload-path"
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
 export interface NewAgentFolder { folderId: string; path: string }
 type Item = { kind: "folder" | "agent"; id: string; name: string }
 
-export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, onOpen, onSettings, onRename, onDelete, onNew, preview, placementRevision = 0 }: {
+export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, onOpen, onSettings, onRename, onDelete, onNew, preview, placementRevision = 0, onTreeChange }: {
   workspaceId: string | null; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; selectedId: string | null
-  onOpen: (id: string, logs?: boolean) => void; onSettings: (app: AppDeployment) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void; onNew: (folder?: NewAgentFolder) => void; preview: boolean; placementRevision?: number
+  onOpen: (id: string, logs?: boolean) => void; onSettings: (app: AppDeployment) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void; onNew: (folder?: NewAgentFolder) => void; preview: boolean; placementRevision?: number; onTreeChange?: (tree: Tree) => void
 }) {
   const [tree, setTree] = useState<Tree>({ folders: [], placements: [] })
   const [loading, setLoading] = useState(false)
@@ -49,7 +50,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
         const data = await api<Tree>(base)
         if (active && generation === readGeneration.current) setTree(data)
       } catch (reason) {
-        if (active && generation === readGeneration.current) setError(String(reason))
+        if (active && generation === readGeneration.current) setError(reason instanceof Error ? reason.message : "Unable to update workload tree")
       } finally { reading = false; if (active) setLoading(false) }
     }
     void refresh()
@@ -85,24 +86,14 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     while (changed) { changed = false; for (const folder of tree.folders) if (folder.parent_id && result.has(folder.parent_id) && !result.has(folder.folder_id)) { result.add(folder.folder_id); changed = true } }
     return result
   }
-  function folderPath(folder: FolderEntry): string {
-    const names = [folder.name]
-    const visited = new Set([folder.folder_id])
-    let parentId = folder.parent_id
-    while (parentId && !visited.has(parentId)) {
-      visited.add(parentId)
-      const parent = tree.folders.find((entry) => entry.folder_id === parentId)
-      if (!parent) break
-      names.unshift(parent.name); parentId = parent.parent_id
-    }
-    return `/${names.join("/")}`
-  }
+  useEffect(() => { onTreeChange?.(tree) }, [tree, onTreeChange])
+  function folderPath(folder: FolderEntry) { return resolveFolderPath(folder, tree.folders) }
   function itemPath(item: Item, parent: string | null) {
     const folder = tree.folders.find((entry) => entry.folder_id === (item.kind === "folder" ? item.id : parent))
     if (item.kind === "folder") return folder ? folderPath(folder) : `/${item.name}`
     // App deployment labels are the canonical workload labels; legacy runtime
     // inventory may still contain the retired app: display prefix.
-    return `${folder ? folderPath(folder) : ""}/${item.name}`
+    return agentPath(workloads.find((agent) => agent.agent_id === item.id)!, tree)
   }
   async function copyPath(path: string) {
     setCopyNotice("")
@@ -123,7 +114,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       await api(`${base}${path}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
       const updated = await api<Tree>(base)
       setTree(updated); setEditor(null)
-    } catch (reason) { setError(String(reason)) } finally { mutation.current = false; setBusy(false) }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") } finally { mutation.current = false; setBusy(false) }
   }
   function move(item: Item, folderId: string | null) {
     if (item.kind === "folder") {
@@ -155,18 +146,18 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       await api(`${base}/placements/${encodeURIComponent(agentId)}`, {
         method: "PUT", body: JSON.stringify({ folder_id: parent, position }),
       })
-    } catch (reason) { setError(String(reason)) }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") }
     finally {
       // Also read after a partial failure: initialization may have succeeded.
-      try { setTree(await api<Tree>(base)) } catch (reason) { setError(String(reason)) }
+      try { setTree(await api<Tree>(base)) } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") }
       mutation.current = false; setBusy(false)
     }
   }
   async function lifecycle(agent: Agent, action: string) {
     setBusy(true); setError("")
-    try { await api(`/api/workspaces/${encodeURIComponent(workspaceId ?? "")}/agents/${encodeURIComponent(agent.agent_id)}/${action}`, { method: "POST", body: "{}" }) } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
+    try { await api(`/api/workspaces/${encodeURIComponent(workspaceId ?? "")}/agents/${encodeURIComponent(agent.agent_id)}/${action}`, { method: "POST", body: "{}" }) } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") } finally { setBusy(false) }
   }
-  function edit(mode: "create" | "rename" | "move", parent: string | null, item?: Item) { setName(mode === "rename" ? item?.name ?? "" : ""); setDestination(parent ?? ""); setEditor({ mode, parent, item }) }
+  function edit(mode: "create" | "rename" | "move", parent: string | null, item?: Item) { setName(mode === "rename" ? item?.name ?? "" : ""); setDestination(parent ?? ""); setError(""); setEditor({ mode, parent, item }) }
   function menu(item: Item, parent: string | null, agent?: Agent) {
     const app = agent && apps.find((entry) => entry.runtime_agent_id === agent.agent_id || entry.app_id === agent.agent_id)
     const siblings = orderedRows(parent)
@@ -184,10 +175,10 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     const folders = tree.folders.filter((folder) => folder.parent_id === parent && !ancestors.has(folder.folder_id)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.folder_id.localeCompare(b.folder_id))
     const rows = orderedRows(parent)
     return <>{folders.map((folder) => { const item: Item = { kind: "folder", id: folder.folder_id, name: folder.name }; return <div key={folder.folder_id} role="treeitem" aria-expanded={!collapsed.has(folder.folder_id)} aria-label={folder.name}>
-      <div className="flex min-h-10 items-center rounded px-1 hover:bg-accent" draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => setDragged(null)} onDragOver={(event) => { event.preventDefault(); event.stopPropagation() }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (dragged) move(dragged, folder.folder_id); setDragged(null) }}>
+      <div title={folderPath(folder)} className="flex min-h-10 items-center rounded px-1 hover:bg-accent" draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => setDragged(null)} onDragOver={(event) => { event.preventDefault(); event.stopPropagation() }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (dragged) move(dragged, folder.folder_id); setDragged(null) }}>
         <button className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs" onClick={() => setCollapsed((current) => { const next = new Set(current); if (next.has(folder.folder_id)) next.delete(folder.folder_id); else next.add(folder.folder_id); return next })}>{collapsed.has(folder.folder_id) ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}<Folder className="size-3.5" /><span className="truncate">{folder.name}</span></button>{menu(item, parent)}
       </div>{!collapsed.has(folder.folder_id) && <div role="group" className="ml-3 border-l pl-1">{render(folder.folder_id, new Set([...ancestors, folder.folder_id]))}</div>}
-    </div> })}{rows.map((agent) => { const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }; return <div role="treeitem" aria-label={agent.name} aria-selected={selectedId === agent.agent_id} key={agent.agent_id} draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => { setDragged(null); setDropTarget(null) }} onDragOver={(event) => {
+    </div> })}{rows.map((agent) => { const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }; return <div role="treeitem" aria-label={agent.name} title={agentPath(agent, tree)} data-agent-id={agent.agent_id} aria-selected={selectedId === agent.agent_id} key={agent.agent_id} draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => { setDragged(null); setDropTarget(null) }} onDragOver={(event) => {
       if (busy || dragged?.kind !== "agent" || dragged.id === agent.agent_id) return
       event.preventDefault(); event.stopPropagation()
       event.dataTransfer.dropEffect = "move"
@@ -202,18 +193,19 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       }
       setDragged(null); setDropTarget(null)
     }} className={`flex min-h-12 items-center gap-1 rounded px-2 py-1 hover:bg-accent ${selectedId === agent.agent_id ? "bg-accent" : ""} ${dropTarget?.id === agent.agent_id ? dropTarget.after ? "shadow-[inset_0_-2px_0_hsl(var(--primary))]" : "shadow-[inset_0_2px_0_hsl(var(--primary))]" : ""}`}>
-      <button className="min-w-0 flex-1 text-left" onClick={() => onOpen(agent.agent_id)}><span className="block truncate text-xs font-medium">{agent.name}</span><span className="block truncate text-[9px] text-muted-foreground">{agent.kind} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
+      <button className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="block truncate text-xs font-medium">{agent.name}</span><span className="block truncate text-[9px] text-muted-foreground">{agent.kind} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
     </div> })}</>
   }
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-tour="agents-tab">
-    {startupAgent && workspaceId && <AgentStartupDialog key={`${workspaceId}/${startupAgent.agent_id}`} workspaceId={workspaceId} agent={startupAgent} onClose={() => setStartupAgent(null)} onSaved={() => setCopyNotice(`Saved startup command and restarted ${startupAgent.name}`)} />}
+    {startupAgent && workspaceId && <AgentStartupDialog key={`${workspaceId}/${startupAgent.agent_id}`} workspaceId={workspaceId} agent={{ ...startupAgent, path: agentPath(startupAgent, tree) }} onClose={() => setStartupAgent(null)} onSaved={() => setCopyNotice(`Saved startup command and restarted ${agentPath(startupAgent, tree)}`)} />}
     <div className="flex h-10 shrink-0 items-center justify-between px-3 text-[11px] font-medium text-muted-foreground"><span>Tree</span><div className="flex"><Button variant="ghost" size="sm" className="h-7 px-2" disabled={!workspaceId || busy || loading} onClick={() => edit("create", null)} aria-label="New folder"><Folder className="size-3.5" /><Plus className="size-3" /></Button><span data-tour="create-agent"><Button variant="ghost" size="sm" className="h-7 px-2" aria-label={!preview && !machines.length ? "Set up a machine before creating an agent" : undefined} disabled={!workspaceId || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onClick={() => onNew()}><Plus className="size-3.5" />New</Button></span></div></div>
     {copyNotice && <p role="status" className="px-3 py-2 text-xs break-all">{copyNotice}</p>}
-    {loading && <p role="status" className="px-3 text-xs">Loading folders…</p>}{error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>Reload folders</Button></div>}
+    {loading && <p role="status" className="px-3 text-xs">Loading folders…</p>}{error && !editor && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>Reload folders</Button></div>}
     <div role="tree" aria-label="Workspace workloads" aria-busy={busy || loading} className="min-h-0 flex-1 overflow-auto px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null) }}>{render(null)}{!workloads.length && !tree.folders.length && !loading && <p className="px-2 py-4 text-xs text-muted-foreground">No workloads in this workspace</p>}<div aria-label="Move to workspace root" className="mt-2 min-h-8 border-t px-2 py-2 text-[10px] text-muted-foreground">Workspace root</div></div>
     <Dialog open={manualCopyPath !== null} onOpenChange={(open) => !open && setManualCopyPath(null)}><DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); copyInput.current?.focus(); copyInput.current?.select() }}><DialogHeader><DialogTitle>Copy path</DialogTitle><DialogDescription>Automatic copying is unavailable. Use your device's copy action on the selected path.</DialogDescription></DialogHeader><Input ref={copyInput} aria-label="Tree path" value={manualCopyPath ?? ""} readOnly className="font-mono" onFocus={(event) => event.target.select()} /><DialogFooter><Button onClick={() => setManualCopyPath(null)}>Done</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(editor)} onOpenChange={(open) => !open && setEditor(null)}><DialogContent><DialogHeader><DialogTitle>{editor?.mode === "move" ? `Move ${editor.item?.name}` : editor?.mode === "rename" ? "Rename folder" : "New folder"}</DialogTitle></DialogHeader>
       {editor?.mode === "move" ? <label className="text-sm">Destination<select aria-label="Destination folder" className="mt-2 w-full rounded border bg-background p-2" value={destination} onChange={(event) => setDestination(event.target.value)}><option value="">Workspace root</option>{tree.folders.filter((folder) => editor.item?.kind !== "folder" || !descendants(editor.item.id).has(folder.folder_id)).map((folder) => <option key={folder.folder_id} value={folder.folder_id}>{folderPath(folder)}</option>)}</select></label> : <Input aria-label="Folder name" autoFocus value={name} onChange={(event) => setName(event.target.value)} />}
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
       <DialogFooter><Button variant="outline" onClick={() => setEditor(null)}>Cancel</Button><Button disabled={busy || (editor?.mode !== "move" && !name.trim())} onClick={() => { if (!editor) return; if (editor.mode === "move" && editor.item) move(editor.item, destination || null); else if (editor.mode === "rename" && editor.item) void mutate(`/folders/${encodeURIComponent(editor.item.id)}`, "PATCH", { name: name.trim() }); else void mutate("/folders", "POST", { name: name.trim(), parent_id: editor.parent }) }}>{busy ? "Saving…" : "Save"}</Button></DialogFooter>
     </DialogContent></Dialog>
   </div>

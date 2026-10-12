@@ -70,6 +70,7 @@ const agentA = {
   agent_id: "ag-1",
   server_id: "srv-a",
   name: "api-server",
+  path: "/api-server",
   kind: "command",
   status: "running",
 }
@@ -78,6 +79,7 @@ const agentB = {
   agent_id: "ag-2",
   server_id: "srv-b",
   name: "worker",
+  path: "/worker",
   kind: "terminal",
   status: "running",
 }
@@ -86,6 +88,7 @@ const appRuntimeAgent = {
   ...agentA,
   agent_id: "appw-1",
   name: "app:Soul Archive",
+  path: "/Soul Archive",
   kind: "app",
 }
 
@@ -334,7 +337,7 @@ for (const mobile of [false, true]) {
       await dialog.getByRole("textbox", { name: "Startup working directory" }).fill("other repo")
       await dialog.getByRole("button", { name: "Save and restart" }).click()
       await expect(dialog).not.toBeVisible()
-      await expect(page.getByRole("status")).toContainText("Saved startup command and restarted api-server")
+      await expect(page.getByRole("status")).toContainText("Saved startup command and restarted /api-server")
       expect(replacements).toBe(1)
       await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
       await expect(page.getByRole("menuitem", { name: "Edit startup command", exact: true })).toHaveCount(0)
@@ -654,11 +657,26 @@ test("shared App rename and delete update metadata without resurrecting a placeh
 })
 
 test("remote App rename and delete events keep tree metadata synchronized", async ({ page }) => {
+  // The mock server sees a connection before the browser's OPEN event. Wait
+  // for that event rather than sending into a connecting/StrictMode socket.
+  await page.addInitScript(() => {
+    const NativeSocket = window.WebSocket
+    window.WebSocket = class extends NativeSocket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols)
+        if (String(url).endsWith("/events")) {
+          const saved = window as Window & { workspaceEvents?: WebSocket }
+          saved.workspaceEvents = this
+        }
+      }
+    }
+  })
   let events: { send: (message: string) => void } | undefined
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, (socket) => { events = socket })
   await page.goto("/")
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
   await expect.poll(() => Boolean(events)).toBe(true)
+  await expect.poll(() => page.evaluate(() => (window as Window & { workspaceEvents?: WebSocket }).workspaceEvents?.readyState)).toBe(1)
   events!.send(JSON.stringify({ event: "agent.updated", revision: 2, data: { ...appRuntimeAgent, name: "Remote Archive" } }))
   await expect(page.getByRole("treeitem", { name: "Remote Archive", exact: true })).toBeVisible()
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(0)
@@ -1422,4 +1440,110 @@ test("workspace deletion is blocked until every machine is deleted", async ({ pa
   await expect(page.getByText("Delete all 2 machines before deleting this workspace.")).toBeVisible()
   await expect(page.getByRole("button", { name: "Delete workspace" })).toBeDisabled()
   await expect(page.getByRole("dialog")).toHaveCount(0)
+})
+
+for (const mobile of [false, true]) {
+  test.describe(`same-name Agents on ${mobile ? "mobile" : "desktop"}`, () => {
+    test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile })
+    test("selection, copy, rename and conflicting move keep stable identity", async ({ page }) => {
+      const agents = [
+        { ...agentA, name: "reviewer", path: "/research/reviewer" },
+        { ...agentB, name: "reviewer", path: "/delivery/reviewer" },
+      ]
+      const tree = { folders: [
+        { folder_id: "research", name: "research", parent_id: null },
+        { folder_id: "delivery", name: "delivery", parent_id: null },
+      ], placements: [
+        { agent_id: "ag-1", folder_id: "research", position: 0 },
+        { agent_id: "ag-2", folder_id: "delivery", position: 0 },
+      ] }
+      const mutations: string[] = []
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (path: string) => { (window as Window & { copiedPath: string }).copiedPath = path } } })
+      })
+      await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents }))
+      await page.route("**/api/workspaces/ws-1/workload-tree**", (route) => {
+        if (route.request().method() === "GET") return ok(route, tree)
+        mutations.push(new URL(route.request().url()).pathname)
+        expect(route.request().postDataJSON().folder_id).toBe("delivery")
+        return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "agent_name_conflict", message: "An Agent in this folder already has this name" } }) })
+      })
+      await page.route("**/api/workspaces/ws-1/agents/ag-1", (route) => {
+        mutations.push(new URL(route.request().url()).pathname)
+        const name = route.request().postDataJSON().name
+        if (name === "occupied") return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "agent_name_conflict", message: "An Agent in this folder already has this name" } }) })
+        agents[0] = { ...agents[0], name, path: `/research/${name}` }
+        return ok(route, agents[0])
+      })
+      await page.goto("/")
+      const first = page.locator('[data-agent-id="ag-1"]')
+      const second = page.locator('[data-agent-id="ag-2"]')
+      await expect(first).toHaveAttribute("title", "/research/reviewer")
+      await expect(second).toHaveAttribute("title", "/delivery/reviewer")
+      for (const [row, path] of [[first, "/research/reviewer"], [second, "/delivery/reviewer"]] as const) {
+        await row.getByRole("button").first().click()
+        await expect(row).toHaveAttribute("aria-selected", "true")
+        if (mobile) {
+          await expect(page.locator(`span[title="${path}"]`)).toBeVisible()
+          await page.getByRole("button", { name: "Close full-screen terminal", exact: true }).click()
+        } else await expect(page.getByRole("navigation", { name: "Agent path" })).toHaveAttribute("title", path)
+        await row.getByRole("button", { name: "Actions for reviewer", exact: true }).click()
+        await page.getByRole("menuitem", { name: "Copy path", exact: true }).click()
+        await expect.poll(() => page.evaluate(() => (window as Window & { copiedPath: string }).copiedPath)).toBe(path)
+      }
+      await first.getByRole("button", { name: "Actions for reviewer", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
+      const dialog = page.getByRole("dialog")
+      await dialog.getByRole("combobox", { name: "Destination folder" }).selectOption("delivery")
+      await dialog.getByRole("button", { name: "Save", exact: true }).click()
+      await expect(dialog.getByRole("alert")).toHaveText("An Agent in this folder already has this name")
+      await expect(first).toHaveAttribute("title", "/research/reviewer")
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click()
+      await first.getByRole("button", { name: "Actions for reviewer", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
+      await expect(dialog).toContainText("/research/reviewer")
+      await dialog.getByRole("textbox").fill("occupied")
+      await dialog.getByRole("button", { name: "Rename", exact: true }).click()
+      await expect(dialog.getByRole("alert")).toHaveText("An Agent in this folder already has this name")
+      await dialog.getByRole("textbox").fill("renamed")
+      await dialog.getByRole("button", { name: "Rename", exact: true }).click()
+      await expect(dialog).not.toBeVisible()
+      await expect(first).toHaveAttribute("title", "/research/renamed")
+      await expect(second).toHaveAttribute("title", "/delivery/reviewer")
+      expect(mutations).toEqual([
+        "/api/workspaces/ws-1/workload-tree/placements/ag-1",
+        "/api/workspaces/ws-1/agents/ag-1", "/api/workspaces/ws-1/agents/ag-1",
+      ])
+    })
+  })
+}
+
+test("startup command fits 390px and short screens with long argv and errors", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 540 })
+  const script = "echo 'long literal value'\n".repeat(90)
+  await page.route("**/agents/ag-1/admin/startup", (route) => ok(route, { command: "sh", args: ["-lc", script], cwd: "repo" }))
+  await page.route("**/agents/ag-1/restart-with-startup", (route) => route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: { message: "Denied: " + "long-path/".repeat(20) } }) }))
+  await page.goto("/")
+  await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  const command = dialog.getByRole("textbox", { name: "Startup command", exact: true })
+  await expect(command).toHaveValue(/long literal value/)
+  await command.fill("sh -lc 'echo edited'")
+  await dialog.getByRole("button", { name: "Save and restart" }).click()
+  await expect(dialog.getByRole("alert")).toContainText("Denied:")
+  await dialog.getByRole("button", { name: "Save and restart" }).scrollIntoViewIfNeeded()
+  const box = (await dialog.boundingBox())!
+  expect(box.x).toBeGreaterThanOrEqual(0)
+  expect(box.x + box.width).toBeLessThanOrEqual(390)
+  expect(box.y).toBeGreaterThanOrEqual(0)
+  expect(box.y + box.height).toBeLessThanOrEqual(540)
+  expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath("startup-390.png") })
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click()
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
+  await expect(command).toHaveValue(/long literal value/)
+  await page.screenshot({ path: testInfo.outputPath("startup-desktop.png") })
 })

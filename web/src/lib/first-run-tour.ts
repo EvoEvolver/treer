@@ -3,10 +3,7 @@ import "driver.js/dist/driver.css"
 
 export const FIRST_RUN_TOUR_VERSION = "v1"
 
-export type SidebarTab = "apps" | "agents"
-
 export type FirstRunTourHost = {
-  setSidebarTab: (tab: SidebarTab) => void
   openCreateWorkspace: () => void
   closeCreateWorkspace: () => void
   prepareWorkspaceForMachineSteps: () => void
@@ -161,7 +158,6 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
       host.closeInstall()
       host.closeCreateAgent()
       host.closeWorkspaceSettings()
-      host.setSidebarTab("agents")
       if (activeTour === tour) activeTour = null
     },
   })
@@ -230,7 +226,6 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
         align: "start",
         onPrevClick: () => {
           host.closeWorkspaceSettings()
-          host.setSidebarTab("agents")
           host.openCreateWorkspace()
           void waitForSelector("[data-tour='create-workspace-dialog']").then(() => tour.movePrevious())
         },
@@ -264,7 +259,6 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
         onNextClick: () => {
           void goTo(tour, "[data-tour='create-agent']", () => {
             host.closeInstall()
-            host.setSidebarTab("agents")
           })
         },
       },

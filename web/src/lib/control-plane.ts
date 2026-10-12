@@ -1,8 +1,6 @@
 import { machineName, proxyUrl, type Agent, type AgentLaunchProfile, type Machine, type Organization, type Snapshot, type User, type Workspace } from "@/lib/api"
 
 
-export type ConnectionState = "connecting" | "live" | "reconnecting" | "no workspace"
-
 export type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
 
 export type MainView = "terminal" | "apps" | "app" | "audit" | "machine" | "organization" | "workspace"

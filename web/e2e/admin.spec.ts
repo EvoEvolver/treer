@@ -111,6 +111,7 @@ async function mockAdmin(page: Page, mode: "configured" | "unconfigured" = "conf
             agent_id: "ag_1",
             server_id: "srv_1",
             name: "reviewer",
+            path: "/research/reviewer",
             kind: "codex",
             status: "idle",
             interface: { protocol: "treer.agent-interface/v1", instance_id: "codex_1", port: 1, capabilities: ["prompt.submit"], registered_at: "2026-08-25T00:00:00Z" },
@@ -155,6 +156,6 @@ test("admin cards expand user and machine inventories", async ({ page }) => {
   await page.getByRole("button", { name: /Machines/ }).click()
   await expect(page.getByText("builder.lan")).toBeVisible()
   await page.getByRole("button", { name: /builder/ }).click()
-  await expect(page.getByText("reviewer")).toBeVisible()
+  await expect(page.getByText("/research/reviewer")).toBeVisible()
   await expect(page.getByText("codex")).toBeVisible()
 })
