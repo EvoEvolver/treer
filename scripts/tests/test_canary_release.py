@@ -52,7 +52,7 @@ class ReleaseTest(unittest.TestCase):
                                   notify=kwargs.get("notify"), agent=kwargs.get("agent"))
 
     def test_dry_run_does_not_write_fetch_push_or_check_identity(self):
-        args = self.args(notify="leader", agent="deployer")
+        args = self.args(notify="leader", agent="release-eng")
         args.dry_run = True
         with patch.object(release, "checked_identity", side_effect=AssertionError("network")):
             release.deploy(self.root, args)
@@ -63,13 +63,13 @@ class ReleaseTest(unittest.TestCase):
 
         def wrong_identity(*args, **kwargs):
             if args[:2] == ("treer", "whoami"):
-                return json.dumps({"agent": {"agent_id": "dev1-id", "name": "dev1"}})
+                return json.dumps({"agent": {"agent_id": "core-dev-id", "name": "core-dev"}})
             return original_run(*args, **kwargs)
 
         with patch.object(release.shutil, "which", return_value="/bin/true"), \
              patch.object(release, "run", side_effect=wrong_identity):
-            with self.assertRaisesRegex(RuntimeError, "caller is dev1"):
-                release.deploy(self.root, self.args(notify="leader", agent="deployer"))
+            with self.assertRaisesRegex(RuntimeError, "caller is core-dev"):
+                release.deploy(self.root, self.args(notify="leader", agent="release-eng"))
         self.assertFalse((self.root / ".treer").exists())
 
     def test_push_refuses_a_remote_commit_missing_from_the_candidate(self):
@@ -98,6 +98,7 @@ class ReleaseTest(unittest.TestCase):
                 return original_run(*args, cwd=cwd, **kwargs)
             if args[:2] == ("sh", "scripts/release-canary.sh"):
                 self.assertEqual((cwd / "source.txt").read_text(), "committed candidate\n")
+                self.assertEqual(kwargs["env"]["CARGO_TARGET_DIR"], str(cwd / "target"))
                 path = cwd / ".treer/releases" / self.commit / "manifest.json"
                 path.parent.mkdir(parents=True)
                 path.write_text(json.dumps({"commit": self.commit, "status": "canary_passed",

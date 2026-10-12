@@ -1320,3 +1320,80 @@ A new CLI checks `agent.path-targets.v1` on the Controller before dispatch. An
 older Controller yields a clear upgrade error; the client does not upgrade or
 restart it automatically. See the [design notes](research/2026-10-12-agent-path-targets.md)
 for compatibility and atomic creation decisions.
+
+### Machine updates with a reviewed Canary artifact set
+
+`scripts/update-machine.py` automates the manual machine update workflow on Unix
+machines with Python 3.11+, `nohup`, and an installed Controller. It is separate
+from the signed release-channel updater above: the manual workflow pins binary
+SHA256 values to the current Canary Proxy's HTTPS `SHA256SUMS`. This checksum
+comparison does not replace signed release metadata or a locally trusted key.
+Use the signed updater for normal distributed releases. Do not pass credentials
+in arguments, artifact URLs, or job configuration.
+
+Plan without changing or contacting a machine:
+
+```sh
+python3 scripts/update-machine.py --machine local
+python3 scripts/update-machine.py --machine mariana --workspace ws_…
+```
+
+After the coordinator has approved the Controller reconnect, apply the plan:
+
+```sh
+python3 scripts/update-machine.py --machine local --workspace ws_… --apply
+python3 scripts/update-machine.py --machine mariana --workspace ws_… --apply
+python3 scripts/update-machine.py --machine mariana --artifacts dist --apply
+```
+
+`本机` is an alias for `local`. Remote machines use `treer exec` only for short
+commands with no stdin, a 25-second timeout and bounded output. Long work runs
+under `nohup env -i` in its own Unix session (`setsid` via `start_new_session`),
+then the caller polls a small result document. No launchd or cron restart task
+is created. Local artifact directories may contain platform subdirectories;
+remote copies use bounded chunks and must still match the online Canary
+checksum manifest. Redirects and non-HTTPS artifact authorities are rejected
+except loopback test servers. Inherited workload credentials, UI settings and
+proxy variables are absent from the detached worker and service commands.
+
+The worker checks and stages binaries, executes `--version`, backs up installed
+files under `~/.local/share/treer-backups/<old-commit>-<timestamp>-<job>/`, then
+atomically replaces **Controller first** and runs
+`service --workspace WS restart-controller`. It requires a fresh Controller
+epoch, matching build/workspace/server identity, `proxy_connected`, path-target
+capability, and unchanged Agent IDs/PIDs/generations before replacing CLI.
+It verifies installed hashes and versions afterward. The Host is untouched;
+different Controller/Host versions, including an older locally built Host, are
+normal while the protocol remains compatible. Shared binary directories with
+multiple local workspace installs are refused and require a coordinated plan.
+
+Failure after activation restores the saved binaries and reactivates the old
+Controller. `result.json` distinguishes `rolled_back` from `rollback_failed`;
+retain the backup and investigate any rollback failure. An interrupted caller
+can resume polling with the printed job path:
+
+```sh
+python3 scripts/update-machine.py --machine mariana --resume /home/USER/.local/share/treer-updates/job-ID
+```
+
+Job and backup receipts contain only versions, paths, workspace/server
+identifiers and process metadata; existing operator credentials are read only
+in memory for the loopback inventory request. A leftover
+`.treer-machine-update.lock` after a power failure is not removed automatically:
+first verify that no updater is running, then resolve it under operator control.
+
+**Host update terminates every Agent and PTY owned by that Host**, including a
+managed caller on that machine. Obtain explicit approval for that impact first:
+
+```sh
+python3 scripts/update-machine.py --machine mariana --workspace ws_… \
+  --host --acknowledge-agent-interruption --apply
+```
+
+The Host path remains detached and uses the same clean environment. Cold
+recovery checks stable Agent IDs and new PIDs/generations for previously live
+Agents. Binary rollback can restore the prior software, but cannot undo the
+interruption or restore original process PIDs. No machine update is performed
+by repository tests; run `python3 -m unittest discover -s scripts/tests -p
+ 'test_update_machine.py'` for fake Controller/CLI, checksum, transport,
+activation-order, detachment and rollback checks.

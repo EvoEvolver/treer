@@ -7,6 +7,7 @@ matching the question; follow its source links for implementation detail.
 
 | Document | Use it for |
 | --- | --- |
+| [Team roles and ownership](team-roles.md) | Directory owners, review boundaries and collaboration rules |
 | [Product direction](product.md) | Purpose, current audience, product promise, and delivery boundaries |
 | [Capability roadmap](roadmap.md) | Real scenarios, capability planes, dependencies, and sequencing |
 | [Architecture](architecture.md) | Components, ownership rules, protocols, state, and information flows |

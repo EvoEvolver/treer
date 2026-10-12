@@ -76,7 +76,7 @@ def deploy(root, args):
         run("pnpm", "--dir", "web", "install", "--frozen-lockfile", cwd=checkout)
         env = os.environ.copy()
         env["TREER_RELEASE_RESUME"] = "1" if args.resume else "0"
-        env.setdefault("CARGO_TARGET_DIR", str(root / "target"))
+        env["CARGO_TARGET_DIR"] = str(checkout / "target")
         # One maintained release pipeline; no local Host/Controller operations.
         run("sh", "scripts/release-canary.sh", commit, cwd=checkout, env=env)
         manifest_path = checkout / ".treer" / "releases" / commit / "manifest.json"

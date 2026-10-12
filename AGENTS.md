@@ -7,6 +7,7 @@ second manual.
 
 ## Instruction boundary
 
+- [Team roles and ownership](docs/team-roles.md).
 - Repository development starts with [the documentation index](docs/README.md).
 - Managed Treer operations use [the embedded Treer skill](skills/treer/SKILL.md).
   That skill is the runtime CLI contract printed by `treer --skill` and
