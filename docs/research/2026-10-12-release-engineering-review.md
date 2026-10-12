@@ -36,3 +36,28 @@ processes; checksum equality against Canary HTTPS is not signed release-channel
 verification; local shared binaries serving multiple workspaces require a
 coordinated update rather than a single-workspace script invocation. The signed
 release-channel updater remains the ordinary distribution path.
+
+## Single-launcher addendum (through `31a7e94`)
+
+`8db143c`, `ff9bf73`, `fbb0cba` consolidate the existing runtime/UI into
+`launchers/agent`; the runtime HTTP source is a byte-identical move. The new
+installer resolves committed Git source, bounds profile cwd to machine root,
+installs into immutable commit directories, verifies saved profiles and swaps
+`current` atomically. Failure restores the previous current link; multi-profile
+updates are not a database transaction. It does not stop a Host or Controller.
+`switch.py` verifies its injected Agent ID against whoami and changes/restarts
+only `self`; it stores a session/startup plan, not workload credentials. Full
+installer/source selection is user-owned executable code, not signed Core
+release verification. `4a25de9` removes compatibility shims after reported saved
+startup/profile migration; old unconverted external saved commands need manual
+migration. Release CI checks type/syntax, 47 fake/installer tests, 43 closed
+Codex/ACP/Claude regressions, and desktop/mobile browser controls.
+
+**Existing risk requiring owner action before a release decision:**
+`launchers/agent/src/index.ts` accepts `/ws` upgrades without validating
+Origin/Host/token and immediately sends state/transcript. HTTP mutation routes
+also lack Origin/content-type validation. Binding to loopback is not a browser
+origin boundary. This pre-exists the move and is not fixed by Proxy ingress
+authentication for direct localhost access. Reported to `launcher-dev` and
+`core-dev` for a shared authenticated-tunnel/local-UI origin contract and hostile
+origin regression tests; no cross-owner implementation change made here.

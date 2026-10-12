@@ -153,7 +153,7 @@ just canary HEAD --push
 # Retry the exact commit after fixing a failed build/deployment:
 just canary <full-commit> --resume
 # Optional completion message; requires the actual managed caller to match:
-just canary HEAD --push --notify leader --agent deployer
+just canary HEAD --push --notify leader --agent /treer-dev-team/release-eng
 ```
 
 The wrapper resolves the revision once and creates a detached worktree under
