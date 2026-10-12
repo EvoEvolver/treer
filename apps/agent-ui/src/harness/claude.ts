@@ -303,7 +303,8 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
         exitCode: typeof patch.exit_code === "number" ? patch.exit_code : previous?.exitCode ?? (summaryExitCode ? Number(summaryExitCode[1]) : null),
         summary: text(patch.summary) || previous?.summary || null,
         ...(text(patch.output_file) || previous?.outputFile ? { outputFile: text(patch.output_file) || previous?.outputFile }
-          : kind === "local_bash" && /^[a-zA-Z0-9_-]+$/.test(id) ? { outputFile: join(this.taskOutputRoots.at(-1)!, `${id}.output`) } : {}),
+          : kind === "local_bash" && (patch.is_backgrounded === true || event.subtype === "background_tasks_changed")
+            && /^[a-zA-Z0-9_-]+$/.test(id) ? { outputFile: join(this.taskOutputRoots.at(-1)!, `${id}.output`) } : {}),
       });
     };
     if (event.subtype === "background_tasks_changed" && Array.isArray(event.tasks)) for (const task of event.tasks) update(record(task));

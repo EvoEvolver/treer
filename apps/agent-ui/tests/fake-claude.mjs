@@ -61,6 +61,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       tool.id === "edit" ? { tool_use_result: { structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ["-old", "+new"] }] } } : {});
   }
   const output = join(process.cwd(), "task.output");
+  system("task_started", { task_id: "foreground", is_backgrounded: false, task_type: "local_bash", description: "Foreground shell" });
+  system("task_notification", { task_id: "foreground", status: "completed", output_file: "", summary: "Foreground shell" });
   writeFileSync(output, "x".repeat(70_000) + "TASK_DONE\n");
   system("background_tasks_changed", { tasks: [{ task_id: "task1", run_id: "run1", task_type: "local_bash", description: "Background shell" }] });
   system("task_started", { task_id: "task1", tool_use_id: "bash", is_backgrounded: true, task_type: "local_bash", description: "Background shell" });

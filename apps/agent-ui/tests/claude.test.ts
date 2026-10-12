@@ -55,6 +55,7 @@ test("native Claude starts, persists identity, streams shared items and maintain
     assert.equal(task.kind, "shell"); assert.equal(task.exitCode, 0); assert.equal(task.summary, "TASK_DONE"); assert.ok(task.endedAt);
     assert.equal((await taskOutput(task, claude.taskOutputRoots, "10")).content, "TASK_DONE\n");
     assert.equal(snapshot.backgroundTasks.find((task) => task.id === "failed-task")?.status, "failed");
+    assert.equal(snapshot.backgroundTasks.find((task) => task.id === "foreground")?.outputFile, undefined);
     assert.equal(snapshot.backgroundTasks.find((task) => task.id === "stopped-task")?.kind, "monitor");
     assert.equal(claude.snapshot(2).thread!.hasOlderItems, true);
     await claude.updateSettings({ model: "opus" });
