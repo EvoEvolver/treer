@@ -44,6 +44,8 @@ interface, while data pages remain JSON. Agent Interfaces such as Codex UI and
 Pi UI are embedded AIS surfaces rather than standalone App indexes and continue
 to expose their registered `ui_path`.
 
+- [`issues`](issues/README.md) is a shared human/Agent issue tracker with SQLite,
+  hierarchy, dependencies, comments and expiring claims.
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`pi-ui`](pi-ui/README.md) is an Agent-scoped browser interface loaded inside

@@ -18,6 +18,7 @@ matching the question; follow its source links for implementation detail.
 | [Workspace Apps](../apps/README.md) | App trust boundary, ownership, runtime model, and in-tree AIS adapters |
 | [Agent launchers](../launchers/README.md) | Optional profile-driven Agent runtimes and presentation boundaries |
 | [App guidelines](../apps/GUIDELINES.md) | Agent Markdown indexes, JSON data routes, and `/_human/` browser surfaces |
+| [Issues App](../apps/issues/README.md) | Shared human/Agent issue tracker deployment, API, permissions and backup |
 | [Gits App](../apps/gits/README.md) | Workspace-local Git hosting, deployment, storage, and trust boundary |
 | [Treer Mail App](../apps/mail/README.md) | Mail setup, browser OAuth, legacy migration, backup, and limits |
 | [Treer Telegram App](../apps/telegram/README.md) | Telegram setup, bindings, reply mapping, recovery, and limits |
