@@ -13,7 +13,8 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { WorkloadTree } from "@/components/workload-tree"
+import { WorkloadTree, type NewAgentFolder } from "@/components/workload-tree"
+import { appendAgentToTreeFolder } from "@/lib/api"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
 import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
@@ -96,6 +97,8 @@ export function WorkspaceApp() {
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
   const [deleteWorkspaceOpen, setDeleteWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
+  const [agentFolder, setAgentFolder] = useState<NewAgentFolder | null>(null)
+  const [placementRevision, setPlacementRevision] = useState(0)
   const [creatingAgent, setCreatingAgent] = useState(false)
   const [deletingApp, setDeletingApp] = useState<AppDeployment | null>(null)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
@@ -523,7 +526,9 @@ export function WorkspaceApp() {
       setCreateAgentOpen(false)
       return
     }
-    if (!workspaceId) return
+    if (!workspaceId || creatingAgent) return
+    const creationWorkspaceId = workspaceId
+    const folder = agentFolder
     setCreatingAgent(true)
     try {
       let agent
@@ -537,15 +542,31 @@ export function WorkspaceApp() {
       }
       const agentId = agent.agent_id
       if (!agentId) throw new Error("Create agent did not return an id")
+      // Creation is complete even when the separate placement request fails.
+      // Close the creation form so retrying placement cannot create duplicates.
+      if (workspaceIdRef.current === creationWorkspaceId) {
+        setCreateAgentOpen(false)
+        setAgentFolder(null)
+      }
+      if (folder) {
+        try { await appendAgentToTreeFolder(creationWorkspaceId, agentId, folder.folderId) }
+        catch (reason) {
+          if (workspaceIdRef.current === creationWorkspaceId) showError(new Error(`Agent ${agent.name} was created, but placing it in ${folder.path} failed. Use Move to folder to retry. ${String(reason)}`))
+        }
+        if (workspaceIdRef.current === creationWorkspaceId) setPlacementRevision((revision) => revision + 1)
+      }
+      if (workspaceIdRef.current !== creationWorkspaceId) return
       setCreateAgentOpen(false)
       showAgentTerminal(agentId)
       await refreshSnapshot()
-    } catch (reason) { showError(reason) }
+    } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) showError(reason) }
     finally { setCreatingAgent(false) }
   }
 
-  function openCreateAgent(reset = true) {
+  function openCreateAgent(reset = true, folder: NewAgentFolder | null = null) {
+    if (creatingAgent) return
     if (reset || !createAgentOpenRef.current) {
+      setAgentFolder(folder)
       setAgentProfileId("terminal")
       setAgentName(defaultAgentName("terminal"))
       setAgentNameCustomized(false)
@@ -555,13 +576,15 @@ export function WorkspaceApp() {
     if (!preview) void loadLaunchProfiles().catch(showError)
   }
 
-  function openCreateAgentOrMachineSetup() {
+  function openCreateAgentOrMachineSetup(folder?: NewAgentFolder) {
     if (!preview && snapshot && snapshot.servers.length === 0) {
       openWorkspaceSettings()
       return
     }
-    openCreateAgent()
+    openCreateAgent(true, folder ?? null)
   }
+
+  useEffect(() => { setCreateAgentOpen(false); setAgentFolder(null) }, [workspaceId])
 
   function selectAgentProfile(profileId: string) {
     changeAgentProfile(profileId)
@@ -1123,7 +1146,7 @@ export function WorkspaceApp() {
           </div>
           <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
-        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} preview={preview} />
+        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} preview={preview} />
 
         <div className="shrink-0 border-t p-2">
           <DropdownMenu>
@@ -1214,6 +1237,7 @@ export function WorkspaceApp() {
             <DialogTitle>Create agent</DialogTitle>
             <DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription>
           </DialogHeader>
+          {agentFolder && <p className="break-all text-xs text-muted-foreground">Tree folder: {agentFolder.path}</p>}
           <Field label="Machine">
             <Select value={agentServerId} onValueChange={setAgentServerId} required>
               <SelectTrigger aria-label="Machine"><SelectValue placeholder="Select a machine" /></SelectTrigger>
@@ -1237,7 +1261,7 @@ export function WorkspaceApp() {
               : null}
           {agentProfileId === "manual" && <Field label="Command"><Input aria-label="Command" className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="/path/to/your-launcher --option" required /></Field>}
           {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Runs the saved command on this machine. Install its runtime and dependencies before launching.</span>}
-          <Field label="Name"><Input value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
+          <Field label="Name"><Input aria-label="Name" value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>
             <Button type="submit" disabled={creatingAgent || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : "Create agent"}</Button>

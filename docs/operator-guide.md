@@ -629,6 +629,14 @@ Production accepts only that manifest through `just promote-production`. See
 Open the App URL to create Agents and manage Agents and Apps together in the
 workspace's Tree sidebar. Each row offers Start, Stop, Restart, and Logs;
 App rows also offer App settings for access controls and the service URL.
+Choose New Agent from a folder's menu to use the same terminal, custom command,
+or launch profile dialog as the Tree's New button. After creation, the Agent is
+placed at the end of that folder. If placement fails, the browser reports that
+the Agent was created and offers Move to folder as the retry path.
+Folder and Agent menus offer Copy path for CLI-style absolute tree paths, such
+as `/research/experiments/reviewer` or `/reviewer` at the root. A status message
+confirms copying; when clipboard access is unavailable or denied, a dialog
+shows the selected path for manual copying on desktop or mobile.
 Use New folder to organize workloads into nested folders. Drag a workload or
 folder onto another folder, or use its Move to folder action to select a
 destination with a keyboard or touch screen. Drop onto Workspace root to move

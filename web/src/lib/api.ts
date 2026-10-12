@@ -15,6 +15,19 @@ export interface Workspace {
   name: string
 }
 
+export interface WorkloadFolder { folder_id: string; name: string; parent_id: string | null }
+export interface WorkloadPlacement { agent_id: string; folder_id: string | null; position: number }
+export interface WorkloadTreeState { folders: WorkloadFolder[]; placements: WorkloadPlacement[] }
+
+export async function appendAgentToTreeFolder(workspaceId: string, agentId: string, folderId: string) {
+  const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/workload-tree`
+  const tree = await api<WorkloadTreeState>(base)
+  const position = Math.max(-1, ...tree.placements.filter((placement) => placement.folder_id === folderId).map((placement) => placement.position)) + 1
+  return api(`${base}/placements/${encodeURIComponent(agentId)}`, {
+    method: "PUT", body: JSON.stringify({ folder_id: folderId, position }),
+  })
+}
+
 export interface OrganizationGroup {
   group_id: string
   organization_id: string

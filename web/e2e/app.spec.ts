@@ -325,6 +325,132 @@ async function openWorkspaceSettings(page: Page) {
   await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
 }
 
+async function createResearchTree(page: Page) {
+  await page.goto("/")
+  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("research")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await page.getByRole("button", { name: "Actions for research", exact: true }).click()
+  await page.getByRole("menuitem", { name: "New folder", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name" }).fill("experiments")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "experiments", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
+  await page.getByRole("combobox", { name: "Destination folder" }).selectOption("folder-2")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "experiments", exact: true }).getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
+}
+
+for (const mobile of [false, true]) {
+  test.describe(`tree menu on ${mobile ? "mobile" : "desktop"}`, () => {
+    test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile })
+
+    for (const launch of ["Terminal", "Custom command", "Codex"]) {
+      test(`New Agent reuses ${launch} creation and appends to the chosen folder`, async ({ page }) => {
+        await createResearchTree(page)
+        let created = false
+        let creations = 0
+        const reviewer = { ...agentA, agent_id: "ag-reviewer", name: "reviewer" }
+        await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: created ? [...snapshot.agents, reviewer] : snapshot.agents }))
+        const endpoint = launch === "Codex" ? "/launch-profiles/alp-codex/launch" : "/agents"
+        await page.route(`**/api/workspaces/ws-1${endpoint}`, (route) => {
+          const body = route.request().postDataJSON()
+          expect(body.server_id).toBe("srv-a")
+          expect(launch === "Codex" ? body.agent_name : body.name).toBe("reviewer")
+          if (launch === "Custom command") expect(body.args).toEqual(["echo", "hello world"])
+          if (launch === "Terminal") expect(body.kind).toBe("shell")
+          creations++; created = true
+          return ok(route, reviewer)
+        })
+        await page.getByRole("button", { name: "Actions for experiments", exact: true }).click()
+        await page.getByRole("menuitem", { name: "New Agent", exact: true }).click()
+        const dialog = page.getByRole("dialog")
+        await expect(dialog.getByRole("heading", { name: "Create agent" })).toBeVisible()
+        await expect(dialog).toContainText("Tree folder: /research/experiments")
+        if (launch !== "Terminal") {
+          await dialog.getByRole("combobox", { name: "Launch", exact: true }).click()
+          await page.getByRole("option", { name: launch, exact: true }).click()
+        }
+        if (launch === "Custom command") await dialog.getByRole("textbox", { name: "Command", exact: true }).fill('echo "hello world"')
+        await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("reviewer")
+        const placement = page.waitForRequest((request) => request.url().endsWith("/workload-tree/placements/ag-reviewer") && request.method() === "PUT")
+        await dialog.getByRole("button", { name: launch === "Terminal" ? "Create terminal" : "Create agent", exact: true }).click()
+        expect((await placement).postDataJSON()).toEqual({ folder_id: "folder-2", position: 1 })
+        if (mobile) await page.getByRole("button", { name: /^Close full-screen (terminal|interface)$/ }).click()
+        await expect(page.getByRole("treeitem", { name: "experiments", exact: true }).getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
+        await page.reload()
+        await expect(page.getByRole("treeitem", { name: "experiments", exact: true }).getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
+        expect(creations).toBe(1)
+      })
+    }
+
+    test("Copy path keeps exact CLI folder and Agent paths", async ({ page }) => {
+      await page.addInitScript(() => {
+        const saved = window as Window & { copiedPaths: string[] }
+        saved.copiedPaths = []
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { saved.copiedPaths.push(text) } } })
+      })
+      await createResearchTree(page)
+      for (const [name, path] of [["research", "/research"], ["experiments", "/research/experiments"], ["api-server", "/research/experiments/api-server"], ["worker", "/worker"], ["Soul Archive", "/app:Soul Archive"]]) {
+        await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
+        await page.getByRole("menuitem", { name: "Copy path", exact: true }).click()
+        await expect(page.getByRole("status").filter({ hasText: `Copied path: ${path}` })).toBeVisible()
+        await expect.poll(() => page.evaluate(() => (window as Window & { copiedPaths: string[] }).copiedPaths.at(-1))).toBe(path)
+      }
+      await page.getByRole("button", { name: "Actions for experiments", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
+      await page.getByRole("textbox", { name: "Folder name" }).fill("Notes & 一")
+      await page.getByRole("button", { name: "Save", exact: true }).click()
+      await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Copy path", exact: true }).click()
+      await expect.poll(() => page.evaluate(() => (window as Window & { copiedPaths: string[] }).copiedPaths.at(-1))).toBe("/research/Notes & 一/api-server")
+    })
+
+    for (const clipboard of ["missing", "denied"]) {
+      test(`Copy path provides selected text when clipboard is ${clipboard}`, async ({ page }) => {
+        await page.addInitScript((mode) => Object.defineProperty(navigator, "clipboard", {
+          configurable: true, value: mode === "missing" ? undefined : { writeText: async () => { throw new Error("Permission denied") } },
+        }), clipboard)
+        await createResearchTree(page)
+        for (const [name, path] of [["experiments", "/research/experiments"], ["api-server", "/research/experiments/api-server"]]) {
+          await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
+          await page.getByRole("menuitem", { name: "Copy path", exact: true }).click()
+          const dialog = page.getByRole("dialog")
+          await expect(dialog).toContainText("Automatic copying is unavailable")
+          const input = dialog.getByRole("textbox", { name: "Tree path" })
+          await expect(input).toHaveValue(path)
+          await expect(input).toBeFocused()
+          expect(await input.evaluate((element: HTMLInputElement) => element.selectionEnd! - element.selectionStart!)).toBe(path.length)
+          await dialog.getByRole("button", { name: "Done" }).click()
+          await expect(page.getByRole("status").filter({ hasText: "Unable to copy automatically" })).toBeVisible()
+        }
+      })
+    }
+
+    test("placement failure reports the created Agent and root New forgets the folder", async ({ page }) => {
+      await createResearchTree(page)
+      let created = false
+      let creations = 0
+      const reviewer = { ...agentA, agent_id: "ag-reviewer", name: "reviewer" }
+      await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: created ? [...snapshot.agents, reviewer] : snapshot.agents }))
+      await page.route("**/api/workspaces/ws-1/agents", (route) => { created = true; creations++; return ok(route, reviewer) })
+      await page.route("**/api/workspaces/ws-1/workload-tree/placements/ag-reviewer", (route) => route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { message: "Folder no longer exists" } }) }))
+      await page.getByRole("button", { name: "Actions for experiments", exact: true }).click()
+      await page.getByRole("menuitem", { name: "New Agent", exact: true }).click()
+      await page.getByRole("dialog").getByRole("textbox", { name: "Name", exact: true }).fill("reviewer")
+      await page.getByRole("dialog").getByRole("button", { name: "Create terminal", exact: true }).click()
+      if (mobile) await page.getByRole("button", { name: /^Close full-screen (terminal|interface)$/ }).click()
+      await expect(page.getByText(/Agent reviewer was created, but placing it in \/research\/experiments failed/)).toBeVisible()
+      await expect(page.getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
+      await expect(page.getByRole("dialog")).toHaveCount(0)
+      expect(creations).toBe(1)
+      await page.getByRole("button", { name: "New", exact: true }).click()
+      await expect(page.getByRole("dialog")).not.toContainText("Tree folder:")
+    })
+  })
+}
+
 test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await page.goto("/")
   await expect(page.locator("aside").getByText("Acme")).toBeVisible()
