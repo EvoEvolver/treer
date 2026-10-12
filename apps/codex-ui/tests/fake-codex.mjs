@@ -9,6 +9,16 @@ const turns = [0, 1].map((n) => ({
   ],
 }));
 let threadId = `new-${process.pid}`;
+if (process.env.FAKE_CODEX_UX) {
+  turns[1].items.push(
+    { id: "plan-1", type: "plan", plan: [{ step: "Inspect the workspace", status: "completed" }, { step: "Improve the file browser", status: "in_progress" }, { step: "Verify desktop and mobile", status: "pending" }] },
+    { id: "change-1", type: "fileChange", status: "completed", changes: [
+      { path: "src/greeting.ts", kind: { type: "update" }, diff: "--- a/src/greeting.ts\n+++ b/src/greeting.ts\n@@ -1 +1 @@\n-export const greeting = 'Hello';\n+export const greeting = 'Hello, Treer';" },
+      { path: "README.md", kind: { type: "add" }, diff: "--- /dev/null\n+++ b/README.md\n@@ -0,0 +1,2 @@\n+# Workspace\n+Small tools, thoughtful interfaces." },
+    ] },
+    { id: "answer-1", type: "agentMessage", text: "The file browser is ready. You can explore **src/** and preview files without leaving this conversation.\n\nThe changes below keep everything read-only." },
+  );
+}
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (process.env.FAKE_CODEX_CALLS) appendFileSync(process.env.FAKE_CODEX_CALLS, line + "\n");
@@ -31,4 +41,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     result = { thread: { id: threadId, cwd: process.cwd(), turns }, model: "test" };
   }
   console.log(JSON.stringify({ id: request.id, result }));
+  if (request.method === "thread/read" && process.env.FAKE_CODEX_PLAN) {
+    console.log(JSON.stringify({ method: "turn/plan/updated", params: { threadId, turnId: "turn-1", explanation: "Checking the UI", plan: [{ step: "Tests", status: "completed" }, { step: "Screenshots", status: "in_progress" }] } }));
+  }
 }

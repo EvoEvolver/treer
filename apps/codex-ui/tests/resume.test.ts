@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, readdirSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, readdirSync, writeFileSync, realpathSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
@@ -99,6 +99,31 @@ async function stop(child: ChildProcess) {
   child.kill("SIGTERM");
   await exited;
 }
+
+test("read-only file HTTP routes reject traversal and outside symlinks and report truncated previews", async () => {
+  const cwd = temp();
+  writeFileSync(join(cwd, "large.txt"), "x".repeat(65537));
+  mkdirSync(join(cwd, "nested"));
+  symlinkSync(tmpdir(), join(cwd, "outside"));
+  const server = await launchServer(cwd);
+  try {
+    const tree = await (await fetch(server.base + "/v1/files/tree?path=")).json();
+    assert.ok(tree.entries.some((entry: { name: string }) => entry.name === "nested"));
+    assert.ok(!tree.entries.some((entry: { name: string }) => entry.name === "outside"));
+    const preview = await (await fetch(server.base + "/v1/files?path=large.txt")).json();
+    assert.equal(preview.content.length, 65536);
+    assert.equal(preview.truncated, true);
+    for (const path of ["../secret", "nested/../large.txt", "outside"]) {
+      const denied = await fetch(server.base + "/v1/files?path=" + encodeURIComponent(path));
+      assert.equal(denied.status, 403);
+      assert.equal((await denied.json()).error.code, "file_access_failed");
+    }
+    assert.equal((await fetch(server.base + "/v1/files?path=missing")).status, 404);
+    assert.equal((await fetch(server.base + "/v1/files/tree?path=large.txt")).status, 400);
+    assert.equal((await fetch(server.base + "/v1/files?path=large.txt", { method: "POST", body: "overwrite" })).status, 405);
+    assert.equal(readFileSync(join(cwd, "large.txt"), "utf8").length, 65537);
+  } finally { await stop(server.child); }
+});
 
 test("two dynamic listeners do not conflict and AIS transcript pages resumed turns", async () => {
   const first = await launchServer(temp(), { CODEX_UI_THREAD_ID: "original" });

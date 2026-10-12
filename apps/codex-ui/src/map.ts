@@ -6,6 +6,7 @@ export interface HistoryItem {
     | "reasoning"
     | "commandExecution"
     | "fileChange"
+    | "plan"
     | "toolCall"
     | "other";
   text: string;
@@ -14,6 +15,8 @@ export interface HistoryItem {
   status?: string | null;
   transcriptOrder?: number | null;
   sourceTurnId?: string | null;
+  changes?: Array<{ path: string; diff: string; kind: string }>;
+  steps?: Array<{ step: string; status: "pending" | "inProgress" | "completed" }>;
 }
 
 export interface TurnDto {
@@ -108,7 +111,14 @@ export function mapItem(item: CodexItem, turnId: string, order: number): History
       };
     case "fileChange":
     case "file_change":
-      return { ...base, kind: "fileChange", text: text || "File change", status: item.status ?? null };
+      return { ...base, kind: "fileChange", text: text || "File change", status: item.status ?? null,
+        changes: mapChanges(item.changes) };
+    case "plan":
+    case "todo":
+    case "todoList": {
+      const plan = item.plan ?? item.steps ?? item.todos ?? item.items ?? text;
+      return { ...base, kind: "plan", text: typeof plan === "string" ? "Plan" : text || "Plan", steps: mapPlanSteps(plan) };
+    }
     case "mcpToolCall":
       return {
         ...base,
@@ -140,6 +150,28 @@ export function mapItem(item: CodexItem, turnId: string, order: number): History
     default:
       return { ...base, kind: type.toLowerCase().includes("tool") ? "toolCall" : "other", text: text || type };
   }
+}
+
+export function mapChanges(raw: unknown): NonNullable<HistoryItem["changes"]> {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const change = entry as Record<string, unknown>;
+    if (typeof change.path !== "string") return [];
+    const kind = typeof change.kind === "string" ? change.kind : change.kind && typeof change.kind === "object" ? String((change.kind as Record<string, unknown>).type ?? "update") : "update";
+    return [{ path: change.path, diff: typeof change.diff === "string" ? change.diff : "", kind }];
+  });
+}
+
+export function mapPlanSteps(raw: unknown): NonNullable<HistoryItem["steps"]> {
+  const entries: unknown[] = typeof raw === "string" ? raw.split("\n").filter((line) => line.trim()) : Array.isArray(raw) ? raw : [];
+  return entries.flatMap((entry) => {
+    const record = typeof entry === "string" ? { step: entry, status: /^\s*[-*]?\s*\[x\]/i.test(entry) ? "completed" : "pending" } : entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+    const step = record.step ?? record.text ?? record.title ?? record.content;
+    if (typeof step !== "string" || !step.trim()) return [];
+    const status = record.status === "completed" || record.status === "done" ? "completed" : ["inProgress", "in_progress", "running"].includes(String(record.status)) ? "inProgress" : "pending";
+    return [{ step: step.replace(/^\s*(?:[-*]|\d+\.)?\s*(?:\[[ xX]\]\s*)?/, "").trim(), status }];
+  });
 }
 
 export function mapTurn(turn: CodexTurn): TurnDto {

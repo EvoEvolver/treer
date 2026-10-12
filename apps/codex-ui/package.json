@@ -6,8 +6,9 @@
   "scripts": {
     "test": "tsx --test tests/*.test.ts",
     "test:live": "node tests/live.mjs",
+    "test:browser": "node tests/browser.mjs",
     "build": "esbuild markdown.entry.js --bundle --format=esm --minify --legal-comments=inline --outfile=public/markdown.js",
-    "check": "npm run typecheck && node --check public/app.js && node --check public/markdown.js",
+    "check": "npm run typecheck && node --check public/app.js && node --check public/files.js && node --check public/theme.js && node --check public/markdown.js",
     "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -16,6 +17,7 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/node": "^22.14.0",
     "@types/ws": "^8.18.1",
     "dompurify": "3.4.14",

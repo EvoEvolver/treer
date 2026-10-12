@@ -81,12 +81,51 @@ restart. A successful restart request does not prove resume succeeded: inspect
 the replacement Agent's Interface and logs. The switching shell exits and the
 current Agent process is deliberately replaced.
 
+## Browser interface
+
+Use the **Browse files** button in the header to open the file explorer. Folders
+load only when expanded. Selecting a file opens a read-only text preview; on
+narrow screens the drawer has Browse/Preview tabs and a close button to return
+to the conversation. Refresh reloads expanded directories and the selected
+preview. File contents, names, paths, and diffs render as text, never as HTML.
+
+File-change cards expand to show each changed path and its unified diff, with
+additions and deletions colored separately. Codex plan/todo items and live
+`turn/plan/updated` notifications appear as checklists with pending, active,
+and completed steps. Expanded activity cards stay open during state updates.
+
+The page honors `?theme=light|dark` and theme updates sent by its parent window
+as `{type: "treer:embed-theme", theme: "light"|"dark"}`. Without a valid explicit
+theme it follows the system preference, including subsequent system changes.
+All browser requests and assets are relative to the Interface page.
+
+The additional read-only JSON routes are:
+
+| Route | Response |
+| --- | --- |
+| `GET /v1/files/tree?path=` | `{path, entries: [{name, path, kind, size, has_children}]}` for one directory; empty path is the working directory |
+| `GET /v1/files?path=src/main.ts` | `{path, name, content, size, truncated}`; content is at most the first 64 KiB of file bytes, decoded as UTF-8 |
+
+Paths are resolved inside `CODEX_UI_CWD` (the runtime's working directory).
+Parent (`..`) components and paths/symlinks outside that root are rejected.
+Internal symlinks are usable; external and broken symlinks are omitted from
+directory listings. Only regular files can be previewed. `truncated: true`
+indicates the file exceeds 64 KiB; `size` is the original byte size. Errors are
+JSON with `error.code` and `error.message` (400 invalid type, 403 denied, 404
+missing, 405 non-GET method). These routes expose local working-directory data
+through the same private AIS listener and Treer access boundary as the UI;
+they add no sandbox or separate authentication scheme.
+
 ## Checks
 
 ```bash
 npm --prefix apps/codex-ui ci
 npm --prefix apps/codex-ui run check
 npm --prefix apps/codex-ui test
+# Browser regression and desktop/390px screenshots, with an isolated fake Codex.
+# No inference, managed Agent mutation, or restart. Chromium is needed once:
+npm --prefix apps/codex-ui exec -- playwright install chromium
+CODEX_UI_SCREENSHOTS=/tmp/codex-ui-screenshots npm --prefix apps/codex-ui run test:browser
 # Opt-in: managed Treer environment, real Codex credentials/inference needed.
 # Creates two temporary Agents and a temporary Codex + UI recipe profile,
 # checks independent ports and restart/context recall, and removes both Agents

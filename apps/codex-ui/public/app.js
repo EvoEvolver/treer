@@ -1,4 +1,6 @@
 import { renderMarkdown } from "./markdown.js";
+import "./theme.js";
+import { setupFileBrowser } from "./files.js";
 
 const elements = {
   composer: document.querySelector("#composer"),
@@ -53,6 +55,21 @@ function itemNode(item) {
     details.append(node("summary", "", "Reasoning"), markdownNode("reasoning-copy", item.text));
     return details;
   }
+  if (item.kind === "plan") {
+    const card = node("section", "plan-card");
+    card.append(node("strong", "", "Plan"));
+    if (item.text && item.text !== "Plan") card.append(node("p", "plan-explanation", item.text));
+    const list = node("ul", "plan-steps");
+    for (const step of item.steps ?? []) {
+      const row = node("li", `plan-${step.status}`);
+      const check = node("span", "plan-check", step.status === "completed" ? "✓" : step.status === "inProgress" ? "◉" : "○");
+      check.setAttribute("aria-label", step.status === "completed" ? "Completed" : step.status === "inProgress" ? "In progress" : "Pending");
+      row.append(check, node("span", "", step.step));
+      list.append(row);
+    }
+    card.append(list);
+    return card;
+  }
   if (["commandExecution", "fileChange", "toolCall"].includes(item.kind)) {
     const details = node("details", `tool tool-${item.status || "complete"}`);
     const summary = node("summary", "tool-summary");
@@ -62,6 +79,23 @@ function itemNode(item) {
       node("span", "tool-status", item.status || "done"),
     );
     details.append(summary);
+    if (item.kind === "fileChange") {
+      const body = node("div", "changes-body");
+      for (const change of item.changes ?? []) {
+        const file = node("section", "file-diff");
+        file.append(node("h3", "diff-path", `${change.kind} · ${change.path}`));
+        const diff = node("pre", "diff-code");
+        for (const line of change.diff.split("\n")) {
+          const kind = line.startsWith("@@") ? "hunk" : line.startsWith("+++") || line.startsWith("---") ? "header" : line.startsWith("+") ? "add" : line.startsWith("-") ? "remove" : "context";
+          diff.append(node("span", `diff-line diff-${kind}`, line + "\n"));
+        }
+        if (!change.diff) diff.textContent = "No diff was provided.";
+        file.append(diff);
+        body.append(file);
+      }
+      if (!item.changes?.length) body.append(node("p", "file-notice", "No file details were provided."));
+      details.append(body);
+    }
     if (item.detailText && item.detailText !== item.text) {
       const body = node("div", "tool-body");
       body.append(node("pre", "", item.detailText));
@@ -93,12 +127,17 @@ function loadOlderNode() {
 }
 
 function renderTimeline(scrollAnchor) {
+  const opened = new Set([...elements.timeline.querySelectorAll("details[open]")].map((detail) => detail.dataset.itemId));
   const nearBottom = elements.timeline.scrollHeight - elements.timeline.scrollTop - elements.timeline.clientHeight < 120;
   const fragment = document.createDocumentFragment();
   if (snapshot?.thread?.hasOlderItems) fragment.append(loadOlderNode());
   for (const turn of snapshot?.thread?.turns ?? []) {
     for (const item of turn.items ?? []) {
       const rendered = itemNode(item);
+      if (rendered?.tagName === "DETAILS") {
+        rendered.dataset.itemId = `${turn.id}:${item.id}`;
+        rendered.open = opened.has(rendered.dataset.itemId);
+      }
       if (rendered) fragment.append(rendered);
     }
     if (turn.error) fragment.append(node("div", "turn-error", turn.error));
@@ -177,7 +216,7 @@ async function request(path, init) {
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(payload.error?.message || payload.error || `HTTP ${response.status}`);
   return payload;
 }
 
@@ -328,4 +367,5 @@ request("api/state")
     localError = error.message;
     render();
   });
+setupFileBrowser(request);
 connect();

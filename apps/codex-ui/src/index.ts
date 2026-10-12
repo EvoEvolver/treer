@@ -7,6 +7,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { CodexRuntime } from "./codex.js";
 import { threadStatePath } from "./thread-state.js";
+import { listFiles, previewFile, fileErrorStatus } from "./files.js";
 
 const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const publicDir = resolve(process.env.CODEX_UI_PUBLIC_DIR || join(appRoot, "public"));
@@ -148,6 +149,21 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const path = requestPath(url);
   try {
+    if (path === "/v1/files/tree" || path === "/v1/files") {
+      if (method !== "GET") {
+        response.setHeader("allow", "GET");
+        send(response, 405, { error: { code: "method_not_allowed", message: "File browsing is read-only; use GET" } });
+        return;
+      }
+      try {
+        const filePath = url.searchParams.get("path") ?? "";
+        send(response, 200, path === "/v1/files/tree" ? await listFiles(cwd, filePath) : await previewFile(cwd, filePath));
+      } catch (error) {
+        const status = fileErrorStatus(error);
+        send(response, status, { error: { code: "file_access_failed", message: status === 404 ? "File or directory not found" : status === 500 ? "Unable to read file or directory" : error instanceof Error ? error.message : "File access denied" } });
+      }
+      return;
+    }
     if (path === "/v1/manifest" && (method === "GET" || method === "HEAD")) {
       send(response, 200, {
         protocol: "treer.agent-interface/v1",

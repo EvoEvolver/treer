@@ -47,6 +47,7 @@ export class CodexRuntime extends EventEmitter {
   private fullTurns: TurnDto[] = [];
   private liveItems = new Map<string, LiveItem>();
   private liveSequence = 0;
+  private turnPlans = new Map<string, CodexItem>();
   thread: ThreadState | null = null;
   models: ModelOption[] = [];
 
@@ -353,6 +354,15 @@ export class CodexRuntime extends EventEmitter {
       // and the only reliable source of ordering.
       turn.items = entries.map((entry, index) => mapItem(entry.item, turnId, index));
     }
+    for (const [turnId, plan] of this.turnPlans) {
+      let turn = byId.get(turnId);
+      if (!turn) {
+        turn = { id: turnId, startedAt: null, status: "inProgress", error: null, items: [] };
+        turns.push(turn);
+        byId.set(turnId, turn);
+      }
+      turn.items.push(mapItem(plan, turnId, turn.items.length));
+    }
     return turns;
   }
 
@@ -432,6 +442,12 @@ export class CodexRuntime extends EventEmitter {
   private async onNotification(event: { method?: string; params?: Record<string, unknown> }) {
     const method = event.method ?? "";
     const params = event.params ?? {};
+    if (method === "turn/plan/updated" && typeof params.turnId === "string") {
+      this.turnPlans.set(params.turnId, { id: `plan:${params.turnId}`, type: "plan",
+        text: typeof params.explanation === "string" ? params.explanation : "Plan", plan: params.plan });
+      this.publishLiveHistory();
+      return;
+    }
     if ((method === "item/started" || method === "item/completed")
         && typeof params.turnId === "string" && params.item && typeof params.item === "object") {
       this.upsertLiveItem(params.turnId, params.item as CodexItem);
@@ -446,7 +462,7 @@ export class CodexRuntime extends EventEmitter {
       this.publishLiveHistory();
       return;
     }
-    if ((method === "item/agentMessage/delta" || method === "item/reasoning/textDelta")
+    if ((method === "item/agentMessage/delta" || method === "item/reasoning/textDelta" || method === "item/plan/delta")
         && typeof params.itemId === "string") {
       this.updateLiveItem(params.itemId, (item) => ({
         ...item,
