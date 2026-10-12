@@ -93,3 +93,14 @@ files/memory/) and project_instructions_file. All referenced files must exist.
 The archive never contains a restore script. On incarnation the client generates
 a fresh native session UUID, rebases structured cwd/session metadata and imports
 into the target Agent's dedicated stores; shell snapshots are never executed.
+
+
+Launcher transfer adapters may instead declare `transfer_files`, an array of
+{scope: session|memory|project, path: scoped relative path, file: raw archive path}.
+Then session_file/session_relative_path are not required. Optional exported_at
+records the launcher export time. `file` must exist below files/, scoped pairs
+must be unique, and project scope only permits CLAUDE.md. Actual file bytes are
+stored unencoded so server secret scanning remains effective. Soul reconstructs
+the treer.agent-session/v1 bundle and current hashes for launcher import, which
+allocates the native identity/storage and rebases the source paths. Legacy
+session_file adapters are translated into this same transfer contract.

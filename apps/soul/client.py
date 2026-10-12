@@ -192,8 +192,8 @@ def command_save(args):
         root=Path(temp)
         root.chmod(0o700)
         session = self_session(args.harness, args.cwd) if args.session == 'self' else args.session
-        adapter=export_session(args.harness,session or args.session,args.cwd,root)
         who=json.loads(treer('whoami'))
+        adapter=export_session(args.harness,session or args.session,args.cwd,root,who.get('machine',{}).get('root'))
         source_machine=who.get('machine',{}).get('server_id')
         manifest={'schema_version':1,'name':args.name or f"{args.harness} {adapter['session_id'][:8]}",
                   'environment':{},'adapter':adapter}
@@ -273,7 +273,8 @@ else:
 root=Path(os.environ.get('TREER_AGENT_INSTALL_ROOT',machine_root/'.treer/launchers/agent'))/'current'
 candidates=[Path(os.environ['TREER_AGENT_LAUNCHER'])] if os.environ.get('TREER_AGENT_LAUNCHER') else [root/p for p in ['launchers/agent/scripts/treer-agent.sh','scripts/treer-agent.sh','treer-agent.sh']]
 launcher=next((str(p.resolve()) for p in candidates if p.is_file() and os.access(p,os.X_OK)),None)
-print(json.dumps(dict(executable=bool(exe),version=version,logged_in=logged_in,launcher=launcher,free_bytes=shutil.disk_usage(home).free)))
+session_transfer=bool(launcher and Path(launcher).with_name('session.sh').is_file() and os.access(Path(launcher).with_name('session.sh'),os.X_OK))
+print(json.dumps(dict(executable=bool(exe),version=version,logged_in=logged_in,launcher=launcher,session_transfer=session_transfer,free_bytes=shutil.disk_usage(home).free)))
 '''
 
 
@@ -287,6 +288,7 @@ def preflight(machine,harness,size):
     if not probe.get('executable'): problems.append('Install '+harness)
     if not probe.get('logged_in'): problems.append('Log in to '+harness+' on target machine')
     if harness!='generic' and not probe.get('launcher'): problems.append('Install unified treer-agent launcher on target machine')
+    if harness!='generic' and not probe.get('session_transfer'): problems.append('Update unified launcher to include session transfer CLI')
     version=probe.get('version','')
     try:
         parsed=tuple(int(p) for p in version.split('.'))
@@ -364,6 +366,8 @@ def safe_extract(raw,destination):
         if field in adapter: archive_path(adapter[field])
     for field in adapter.get('memory_files',[]):
         if not archive_path(field).startswith('files/memory/'): raise RuntimeError('Invalid memory file')
+    for entry in adapter.get('transfer_files',[]):
+        archive_path(entry['file']); archive_path(entry['path'])
     return manifest
 
 
@@ -396,8 +400,7 @@ def command_run(args):
                     import uuid
                     adapter['source_session_id'] = adapter['session_id']
                     adapter['session_id'] = str(uuid.uuid4())
-                    if adapter['name'] == 'codex':
-                        adapter['session_relative_path'] = 'imported/' + adapter['session_id'] + '.jsonl'
+
                 if adapter.get('name', 'generic') == 'generic':
                     adapter = {'name': 'generic'}
                     files_root = root / 'generic'
@@ -414,8 +417,12 @@ def command_run(args):
                             raise RuntimeError('Missing environment binding file')
                         environment[key] = str((files_root / path).resolve())
                 else:
-                    environment=import_session(bundle,adapter,workspace,root)
-                state=dict(soul_id=args.soul_id,adapter=adapter,environment=environment)
+                    machine_root = None
+                    if not os.environ.get('TREER_AGENT_LAUNCHER') and not os.environ.get('TREER_AGENT_INSTALL_ROOT'):
+                        machine_root = json.loads(treer('whoami')).get('machine',{}).get('root')
+                    environment, workspace_path=import_session(bundle,adapter,workspace,root,machine_root)
+                    workspace=Path(workspace_path)
+                state=dict(soul_id=args.soul_id,adapter=adapter,environment=environment,workspace=str(workspace))
             temporary=marker.with_suffix('.tmp')
             temporary.write_text(json.dumps(state))
             temporary.chmod(0o600)
@@ -424,6 +431,7 @@ def command_run(args):
     environment.update(state['environment'])
     # Restart never downloads/reimports the snapshot or overwrites learned memory.
     adapter=state['adapter']
+    workspace=Path(state['workspace'])
     if adapter['name'] == 'generic':
         argv = args.command
         if argv and argv[0] == '--': argv = argv[1:]

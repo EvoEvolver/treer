@@ -12,7 +12,9 @@ import unittest
 from pathlib import Path
 
 from fixture import servers, sealed_environment
-from soul_sessions import project_key
+def project_key(path):
+    import re
+    return re.sub(r"[^A-Za-z0-9]", "-", str(Path(path).resolve()))
 from soul import bundled_client
 
 APP = Path(__file__).resolve().parents[1]
@@ -47,12 +49,15 @@ else: sys.exit(2)
         launcher=self.root/'treer-agent.sh'
         launcher.write_text('''#!/usr/bin/env python3
 import json,os,sys
-print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.get('CODEX_HOME')}))
+print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.get('CODEX_HOME'),'claude_config':os.environ.get('CLAUDE_CONFIG_DIR')}))
 ''')
         launcher.chmod(0o755)
+        session_cli=self.root/'session.sh'
+        session_cli.write_text((APP/'tests/fake_session.py').read_text())
+        session_cli.chmod(0o755)
         self.env=sealed_environment({'HOME':str(self.home),'PATH':os.defpath,'TMPDIR':str(self.tmp),'TREER_BIN':str(fake),
-                    'FAKE_LOG':str(self.log),'FAKE_PROBE':json.dumps(dict(executable=True,version='2.1.0',logged_in=True,launcher=str(launcher),free_bytes=1024**3)),
-                    'TREER_AGENT_LAUNCHER':str(launcher),'TREER_AGENT_ID':'ag_restore'})
+                    'FAKE_LOG':str(self.log),'FAKE_PROBE':json.dumps(dict(executable=True,version='2.1.0',logged_in=True,launcher=str(launcher),session_transfer=True,free_bytes=1024**3)),
+                    'TREER_AGENT_LAUNCHER':str(launcher),'TREER_AGENT_ID':'ag_restore','FAKE_SESSION_SOURCE':str(self.root/'session-source.json')})
         self.server,self.proxy=servers(self.root/'server')
         self.url=f'http://127.0.0.1:{self.server.server_port}'
         self.binary=self.root/'treer-soul'
@@ -76,6 +81,9 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         directory.mkdir(parents=True,exist_ok=True)
         (directory/'agent-ui.json').write_text(json.dumps({'threadId':SID}))
 
+    def source(self,harness,entries):
+        (self.root/'session-source.json').write_text(json.dumps(dict(harness=harness,sessionId=SID,files=entries)))
+
     def claude(self,secret=False):
         self.saved_self()
         project=self.home/'.claude/projects'/project_key(self.cwd)
@@ -85,6 +93,9 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         session.write_text(json.dumps(data)+'\n')
         (project/'memory/MEMORY.md').write_text('memory ghp_'+'A'*40+'\n' if secret else 'memory\n')
         (self.cwd/'CLAUDE.md').write_text('project instruction\n')
+        self.source('claude',[dict(scope='session',path=SID+'.jsonl',source=str(session)),
+                              dict(scope='memory',path='MEMORY.md',source=str(project/'memory/MEMORY.md')),
+                              dict(scope='project',path='CLAUDE.md',source=str(self.cwd/'CLAUDE.md'))])
         return session
 
     def codex(self):
@@ -98,6 +109,8 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         (config/'shell_snapshots').mkdir()
         (config/'shell_snapshots'/(SID+'.sh')).write_text('export api_key=abcdef\n')
         (config/'auth.json').write_text('DO NOT READ OR COPY')
+        self.source('codex',[dict(scope='session',path='2026/10/12/rollout-'+SID+'.jsonl',source=str(session)),
+                             dict(scope='session',path='shell_snapshots/'+SID+'.sh',source=str(config/'shell_snapshots'/(SID+'.sh')))])
         return session
 
     def save(self,harness='claude',*extra):
@@ -113,8 +126,8 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertEqual(record['source_machine'],'srv_self')
         self.assertEqual(source.read_bytes(),before)
         self.assertEqual(list(self.tmp.iterdir()),[])
-        self.assertEqual(len(record['manifest']['adapter']['memory_files']),1)
-        self.assertTrue(record['manifest']['adapter']['project_instructions_file'])
+        self.assertEqual(sum(f['scope']=='memory' for f in record['manifest']['adapter']['transfer_files']),1)
+        self.assertTrue(any(f['scope']=='project' for f in record['manifest']['adapter']['transfer_files']))
         self.assertEqual(self.call('--version').stdout.strip(),'treer-soul 2.0.0')
 
     def test_explicit_secret_ack_and_default_server_rejection(self):
@@ -130,7 +143,7 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         original=self.codex()
         record=self.save('codex')
         self.assertEqual(record['harness'],'codex')
-        self.assertEqual(record['manifest']['adapter']['shell_snapshot_name'],SID+'.sh')
+        self.assertTrue(any(f['path']=='shell_snapshots/'+SID+'.sh' for f in record['manifest']['adapter']['transfer_files']))
         self.assertFalse(record['contains_secrets'])
         self.assertIn('wlc_',original.read_text())
         self.claude()
@@ -180,7 +193,7 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertNotEqual(workspace,self.cwd)
         self.assertIn('--cwd',result['argv'])
         self.assertEqual((workspace/'CLAUDE.md').read_text(),'project instruction\n')
-        restored=self.home/'.claude/projects'/project_key(workspace)
+        restored=next((Path(result['claude_config'])/'projects').iterdir())
         (restored/'memory/MEMORY.md').write_text('new learning\n')
         restored_session = next(restored.glob('*.jsonl'))
         self.assertNotEqual(restored_session.stem, SID)
@@ -250,7 +263,8 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
             client.safe_extract(stream.getvalue(), self.root/'unsafe')
         self.claude()
         project=self.home/'.claude/projects'/project_key(self.cwd)
-        (project/'memory/link').symlink_to(self.root)
+        (project/'memory/MEMORY.md').unlink()
+        (project/'memory/MEMORY.md').symlink_to(self.root)
         self.call('save','--harness','claude',success=False)
         self.assertEqual(list(self.tmp.iterdir()),[])
 

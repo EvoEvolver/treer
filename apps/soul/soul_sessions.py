@@ -1,178 +1,151 @@
-"""Temporary native harness export/import boundary, to move to launcher adapters.
-
-No credentials are exported. All import destinations belong to a new Agent.
-"""
+"""Thin launcher session-transfer bridge; no harness-native format implementation."""
+import base64
+import hashlib
 import json
 import os
 import re
 import shutil
-import time
+import subprocess
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 UUID = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
 MAX_FILE = 128 * 1024 * 1024
 
 
-def project_key(cwd):
-    return re.sub(r'[^A-Za-z0-9]', '-', str(Path(cwd).resolve()))
+def safe_path(value):
+    if not isinstance(value,str) or not value or '\\' in value or '\x00' in value or value.startswith('/') or any(part in ('','.','..') for part in value.split('/')):
+        raise RuntimeError('Unsafe session-transfer path')
+    return value
 
 
 def copy_snapshot(source, destination, jsonl=False):
-    if source.is_symlink() or not source.is_file():
-        raise RuntimeError('Session capture rejects symbolic links and non-files')
-    if source.stat().st_size > MAX_FILE:
-        raise RuntimeError('Session file is too large')
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for _ in range(5):
-        before = source.stat()
-        shutil.copyfile(source, destination)
-        destination.chmod(0o600)
-        after = source.stat()
-        if (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
-            if jsonl and destination.stat().st_size:
-                with destination.open('rb') as stream:
-                    stream.seek(-1, 2)
-                    if stream.read(1) != b'\n':
-                        raise RuntimeError('Session contains an incomplete JSONL record')
-            return
-        time.sleep(0.05)
-    raise RuntimeError('Session kept changing; retry when idle')
-
-
-def export_session(harness, session, cwd, destination):
-    cwd = Path(cwd).resolve()
-    destination = Path(destination)
-    if session in (None, 'self'):
-        keys = ('CLAUDE_SESSION_ID', 'TREER_SESSION_ID') if harness == 'claude' else ('CODEX_SESSION_ID', 'CODEX_THREAD_ID', 'TREER_SESSION_ID')
-        session = next((os.environ[k] for k in keys if os.environ.get(k)), None)
-        if not session:
-            raise RuntimeError('Cannot identify own self session; pass --session ID explicitly')
-    if session and not UUID.fullmatch(session):
-        raise RuntimeError('Session ID must be a UUID')
-    home = Path.home()
-    if harness == 'claude':
-        project = Path(os.environ.get('CLAUDE_CONFIG_DIR', home / '.claude')) / 'projects' / project_key(cwd)
-        candidates = list(project.glob((session or '*') + '.jsonl'))
-    else:
-        config = Path(os.environ.get('CODEX_HOME', home / '.codex'))
-        candidates = list((config / 'sessions').rglob('*.jsonl'))
-        matching = []
-        for path in candidates:
-            if path.is_symlink():
-                continue
-            with path.open('rb') as stream:
-                line = stream.readline(1024 * 1024)
-            try:
-                record = json.loads(line)
-            except (ValueError, UnicodeDecodeError):
-                continue
-            meta = record.get('payload', {}) if record.get('type') == 'session_meta' else {}
-            if (session and meta.get('id') == session) or (not session and isinstance(meta.get('cwd'), str) and Path(meta['cwd']).resolve() == cwd):
-                matching.append(path)
-        candidates = matching
-    # Never pick newest from a shared directory; ambiguity must be explicit.
-    if len(candidates) != 1:
-        raise RuntimeError('Cannot identify one self session; pass --session ID explicitly')
-    source = candidates[0]
-    if not session:
-        if harness == 'claude':
-            session = source.stem
-        else:
-            with source.open('rb') as stream:
-                session = json.loads(stream.readline(1024*1024))['payload']['id']
-    if not UUID.fullmatch(session):
-        raise RuntimeError('Captured session ID is invalid')
-    copy_snapshot(source, destination / 'files/session.jsonl', True)
-    adapter = dict(name=harness, session_id=session, session_file='files/session.jsonl', cwd=str(cwd))
-    if harness == 'codex':
-        adapter['session_relative_path'] = source.relative_to(config / 'sessions').as_posix()
-        snapshots = list((config / 'shell_snapshots').glob(session + '*.sh'))
-        if snapshots:
-            if len(snapshots) != 1:
-                raise RuntimeError('Ambiguous shell snapshot')
-            copy_snapshot(snapshots[0], destination / 'files/shell_snapshot.sh')
-            adapter.update(shell_snapshot_file='files/shell_snapshot.sh', shell_snapshot_name=snapshots[0].name)
-    else:
-        adapter['memory_files'] = []
-        memory = project / 'memory'
-        if memory.is_symlink():
-            raise RuntimeError('Memory directory may not be a symbolic link')
-        if memory.exists():
-            for path in sorted(memory.rglob('*')):
-                if path.is_symlink():
-                    raise RuntimeError('Memory may not contain symbolic links')
-                if path.is_file():
-                    relative = 'files/memory/' + path.relative_to(memory).as_posix()
-                    copy_snapshot(path, destination / relative)
-                    adapter['memory_files'].append(relative)
-        instructions = cwd / 'CLAUDE.md'
-        if instructions.exists():
-            copy_snapshot(instructions, destination / 'files/CLAUDE.md')
-            adapter['project_instructions_file'] = 'files/CLAUDE.md'
-    return adapter
-
-
-def import_session(bundle, adapter, workspace, state_root):
-    bundle, workspace, state_root = Path(bundle), Path(workspace).resolve(), Path(state_root).resolve()
-    workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
-    harness, session = adapter['name'], adapter.get('session_id')
-    if harness not in ('claude','codex') or not isinstance(session, str) or not UUID.fullmatch(session):
-        raise RuntimeError('Invalid declarative harness adapter')
-    # Rebase structured cwd fields only; textual tool records remain archival evidence.
-    records = []
-    with (bundle / adapter['session_file']).open('r', encoding='utf-8') as stream:
-        for line in stream:
-            value = json.loads(line)
-            if not isinstance(value, dict):
-                raise RuntimeError('Session JSONL record must be an object')
-            if 'sessionId' in value:
-                value['sessionId'] = session
-            if 'cwd' in value:
-                value['cwd'] = str(workspace)
-            payload = value.get('payload')
-            if isinstance(payload, dict):
-                if 'cwd' in payload: payload['cwd'] = str(workspace)
-                if value.get('type') == 'session_meta': payload['id'] = session
-            records.append(json.dumps(value, ensure_ascii=False) + '\n')
-    environment = {}
-    if harness == 'codex':
-        config = state_root / 'codex'
-        target = config / 'sessions' / adapter['session_relative_path']
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        original = Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))
-        # Login remains local: link, never copy/read credential content or export it.
-        if (original / 'auth.json').exists() and not (config / 'auth.json').exists():
-            (config / 'auth.json').symlink_to((original / 'auth.json').resolve())
-        environment['CODEX_HOME'] = str(config)
-        # Shell snapshots are archival only: never execute source shell state.
-    else:
-        config = Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home()/'.claude'))
-        project = config / 'projects' / project_key(workspace)
-        project.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = project / (session + '.jsonl')
-        for path in adapter.get('memory_files', []):
-            destination = project / 'memory' / Path(path).relative_to('files/memory')
-            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            shutil.copyfile(bundle / path, destination)
-            destination.chmod(0o600)
-        if adapter.get('project_instructions_file'):
-            shutil.copyfile(bundle / adapter['project_instructions_file'], workspace / 'CLAUDE.md')
-            (workspace / 'CLAUDE.md').chmod(0o600)
-    target.write_text(''.join(records), encoding='utf-8')
-    target.chmod(0o600)
-    return environment
+    # Generic upload copies only, provider export consistency belongs to launcher.
+    if source.is_symlink() or not source.is_file() or source.stat().st_size > MAX_FILE:
+        raise RuntimeError('Upload requires a bounded regular file')
+    destination.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    shutil.copyfile(source,destination)
+    destination.chmod(0o600)
 
 
 def launcher_path(machine_root=None):
-    override = os.environ.get('TREER_AGENT_LAUNCHER')
+    override=os.environ.get('TREER_AGENT_LAUNCHER')
     if override:
-        path = Path(override).expanduser()
-        if not path.is_file() or not os.access(path, os.X_OK):
+        path=Path(override).expanduser()
+        if not path.is_file() or not os.access(path,os.X_OK):
             raise RuntimeError('Configured launcher is not executable')
         return path.resolve()
-    root = Path(os.environ.get('TREER_AGENT_INSTALL_ROOT', Path(machine_root or os.environ.get('TREER_MACHINE_ROOT', str(Path.home()))) / '.treer/launchers/agent')) / 'current'
-    for relative in ('launchers/agent/scripts/treer-agent.sh', 'scripts/treer-agent.sh', 'treer-agent.sh'):
-        path = root / relative
-        if path.is_file() and os.access(path, os.X_OK):
-            return path.resolve()
-    raise RuntimeError('Unified launcher is not installed; configure TREER_AGENT_LAUNCHER or install treer-agent')
+    root=Path(os.environ.get('TREER_AGENT_INSTALL_ROOT',Path(machine_root or os.environ.get('TREER_MACHINE_ROOT',str(Path.home())))/'.treer/launchers/agent'))/'current'
+    for relative in ('launchers/agent/scripts/treer-agent.sh','scripts/treer-agent.sh','treer-agent.sh'):
+        path=root/relative
+        if path.is_file() and os.access(path,os.X_OK): return path.resolve()
+    raise RuntimeError('Unified launcher not installed; configure TREER_AGENT_LAUNCHER or install treer-agent')
+
+
+def transfer_cli(machine_root=None):
+    path=launcher_path(machine_root).with_name('session.sh')
+    if not path.is_file() or not os.access(path,os.X_OK):
+        raise RuntimeError('Launcher session transfer is unavailable; update unified launcher')
+    return path
+
+
+def run_transfer(cli,*args):
+    with tempfile.TemporaryFile() as output:
+        result=subprocess.run([str(cli),*args],stdin=subprocess.DEVNULL,stdout=output,
+                              stderr=subprocess.DEVNULL,timeout=60)
+        if result.returncode: raise RuntimeError('Launcher session transfer failed; verify session identity, version and destination')
+        if output.tell()>MAX_FILE*2: raise RuntimeError('Session-transfer result too large')
+        output.seek(0)
+        return json.load(output)
+
+
+def validate_bundle(bundle,harness=None,session=None):
+    if not isinstance(bundle,dict) or bundle.get('schema')!='treer.agent-session/v1' or bundle.get('harness') not in ('claude','codex'):
+        raise RuntimeError('Invalid launcher session bundle')
+    if harness and bundle['harness']!=harness: raise RuntimeError('Exported harness mismatch')
+    if not isinstance(bundle.get('sessionId'),str) or not UUID.fullmatch(bundle['sessionId']):
+        raise RuntimeError('Invalid exported session identity')
+    if session and bundle['sessionId']!=session: raise RuntimeError('Exported session identity mismatch')
+    files=bundle.get('files')
+    if not isinstance(files,list) or not 1<=len(files)<=250: raise RuntimeError('Invalid session file list')
+    seen=set(); decoded=[]; total=0
+    for record in files:
+        scope=record.get('scope'); path=safe_path(record.get('path'))
+        if scope not in ('session','memory','project') or (scope,path) in seen or record.get('encoding')!='base64':
+            raise RuntimeError('Invalid session file record')
+        if scope=='project' and path!='CLAUDE.md': raise RuntimeError('Only project CLAUDE.md is supported')
+        if scope=='session' and not path.endswith(('.jsonl','.sh')): raise RuntimeError('Unsupported session file type')
+        if any(part.lower() in ('auth.json','.credentials.json','config.toml','settings.json','.env') for part in path.split('/')):
+            raise RuntimeError('Credential/config files may not be exported')
+        try: data=base64.b64decode(record.get('content',''),validate=True)
+        except (ValueError,TypeError): raise RuntimeError('Invalid session file encoding')
+        total+=len(data)
+        if total>MAX_FILE or hashlib.sha256(data).hexdigest()!=record.get('sha256'):
+            raise RuntimeError('Session file size or integrity failure')
+        seen.add((scope,path)); decoded.append((scope,path,data))
+    return decoded
+
+
+def export_session(harness,session,cwd,destination,machine_root=None):
+    if not isinstance(session,str) or not UUID.fullmatch(session):
+        raise RuntimeError('Cannot identify own self session; pass --session ID explicitly')
+    bundle=run_transfer(transfer_cli(machine_root),'export','--harness',harness,'--session-id',session,'--cwd',str(Path(cwd).resolve()))
+    decoded=validate_bundle(bundle,harness,session)
+    entries=[]
+    for scope,path,data in decoded:
+        relative='files/'+scope+'/'+path
+        target=Path(destination)/relative
+        target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        target.write_bytes(data);target.chmod(0o600)
+        entries.append(dict(scope=scope,path=path,file=relative))
+    return dict(name=harness,session_id=session,cwd=bundle.get('cwd',str(Path(cwd).resolve())),
+                exported_at=bundle.get('exportedAt'),transfer_files=entries)
+
+
+def import_session(bundle_root,adapter,workspace,state_root,machine_root=None):
+    entries=adapter.get('transfer_files')
+    if not isinstance(entries,list):
+        # Legacy v1 snapshots are translated structurally, not interpreted natively.
+        # Provider decoding/rebasing remains wholly in the launcher's adapter.
+        entries=[]
+        harness=adapter['name']
+        session=adapter.get('source_session_id',adapter['session_id'])
+        if harness=='codex':
+            path=adapter.get('session_relative_path',session+'.jsonl')
+            entries.append(dict(scope='session',path=path,file=adapter['session_file']))
+            if adapter.get('shell_snapshot_file'):
+                entries.append(dict(scope='session',path='shell_snapshots/'+adapter.get('shell_snapshot_name',session+'.sh'),file=adapter['shell_snapshot_file']))
+        else:
+            entries.append(dict(scope='session',path=session+'.jsonl',file=adapter['session_file']))
+            for file in adapter.get('memory_files',[]):
+                entries.append(dict(scope='memory',path=file.removeprefix('files/memory/'),file=file))
+            if adapter.get('project_instructions_file'):
+                entries.append(dict(scope='project',path='CLAUDE.md',file=adapter['project_instructions_file']))
+    files=[]
+    for entry in entries:
+        data=(Path(bundle_root)/safe_path(entry['file'])).read_bytes()
+        files.append(dict(scope=entry['scope'],path=safe_path(entry['path']),encoding='base64',
+                          content=base64.b64encode(data).decode(),sha256=hashlib.sha256(data).hexdigest()))
+    bundle=dict(schema='treer.agent-session/v1',harness=adapter['name'],
+                sessionId=adapter.get('source_session_id',adapter['session_id']),cwd=adapter.get('cwd',''),
+                exportedAt=adapter.get('exported_at') or datetime.now(timezone.utc).isoformat(),files=files)
+    validate_bundle(bundle)
+    # The native import owns a new directory. On failed first import, leave it
+    # for operator inspection rather than overwriting user data on retry.
+    destination=Path(state_root)/'native'
+    with tempfile.NamedTemporaryFile(mode='w',suffix='.json',dir=state_root,encoding='utf-8') as source:
+        json.dump(bundle,source);source.flush()
+        result=run_transfer(transfer_cli(machine_root),'import','--directory',str(destination),
+                            '--session-id',adapter['session_id'],'--input',source.name)
+    if result.get('sessionId')!=adapter['session_id']:
+        raise RuntimeError('Imported session ID does not match new incarnation')
+    cwd=Path(result.get('cwd','')).resolve()
+    if not cwd.is_relative_to(destination.resolve()): raise RuntimeError('Launcher imported outside dedicated Agent directory')
+    environment=result.get('environment',{})
+    if not isinstance(environment,dict) or set(environment)-{'CODEX_HOME','CLAUDE_CONFIG_DIR'}:
+        raise RuntimeError('Launcher returned unsupported environment selectors')
+    for path in environment.values():
+        if not isinstance(path,str) or not Path(path).resolve().is_relative_to(destination.resolve()):
+            raise RuntimeError('Launcher storage selector is outside dedicated Agent directory')
+    return environment,str(cwd)

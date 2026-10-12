@@ -74,8 +74,11 @@ environment ID. It never infers self from a shared cwd or selects the newest
 session; missing authority needs an explicit --session. Claude captures project JSONL, project `memory/`, and `CLAUDE.md`.
 Codex captures rollout plus matching shell snapshot. No auth/config credential
 files are exported. Snapshot consistency retries are bounded; original sessions
-are never modified. `soul_sessions.py` isolates this native format logic pending
-launcher-owned exportSession/importSession integration.
+are never modified. `soul_sessions.py` is a thin bridge to the launcher-owned session export/import
+CLI. Native file selection, consistency and rebasing belong to launcher adapters.
+Soul validates the transfer bundle, decodes files into the tar so server scanning
+sees actual bytes, and reconstructs checksums after redaction before import.
+A launcher with session-transfer support must be installed on source and target.
 
 Incarnation resolves the version first, then uses read-only `treer exec --machine`
 to inspect harness executable/version, existence of login material, installed
@@ -95,9 +98,10 @@ snapshot metadata), preventing global resume from selecting an unrelated origina
 Each Agent has its own `~/.local/state/treer-soul/AGENT_ID/workspace` and restore
 marker. Startup after completed restoration never downloads/reimports or overwrites
 new learning. Claude uses the dedicated cwd's unique project directory and memory;
-Codex uses an Agent-local CODEX_HOME and a link to the target machine's existing
-auth.json (credentials remain local, never copied/exported). Shell snapshots are
-archived but never executed. Generic souls support an explicit command after `--`.
+Codex/Claude storage selectors come from the launcher import result and must
+remain inside the dedicated Agent directory. Provider login remains machine-local
+and is handled by the launcher adapter; Soul never exports or reads credentials. Shell snapshots are
+archival only; Soul never executes them. Generic souls support an explicit command after `--`.
 
 Launcher path comes from `TREER_AGENT_LAUNCHER`, or
 `TREER_AGENT_INSTALL_ROOT/current`, or
@@ -194,6 +198,7 @@ secure disk erase, or remote download cache. Response/archive materialization an
 list filtering currently use bounded-request in-memory processing; quotas are
 single-process and per owner, not a workspace-wide disk cap. File blob dedup is
 implemented; append-only JSONL delta chains are deferred to keep snapshots simple.
-A failed first import can leave partial Agent-local restore files; startup retries
-until a successful marker, then never overwrites evolved state. Restore targets must
+A failed first import can leave partial Agent-local native storage; the launcher
+refuses overwrites. Inspect/move that dedicated native directory aside before
+retrying; a successful marker prevents all later reimport. Restore targets must
 be App-owned private directories, not user-supplied symlinks.

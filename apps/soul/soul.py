@@ -143,18 +143,39 @@ def validate_manifest(value: object, archive_files: set[str]) -> dict[str, objec
             if not isinstance(session_id, str) or not SESSION_ID_PATTERN.fullmatch(session_id):
                 raise SoulError(400, 'invalid_adapter', 'session_id must be a UUID')
             clean_adapter['session_id'] = session_id
-            session_file = validate_member_path(adapter.get('session_file'))
-            if session_file not in archive_files:
+            session_file = validate_member_path(adapter.get('session_file')) if 'transfer_files' not in adapter else None
+            if session_file is not None and session_file not in archive_files:
                 raise SoulError(400, 'invalid_adapter', 'Session file is missing')
-            clean_adapter['session_file'] = session_file
+            if session_file is not None: clean_adapter['session_file'] = session_file
         for field in ('session_relative_path','shell_snapshot_file','project_instructions_file'):
             if field in adapter:
                 path = validate_member_path(adapter[field])
                 if field != 'session_relative_path' and path not in archive_files:
                     raise SoulError(400, 'invalid_adapter', 'Adapter file is missing')
                 clean_adapter[field] = path
-        if adapter['name'] == 'codex' and not clean_adapter.get('session_relative_path', '').endswith('.jsonl'):
+        if adapter['name'] == 'codex' and 'transfer_files' not in adapter and not clean_adapter.get('session_relative_path', '').endswith('.jsonl'):
             raise SoulError(400, 'invalid_adapter', 'Codex session_relative_path must end in .jsonl')
+        if 'transfer_files' in adapter:
+            entries = adapter['transfer_files']
+            if not isinstance(entries, list) or not 1 <= len(entries) <= 250:
+                raise SoulError(400, 'invalid_adapter', 'Invalid transfer file list')
+            seen = set()
+            clean_adapter['transfer_files'] = []
+            for entry in entries:
+                if not isinstance(entry, dict) or set(entry) != {'scope','path','file'} or entry['scope'] not in ('session','memory','project'):
+                    raise SoulError(400, 'invalid_adapter', 'Invalid transfer file record')
+                path = validate_member_path(entry['path'])
+                file = validate_member_path(entry['file'])
+                if file not in archive_files or not file.startswith('files/') or (entry['scope'],path) in seen:
+                    raise SoulError(400, 'invalid_adapter', 'Transfer file missing or duplicated')
+                if entry['scope'] == 'project' and path != 'CLAUDE.md':
+                    raise SoulError(400, 'invalid_adapter', 'Only CLAUDE.md project instructions supported')
+                seen.add((entry['scope'],path))
+                clean_adapter['transfer_files'].append(dict(scope=entry['scope'],path=path,file=file))
+        if 'exported_at' in adapter:
+            if not isinstance(adapter['exported_at'], str) or len(adapter['exported_at']) > 80:
+                raise SoulError(400, 'invalid_adapter', 'Invalid export timestamp')
+            clean_adapter['exported_at'] = adapter['exported_at']
         if 'memory_files' in adapter:
             memory = adapter['memory_files']
             if not isinstance(memory, list) or len(memory) > 128:
@@ -242,6 +263,7 @@ class SoulStore:
         if max_count < 1 or max_bytes < 1:
             raise ValueError("owner quotas must be positive")
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
         self.lock_file = (root / ".server.lock").open("a+")
         fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.lock = threading.RLock()
