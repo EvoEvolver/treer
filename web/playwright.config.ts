@@ -11,7 +11,7 @@ export default defineConfig({
     headless: true,
   },
   webServer: {
-    command: `pnpm exec vite --port=${PORT} --strict-port --host 127.0.0.1`,
+    command: `node node_modules/vite/bin/vite.js --port=${PORT} --strict-port --host 127.0.0.1`,
     url: WEB_SERVER_URL,
     reuseExistingServer: false,
     timeout: 60_000,

@@ -1,3 +1,4 @@
+import { agentPath } from "@/lib/workload-path"
 import { EmptyState, MachineRecovery, Status } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -85,7 +86,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       <h2 className="mb-3 text-sm font-semibold">Agents on this machine</h2>
       {agents.length ? <div className="border-y">{agents.map((agent) => <div key={agent.agent_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b py-3 last:border-b-0">
         <div className="min-w-0">
-          <div className="truncate text-xs font-medium">{agent.name}</div>
+          <div className="truncate text-xs font-medium">{agentPath(agent)}</div>
           <div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{agent.kind} · {agent.agent_id}</div>
         </div>
         <div className="flex items-center gap-2"><Status value={agentDisplayStatus(agent, machine)} /><Button size="sm" variant="outline" onClick={() => onOpenAgent(agent.agent_id)}>Terminal</Button></div>

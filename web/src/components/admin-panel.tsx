@@ -1,3 +1,4 @@
+import { agentPath } from "@/lib/workload-path"
 import { EmptyState, Status } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -268,7 +269,7 @@ export function AdminInventoryPanel({ kind, preview, onError, onChanged }: { kin
         {openMachine === machine.server_id && <div className="pb-3 pl-7">
           {(machineDetail?.agents ?? []).length ? machineDetail!.agents!.map((agent) => (
             <div key={agent.agent_id} className="flex items-center justify-between gap-3 py-1.5 text-sm">
-              <span className="min-w-0 truncate">{agent.name}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
+              <span className="min-w-0 truncate">{agentPath(agent)}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
               <Status value={agent.status} />
             </div>
           )) : <div className="py-2 text-[11px] text-muted-foreground">No live agents on this machine.</div>}
@@ -284,7 +285,7 @@ export function AdminInventoryPanel({ kind, preview, onError, onChanged }: { kin
         <div className="text-[11px] text-muted-foreground">{serverId}</div>
         {group.map((agent) => (
           <div key={agent.agent_id} className="mt-1 flex items-center justify-between gap-3 text-sm">
-            <span className="truncate">{agent.name}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
+            <span className="truncate">{agentPath(agent)}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
             <Status value={agent.status} />
           </div>
         ))}

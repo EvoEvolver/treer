@@ -39,6 +39,7 @@ const agentWithUi = {
   agent_id: "ag-ui",
   server_id: "srv-a",
   name: "dashboard",
+  path: "/dashboard",
   kind: "command",
   status: "running",
   interface: {
@@ -55,6 +56,7 @@ const agentPlain = {
   agent_id: "ag-tty",
   server_id: "srv-a",
   name: "plain-tty",
+  path: "/plain-tty",
   kind: "command",
   status: "running",
 }
@@ -89,7 +91,7 @@ async function mockApp(page: Page, status = "running", runtimeAgentId = "app-run
   // The Controller reports Agent lifecycle states for the runtime, never "running".
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
     ...snapshot,
-    agents: [...snapshot.agents, { ...agentPlain, agent_id: runtimeAgentId, name: "app:Soul Archive", kind: "app", status: runtimeStatus }],
+    agents: [...snapshot.agents, { ...agentPlain, agent_id: runtimeAgentId, name: "app:Soul Archive", path: "/Soul Archive", kind: "app", status: runtimeStatus }],
   }))
   await page.route("**/api/workspaces/ws-1/apps/app-1/ui/**", (route) => {
     if (new URL(route.request().url()).pathname.endsWith("/app.js")) {
@@ -173,10 +175,10 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await mockApp(page, "running", runtimeId)
     await page.goto("/")
     await page.getByRole("button", { name: /^Soul Archive / }).click()
-    const frame = page.locator("iframe[title='Soul Archive interface']")
+    const frame = page.locator("iframe[title='/Soul Archive interface']")
     await expect(frame).toBeVisible()
     await expect(frame).toHaveAttribute("src", /\/apps\/app-1\/ui\/\?theme=light$/)
-    await expect(page.frameLocator("iframe[title='Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
+    await expect(page.frameLocator("iframe[title='/Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
     await expect(page.locator(".xterm")).toBeHidden()
 
     const reload = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/apps/app-1/ui/"))
@@ -202,7 +204,7 @@ test("mobile: selecting an App opens its human interface and closes back to work
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
   await page.getByRole("button", { name: /^Soul Archive / }).click()
-  await expect(page.frameLocator("iframe[title='Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
+  await expect(page.frameLocator("iframe[title='/Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
   await page.getByRole("button", { name: "Close full-screen interface" }).click()
   await expect(page.locator("aside")).toBeVisible()
   await expect(page.locator("iframe")).toBeHidden()
@@ -253,7 +255,7 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   await expect(page.locator(".xterm")).toBeHidden()
 
   // The iframe must be rendered, pointing at the UI proxy URL
-  const frame = page.locator("iframe[title='dashboard interface']")
+  const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
   await expect(frame).toHaveAttribute("src", /\/api\/workspaces\/ws-1\/agents\/ag-ui\/interface\/ui\//)
 
@@ -264,7 +266,7 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   expect(sandbox).not.toContain("allow-top-navigation")
 
   // The framed content was actually loaded
-  const innerHeading = page.frameLocator("iframe[title='dashboard interface']").getByText("Agent dashboard for ag-ui")
+  const innerHeading = page.frameLocator("iframe[title='/dashboard interface']").getByText("Agent dashboard for ag-ui")
   await expect(innerHeading).toBeVisible()
 })
 
@@ -278,7 +280,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
-  await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
+  await expect(page.locator("iframe[title='/dashboard interface']")).toBeHidden()
   await expect(page.getByText("offline").first()).toBeVisible()
   await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
   await expect(page.getByRole("button", { name: "Copy restart-controller" })).toBeVisible()
@@ -316,10 +318,10 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   await expect(page.locator("aside")).toBeVisible()
-  await expect(page.locator("iframe[title='dashboard interface']")).toBeHidden()
+  await expect(page.locator("iframe[title='/dashboard interface']")).toBeHidden()
 
   await page.getByRole("button", { name: /^dashboard / }).click()
-  const frame = page.locator("iframe[title='dashboard interface']")
+  const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
   await expect(page.getByRole("button", { name: "Close full-screen interface" })).toBeVisible()
   await expect(page.locator(".xterm")).toBeHidden()
@@ -357,11 +359,11 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
 
-  const frame = page.locator("iframe[title='dashboard interface']")
+  const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
   await expect(frame).toHaveAttribute("src", /[?&]theme=light(?:&|$)/)
   await expect(frame).toHaveCSS("color-scheme", "light")
-  await expect(page.frameLocator("iframe[title='dashboard interface']").locator("html")).toHaveAttribute("data-embed-theme", "light")
+  await expect(page.frameLocator("iframe[title='/dashboard interface']").locator("html")).toHaveAttribute("data-embed-theme", "light")
 
   await page.getByRole("button", { name: "User menu" }).click()
   await page.getByRole("menuitem", { name: "Settings" }).click()
@@ -371,7 +373,7 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
 
   await expect(page.locator("html")).toHaveClass(/dark/)
   await expect(frame).toHaveCSS("color-scheme", "dark")
-  await expect(page.frameLocator("iframe[title='dashboard interface']").locator("html")).toHaveAttribute("data-embed-theme", "dark")
+  await expect(page.frameLocator("iframe[title='/dashboard interface']").locator("html")).toHaveAttribute("data-embed-theme", "dark")
   await expect(frame).toHaveAttribute("src", /[?&]theme=light(?:&|$)/)
 })
 
@@ -379,7 +381,7 @@ test("a new interface registered_at remounts the iframe", async ({ page }) => {
   await page.goto("/")
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
-  const frame = page.locator("iframe[title='dashboard interface']")
+  const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
 
   let uiHits = 0

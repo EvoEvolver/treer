@@ -1,3 +1,4 @@
+import { AgentBreadcrumbs } from "@/components/agent-breadcrumbs"
 import { AppSettingsView, AppsView } from "@/components/apps-view"
 import { AuditView } from "@/components/audit-view"
 import { AuthScreen } from "@/components/auth-screen"
@@ -15,12 +16,13 @@ import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { WorkloadTree, type NewAgentFolder } from "@/components/workload-tree"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
-import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
+import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkloadTreeState } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
-import { ConnectionState, DeleteTarget, MainView, PREVIEW_CONNECT, PREVIEW_INSTALL, PREVIEW_ORG, PREVIEW_PROFILES, PREVIEW_USER, PREVIEW_WORKSPACE, RenameTarget, TerminalState, activeStatuses, arrayBufferToBase64, authorizationReturnUrl, controlCharacter, defaultAgentName, defaultProfileAgentName, formatBytes, initials, machineOnline, replaceWorkspace, visibleWorkspaceSnapshot, workspacePath } from "@/lib/control-plane"
+import { DeleteTarget, MainView, PREVIEW_CONNECT, PREVIEW_INSTALL, PREVIEW_ORG, PREVIEW_PROFILES, PREVIEW_USER, PREVIEW_WORKSPACE, RenameTarget, TerminalState, activeStatuses, arrayBufferToBase64, authorizationReturnUrl, controlCharacter, defaultAgentName, defaultProfileAgentName, formatBytes, initials, machineOnline, replaceWorkspace, visibleWorkspaceSnapshot, workspacePath } from "@/lib/control-plane"
 import { interfaceFrameKey, postEmbedTheme, withEmbedTheme } from "@/lib/embed-ui"
-import { clearFirstRunTour, firstRunTourMode, shouldAutoStartFirstRunTour, startFirstRunTour, stopFirstRunTour, type FirstRunTourHost, type SidebarTab } from "@/lib/first-run-tour"
+import { clearFirstRunTour, firstRunTourMode, shouldAutoStartFirstRunTour, startFirstRunTour, stopFirstRunTour, type FirstRunTourHost } from "@/lib/first-run-tour"
 import { readTheme, subscribeTheme, type Theme } from "@/lib/theme"
+import { agentPath } from "@/lib/workload-path"
 import { cn } from "@/lib/utils"
 import {
   ArrowDown,
@@ -58,9 +60,14 @@ export function WorkspaceApp() {
   const location = useLocation()
   const routeSelectionRef = useRef({ organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null })
   routeSelectionRef.current = { organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null }
+  const routingRef = useRef({ navigate, search: location.search, hash: location.hash })
+  routingRef.current = { navigate, search: location.search, hash: location.hash }
+  // Canonicalizing the URL must not reset workspace loading or close its event
+  // socket when React Router changes the navigate function's identity.
   const replaceWorkspaceRoute = useCallback((organizationId: string | null, workspaceId: string | null) => {
-    navigate({ pathname: workspacePath(organizationId, workspaceId), search: location.search, hash: location.hash }, { replace: true })
-  }, [navigate, location.search, location.hash])
+    const routing = routingRef.current
+    routing.navigate({ pathname: workspacePath(organizationId, workspaceId), search: routing.search, hash: routing.hash }, { replace: true })
+  }, [])
   const preview = firstRunTourMode() === "preview"
   const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
   const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
@@ -72,12 +79,10 @@ export function WorkspaceApp() {
   workspaceIdRef.current = workspaceId
   const [loadedSnapshot, setSnapshot] = useState<Snapshot | null>(null)
   const snapshot = loadedSnapshot?.workspace.workspace_id === workspaceId ? loadedSnapshot : null
-  const [, setSidebarTab] = useState<SidebarTab>("agents")
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [showWorkloadLogs, setShowWorkloadLogs] = useState(false)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
-  const [connection, setConnection] = useState<ConnectionState>("connecting")
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
   const [interfaceUiRevision, setInterfaceUiRevision] = useState(0)
   const [theme, setTheme] = useState<Theme>(() => readTheme())
@@ -98,6 +103,9 @@ export function WorkspaceApp() {
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [agentFolder, setAgentFolder] = useState<NewAgentFolder | null>(null)
   const [placementRevision, setPlacementRevision] = useState(0)
+  const [workloadTree, setWorkloadTree] = useState<WorkloadTreeState>({ folders: [], placements: [] })
+  const [renameError, setRenameError] = useState("")
+  const [createAgentError, setCreateAgentError] = useState("")
   const [creatingAgent, setCreatingAgent] = useState(false)
   const [deletingApp, setDeletingApp] = useState<AppDeployment | null>(null)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
@@ -194,7 +202,6 @@ export function WorkspaceApp() {
     if (preview) return
     if (!organizationId) {
       setWorkspaces([])
-      setConnection("no workspace")
       return
     }
     const data = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
@@ -209,12 +216,10 @@ export function WorkspaceApp() {
     workspaceIdRef.current = selected
     setWorkspaceId(selected)
     replaceWorkspaceRoute(organizationId, selected)
-    if (!data.workspaces.length) setConnection("no workspace")
   }, [organizationId, preview, replaceWorkspaceRoute])
 
   useEffect(() => {
     if (preview) {
-      setConnection("no workspace")
       return
     }
     workspaceIdRef.current = null
@@ -237,7 +242,6 @@ export function WorkspaceApp() {
     if (!workspaceId) {
       setSnapshot(null)
       setSelectedAgentId(null)
-      setConnection("no workspace")
       return
     }
     let disposed = false
@@ -245,11 +249,9 @@ export function WorkspaceApp() {
     let timer: number | undefined
     setSnapshot((current) => current?.workspace.workspace_id === workspaceId ? current : null)
     refreshSnapshot().catch(showError)
-    const connect = (initial = false) => {
+    const connect = () => {
       if (disposed || workspaceIdRef.current !== workspaceId) return
-      if (initial) setConnection("connecting")
       socket = new WebSocket(websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/events`))
-      socket.onopen = () => { if (!disposed && workspaceIdRef.current === workspaceId) setConnection("live") }
       socket.onmessage = (event) => {
         if (disposed || workspaceIdRef.current !== workspaceId) return
         const message = JSON.parse(event.data) as { event: string; revision?: number; data?: Snapshot | Workspace | Agent }
@@ -294,11 +296,10 @@ export function WorkspaceApp() {
       }
       socket.onclose = () => {
         if (disposed || workspaceIdRef.current !== workspaceId) return
-        setConnection("reconnecting")
-        timer = window.setTimeout(() => connect(false), 1200)
+        timer = window.setTimeout(() => connect(), 1200)
       }
     }
-    connect(true)
+    connect()
     return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
   }, [preview, workspaceId, refreshSnapshot, syncWorkspaces, showError])
 
@@ -310,6 +311,7 @@ export function WorkspaceApp() {
   const selectedAgentApp = apps.find((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
   const selectedRuntimeAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId) ?? (selectedAgentApp ? { agent_id: selectedAgentApp.runtime_agent_id ?? selectedAgentApp.app_id, server_id: selectedAgentApp.server_id, name: selectedAgentApp.name, kind: "app", status: selectedAgentApp.status } : undefined)
   const selectedAgent = selectedRuntimeAgent && selectedAgentApp ? { ...selectedRuntimeAgent, name: selectedAgentApp.name } : selectedRuntimeAgent
+  const selectedAgentPath = selectedAgent ? agentPath(selectedAgent, workloadTree) : ""
   const selectedAgentMachine = snapshot?.servers.find((machine) => machine.server_id === selectedAgent?.server_id)
   const selectedAgentMachineOnline = machineOnline(selectedAgentMachine)
   const selectedAgentInterface = !showWorkloadLogs && !selectedAgentApp && selectedAgentMachineOnline && selectedAgent?.interface?.ui_path ? selectedAgent.interface : undefined
@@ -433,7 +435,6 @@ export function WorkspaceApp() {
   function showAgentTerminal(agentId: string, logs = false) {
     setSelectedAgentId(agentId)
     setShowWorkloadLogs(logs)
-    setSidebarTab("agents")
     setMainView("terminal")
     if (isMobile) setMobileTerminalOpen(true)
   }
@@ -531,7 +532,7 @@ export function WorkspaceApp() {
     const creationWorkspaceId = workspaceId
     const folder = agentFolder
     const placement = folder ? { folder_id: folder.folderId } : {}
-    setCreatingAgent(true)
+    setCreatingAgent(true); setCreateAgentError("")
     try {
       let agent
       if (agentProfileId === "terminal") {
@@ -554,11 +555,12 @@ export function WorkspaceApp() {
       setCreateAgentOpen(false)
       showAgentTerminal(agentId)
       await refreshSnapshot()
-    } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) showError(reason) }
+    } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) setCreateAgentError(reason instanceof Error ? reason.message : "Create failed") }
     finally { setCreatingAgent(false) }
   }
 
   function openCreateAgent(reset = true, folder: NewAgentFolder | null = null) {
+    setCreateAgentError("")
     if (creatingAgent) return
     if (reset || !createAgentOpenRef.current) {
       setAgentFolder(folder)
@@ -661,14 +663,12 @@ export function WorkspaceApp() {
   }, [mainView, selectedAppId, selectedApp, appsLoading])
 
   function openApps() {
-    setSidebarTab("agents")
     setMainView("terminal")
     setMobileTerminalOpen(false)
   }
 
   function openAppSettings(app: AppDeployment) {
     setSelectedAppId(app.app_id)
-    setSidebarTab("apps")
     setMainView("app")
     setMobileTerminalOpen(false)
   }
@@ -833,7 +833,6 @@ export function WorkspaceApp() {
 
   const tourHostRef = useRef<FirstRunTourHost | null>(null)
   tourHostRef.current = {
-    setSidebarTab,
     openCreateWorkspace: () => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) },
     closeCreateWorkspace: () => setCreateWorkspaceOpen(false),
     prepareWorkspaceForMachineSteps: () => {
@@ -841,7 +840,6 @@ export function WorkspaceApp() {
       setWorkspaces([PREVIEW_WORKSPACE])
       setWorkspaceId(PREVIEW_WORKSPACE.workspace_id)
       setSnapshot({ revision: 0, workspace: PREVIEW_WORKSPACE, servers: [], agents: [] })
-      setConnection("no workspace")
     },
     openWorkspaceSettings: () => {
       setWorkspaceName(workspaces.find((item) => item.workspace_id === workspaceId)?.name ?? PREVIEW_WORKSPACE.name)
@@ -882,7 +880,7 @@ export function WorkspaceApp() {
     }
   }, [user, preview])
 
-  function openRename(target: NonNullable<RenameTarget>) { setRenameTarget(target); setRenameName(target.name) }
+  function openRename(target: NonNullable<RenameTarget>) { setRenameError(""); setRenameTarget(target); setRenameName(target.name) }
 
   function openUpload() {
     closeMobileSurface()
@@ -929,12 +927,13 @@ export function WorkspaceApp() {
     event.preventDefault()
     if (!workspaceId || !renameTarget) return
     const resource = renameTarget.kind === "machine" ? "servers" : "agents"
+    setRenameError("")
     try {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/${resource}/${encodeURIComponent(renameTarget.id)}`, { method: "PATCH", body: JSON.stringify({ name: renameName }) })
       if (workspaceIdRef.current !== workspaceId) return
       if (renameTarget.kind === "agent") setApps((current) => current.map((app) => app.runtime_agent_id === renameTarget.id || app.app_id === renameTarget.id ? { ...app, name: renameName } : app))
       setRenameTarget(null); await refreshSnapshot()
-    } catch (reason) { showError(reason) }
+    } catch (reason) { setRenameError(reason instanceof Error ? reason.message : "Rename failed") }
   }
 
   async function confirmDelete() {
@@ -1141,7 +1140,7 @@ export function WorkspaceApp() {
           </div>
           <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
-        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} preview={preview} />
+        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <div className="shrink-0 border-t p-2">
           <DropdownMenu>
@@ -1155,7 +1154,7 @@ export function WorkspaceApp() {
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
             {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
-            <span className="hidden truncate sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong></div>
+            <span className="hidden truncate sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface || showAppUi ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs((value) => !value)}>{showWorkloadLogs ? "Show App" : "Show logs"}</Button>}
@@ -1181,11 +1180,11 @@ export function WorkspaceApp() {
             {mobileTerminalOpen && <Button variant="ghost" onClick={closeMobileSurface}>Back to workloads</Button>}
           </div>
         </div> : mainView === "terminal" && interfaceUiUrl ? <div className={cn("min-h-0 min-w-0 overflow-hidden bg-background", mobileTerminalOpen && "fixed inset-0 z-[100] grid h-[100dvh] grid-rows-[44px_minmax(0,1fr)] bg-background pt-[env(safe-area-inset-top)]")}>
-          {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b bg-background px-3.5"><span className="truncate text-xs font-semibold text-foreground">{selectedAgent?.name ?? "Interface"}</span><div className="flex shrink-0 items-center gap-1"><IconButton label="Upload file" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div></div>}
-          <iframe ref={interfaceFrameRef} key={interfaceFrameKey(selectedAgent?.agent_id ?? "", selectedAgentInterface?.instance_id ?? selectedAgentApp?.hostname ?? "", selectedAgentInterface?.registered_at ?? String(selectedAgent?.run_generation ?? ""), interfaceUiRevision)} src={interfaceUiUrl} title={`${selectedAgent?.name ?? "Agent"} interface`} className="block size-full min-h-0 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" onLoad={() => postEmbedTheme(interfaceFrameRef.current, themeRef.current)} />
+          {mobileTerminalOpen && <div className="flex min-w-0 items-center justify-between gap-3 border-b bg-background px-3.5"><span title={selectedAgentPath} className="truncate text-xs font-semibold text-foreground">{selectedAgentPath || "Interface"}</span><div className="flex shrink-0 items-center gap-1"><IconButton label="Upload file" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close full-screen interface" onClick={closeMobileSurface}><X className="size-4" /></button></div></div>}
+          <iframe ref={interfaceFrameRef} key={interfaceFrameKey(selectedAgent?.agent_id ?? "", selectedAgentInterface?.instance_id ?? selectedAgentApp?.hostname ?? "", selectedAgentInterface?.registered_at ?? String(selectedAgent?.run_generation ?? ""), interfaceUiRevision)} src={interfaceUiUrl} title={`${selectedAgentPath || "Agent"} interface`} className="block size-full min-h-0 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads" onLoad={() => postEmbedTheme(interfaceFrameRef.current, themeRef.current)} />
         </div> : mainView === "terminal" ? mobileTerminalIdle ? null : <div className="flex min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16">
           <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobileTerminalOpen && "fixed inset-0 z-[100] h-[100dvh] max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
-            <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span className="truncate text-xs font-semibold text-zinc-200">{selectedAgent?.name ?? "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <><IconButton label="Upload file" className="text-zinc-400 hover:bg-white/10 hover:text-zinc-100" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button></>}</div></div>
+            <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span title={selectedAgentPath} className="truncate text-xs font-semibold text-zinc-200">{selectedAgentPath || "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <><IconButton label="Upload file" className="text-zinc-400 hover:bg-white/10 hover:text-zinc-100" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button></>}</div></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane ref={terminalPaneRef} key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} transformInput={transformTerminalInput} /></div>
             {mobileTerminalOpen && <div className="border-t border-zinc-800 bg-[#191d20] px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
               <div className="grid grid-cols-6 gap-1.5">
@@ -1257,6 +1256,7 @@ export function WorkspaceApp() {
           {agentProfileId === "manual" && <Field label="Command"><Input aria-label="Command" className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="/path/to/your-launcher --option" required /></Field>}
           {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Runs the saved command on this machine. Install its runtime and dependencies before launching.</span>}
           <Field label="Name"><Input aria-label="Name" value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
+          {createAgentError && <p role="alert" className="break-words text-sm text-destructive">{createAgentError}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>
             <Button type="submit" disabled={creatingAgent || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : "Create agent"}</Button>
@@ -1279,11 +1279,11 @@ export function WorkspaceApp() {
       </DialogContent>
     </Dialog>
 
-    <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Choose a clear name for this {renameTarget?.kind}.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Rename {renameTarget?.kind === "agent" ? agentPath(snapshot?.agents.find((agent) => agent.agent_id === renameTarget.id) ?? { agent_id: renameTarget.id, name: renameTarget.name, server_id: "", kind: "", status: "" }, workloadTree) : renameTarget?.name}. Names must be unique within the same folder.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div>{renameError && <p role="alert" className="mb-4 break-words text-sm text-destructive">{renameError}</p>}<DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
 
     <Dialog open={uploadOpen} onOpenChange={(open) => !uploading && setUploadOpen(open)}><DialogContent><form onSubmit={uploadToAgentMachine} className="space-y-4"><DialogHeader><DialogTitle>Upload file</DialogTitle><DialogDescription>Upload to {machineName(selectedAgentMachine, selectedAgent?.server_id)}. The destination directory is relative to the Machine root.</DialogDescription></DialogHeader><Field label="Destination directory"><Input aria-label="Destination directory" className="font-mono" value={uploadDirectory} onChange={(event) => setUploadDirectory(event.target.value)} placeholder="." required disabled={uploading} /></Field><Field label="File"><Input key={uploadInputKey} aria-label="File" type="file" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} disabled={uploading} /></Field><label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-foreground" checked={overwriteUpload} onChange={(event) => setOverwriteUpload(event.target.checked)} disabled={uploading} />Replace an existing file with the same name</label><p className="text-[10px] text-muted-foreground">Maximum 16 MiB</p>{uploadMessage && <p className="text-xs text-emerald-700">{uploadMessage}</p>}{uploadError && <p className="text-xs text-red-600">{uploadError}</p>}<DialogFooter><Button type="button" variant="outline" onClick={() => setUploadOpen(false)} disabled={uploading}>Close</Button><Button type="submit" disabled={!uploadFile || uploading || !selectedAgentMachineOnline}><Upload />{uploading ? "Uploading" : "Upload"}</Button></DialogFooter></form></DialogContent></Dialog>
 
-    <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget?.name} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget ? agentPath(snapshot?.agents.find((agent) => agent.agent_id === deleteTarget.id) ?? { agent_id: deleteTarget.id, name: deleteTarget.name, server_id: "", kind: "", status: "" }, workloadTree) : "Agent"} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>Delete workspace</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? "Checking the workspace machine inventory..." : workspaceMachineCount > 0 ? `Delete all ${workspaceMachineCount} ${workspaceMachineCount === 1 ? "machine" : "machines"} from ${workspace?.name ?? "this workspace"} first.` : `Delete ${workspace?.name}? It will disappear from active views while historical traffic and messages are retained. This cannot be undone.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>Cancel</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>Delete workspace</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>

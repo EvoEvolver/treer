@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build && node scripts/clean-dist.mjs",
     "typecheck": "tsc -b --pretty false && wrangler types --env canary ./worker-configuration.d.ts && tsc -p tsconfig.worker.json --pretty false",
-    "test:e2e": "playwright test",
+    "test:e2e": "node e2e/run.mjs",
     "preview": "vite preview",
     "worker:dev": "wrangler dev --env canary",
     "worker:upload:canary": "wrangler versions upload --env canary",
@@ -16,8 +16,6 @@
     "worker:deploy:production": "wrangler deploy --env production"
   },
   "dependencies": {
-    "@radix-ui/react-alert-dialog": "^1.1.15",
-    "@radix-ui/react-avatar": "^1.1.10",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-label": "^2.1.7",
