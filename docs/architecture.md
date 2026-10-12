@@ -573,32 +573,29 @@ an idempotency key. An interface with `state.observe` owns working, idle, and
 blocked state; Host exit state remains authoritative. Terminal attach, raw
 input, resize, stop, and delete remain Host/PTY operations.
 
-Pi UI and Codex UI are the bundled browser AIS implementations. Pi exposes the
-v1 routes from its extension. Codex UI owns one `codex app-server` thread per
-Treer Agent and deliberately has no thread list or session switcher. Each
-serves its browser UI and semantic routes from the same private listener; its
-verified descriptor is the single registration for both capabilities and
-presentation.
+The optional [Agent launcher](../launchers/agent/README.md) lives in
+`launchers/agent` and uses the same public launch-profile and Agent Interface
+contracts as an external recipe. It owns one shared AIS implementation and
+browser UI, serving semantic routes and presentation from one private listener
+registered with `ui_path: "/"`. Each Treer Agent binds to one harness
+thread/session; the UI has no thread list or session switcher. Provider choices,
+session persistence, and presentation remain launcher concerns, without adding
+provider routes, Agent kinds, or Host-wide UI state to Core.
 
-Optional launchers live under `launchers/` and use the same public profile and
-Agent Interface contracts as an external recipe. The ACP launcher starts as an
-ordinary profile command; its provider catalog, session journal, and optional
-presentation remain inside that launcher. Headless profiles omit `ui_path`.
-Remote Codex presentation is a separately named, explicit profile and does not
-add an ACP Agent kind, provider routes, Host-wide UI state, or provider choices
-to Controller, Proxy, Protocol, or Web.
+Harness-specific behavior lives in `launchers/agent/src/harness/{codex,claude,acp}`.
+Codex uses its native `codex app-server`; Claude Code uses its native stream-JSON
+interface. Cursor, Grok Build, OpenCode, and Gemini use the shared ACP adapter
+with provider-specific commands from the launch profiles. The Cursor profile
+uses `cursor-agent`, avoiding Grok Build's `agent` executable alias. Built-in
+`--kind codex` and `--kind claude` remain ordinary TUI/PTY paths without AIS.
 
-Launch-profile sidecars in `apps/codex-ais`, `apps/opencode-ais`,
-`apps/dsh-ais`, `apps/claude-ais`, `apps/grok-ais`, and `apps/cursor-ais`
-register the same protocol without a bundled page. They bind one Treer Agent to
-one downstream thread/session beside `codex app-server`, `opencode serve`, a
-dedicated DeepSeek Harness host (`dsh --profile web`) or SDK runtime, Claude
-Code stream-json, Grok Build ACP (`grok agent stdio`), and Cursor ACP
-(`cursor-agent acp`). Neither Grok Build nor Cursor ships a Codex-style
-app-server; ACP over stdio is their first-party editor integration. The Cursor
-sidecar uses `cursor-agent`, not `agent`, because Grok Build also installs an
-`agent` symlink. Built-in `--kind codex` and `--kind claude` remain TUI/PTY
-paths. Shared helpers live in `apps/ais-kit`.
+The standalone Rust ACP launcher, Pi UI, DSH AIS, provider-specific AIS Apps,
+and `apps/ais-kit` have been retired in favor of this single launcher. Provider
+authentication belongs to each provider's own CLI/configuration; the launcher
+does not automatically reuse Codex credentials for other providers. This
+consolidation adds no authentication, Policy, or isolation boundary: launcher
+code runs with the Agent's operating-system authority, and the Controller
+remains the external authorization and routing boundary.
 
 `GET /v1/transcript` pages by conversation turn. A turn starts at a user prompt
 and includes the following entries until the next user prompt. Leading non-user
