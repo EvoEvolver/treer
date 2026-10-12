@@ -7,7 +7,7 @@ pub(super) async fn run_app_command(
     match command {
         AppCommand::List => client.value(Method::GET, "api/apps", None).await,
         AppCommand::Show { target } => {
-            let target = normalize_target(&target)?;
+            let target = workload_tree::resolve_target(client, &target).await?;
             client
                 .value(
                     Method::GET,
@@ -47,7 +47,7 @@ pub(super) async fn run_app_command(
         AppCommand::Stop { target } => app_action(client, &target, "stop").await,
         AppCommand::Restart { target } => app_action(client, &target, "restart").await,
         AppCommand::Delete { target } => {
-            let target = normalize_target(&target)?;
+            let target = workload_tree::resolve_target(client, &target).await?;
             client
                 .value(
                     Method::DELETE,
@@ -64,7 +64,7 @@ pub(super) async fn app_action(
     target: &str,
     action: &str,
 ) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     client
         .value(
             Method::POST,

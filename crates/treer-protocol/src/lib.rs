@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 pub mod cli;
 pub mod recovery;
 pub use recovery::*;
+mod targets;
+pub use targets::*;
 mod workload_tree;
 pub use workload_tree::*;
 
@@ -14,6 +16,7 @@ pub const PROTOCOL_MIN_VERSION: u32 = 4;
 pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKILL.md");
 /// Text control frame on a private service WebSocket; binary frames carry bytes.
 pub const SERVICE_STREAM_EOF: &str = "treer-service-eof-v1";
+pub const CAPABILITY_AGENT_PATH_TARGETS: &str = "agent.path-targets.v1";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
 pub const CAPABILITY_AGENT_STARTUP_ADMIN: &str = "agent.startup-admin.v1";
@@ -23,6 +26,7 @@ pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
 pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
 pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
+    CAPABILITY_AGENT_PATH_TARGETS,
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,
     CAPABILITY_AGENT_STARTUP_ADMIN,
@@ -62,6 +66,8 @@ const MAX_NETWORK_PAYLOAD_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolError {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<Vec<String>>,
     pub code: String,
     pub message: String,
 }
@@ -69,6 +75,7 @@ pub struct ProtocolError {
 impl ProtocolError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
+            hint: None,
             code: code.into(),
             message: message.into(),
         }

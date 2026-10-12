@@ -28,15 +28,6 @@ export function restartAgentWithStartup(workspaceId: string, agentId: string, re
   return api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/restart-with-startup`, { method: "POST", body: JSON.stringify(request) })
 }
 
-export async function appendAgentToTreeFolder(workspaceId: string, agentId: string, folderId: string) {
-  const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/workload-tree`
-  const tree = await api<WorkloadTreeState>(base)
-  const position = Math.max(-1, ...tree.placements.filter((placement) => placement.folder_id === folderId).map((placement) => placement.position)) + 1
-  return api(`${base}/placements/${encodeURIComponent(agentId)}`, {
-    method: "PUT", body: JSON.stringify({ folder_id: folderId, position }),
-  })
-}
-
 export interface OrganizationGroup {
   group_id: string
   organization_id: string
@@ -96,6 +87,7 @@ export interface MachineFileUpload {
 }
 
 export interface Agent {
+  path?: string
   run_generation?: number
   agent_id: string
   server_id: string

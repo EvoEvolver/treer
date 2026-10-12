@@ -319,6 +319,17 @@ where
 }
 async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
     let connection = connection(raw)?;
+    // Never let an older interpreter silently reinterpret sibling targets globally.
+    let health: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
+        .get(connection.url.join("/api/health")?)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure_path_target_capability(&health)?;
     let mut url = connection.url.join("/api/cli/session")?;
     let scheme = match url.scheme() {
         "http" => "ws",
@@ -434,5 +445,32 @@ mod configuration_tests {
         write("srv_duplicate", "ws_one", &hostname, 8793);
         assert!(installed_config(&directory, Some("ws_one"), None).is_err());
         fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+fn ensure_path_target_capability(health: &serde_json::Value) -> anyhow::Result<()> {
+    anyhow::ensure!(health["cli_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap == treer_protocol::CAPABILITY_AGENT_PATH_TARGETS)),
+        "unsupported_command: Controller does not advertise agent.path-targets.v1; upgrade the Controller before using this CLI (no command was dispatched)");
+    Ok(())
+}
+
+#[cfg(test)]
+mod path_capability_tests {
+    #[test]
+    fn old_controllers_fail_before_command_dispatch_without_breaking_a_session() {
+        assert!(
+            super::ensure_path_target_capability(&serde_json::json!({"status":"ok"}))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported_command")
+        );
+        assert!(super::ensure_path_target_capability(
+            &serde_json::json!({"cli_capabilities":["unknown"]})
+        )
+        .is_err());
+        assert!(super::ensure_path_target_capability(
+            &serde_json::json!({"cli_capabilities":["agent.path-targets.v1"]})
+        )
+        .is_ok());
     }
 }

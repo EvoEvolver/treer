@@ -17,7 +17,7 @@ treer app create --machine self --name tower --cwd treer --port 9460 \
   TOWER_DATA_DIR=.treer/apps/tower \
   TOWER_TOKEN="$TOKEN" \
   python3 apps/tower/tower.py
-treer app show tower
+treer app show /tower
 ```
 
 Keep the token outside Agent-visible files when the deployment environment can

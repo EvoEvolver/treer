@@ -151,6 +151,7 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "treer-agent-server",
+        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS],
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
         "controller_epoch": state.controller_epoch,

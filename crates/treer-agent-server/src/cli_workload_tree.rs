@@ -5,6 +5,7 @@ const TREE: &str = "api/workload-tree";
 
 fn fail(code: &str, message: impl Into<String>) -> anyhow::Error {
     CliFailure {
+        hint: None,
         code: code.into(),
         message: message.into(),
     }
@@ -127,8 +128,8 @@ fn entry_path(parent: &str, name: &str) -> String {
 }
 
 // Resolve before creation so a misspelled destination never starts a workload.
-// Placement uses the existing Policy-checked tree API, without changing the
-// create/launch wire contract or interpreting paths in the thin client.
+// Proxy atomically reserves the name and final placement before dispatch.
+// The thin client continues to forward argv without interpreting tree paths.
 pub(super) async fn create_in_folder(
     client: &ApiClient,
     requested: Option<&str>,
@@ -145,23 +146,62 @@ pub(super) async fn create_in_folder(
     } else {
         None
     };
-    let created = client.value(Method::POST, endpoint, Some(request)).await?;
+    let mut request = request;
     if let Some(folder) = destination {
-        let agent_id = created["agent_id"].as_str().ok_or_else(|| {
-            fail("agent_created_placement_failed", "Agent creation returned no agent_id; inspect the workspace before retrying creation")
-        })?;
-        client
-            .value(
-                Method::PUT,
-                &format!("{TREE}/placements/{}", path_segment(agent_id)),
-                Some(json!({"folder_id":folder,"position":i64::MAX})),
-            )
-            .await
-            .map_err(|error| fail("agent_created_placement_failed", format!(
-                "Agent {agent_id} was created, but folder placement failed: {error}. Do not repeat creation; retry with treer agent mv {agent_id} {folder}"
-            )))?;
+        request["folder_id"] = json!(folder);
     }
+    let created = client.value(Method::POST, endpoint, Some(request)).await?;
     Ok(created)
+}
+
+pub(super) async fn resolve_target(client: &ApiClient, target: &str) -> anyhow::Result<String> {
+    if matches!(target, "self" | ".") {
+        return client.source_agent_id.clone().ok_or_else(|| {
+            fail(
+                "agent_identity_required",
+                "self requires an authenticated Agent identity",
+            )
+        });
+    }
+    if target.starts_with("ag_") || target.starts_with("app_") {
+        return Ok(target.to_owned());
+    }
+    let tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
+    resolve_target_in_tree(client, &tree, target).await
+}
+
+async fn resolve_target_in_tree(
+    client: &ApiClient,
+    tree: &WorkloadTree,
+    target: &str,
+) -> anyhow::Result<String> {
+    if matches!(target, "self" | ".") {
+        return client.source_agent_id.clone().ok_or_else(|| {
+            fail(
+                "agent_identity_required",
+                "self requires an authenticated Agent identity",
+            )
+        });
+    }
+    let rows = workloads(client)
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            Some(treer_protocol::WorkloadTarget {
+                id: row["agent_id"].as_str()?.to_owned(),
+                name: row["name"].as_str()?.to_owned(),
+            })
+        })
+        .collect::<Vec<_>>();
+    tree.resolve_target(&rows, client.source_agent_id.as_deref(), target)
+        .map_err(|error| {
+            CliFailure {
+                code: error.code,
+                message: error.message,
+                hint: error.hint,
+            }
+            .into()
+        })
 }
 
 pub(super) async fn mkdir(client: &ApiClient, path: &str, parents: bool) -> anyhow::Result<Value> {
@@ -409,55 +449,7 @@ pub(super) async fn mv(
             .await;
     }
     let destination = resolve_folder(&tree, destination, cwd)?;
-    let agent = if source == "self" {
-        client
-            .source_agent_id
-            .clone()
-            .ok_or_else(|| fail("agent_not_found", "self requires an Agent identity"))?
-    } else {
-        let rows = workloads(client).await?;
-        if let Some(id) = rows
-            .iter()
-            .find(|a| !source.contains('/') && a["agent_id"] == source)
-            .and_then(|a| a["agent_id"].as_str())
-        {
-            id.to_owned()
-        } else {
-            let parts = components(&tree, source, cwd)?;
-            let name = parts
-                .last()
-                .ok_or_else(|| fail("agent_not_found", "Agent path is empty"))?;
-            let parent = resolve_folder(
-                &tree,
-                &format!("/{}", parts[..parts.len() - 1].join("/")),
-                cwd,
-            )?;
-            let matches: Vec<_> = rows
-                .iter()
-                .filter(|a| {
-                    let folder = tree
-                        .placements
-                        .iter()
-                        .find(|p| Some(p.agent_id.as_str()) == a["agent_id"].as_str())
-                        .and_then(|p| p.folder_id.as_deref());
-                    a["name"].as_str() == Some(name.as_str()) && folder == parent.as_deref()
-                })
-                .collect();
-            match matches.as_slice() {
-                [agent] => agent["agent_id"]
-                    .as_str()
-                    .context("missing agent ID")?
-                    .to_owned(),
-                [] => return Err(fail("agent_not_found", "Agent not found at this path")),
-                _ => {
-                    return Err(fail(
-                        "agent_ambiguous",
-                        "multiple Agents at this path; use the Agent ID",
-                    ))
-                }
-            }
-        }
-    };
+    let agent = resolve_target_in_tree(client, &tree, source).await?;
     client
         .value(
             Method::PUT,
@@ -794,17 +786,13 @@ mod tests {
                 requests.push((
                     Method::POST,
                     "/api/agents".into(),
-                    Some(json!({"name":"child"})),
+                    Some(if let Some(folder) = destination {
+                        json!({"name":"child","folder_id":folder})
+                    } else {
+                        json!({"name":"child"})
+                    }),
                     json!({"agent_id":"new-agent","cwd":"repo"}),
                 ));
-                if let Some(folder) = destination {
-                    requests.push((
-                        Method::PUT,
-                        "/api/workload-tree/placements/new%2Dagent".into(),
-                        Some(json!({"folder_id":folder,"position":i64::MAX})),
-                        json!({"ok":true}),
-                    ));
-                }
             }
             let expected = Arc::new(Mutex::new(std::collections::VecDeque::from(requests)));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -852,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_launch_inherits_folder_and_reports_partial_creation_without_retrying() {
+    async fn profile_launch_reserves_inherited_folder_in_creation_request() {
         let expected = Arc::new(Mutex::new(std::collections::VecDeque::from([
             (
                 Method::GET,
@@ -865,6 +853,7 @@ mod tests {
                 "/api/launch-profiles/reviewer/launch".into(),
                 Some(
                     serde_json::to_value(LaunchAgentProfileRequest {
+                        folder_id: Some("research".into()),
                         server_id: None,
                         agent_name: None,
                         cwd: None,
@@ -895,7 +884,7 @@ mod tests {
             workload_credential: Some("test-workload-credential".into()),
             operator_credential: None,
         };
-        let error = run_profile_command(
+        let created = run_profile_command(
             &client,
             ProfileCommand::Launch {
                 target: "reviewer".into(),
@@ -906,14 +895,9 @@ mod tests {
             },
         )
         .await
-        .unwrap_err();
-        let failure = error.downcast_ref::<CliFailure>().unwrap();
-        assert_eq!(failure.code, "agent_created_placement_failed");
-        assert!(failure.message.contains("new-agent was created"));
-        assert!(failure
-            .message
-            .contains("treer agent mv new-agent research"));
-        assert!(failure.message.contains("Do not repeat creation"));
+        .unwrap();
+        assert_eq!(created["agent_id"], "new-agent");
+
         assert!(expected.lock().await.is_empty());
         server.abort();
     }

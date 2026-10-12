@@ -80,6 +80,8 @@ pub(crate) enum ClusterProjectionUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Keep command envelopes inline, matching the Controller transport.
+#[allow(clippy::large_enum_variant)]
 enum ClusterRequest {
     Command {
         workspace_id: String,

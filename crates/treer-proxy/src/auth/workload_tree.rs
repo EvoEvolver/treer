@@ -19,7 +19,7 @@ fn folder(row: sqlx::postgres::PgRow) -> WorkloadFolder {
 impl AuthStore {
     // Every mutation locks the workspace row before reading the graph. This also
     // serializes simultaneous moves that would otherwise jointly form a cycle.
-    async fn lock_workload_tree(
+    pub(super) async fn lock_workload_tree(
         &self,
         workspace: &str,
     ) -> Result<Transaction<'_, Postgres>, AuthFailure> {
@@ -28,6 +28,46 @@ impl AuthStore {
             .bind(workspace).fetch_optional(&mut *tx).await.map_err(AuthFailure::database)?
             .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
         Ok(tx)
+    }
+
+    pub async fn create_named_agent_credential(
+        &self,
+        workspace: &str,
+        server: &str,
+        agent: &str,
+        name: &str,
+        folder: Option<&str>,
+    ) -> Result<String, AuthFailure> {
+        treer_protocol::validate_workload_label(name)
+            .map_err(|e| AuthFailure::bad_request("invalid_agent_name", &e.message))?;
+        let mut tx = self.lock_workload_tree(workspace).await?;
+        validate_parent(&mut tx, workspace, folder, None).await?;
+        validate_workload_name(&mut tx, workspace, folder, name, Some(agent)).await?;
+        let credential = format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let record = AgentCredentialRecord {
+            workspace_id: workspace.into(),
+            server_id: server.into(),
+            secret_hash: fast_secret_hash(&credential),
+            cached_at: Instant::now(),
+        };
+        sqlx::query("INSERT INTO agent_credentials(agent_id,workspace_id,server_id,secret_hash,created_at) VALUES($1,$2,$3,$4,$5)").bind(agent).bind(workspace).bind(server).bind(&record.secret_hash).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO agent_names(agent_id,workspace_id,name,updated_at) VALUES($1,$2,$3,$4)",
+        )
+        .bind(agent)
+        .bind(workspace)
+        .bind(name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query("INSERT INTO workload_placements(workspace_id,agent_id,folder_id,position) SELECT $1,$2,$3,COALESCE(MAX(position)+1,0) FROM workload_placements WHERE workspace_id=$1 AND folder_id IS NOT DISTINCT FROM $3").bind(workspace).bind(agent).bind(folder).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        tx.commit().await.map_err(AuthFailure::database)?;
+        self.agent_credentials
+            .write()
+            .await
+            .insert(agent.into(), record);
+        Ok(credential)
     }
 
     pub async fn workload_tree(&self, workspace: &str) -> Result<WorkloadTree, AuthFailure> {
@@ -132,6 +172,17 @@ impl AuthStore {
         .execute(&mut *tx)
         .await
         .map_err(AuthFailure::database)?;
+        let promoted = sqlx::query("SELECT p.agent_id,COALESCE(n.name,a.name) AS name FROM workload_placements p LEFT JOIN agent_names n ON p.workspace_id=n.workspace_id AND p.agent_id=n.agent_id LEFT JOIN app_deployments a ON a.workspace_id=p.workspace_id AND (a.runtime_agent_id=p.agent_id OR a.app_id=p.agent_id) WHERE p.workspace_id=$1 AND p.folder_id=$2 AND COALESCE(n.name,a.name) IS NOT NULL").bind(workspace).bind(id).fetch_all(&mut *tx).await.map_err(AuthFailure::database)?;
+        for row in promoted {
+            validate_workload_name(
+                &mut tx,
+                workspace,
+                result.parent_id.as_deref(),
+                row.get::<String, _>("name").as_str(),
+                Some(row.get::<String, _>("agent_id").as_str()),
+            )
+            .await?;
+        }
         // Append promoted placements after existing siblings, preserving both orders.
         sqlx::query("UPDATE workload_placements SET position=position+(SELECT COALESCE(MAX(position)+1,0) FROM workload_placements WHERE workspace_id=$1 AND folder_id IS NOT DISTINCT FROM $3),folder_id=$3 WHERE workspace_id=$1 AND folder_id=$2").bind(workspace).bind(id).bind(&result.parent_id).execute(&mut *tx).await.map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM workload_folders WHERE workspace_id=$1 AND folder_id=$2")
@@ -157,6 +208,25 @@ impl AuthStore {
         let mut tx = self.lock_workload_tree(workspace).await?;
         sqlx::query("SELECT agent_id FROM agent_credentials WHERE workspace_id=$1 AND agent_id=$2 AND revoked_at IS NULL FOR SHARE").bind(workspace).bind(agent).fetch_optional(&mut *tx).await.map_err(AuthFailure::database)?.ok_or_else(|| invalid("agent does not exist in this workspace"))?;
         validate_parent(&mut tx, workspace, request.folder_id.as_deref(), None).await?;
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT name FROM agent_names WHERE workspace_id=$1 AND agent_id=$2),(SELECT name FROM app_deployments WHERE workspace_id=$1 AND (runtime_agent_id=$2 OR app_id=$2)))",
+        )
+        .bind(workspace)
+        .bind(agent)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AuthFailure::database)?;
+        if let Some(name) = name {
+            validate_workload_name(
+                &mut tx,
+                workspace,
+                request.folder_id.as_deref(),
+                &name,
+                Some(agent),
+            )
+            .await?;
+        }
+
         sqlx::query("DELETE FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2")
             .bind(workspace)
             .bind(agent)
@@ -183,6 +253,24 @@ fn validate_folder_name(name: &str) -> Result<String, AuthFailure> {
         return Err(invalid("folder names cannot contain / or equal . or .."));
     }
     Ok(name)
+}
+
+pub(super) async fn validate_workload_name(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: &str,
+    folder: Option<&str>,
+    name: &str,
+    excluding: Option<&str>,
+) -> Result<(), AuthFailure> {
+    let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_names n LEFT JOIN workload_placements p ON p.workspace_id=n.workspace_id AND p.agent_id=n.agent_id LEFT JOIN agent_credentials c ON c.workspace_id=n.workspace_id AND c.agent_id=n.agent_id WHERE n.workspace_id=$1 AND n.name=$3 AND p.folder_id IS NOT DISTINCT FROM $2 AND ($4::text IS NULL OR n.agent_id<>$4) AND c.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM deleted_agents d WHERE d.workspace_id=n.workspace_id AND d.agent_id=n.agent_id)) OR EXISTS(SELECT 1 FROM app_deployments a LEFT JOIN workload_placements p ON p.workspace_id=a.workspace_id AND p.agent_id=COALESCE(a.runtime_agent_id,a.app_id) WHERE a.workspace_id=$1 AND a.name=$3 AND p.folder_id IS NOT DISTINCT FROM $2 AND ($4::text IS NULL OR COALESCE(a.runtime_agent_id,a.app_id)<>$4))")
+        .bind(workspace).bind(folder).bind(name).bind(excluding).fetch_one(&mut **tx).await.map_err(AuthFailure::database)?;
+    if exists {
+        return Err(AuthFailure::conflict(
+            "agent_name_conflict",
+            "an Agent or App in the destination folder already has this name",
+        ));
+    }
+    Ok(())
 }
 
 async fn validate_sibling_name(
@@ -245,6 +333,185 @@ mod tests {
             sqlx::query("INSERT INTO agent_credentials(agent_id,workspace_id,server_id,secret_hash,created_at) VALUES($1,$2,'machine','hash','now')").bind(id).bind(ws).execute(&store.pool).await.unwrap();
         }
         store
+    }
+
+    #[tokio::test]
+    async fn workload_names_are_unique_per_folder_for_creation_rename_and_moves() {
+        let store = setup().await;
+        let a = create(&store, "one", "team-a", None).await;
+        let b = create(&store, "one", "team-b", None).await;
+        store
+            .create_named_agent_credential("one", "machine", "ag_a", "reviewer", Some(&a.folder_id))
+            .await
+            .unwrap();
+        store
+            .create_named_agent_credential("one", "machine", "ag_b", "reviewer", Some(&b.folder_id))
+            .await
+            .unwrap();
+        let conflict = store
+            .create_named_agent_credential(
+                "one",
+                "machine",
+                "ag_duplicate",
+                "reviewer",
+                Some(&a.folder_id),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code(), "agent_name_conflict");
+        assert!(!sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM agent_credentials WHERE agent_id='ag_duplicate')"
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap());
+        store
+            .create_named_agent_credential("one", "machine", "ag_c", "helper", Some(&a.folder_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .set_agent_name("one", "ag_c", "reviewer")
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_name_conflict"
+        );
+        store
+            .set_agent_name("one", "ag_c", "renamed")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .set_workload_placement(
+                    "one",
+                    "ag_b",
+                    SetWorkloadPlacementRequest {
+                        folder_id: Some(a.folder_id.clone()),
+                        position: 0
+                    }
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_name_conflict"
+        );
+        assert_eq!(
+            store
+                .workload_tree("one")
+                .await
+                .unwrap()
+                .containing_folder("ag_b"),
+            Some(b.folder_id.as_str())
+        );
+        store
+            .create_named_agent_credential("one", "machine", "ag_root", "reviewer", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .set_workload_placement(
+                    "one",
+                    "ag_b",
+                    SetWorkloadPlacementRequest {
+                        folder_id: None,
+                        position: 0
+                    }
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_name_conflict"
+        );
+        assert_eq!(
+            store
+                .delete_workload_folder("one", &b.folder_id)
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_name_conflict"
+        );
+        // Atomic reservations serialize concurrent callers with the same folder/name.
+        let (one, two) = tokio::join!(
+            store.create_named_agent_credential("one", "machine", "ag_race1", "race", None),
+            store.create_named_agent_credential("one", "machine", "ag_race2", "race", None)
+        );
+        assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
+    }
+
+    #[tokio::test]
+    async fn apps_and_agents_share_folder_names_but_owned_services_keep_global_names() {
+        let store = setup().await;
+        let folder = create(&store, "one", "team", None).await;
+        let request = || treer_protocol::CreateAppDeploymentRequest {
+            server_id: Some("machine".into()),
+            name: "docs".into(),
+            command: "serve".into(),
+            args: vec![],
+            cwd: ".".into(),
+            port: 8080,
+            hostname: String::new(),
+            public: false,
+        };
+        let app = store
+            .create_app_deployment("one", "owner", "machine".into(), request())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .create_named_agent_credential("one", "machine", "ag_conflict", "docs", None)
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_name_conflict"
+        );
+        store
+            .create_agent_credential("one", "machine", &app.app_id)
+            .await
+            .unwrap();
+        store
+            .set_workload_placement(
+                "one",
+                &app.app_id,
+                SetWorkloadPlacementRequest {
+                    folder_id: Some(folder.folder_id.clone()),
+                    position: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let second = store
+            .create_app_deployment("one", "owner", "machine".into(), request())
+            .await
+            .unwrap();
+        assert_ne!(app.app_id, second.app_id);
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM machine_services WHERE workspace_id='one' ORDER BY name",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
+        store
+            .create_agent_credential("one", "machine", &second.app_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .set_workload_placement(
+                    "one",
+                    &second.app_id,
+                    SetWorkloadPlacementRequest {
+                        folder_id: Some(folder.folder_id),
+                        position: 0
+                    }
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_name_conflict"
+        );
     }
 
     async fn create(

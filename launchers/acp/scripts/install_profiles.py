@@ -107,7 +107,7 @@ def main() -> None:
         if not options.launch:
             continue
         agent_name = profile["agent_name"]
-        if run(["treer", "agent", "show", agent_name], check=False).returncode == 0:
+        if run(["treer", "agent", "show", f"./{agent_name}"], check=False).returncode == 0:
             print(f"Agent already exists: {agent_name}")
             continue
         subprocess.check_call(

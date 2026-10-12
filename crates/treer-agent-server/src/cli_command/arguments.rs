@@ -142,10 +142,13 @@ pub(super) enum RuntimeCommand {
 }
 
 #[derive(Debug, Subcommand)]
+#[command(
+    after_help = "App targets use the workspace tree: stable app_ ID, absolute /team/app, relative ./app or ../team/app, or a sibling name. Bare names never fall back to a global match."
+)]
 pub(super) enum AppCommand {
     #[command(about = "List Apps in the current workspace")]
     List,
-    #[command(about = "Show an App by unique name or id")]
+    #[command(about = "Show an App by tree path, sibling name, or stable ID")]
     Show { target: String },
     #[command(about = "Create and start an App with one HTTP UI endpoint")]
     Create {
@@ -187,7 +190,11 @@ pub(super) enum MemberCommand {
 pub(super) enum MessageCommand {
     #[command(about = "Send a durable Message")]
     Send {
-        #[arg(long = "to", required = true)]
+        #[arg(
+            long = "to",
+            required = true,
+            help = "Recipient stable ID, Agent tree path, or sibling Agent name; human display names retain their own namespace"
+        )]
         recipients: Vec<String>,
         #[arg(long = "context")]
         context_ids: Vec<String>,
@@ -209,7 +216,10 @@ pub(super) enum MessageCommand {
     #[command(about = "Reply with a context edge to an existing Message")]
     Reply {
         message_id: String,
-        #[arg(long = "to")]
+        #[arg(
+            long = "to",
+            help = "Recipient stable ID, Agent tree path, or sibling Agent name; sender selects the original sender"
+        )]
         recipients: Vec<String>,
         #[arg(long = "context")]
         additional_context_ids: Vec<String>,
@@ -257,6 +267,9 @@ pub(super) enum MessageCommand {
 }
 
 #[derive(Debug, Subcommand)]
+#[command(
+    after_help = "Agent targets: stable ag_/app_ ID, self (or .), absolute /team/agent, or a path relative to your containing folder (./peer, ../team/agent, sub/agent). Bare names match siblings only; operators start at /. Missing siblings return agent_not_in_folder with matching paths in hint."
+)]
 pub(super) enum AgentCommand {
     #[command(about = "Create a workspace Tree folder")]
     Mkdir {
@@ -289,7 +302,7 @@ pub(super) enum AgentCommand {
         #[arg(last = true, value_name = "COMMAND", num_args = 1..)]
         command: Vec<String>,
     },
-    #[command(about = "Show one agent by unique name or id")]
+    #[command(about = "Show an Agent by tree path, sibling name, or stable ID")]
     Show { target: String },
     #[command(about = "Print an Agent's primary HTTP service URL for curl or other HTTP clients")]
     Address {

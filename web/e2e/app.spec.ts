@@ -418,6 +418,8 @@ for (const mobile of [false, true]) {
     for (const launch of ["Terminal", "Custom command", "Codex"]) {
       test(`New Agent reuses ${launch} creation and appends to the chosen folder`, async ({ page }) => {
         await createResearchTree(page)
+        const tree = await page.evaluate(async () => (await fetch("/api/workspaces/ws-1/workload-tree")).json())
+        await page.route("**/api/workspaces/ws-1/workload-tree", (route) => ok(route, tree))
         let created = false
         let creations = 0
         const reviewer = { ...agentA, agent_id: "ag-reviewer", name: "reviewer" }
@@ -426,10 +428,12 @@ for (const mobile of [false, true]) {
         await page.route(`**/api/workspaces/ws-1${endpoint}`, (route) => {
           const body = route.request().postDataJSON()
           expect(body.server_id).toBe("srv-a")
+          expect(body.folder_id).toBe("folder-2")
           expect(launch === "Codex" ? body.agent_name : body.name).toBe("reviewer")
           if (launch === "Custom command") expect(body.args).toEqual(["echo", "hello world"])
           if (launch === "Terminal") expect(body.kind).toBe("shell")
           creations++; created = true
+          tree.placements.push({ agent_id: reviewer.agent_id, folder_id: body.folder_id, position: 1 })
           return ok(route, reviewer)
         })
         await page.getByRole("button", { name: "Actions for experiments", exact: true }).click()
@@ -443,9 +447,11 @@ for (const mobile of [false, true]) {
         }
         if (launch === "Custom command") await dialog.getByRole("textbox", { name: "Command", exact: true }).fill('echo "hello world"')
         await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("reviewer")
-        const placement = page.waitForRequest((request) => request.url().endsWith("/workload-tree/placements/ag-reviewer") && request.method() === "PUT")
+        const placementWrites: string[] = []
+        page.on("request", (request) => { if (request.method() === "PUT" && request.url().includes("/placements/ag-reviewer")) placementWrites.push(request.url()) })
         await dialog.getByRole("button", { name: launch === "Terminal" ? "Create terminal" : "Create agent", exact: true }).click()
-        expect((await placement).postDataJSON()).toEqual({ folder_id: "folder-2", position: 1 })
+        await expect.poll(() => creations).toBe(1)
+        expect(placementWrites).toEqual([])
         if (mobile) await page.getByRole("button", { name: /^Close full-screen (terminal|interface)$/ }).click()
         await expect(page.getByRole("treeitem", { name: "experiments", exact: true }).getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
         await page.reload()
@@ -461,7 +467,7 @@ for (const mobile of [false, true]) {
         Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { saved.copiedPaths.push(text) } } })
       })
       await createResearchTree(page)
-      for (const [name, path] of [["research", "/research"], ["experiments", "/research/experiments"], ["api-server", "/research/experiments/api-server"], ["worker", "/worker"], ["Soul Archive", "/app:Soul Archive"]]) {
+      for (const [name, path] of [["research", "/research"], ["experiments", "/research/experiments"], ["api-server", "/research/experiments/api-server"], ["worker", "/worker"], ["Soul Archive", "/Soul Archive"]]) {
         await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
         await page.getByRole("menuitem", { name: "Copy path", exact: true }).click()
         await expect(page.getByRole("status").filter({ hasText: `Copied path: ${path}` })).toBeVisible()
@@ -497,21 +503,22 @@ for (const mobile of [false, true]) {
       })
     }
 
-    test("placement failure reports the created Agent and root New forgets the folder", async ({ page }) => {
+    test("folder conflicts reject creation atomically and root New forgets the folder", async ({ page }) => {
       await createResearchTree(page)
-      let created = false
+      const created = false
       let creations = 0
       const reviewer = { ...agentA, agent_id: "ag-reviewer", name: "reviewer" }
       await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: created ? [...snapshot.agents, reviewer] : snapshot.agents }))
-      await page.route("**/api/workspaces/ws-1/agents", (route) => { created = true; creations++; return ok(route, reviewer) })
+      await page.route("**/api/workspaces/ws-1/agents", (route) => { creations++; expect(route.request().postDataJSON().folder_id).toBe("folder-2"); return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code:"agent_name_conflict", message: "An Agent in this folder already has this name" } }) }) })
       await page.route("**/api/workspaces/ws-1/workload-tree/placements/ag-reviewer", (route) => route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { message: "Folder no longer exists" } }) }))
       await page.getByRole("button", { name: "Actions for experiments", exact: true }).click()
       await page.getByRole("menuitem", { name: "New Agent", exact: true }).click()
       await page.getByRole("dialog").getByRole("textbox", { name: "Name", exact: true }).fill("reviewer")
       await page.getByRole("dialog").getByRole("button", { name: "Create terminal", exact: true }).click()
-      if (mobile) await page.getByRole("button", { name: /^Close full-screen (terminal|interface)$/ }).click()
-      await expect(page.getByText(/Agent reviewer was created, but placing it in \/research\/experiments failed/)).toBeVisible()
-      await expect(page.getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
+      await expect(page.getByText("An Agent in this folder already has this name", { exact:true })).toBeVisible()
+      await expect(page.getByRole("dialog").getByRole("textbox", { name: "Name", exact: true })).toHaveValue("reviewer")
+      await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click()
+      await expect(page.getByRole("treeitem", { name: "reviewer", exact: true })).toHaveCount(0)
       await expect(page.getByRole("dialog")).toHaveCount(0)
       expect(creations).toBe(1)
       await page.getByRole("button", { name: "New", exact: true }).click()

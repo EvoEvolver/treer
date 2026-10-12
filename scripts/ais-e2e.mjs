@@ -110,7 +110,7 @@ async function waitForInterface(name, timeoutMs = 120000) {
   const started = Date.now();
   let last = null;
   while (Date.now() - started < timeoutMs) {
-    last = await treerJson(["agent", "show", name]);
+    last = await treerJson(["agent", "show", `./${name}`]);
     if (last.status === "exited" || last.status === "failed") {
       throw new Error(`${name} exited before AIS registration: ${JSON.stringify({
         status: last.status,
@@ -143,7 +143,7 @@ async function runPlatform(platform, machine, envPairs) {
   const cwd = relative(machine.root, root) || ".";
   const sibling = `${platform.name}-b`;
   for (const name of [platform.name, sibling]) {
-    await treerJson(["agent", "admin", "delete", name]).catch(() => {});
+    await treerJson(["agent", "admin", "delete", `./${name}`]).catch(() => {});
   }
   const createArgs = [
     "agent", "admin", "create",
@@ -159,21 +159,21 @@ async function runPlatform(platform, machine, envPairs) {
   try {
     await waitForInterface(platform.name);
     await treerJson([
-      "agent", "prompt", platform.name,
+      "agent", "prompt", `./${platform.name}`,
       "Reply with exactly PING-1 and nothing else.",
       "--wait", "--timeout", "180000",
     ]);
-    const first = await treerJson(["agent", "transcript", platform.name, "--page", "0"]);
+    const first = await treerJson(["agent", "transcript", `./${platform.name}`, "--page", "0"]);
     if (first.page_count < 1 || !first.entries?.length) {
       throw new Error(`${platform.id} page 0 was empty: ${JSON.stringify(first)}`);
     }
     await treerJson([
-      "agent", "prompt", platform.name,
+      "agent", "prompt", `./${platform.name}`,
       "Reply with exactly PING-2 and nothing else.",
       "--wait", "--timeout", "180000",
     ]);
-    const page0 = await treerJson(["agent", "transcript", platform.name, "--page", "0"]);
-    const page1 = await treerJson(["agent", "transcript", platform.name, "--page", "1"]);
+    const page0 = await treerJson(["agent", "transcript", `./${platform.name}`, "--page", "0"]);
+    const page1 = await treerJson(["agent", "transcript", `./${platform.name}`, "--page", "1"]);
     if (page0.page !== 0 || page1.page !== 1 || page1.page_count < 2) {
       throw new Error(`${platform.id} did not expose two transcript pages: ${JSON.stringify({ page0, page1 })}`);
     }
@@ -190,22 +190,22 @@ async function runPlatform(platform, machine, envPairs) {
     try {
       await waitForInterface(sibling);
       await treerJson([
-        "agent", "prompt", sibling,
+        "agent", "prompt", `./${sibling}`,
         "Reply with exactly PING-B and nothing else.",
         "--wait", "--timeout", "180000",
       ]);
-      const original = await treerJson(["agent", "transcript", platform.name, "--page", "1"]);
-      const other = await treerJson(["agent", "transcript", sibling, "--page", "0"]);
+      const original = await treerJson(["agent", "transcript", `./${platform.name}`, "--page", "1"]);
+      const other = await treerJson(["agent", "transcript", `./${sibling}`, "--page", "0"]);
       const originalText = (original.entries ?? []).map(entryText).join("\n");
       const otherText = (other.entries ?? []).map(entryText).join("\n");
       if (otherText.includes("PING-1") || originalText.includes("PING-B")) {
         throw new Error(`${platform.id} leaked transcript across Agents`);
       }
     } finally {
-      await treerJson(["agent", "admin", "delete", sibling]).catch(() => {});
+      await treerJson(["agent", "admin", "delete", `./${sibling}`]).catch(() => {});
     }
   } finally {
-    await treerJson(["agent", "admin", "delete", platform.name]).catch(() => {});
+    await treerJson(["agent", "admin", "delete", `./${platform.name}`]).catch(() => {});
   }
 }
 

@@ -642,3 +642,20 @@ bindings, HTML page, and optional wake. Core owns canonical message bodies and
 per-recipient delivery. Agent requests and human replies use their own verified
 service tokens through App Message routes. App-owned channel data does not add
 email fields to Core Message or use an App credential to impersonate a caller.
+
+### Workspace tree target identity
+
+Agent/App display names are unique per containing Tree folder. One shared pure
+resolver interprets absolute/relative paths and sibling-only bare names for CLI
+and Message recipients. Operators resolve from root; Agent callers resolve from
+their containing folder. ID-addressed transport and Policy remain unchanged.
+`agent_not_in_folder` carries bounded matching paths in `hint`; there is no
+implicit global name fallback. Discovery paths are derived from current Tree
+placements; Message paths, like names, are immutable send-time display snapshots.
+
+Proxy serializes name reservation, placement, rename, and move under the
+workspace Tree lock. Creation reserves placement before process dispatch,
+allowing distinct folders to create identical labels without a temporary root
+collision. Owned service/virtual-host names retain workspace-wide uniqueness.
+Controller capability `agent.path-targets.v1` gates new CLI semantics, with a
+pre-dispatch upgrade error against old Controllers. [Design decisions and tests](research/2026-10-12-agent-path-targets.md).

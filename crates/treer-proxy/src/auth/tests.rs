@@ -2493,6 +2493,7 @@ async fn machine_authentication_rejects_missing_credentials() {
 #[tokio::test]
 async fn deleting_machine_revokes_credential_and_cleans_names() {
     let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("workspace-a").await;
     let enrollment = store
         .create_machine_enrollment("workspace-a", "admin")
         .await
@@ -2557,6 +2558,7 @@ async fn deleting_machine_revokes_credential_and_cleans_names() {
 #[tokio::test]
 async fn persisted_names_are_applied_to_controller_snapshots() {
     let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("workspace-a").await;
     store
         .set_machine_name("workspace-a", "server-a", "build-machine")
         .await
@@ -2589,6 +2591,7 @@ async fn persisted_names_are_applied_to_controller_snapshots() {
             last_seen_at: now,
         },
         agents: vec![AgentInfo {
+            path: None,
             run_generation: 0,
             agent_id: "agent-a".to_string(),
             workspace_id: "workspace-a".to_string(),

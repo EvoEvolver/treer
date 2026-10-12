@@ -175,6 +175,7 @@ fn managed_app_public_access_is_explicit_and_backward_compatible() {
 #[test]
 fn launch_profile_request_round_trips_optional_cwd_override() {
     let request = LaunchAgentProfileRequest {
+        folder_id: None,
         server_id: Some("srv_1".to_string()),
         agent_name: Some("reviewer".to_string()),
         cwd: Some("packages/api".to_string()),
@@ -800,12 +801,14 @@ fn core_message_wire_shape_round_trips_ordered_contexts() {
         message_id: "msg_1".to_string(),
         workspace_id: "ws_1".to_string(),
         sender: MessagePrincipal {
+            path: None,
             kind: MessagePrincipalKind::Agent,
             id: "agent_1".to_string(),
             name: "builder".to_string(),
             role: None,
         },
         recipients: vec![MessagePrincipal {
+            path: None,
             kind: MessagePrincipalKind::Human,
             id: "user_1".to_string(),
             name: "Owner".to_string(),

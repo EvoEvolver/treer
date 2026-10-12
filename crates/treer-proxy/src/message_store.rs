@@ -132,8 +132,16 @@ impl MessageStore {
     ) -> Result<SendMessageResponse, MessageStoreError> {
         validate_workspace_and_principal(workspace_id, sender)?;
         validate_send(recipients, request)?;
+        let fingerprint_recipients = recipients
+            .iter()
+            .cloned()
+            .map(|mut recipient| {
+                recipient.path = None;
+                recipient
+            })
+            .collect::<Vec<_>>();
         let request_hash = request_hash(&SendFingerprint {
-            recipients,
+            recipients: &fingerprint_recipients,
             context_ids: &request.context_ids,
             body: &request.body,
             expires_at: request.expires_at.as_ref(),
@@ -206,8 +214,8 @@ impl MessageStore {
         sqlx::query(
             "INSERT INTO core_messages(\
                 message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, body, \
-                created_at, expires_at, correlation_id, trace_id, external_source) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                created_at, expires_at, correlation_id, trace_id, external_source, sender_path) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(&message_id)
         .bind(workspace_id)
@@ -228,6 +236,7 @@ impl MessageStore {
                 .transpose()
                 .map_err(|_| MessageStoreError::Corrupt)?,
         )
+        .bind(&sender.path)
         .execute(&mut *connection)
         .await?;
 
@@ -237,8 +246,8 @@ impl MessageStore {
             sqlx::query(
                 "INSERT INTO core_message_deliveries(\
                     delivery_id, message_id, workspace_id, recipient_kind, recipient_id, \
-                    recipient_name, recipient_role, position, created_at, expires_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    recipient_name, recipient_role, position, created_at, expires_at, recipient_path) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             )
             .bind(&delivery_id)
             .bind(&message_id)
@@ -250,6 +259,7 @@ impl MessageStore {
             .bind(position as i64)
             .bind(now.to_rfc3339())
             .bind(request.expires_at.map(|value| value.to_rfc3339()))
+            .bind(&recipient.path)
             .execute(&mut *connection)
             .await?;
             delivery_ids.push(delivery_id);
@@ -449,7 +459,7 @@ impl MessageStore {
     ) -> Result<ReceiveMessagesResponse, MessageStoreError> {
         let mut connection = self.pool.acquire().await?;
         let rows = sqlx::query(
-            "SELECT delivery_id, message_id, recipient_kind, recipient_id, recipient_name, \
+            "SELECT delivery_id, message_id, recipient_kind, recipient_id, recipient_name, recipient_path, \
                     recipient_role, created_at, acknowledged_at, expires_at \
              FROM core_message_deliveries WHERE workspace_id = $1 AND recipient_kind = $2 \
              AND recipient_id = $3 AND acknowledged_at IS NULL \
@@ -818,6 +828,9 @@ fn validate_workspace_and_principal(
     if principal.id.len() > MAX_MESSAGE_ID_BYTES
         || principal.name.is_empty()
         || principal.name.len() > MAX_MESSAGE_SNAPSHOT_NAME_BYTES
+        || principal.path.as_ref().is_some_and(|path| {
+            path.len() > 4096 || !path.starts_with('/') || path.chars().any(char::is_control)
+        })
         || principal.name.chars().any(char::is_control)
         || principal.role.as_ref().is_some_and(|role| {
             role.is_empty()
@@ -1129,7 +1142,7 @@ async fn load_message(
     message_id: &str,
 ) -> Result<CoreMessage, MessageStoreError> {
     let row = sqlx::query(
-        "SELECT message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, \
+        "SELECT message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, sender_path, \
                 body, created_at, expires_at, correlation_id, trace_id, external_source \
          FROM core_messages WHERE workspace_id = $1 AND message_id = $2",
     )
@@ -1139,7 +1152,7 @@ async fn load_message(
     .await?
     .ok_or_else(|| MessageStoreError::contract("message_not_found", "message does not exist"))?;
     let recipient_rows = sqlx::query(
-        "SELECT recipient_kind, recipient_id, recipient_name, recipient_role \
+        "SELECT recipient_kind, recipient_id, recipient_name, recipient_path, recipient_role \
          FROM core_message_deliveries WHERE workspace_id = $1 AND message_id = $2 \
          ORDER BY position",
     )
@@ -1169,6 +1182,7 @@ async fn load_message(
             row.get("sender_id"),
             row.get("sender_name"),
             row.get("sender_role"),
+            row.get("sender_path"),
         )?,
         recipients: recipient_rows
             .into_iter()
@@ -1178,6 +1192,7 @@ async fn load_message(
                     row.get("recipient_id"),
                     row.get("recipient_name"),
                     row.get("recipient_role"),
+                    row.get("recipient_path"),
                 )
             })
             .collect::<Result<_, _>>()?,
@@ -1205,6 +1220,7 @@ fn delivery_from_row(
             row.get("recipient_id"),
             row.get("recipient_name"),
             row.get("recipient_role"),
+            row.get("recipient_path"),
         )?,
         created_at: parse_timestamp(row.get("created_at"))?,
         acknowledged_at: parse_optional_timestamp(row.get("acknowledged_at"))?,
@@ -1272,8 +1288,8 @@ async fn insert_legacy_message(
 ) -> Result<(), MessageStoreError> {
     sqlx::query(
         "INSERT INTO core_messages(\
-            message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, body, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, body, created_at, sender_path) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&message.message_id)
     .bind(&message.workspace_id)
@@ -1283,6 +1299,7 @@ async fn insert_legacy_message(
     .bind(&message.sender.role)
     .bind(&message.body)
     .bind(message.created_at.to_rfc3339())
+    .bind(&message.sender.path)
     .execute(&mut *connection)
     .await?;
     for recipient in &message.recipients {
@@ -1294,8 +1311,8 @@ async fn insert_legacy_message(
         sqlx::query(
             "INSERT INTO core_message_deliveries(\
                 delivery_id, message_id, workspace_id, recipient_kind, recipient_id, \
-                recipient_name, recipient_role, position, created_at, acknowledged_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                recipient_name, recipient_role, position, created_at, acknowledged_at, recipient_path) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(delivery_id)
         .bind(&message.message_id)
@@ -1307,6 +1324,7 @@ async fn insert_legacy_message(
         .bind(i64::from(recipient.position))
         .bind(message.created_at.to_rfc3339())
         .bind(recipient.read_at.map(|value| value.to_rfc3339()))
+        .bind(&recipient.principal.path)
         .execute(&mut *connection)
         .await?;
     }
@@ -1351,7 +1369,7 @@ async fn legacy_message_matches(
         return Ok(false);
     }
     let rows = sqlx::query(
-        "SELECT recipient_kind, recipient_id, recipient_name, recipient_role, position, \
+        "SELECT recipient_kind, recipient_id, recipient_name, recipient_path, recipient_role, position, \
                 acknowledged_at FROM core_message_deliveries \
          WHERE workspace_id = $1 AND message_id = $2 ORDER BY position",
     )
@@ -1368,6 +1386,7 @@ async fn legacy_message_matches(
             row.get("recipient_id"),
             row.get("recipient_name"),
             row.get("recipient_role"),
+            row.get("recipient_path"),
         )?;
         let acknowledged_at = parse_optional_timestamp(row.get("acknowledged_at"))?;
         if principal != expected_recipient.principal
@@ -1406,6 +1425,7 @@ fn principal_from_columns(
     id: String,
     name: String,
     role: Option<String>,
+    path: Option<String>,
 ) -> Result<MessagePrincipal, MessageStoreError> {
     let kind = match kind.as_str() {
         "agent" => MessagePrincipalKind::Agent,
@@ -1415,6 +1435,7 @@ fn principal_from_columns(
         _ => return Err(MessageStoreError::Corrupt),
     };
     Ok(MessagePrincipal {
+        path,
         kind,
         id,
         name,
@@ -1513,6 +1534,8 @@ const SCHEMA: &[&str] = &[
         attempts BIGINT NOT NULL DEFAULT 0 CHECK(attempts >= 0))",
     "CREATE INDEX IF NOT EXISTS core_message_outbox_pending \
         ON core_message_outbox(created_at, event_id) WHERE dispatched_at IS NULL",
+    "ALTER TABLE core_messages ADD COLUMN IF NOT EXISTS sender_path TEXT",
+    "ALTER TABLE core_message_deliveries ADD COLUMN IF NOT EXISTS recipient_path TEXT",
 ];
 
 #[cfg(test)]
@@ -1553,6 +1576,7 @@ mod tests {
 
     fn agent(id: &str) -> MessagePrincipal {
         MessagePrincipal {
+            path: None,
             kind: MessagePrincipalKind::Agent,
             id: id.to_string(),
             name: id.to_string(),
@@ -1562,6 +1586,7 @@ mod tests {
 
     fn human(id: &str) -> MessagePrincipal {
         MessagePrincipal {
+            path: None,
             kind: MessagePrincipalKind::Human,
             id: id.to_string(),
             name: id.to_string(),
@@ -1585,6 +1610,53 @@ mod tests {
             trace_id: None,
             external_source: None,
         }
+    }
+
+    #[tokio::test]
+    async fn message_paths_are_immutable_snapshots_and_do_not_change_retry_identity() {
+        let store = test_store().await;
+        let mut sender = agent("ag_sender");
+        sender.path = Some("/team-a/sender".into());
+        let mut recipient = agent("ag_peer");
+        recipient.path = Some("/team-b/reviewer".into());
+        let input = request(&["ag_peer"], vec![], "review", "paths");
+        let first = store
+            .send(
+                "workspace-a",
+                &sender,
+                std::slice::from_ref(&recipient),
+                &input,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.message.sender.path.as_deref(), Some("/team-a/sender"));
+        assert_eq!(
+            first.message.recipients[0].path.as_deref(),
+            Some("/team-b/reviewer")
+        );
+        recipient.path = Some("/moved/reviewer".into());
+        let replay = store
+            .send(
+                "workspace-a",
+                &sender,
+                std::slice::from_ref(&recipient),
+                &input,
+            )
+            .await
+            .unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(
+            replay.message.recipients[0].path.as_deref(),
+            Some("/team-b/reviewer")
+        );
+        let received = store
+            .receive("workspace-a", &recipient, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            received.deliveries[0].recipient.path.as_deref(),
+            Some("/team-b/reviewer")
+        );
     }
 
     #[tokio::test]
@@ -1981,6 +2053,7 @@ mod tests {
         assert_eq!(final_messages, baseline_messages);
 
         let importer = MessagePrincipal {
+            path: None,
             kind: MessagePrincipalKind::Machine,
             id: "machine-a".to_string(),
             name: "machine-a".to_string(),
@@ -2209,6 +2282,7 @@ mod tests {
     async fn legacy_ids_are_workspace_scoped_and_conflicts_are_rejected() {
         let store = test_store().await;
         let importer = MessagePrincipal {
+            path: None,
             kind: MessagePrincipalKind::Machine,
             id: "machine-a".to_string(),
             name: "machine-a".to_string(),

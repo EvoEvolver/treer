@@ -135,13 +135,28 @@ pub(super) async fn list_app_deployments(
     Ok(Json(json!({ "apps": apps })))
 }
 
+async fn resolve_app_target(
+    state: &AppState,
+    auth: &AuthStore,
+    workspace: &str,
+    headers: &HeaderMap,
+    target: &str,
+) -> Result<AppDeployment, ApiFailure> {
+    let caller = headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok());
+    let agent = resolve_workload_at(state, auth, workspace, caller, target).await?;
+    Ok(auth
+        .resolve_app_deployment(workspace, &agent.agent_id)
+        .await?)
+}
+
 pub(super) async fn get_app_deployment(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(config): Extension<IngressConfig>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let mut app = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let mut app = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
     hydrate_app_deployment(&state, &mut app).await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
@@ -152,16 +167,18 @@ pub(super) struct UpdateAppAccessRequest {
     access: ServiceIngressAccess,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn update_app_access(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(config): Extension<IngressConfig>,
     Extension(provider_store): Extension<crate::policy_provider_store::PolicyProviderStore>,
     Extension(session): Extension<CurrentSession>,
+    headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<UpdateAppAccessRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let mut app = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let mut app = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
     if request.access == ServiceIngressAccess::Public
         && provider_store
             .get(&workspace_id)
@@ -371,7 +388,7 @@ pub(super) async fn start_app_deployment(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let current = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let current = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -425,7 +442,7 @@ pub(super) async fn stop_app_deployment(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let current = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let current = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -479,7 +496,7 @@ pub(super) async fn restart_app_deployment(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let current = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let current = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -541,7 +558,7 @@ pub(super) async fn delete_app_deployment(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let current = auth.resolve_app_deployment(&workspace_id, &target).await?;
+    let current = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
     let mut response_app = current.clone();
     hydrate_app_public_url(&auth, &config, &mut response_app).await?;
     let subject = control_policy_subject(

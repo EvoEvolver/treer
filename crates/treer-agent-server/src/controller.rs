@@ -560,6 +560,7 @@ impl ControllerRuntime {
         }
         let now = Utc::now();
         let info = AgentInfo {
+            path: None,
             agent_id: entry.spec.agent_id.clone(),
             run_generation: entry.spec.generation,
             workspace_id: entry.workspace_id.clone(),
@@ -2316,6 +2317,7 @@ impl ControllerRuntime {
             .then(|| self.interface(&metadata.agent_id).ok().flatten())
             .flatten();
         let info = AgentInfo {
+            path: None,
             agent_id: metadata.agent_id.clone(),
             run_generation: metadata.run_generation,
             workspace_id: metadata.workspace_id,

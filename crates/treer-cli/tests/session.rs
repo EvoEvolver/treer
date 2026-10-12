@@ -17,11 +17,26 @@ fn client(address: std::net::SocketAddr) -> tokio::process::Command {
         .kill_on_drop(true);
     command
 }
+async fn negotiate_path_targets(listener: &tokio::net::TcpListener) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let mut request = Vec::new();
+    while !request.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).await.unwrap();
+        request.push(byte[0]);
+    }
+    assert!(request.starts_with(b"GET /api/health "));
+    let body = r#"{"cli_capabilities":["agent.path-targets.v1"]}"#;
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+    stream.write_all(response.as_bytes()).await.unwrap();
+}
+
 #[tokio::test]
 async fn raw_argv_stdin_eof_output_streams_and_exit_are_preserved() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
+        negotiate_path_targets(&listener).await;
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_hdr_async(
             stream,
@@ -129,6 +144,7 @@ async fn server_cannot_direct_client_credentials_to_another_origin() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
+        negotiate_path_targets(&listener).await;
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         socket.next().await.unwrap().unwrap();
@@ -162,6 +178,7 @@ async fn forwarding_stream_preserves_half_close_and_authentication() {
     let local_address = reserved.local_addr().unwrap();
     drop(reserved);
     let server = tokio::spawn(async move {
+        negotiate_path_targets(&listener).await;
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         socket.next().await.unwrap().unwrap();
@@ -230,6 +247,7 @@ async fn generic_session_streams_binary_and_remote_exit() {
     let address = listener.local_addr().unwrap();
     let (ready, wait_ready) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
+        negotiate_path_targets(&listener).await;
         let (stream, _) = listener.accept().await.unwrap();
         let mut command = tokio_tungstenite::accept_async(stream).await.unwrap();
         command.next().await.unwrap().unwrap();

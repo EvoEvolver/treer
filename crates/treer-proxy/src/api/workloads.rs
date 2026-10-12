@@ -29,6 +29,7 @@ pub(super) fn stop_target_is_absent(error: &ProtocolError) -> bool {
 
 pub(super) fn app_workload_agent(app: &AppDeployment) -> AgentInfo {
     AgentInfo {
+        path: None,
         agent_id: app
             .runtime_agent_id
             .clone()
@@ -52,34 +53,59 @@ pub(super) fn app_workload_agent(app: &AppDeployment) -> AgentInfo {
 
 /// Durable App metadata also makes a workload addressable before its first
 /// successful Controller snapshot (including an offline stop).
-pub(super) async fn resolve_workload(
+pub(super) async fn resolve_workload_at(
     state: &AppState,
     auth: &AuthStore,
     workspace: &str,
+    caller: Option<&str>,
     target: &str,
 ) -> Result<AgentInfo, ApiFailure> {
-    match state.resolve_agent(workspace, target).await {
-        Ok(agent) => Ok(agent),
+    let tree = auth.workload_tree(workspace).await?;
+    let id = if target.starts_with("ag_") || target.starts_with("app_") {
+        target.to_owned()
+    } else {
+        let snapshot = state.snapshot(workspace).await?;
+        let mut rows = snapshot
+            .agents
+            .iter()
+            .map(|a| treer_protocol::WorkloadTarget {
+                id: a.agent_id.clone(),
+                name: a.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        for app in auth.list_app_deployments(workspace).await? {
+            let id = app.runtime_agent_id.unwrap_or(app.app_id);
+            if !rows.iter().any(|r| r.id == id) {
+                rows.push(treer_protocol::WorkloadTarget { id, name: app.name });
+            }
+        }
+        tree.resolve_target(&rows, caller, target)?
+    };
+    let mut agent = match state.resolve_agent(workspace, &id).await {
+        Ok(agent) => agent,
         Err(error) if error.code == "agent_not_found" => {
             let app = match auth
-                .resolve_app_deployment_by_runtime(workspace, target)
+                .resolve_app_deployment_by_runtime(workspace, &id)
                 .await?
             {
                 Some(app) => app,
-                None => match auth.resolve_app_deployment(workspace, target).await {
-                    Ok(app) => app,
-                    Err(failure) if failure.code() == "app_not_found" => return Err(error.into()),
-                    Err(failure) => return Err(failure.into()),
-                },
+                None => auth
+                    .resolve_app_deployment(workspace, &id)
+                    .await
+                    .map_err(|e| {
+                        if e.code() == "app_not_found" {
+                            ApiFailure::from(error)
+                        } else {
+                            ApiFailure::from(e)
+                        }
+                    })?,
             };
-            let fallback = app_workload_agent(&app);
-            Ok(state
-                .resolve_agent(workspace, &fallback.agent_id)
-                .await
-                .unwrap_or(fallback))
+            app_workload_agent(&app)
         }
-        Err(error) => Err(error.into()),
-    }
+        Err(error) => return Err(error.into()),
+    };
+    agent.path = Some(tree.workload_path(&agent.agent_id, &agent.name)?);
+    Ok(agent)
 }
 
 /// Send the saved App launch declaration to the same Controller lifecycle used
@@ -109,6 +135,7 @@ pub(super) async fn ensure_app_workload(
     let mut args = vec![app.command.clone()];
     args.extend(app.args.clone());
     let request = CreateAgentRequest {
+        folder_id: None,
         server_id: Some(app.server_id.clone()),
         kind: "app".into(),
         name: app.name.clone(),
@@ -267,7 +294,14 @@ async fn lifecycle_handler(
     target: String,
     action: WorkloadAction,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
+    let agent = resolve_workload_at(
+        &state,
+        &auth,
+        &workspace_id,
+        headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok()),
+        &target,
+    )
+    .await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),

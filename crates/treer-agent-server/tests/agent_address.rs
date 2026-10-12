@@ -92,6 +92,18 @@ async fn update(
 async fn fixture(state: Shared) -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/api/agents/{target}", get(agent))
+        .route(
+            "/api/agents",
+            get(|headers: HeaderMap| async move {
+                let Json(row) = agent(headers).await;
+                Json(json!({"agents":[row]}))
+            }),
+        )
+        .route("/api/apps", get(|| async { Json(json!({"apps":[]})) }))
+        .route(
+            "/api/workload-tree",
+            get(|| async { Json(json!({"folders":[],"placements":[]})) }),
+        )
         .route("/api/services", get(services).post(register))
         .route("/api/services/{service_id}", axum::routing::patch(update))
         .with_state(state);

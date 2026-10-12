@@ -460,8 +460,8 @@ CREATE TABLE IF NOT EXISTS app_deployments (
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
     FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
 );
-CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_name_lower
-    ON app_deployments(workspace_id, lower(name));
+DROP INDEX IF EXISTS app_deployments_workspace_name_lower;
+CREATE INDEX IF NOT EXISTS app_deployments_workspace_name ON app_deployments(workspace_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_hostname_lower
     ON app_deployments(workspace_id, lower(hostname));
 CREATE INDEX IF NOT EXISTS app_deployments_server

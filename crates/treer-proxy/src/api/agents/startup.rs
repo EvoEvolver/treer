@@ -38,7 +38,14 @@ async fn admin_startup_handler(
     } else {
         target
     };
-    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
+    let agent = resolve_workload_at(
+        &state,
+        &auth,
+        &workspace_id,
+        headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok()),
+        &target,
+    )
+    .await?;
     require_machine_target(subject.as_ref(), &agent.server_id)?;
     authorize_control(
         &policy,

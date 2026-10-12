@@ -45,7 +45,7 @@ pub(super) async fn run_agent_command(
             limit,
         } => read_agent_transcript(client, &target, page, cursor, limit).await,
         AgentCommand::SendKeys { target, keys } => {
-            let target = normalize_target(&target)?;
+            let target = workload_tree::resolve_target(client, &target).await?;
             let data = encode_keys(&keys)?;
             client
                 .value(
@@ -111,7 +111,7 @@ pub(super) async fn run_agent_admin_command(
                 command,
             } => replace_agent_startup(client, &target, cwd, command, false).await,
             AgentAdminStartupCommand::Show { target } => {
-                let target = normalize_target(&target)?;
+                let target = workload_tree::resolve_target(client, &target).await?;
                 client
                     .value(
                         Method::GET,
@@ -145,6 +145,7 @@ pub(super) async fn run_agent_admin_command(
                 folder.as_deref(),
                 "api/agents",
                 serde_json::to_value(CreateAgentRequest {
+                    folder_id: None,
                     server_id: Some(server_id),
                     kind,
                     name,
@@ -170,7 +171,7 @@ pub(super) async fn lifecycle_agent(
     target: &str,
     action: &str,
 ) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     client
         .value(
             Method::POST,
@@ -187,7 +188,7 @@ async fn replace_agent_startup(
     mut command: Vec<String>,
     restart: bool,
 ) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     let executable = command.remove(0);
     client
         .value(

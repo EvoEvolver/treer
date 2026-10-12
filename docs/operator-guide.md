@@ -67,8 +67,8 @@ treer app create --machine build-machine --name docs --port 8080 \
 treer app create --public --machine build-machine --name public-docs --port 8081 \
   python3 -- -m http.server 8081
 treer app list
-treer agent restart docs
-treer agent read docs --lines 80
+treer agent restart /docs
+treer agent read /docs --lines 80
 ```
 
 When wildcard ingress is configured, every Managed App receives a stable
@@ -463,14 +463,14 @@ A workspace human/operator or Policy-authorized Agent can inspect and replace
 another Agent's saved command without changing its ID or workload credential:
 
 ```bash
-treer agent admin startup show reviewer
-treer agent admin startup set reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
-treer agent restart reviewer
+treer agent admin startup show /reviewer
+treer agent admin startup set /reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
+treer agent restart /reviewer
 # Or save the command and restart atomically in one Controller operation:
-treer agent restart reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
+treer agent restart /reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
 ```
 
-Targets accept ID, unique name, or `self` for a managed caller. Omitting `--cwd`
+Targets accept ID, tree path, sibling name, or `self` for a managed caller. Omitting `--cwd`
 preserves the saved directory. Admin set alone does not start a stopped Agent or
 change its recovery intent; restart increments `run_generation`. The webpage's
 Agent menu offers **Edit startup command**, displaying saved argv and cwd and
@@ -661,9 +661,9 @@ Open the App URL to create Agents and manage Agents and Apps together in the
 workspace's Tree sidebar. Each row offers Start, Stop, Restart, and Logs;
 App rows also offer App settings for access controls and the service URL.
 Choose New Agent from a folder's menu to use the same terminal, custom command,
-or launch profile dialog as the Tree's New button. After creation, the Agent is
-placed at the end of that folder. If placement fails, the browser reports that
-the Agent was created and offers Move to folder as the retry path.
+or launch profile dialog as the Tree's New button. Proxy reserves the Agent's
+name and final folder atomically before starting it. A name conflict leaves
+the creation form open for correction and does not start an extra process.
 Folder and Agent menus offer Copy path for CLI-style absolute tree paths, such
 as `/research/experiments/reviewer` or `/reviewer` at the root. A status message
 confirms copying; when clipboard access is unavailable or denied, a dialog
@@ -736,11 +736,10 @@ treer agent admin create --machine build-machine --kind command --name helper \
   --folder /research --cwd repo -- /bin/sh
 ```
 
-CLI checks the folder before creation, then places the created Agent at its
-end through the existing authenticated Tree API. Tree reads and placement use
-`agent.tree.read` and `agent.tree.manage`. If creation succeeds but placement
-fails, CLI reports `agent_created_placement_failed` with the Agent ID and a
-`treer agent mv` retry command; do not repeat creation to retry placement.
+CLI resolves the folder before creation. Proxy reserves the name and final
+placement atomically before dispatching process startup, appending after existing
+siblings. Tree reads require `agent.tree.read`; non-root creation placement
+requires `agent.tree.manage`. Conflicts fail before any process starts.
 
 ## Host and Controller
 
@@ -796,7 +795,7 @@ endpoint. Run registration from that Agent's managed runtime:
 ```bash
 treer service register --primary --protocol http --name reviewer-api --port 4180
 # From another managed Agent:
-addr=$(treer agent address reviewer)
+addr=$(treer agent address /reviewer)
 curl --fail-with-body "$addr/openapi.json"
 curl --fail-with-body -X POST "$addr/review" \
   -H 'Content-Type: application/json' -d @request.json
@@ -804,7 +803,7 @@ curl --fail-with-body -X POST "$addr/review" \
 
 The serving Agent owns its API/schema; these paths are examples. `address`
 prints only the stable service-ID URL; `--json` includes the Agent and service
-IDs. It accepts a unique name or Agent ID and defaults to `self`. It fails when
+IDs. It accepts a tree path, sibling name, or Agent ID and defaults to `self`. It fails when
 no primary service is registered. The URL requires a Treer HTTP proxy, which
 managed processes inherit; it is not a public DNS address. Repeating primary
 registration updates the existing service through ownership and update Policy
@@ -927,21 +926,21 @@ from peers without matching names.
 treer whoami
 treer status
 treer agent ls -R /
-treer agent show reviewer
-treer agent start reviewer
-treer agent stop reviewer
-treer agent restart reviewer
-treer agent admin rename reviewer code-reviewer
+treer agent show /reviewer
+treer agent start /reviewer
+treer agent stop /reviewer
+treer agent restart /reviewer
+treer agent admin rename /reviewer code-reviewer
 treer machine rename self build-machine
 treer machine delete srv_obsolete
 treer exec --machine build-machine --cwd repo -- git status --short
 treer exec --machine build-machine --cwd . --timeout 10000 -- sh -lc 'make test'
-treer agent attach reviewer
-treer agent admin delete obsolete-helper
-treer agent prompt reviewer "Review the parser changes" --wait --timeout 120000
-treer agent read reviewer --lines 80
-treer agent transcript reviewer --page 0
-treer agent send-keys reviewer ctrl-c
+treer agent attach /reviewer
+treer agent admin delete /obsolete-helper
+treer agent prompt /reviewer "Review the parser changes" --wait --timeout 120000
+treer agent read /reviewer --lines 80
+treer agent transcript /reviewer --page 0
+treer agent send-keys /reviewer ctrl-c
 ```
 
 The same `treer agent start`, `stop`, `restart`, and `read` commands accept App
@@ -955,9 +954,9 @@ Organize both kinds using commands under the same prefix:
 treer agent mkdir -p /research/experiments
 treer agent ls /research
 treer agent ls -R /
-treer agent mv reviewer /research/experiments/
+treer agent mv /reviewer /research/experiments/
 treer agent mv /research/experiments /research/runs
-treer agent mv reviewer /
+treer agent mv /research/experiments/reviewer /
 treer agent rmdir /research/runs
 ```
 
@@ -1059,7 +1058,7 @@ treer message list --limit 50
 
 printf '%s\n' 'Review is ready.' | \
   treer message send \
-    --to coordinator \
+    --to /coordinator \
     --idempotency-key review-42-ready
 
 printf '%s\n' 'I addressed the comments.' | \
@@ -1068,7 +1067,7 @@ printf '%s\n' 'I addressed the comments.' | \
 treer message ack <delivery-id> --operation-id ack-review-42
 ```
 
-Use stable recipient IDs or unique names and a sender-scoped idempotency key for
+Use stable recipient IDs, paths, or sibling names and a sender-scoped idempotency key for
 retryable sends. A reply creates an ordinary immutable Message whose first
 `context_id` is the parent; contexts can have several ordered parents and form a
 workspace-scoped DAG. An edge never grants access to an otherwise invisible
@@ -1180,7 +1179,7 @@ agent's live PTY in the current native terminal. Input, colors, cursor control,
 and terminal resize are passed through directly. Press `Ctrl-]` to detach
 without stopping the agent.
 
-Targets accept an agent id, a unique agent name, or `self`/`.` from inside a
+Targets accept a stable Agent/App ID, tree path, sibling name, or `self`/`.` from inside a
 managed agent. `prompt --wait` waits for observed activity followed by `idle`,
 `blocked`, `exited`, or `failed` by default; repeat `--until STATUS` to select
 other states. It is state-based coordination, not strict per-prompt turn
@@ -1263,3 +1262,25 @@ App, initially in `outbox` mode. `proxy` mode falls back to local outbox only on
 Older Proxies without this route return a visible failure; select outbox
 explicitly until the Proxy upgrade. Real email acceptance requires operator
 coordination after the route is deployed; automated tests use local fakes only.
+
+### Agent path targets
+
+Agent/App names are case-sensitive and unique within their Tree folder. Use
+`/team/reviewer`, `./reviewer`, `../team/reviewer`, or `sub/reviewer`; relative
+paths start at the caller Agent's containing folder, or `/` for an operator.
+Bare names match siblings only. A missing sibling returns `agent_not_in_folder`
+with at most ten same-name paths in `hint`, even if there is only one global
+match. Stable `ag_…` / `app_…` IDs always work; `self` and `.` are the calling
+Agent when an Agent target is required. Folder commands keep `.` as the folder.
+
+Agent discovery, show, whoami, status, and Message recipient snapshots include
+`path`. Tree **Copy path** values can be used directly as `treer` targets. Moves
+and renames preserve IDs and Policy rules. Creation, rename, and moves reject
+sibling collisions; folder deletion also rejects promotion into conflicting
+siblings. Services and `NAME.treer` retain separate workspace-wide naming.
+Launch profile names and machine names keep their existing separate namespaces.
+
+A new CLI checks `agent.path-targets.v1` on the Controller before dispatch. An
+older Controller yields a clear upgrade error; the client does not upgrade or
+restart it automatically. See the [design notes](research/2026-10-12-agent-path-targets.md)
+for compatibility and atomic creation decisions.

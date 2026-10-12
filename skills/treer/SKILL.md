@@ -63,11 +63,17 @@ All discovery and control stays inside `TREER_WORKSPACE_ID`. Agent targets may
 be:
 
 - an opaque agent ID;
-- a unique agent name;
+- an absolute tree path (`/team/reviewer`) or a relative path (`../team/reviewer`);
+- a bare name only for a sibling in the caller's containing folder;
 - `self` or `.` for the calling agent.
 
-Prefer a short unique name for collaboration. If names are duplicated, Treer
-returns `agent_ambiguous`; use the exact agent ID.
+Prefer paths for collaboration. Agent names are unique within a folder, not the
+whole workspace. Relative paths start at your containing Tree folder; operators
+start at `/`. A missing bare sibling returns `agent_not_in_folder` with up to ten
+same-name absolute paths in `hint`; it never falls back to a global name match.
+Agent output includes `path`, and Tree **Copy path** can be pasted as a CLI target.
+New CLI clients require Controller capability `agent.path-targets.v1`; an older
+Controller returns an upgrade error before dispatch, without disconnecting.
 
 Discover current topology before choosing a peer or server:
 
@@ -76,7 +82,7 @@ treer whoami
 treer status
 treer agent ls -R /
 treer agent show self
-treer agent show reviewer
+treer agent show /reviewer
 ```
 
 Use stable IDs when renaming an object. `self` and `.` are accepted for both
@@ -101,25 +107,25 @@ Agent after a successful exit, and `treer agent stop` disables it. Do not put
 secrets in argv. Explicit start can launch a stopped or completed workload again:
 
 ```bash
-treer agent start reviewer
-treer agent stop reviewer
-treer agent restart reviewer
-treer agent read reviewer --lines 100
+treer agent start /reviewer
+treer agent stop /reviewer
+treer agent restart /reviewer
+treer agent read /reviewer --lines 100
 ```
 
-These lifecycle commands also accept managed App runtime IDs and unique names.
+These lifecycle commands also accept managed App runtime IDs, paths, and sibling names.
 To repair a stuck peer without deleting its identity, use the separate
 Policy-controlled startup management commands:
 
 ```bash
-treer agent admin startup show reviewer
-treer agent admin startup set reviewer --cwd repo -- ./scripts/start-agent.sh
-treer agent restart reviewer
+treer agent admin startup show /reviewer
+treer agent admin startup set /reviewer --cwd repo -- ./scripts/start-agent.sh
+treer agent restart /reviewer
 # Atomically save new argv and restart once:
-treer agent restart reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
+treer agent restart /reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
 ```
 
-Targets accept ID, unique name, or `self`. Omitted `--cwd` keeps the target's
+Targets accept ID, tree path, sibling name, or `self`. Omitted `--cwd` keeps the target's
 saved directory. Admin set alone preserves stopped intent and does not launch.
 Admin show/set require `agent.startup.manage` on the target; atomic restart also
 requires ordinary lifecycle permissions. This does not change the self-only
@@ -147,9 +153,9 @@ Organize Agents and Apps in the shared workspace tree:
 treer agent mkdir -p /research/experiments
 treer agent ls /research
 treer agent ls -R /
-treer agent mv reviewer /research/experiments/
+treer agent mv /reviewer /research/experiments/
 treer agent mv /research/experiments /research/runs
-treer agent mv reviewer /
+treer agent mv /research/experiments/reviewer /
 treer agent rmdir /research/runs
 ```
 
@@ -188,11 +194,11 @@ treer app create --machine build-machine --name docs --cwd . --port 8080 \
 treer app create --public --machine build-machine --name public-docs --cwd . \
   --port 8081 python3 -- -m http.server 8081
 treer app list
-treer app show docs
-treer app stop docs
-treer app start docs
-treer app restart docs
-treer app delete docs
+treer app show /docs
+treer app stop /docs
+treer app start /docs
+treer app restart /docs
+treer app delete /docs
 ```
 
 Read `public_url` and `access` from `treer app create`, `list`, or `show`. Use
@@ -254,7 +260,7 @@ are never retried through PTY input. Read a structured interface transcript
 with:
 
 ```bash
-treer agent transcript reviewer --page 0
+treer agent transcript /reviewer --page 0
 ```
 
 Each page is one conversation turn: a user prompt plus the following entries
@@ -302,15 +308,15 @@ Agent's endpoint. Ordinary services remain available alongside the primary.
 The calling Agent discovers the address, then uses an ordinary HTTP client:
 
 ```bash
-addr=$(treer agent address reviewer)
+addr=$(treer agent address /reviewer)
 curl --fail-with-body "$addr/openapi.json"
 curl --fail-with-body -X POST "$addr/review" \
   -H 'Content-Type: application/json' -d @request.json
-treer agent address reviewer --json
+treer agent address /reviewer --json
 ```
 
 The schema path and request routes above are examples owned by the serving Agent.
-Treer does not interpret its schema. `address` accepts a unique Agent name or ID,
+Treer does not interpret its schema. `address` accepts a tree path, sibling name, or ID,
 defaults to `self`, and prints only `http://SERVICE_ID.treer/` with a newline.
 `--json` returns `agent_id`, `service_id`, and `address`. A missing primary is an
 error; other owned services are never selected implicitly. Addresses remain
@@ -385,12 +391,12 @@ record any external effect before acknowledging:
 treer message ack <delivery-id> --operation-id <stable-operation-id>
 ```
 
-Send a new Message using a stable recipient ID or unique name. Prefer stdin for
+Send a new Message using a stable recipient ID, tree path, or sibling name. Prefer stdin for
 multiline or generated content so the body is not exposed in process arguments:
 
 ```bash
 printf '%s\n' 'Review is complete.' | \
-  treer message send --to coordinator --idempotency-key task-42-result
+  treer message send --to /coordinator --idempotency-key task-42-result
 ```
 
 Use a sender-scoped idempotency key whenever a send may be retried. Repeating an
@@ -530,10 +536,10 @@ treer agent admin profile launch reviewer --name review-42 --folder ../reviews
 treer agent admin create --kind command --name helper --folder /research --cwd repo -- /bin/sh
 ```
 
-The destination must exist and is checked before creating the Agent. Placement
-then uses the existing Tree API and its `agent.tree.manage` Policy. If placement
-fails after creation, the error includes the created Agent ID and a `treer agent
-mv` retry command. Move that Agent rather than repeating creation.
+The destination must exist and is checked before creating the Agent. Proxy
+reserves the name and placement atomically before starting the process;
+non-root placement requires `agent.tree.manage`. Sibling name conflicts are
+rejected before dispatch, including when two callers create concurrently.
 
 Select an online machine from `treer status`, then create an explicit command
 Agent. Preserve the current working directory unless the task requires a
@@ -574,10 +580,10 @@ Native agent arguments go after `--`:
 treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex <agent-args...>
 ```
 
-Submit work by unique name and wait for a settled state:
+Submit work by path and wait for a settled state:
 
 ```bash
-treer agent prompt reviewer \
+treer agent prompt /reviewer \
   "Review the current diff and report only actionable findings." \
   --wait --timeout 120000
 ```
@@ -587,7 +593,7 @@ Without `--until`, `prompt --wait` settles on `idle`, `blocked`, `exited`, or
 exact state:
 
 ```bash
-treer agent wait reviewer --until blocked --timeout 120000
+treer agent wait /reviewer --until blocked --timeout 120000
 ```
 
 The wait observes lifecycle state and output revisions, not a correlated task
@@ -598,8 +604,8 @@ correct or complete.
 Inspect the result after a wait, especially after `blocked` or `failed`:
 
 ```bash
-treer agent show reviewer
-treer agent read reviewer --lines 120
+treer agent show /reviewer
+treer agent read /reviewer --lines 120
 ```
 
 `treer agent attach <target>` is reserved for a human using an interactive
@@ -611,7 +617,7 @@ Delete an agent only when its process and workspace entry should both be
 removed. Deletion is persistent and is different from merely stopping it:
 
 ```bash
-treer agent admin delete reviewer
+treer agent admin delete /reviewer
 ```
 
 ## Send terminal keys intentionally
@@ -620,9 +626,9 @@ Use `prompt` for normal messages. Use `send-keys` only for interactive terminal
 controls, approvals, cancellation, or applications that need individual keys:
 
 ```bash
-treer agent send-keys reviewer esc
-treer agent send-keys reviewer ctrl-c
-treer agent send-keys reviewer y enter
+treer agent send-keys /reviewer esc
+treer agent send-keys /reviewer ctrl-c
+treer agent send-keys /reviewer y enter
 ```
 
 Supported logical keys include `enter`, `tab`, `backspace`, `esc`, `space`,

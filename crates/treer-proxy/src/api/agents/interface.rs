@@ -14,6 +14,7 @@ pub(crate) struct AgentTranscriptQuery {
 
 pub(crate) async fn prompt_agent(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
@@ -23,6 +24,7 @@ pub(crate) async fn prompt_agent(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -46,6 +48,7 @@ pub(crate) async fn prompt_agent(
 
 pub(crate) async fn input_agent(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
@@ -55,6 +58,7 @@ pub(crate) async fn input_agent(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -78,6 +82,7 @@ pub(crate) async fn input_agent(
 
 pub(crate) async fn read_agent(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
@@ -87,6 +92,7 @@ pub(crate) async fn read_agent(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -112,6 +118,7 @@ pub(crate) async fn read_agent(
 
 pub(crate) async fn read_agent_transcript(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
@@ -121,6 +128,7 @@ pub(crate) async fn read_agent_transcript(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -158,12 +166,20 @@ pub(crate) async fn stop_agent(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
     )
     .await?;
-    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
+    let agent = resolve_workload_at(
+        &state,
+        &auth,
+        &workspace_id,
+        headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok()),
+        &target,
+    )
+    .await?;
     context.authorize_agent(&agent, ACTION_AGENT_STOP).await?;
     let data = apply_workload_action(
         &state,
@@ -205,6 +221,7 @@ pub(crate) async fn abort_agent(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,

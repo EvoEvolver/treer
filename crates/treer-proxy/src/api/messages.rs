@@ -158,7 +158,7 @@ pub(super) async fn send_message_for(
     messages: &MessageStore,
     workspace_id: &str,
     subject: PolicySubject,
-    sender: MessagePrincipal,
+    mut sender: MessagePrincipal,
     request: SendMessageRequest,
 ) -> Result<treer_protocol::SendMessageResponse, ApiFailure> {
     if request.recipients.is_empty() || request.recipients.len() > 32 {
@@ -168,6 +168,11 @@ pub(super) async fn send_message_for(
         ));
     }
     let directory = workspace_app_principals(state, auth, workspace_id).await?;
+    let tree = auth.workload_tree(workspace_id).await?;
+    let caller = (sender.kind == MessagePrincipalKind::Agent).then_some(sender.id.as_str());
+    if sender.kind == MessagePrincipalKind::Agent {
+        sender.path = Some(tree.workload_path(&sender.id, &sender.name)?);
+    }
     let mut recipients = Vec::with_capacity(request.recipients.len());
     for target in &request.recipients {
         let target = if matches!(target.trim(), "self" | ".") {
@@ -175,9 +180,18 @@ pub(super) async fn send_message_for(
         } else {
             target.trim()
         };
-        let recipient = resolve_app_principal(&directory, target)
+        let mut recipient = resolve_tree_principal(&directory, &tree, caller, target)
             .map(MessagePrincipal::from)
-            .map_err(|_| message_recipient_unavailable())?;
+            .map_err(|error| {
+                if error.code == "agent_not_in_folder" {
+                    ApiFailure::from(error)
+                } else {
+                    message_recipient_unavailable()
+                }
+            })?;
+        if recipient.kind == MessagePrincipalKind::Agent {
+            recipient.path = Some(tree.workload_path(&recipient.id, &recipient.name)?);
+        }
         recipients.push(recipient);
     }
     let recipient_count = recipients.len();
@@ -456,6 +470,7 @@ pub(super) async fn import_core_messages(
     )
     .await?;
     let importer = MessagePrincipal {
+        path: None,
         kind: MessagePrincipalKind::Machine,
         id: server_id.clone(),
         name: server_id.clone(),
@@ -485,6 +500,7 @@ pub(super) async fn message_request_principal(
     Ok((
         subject,
         MessagePrincipal {
+            path: None,
             kind: MessagePrincipalKind::Agent,
             id: agent.agent_id,
             name: agent.name,

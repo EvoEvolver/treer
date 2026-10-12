@@ -520,6 +520,7 @@ mod tests {
     fn test_agent(agent_id: &str, server_id: &str, workspace_id: &str) -> AgentInfo {
         let now = Utc::now();
         AgentInfo {
+            path: None,
             run_generation: 0,
             agent_id: agent_id.to_string(),
             workspace_id: workspace_id.to_string(),

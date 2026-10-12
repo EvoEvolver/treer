@@ -1,6 +1,7 @@
 use super::*;
 pub(crate) async fn list_agents(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
@@ -15,7 +16,9 @@ pub(crate) async fn list_agents(
     )
     .await?;
     let mut agents = Vec::new();
-    for agent in snapshot.agents {
+    let tree = auth.workload_tree(&workspace_id).await?;
+    for mut agent in snapshot.agents {
+        agent.path = Some(tree.workload_path(&agent.agent_id, &agent.name)?);
         if matches!(subject.as_ref(), Some(PolicySubject::Machine { server_id }) if server_id != &agent.server_id)
         {
             continue;
@@ -45,7 +48,14 @@ pub(crate) async fn get_agent(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
+    let agent = resolve_workload_at(
+        &state,
+        &auth,
+        &workspace_id,
+        headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok()),
+        &target,
+    )
+    .await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -75,7 +85,14 @@ pub(crate) async fn rename_agent(
     Path((workspace_id, target)): Path<(String, String)>,
     Json(request): Json<RenameRequest>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
+    let agent = resolve_workload_at(
+        &state,
+        &auth,
+        &workspace_id,
+        headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok()),
+        &target,
+    )
+    .await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -135,7 +152,14 @@ pub(crate) async fn delete_agent(
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = resolve_workload(&state, &auth, &workspace_id, &target).await?;
+    let agent = resolve_workload_at(
+        &state,
+        &auth,
+        &workspace_id,
+        headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok()),
+        &target,
+    )
+    .await?;
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),
@@ -295,12 +319,28 @@ pub(crate) async fn execute_agent_create(
         PolicyResource::new(RESOURCE_MACHINE, &server_id),
     )
     .await?;
+    if request.folder_id.is_some() {
+        authorize_control(
+            policy,
+            workspace_id,
+            subject,
+            crate::policy::ACTION_AGENT_TREE_MANAGE,
+            PolicyResource::new(crate::policy::RESOURCE_AGENT_TREE, workspace_id),
+        )
+        .await?;
+    }
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
     let agent_name = request.name.clone();
     let workload_credential = auth
-        .create_agent_credential(workspace_id, &server_id, &agent_id)
+        .create_named_agent_credential(
+            workspace_id,
+            &server_id,
+            &agent_id,
+            &request.name,
+            request.folder_id.as_deref(),
+        )
         .await?;
-    let data = state
+    let mut data = state
         .send_command(
             workspace_id,
             &server_id,
@@ -310,7 +350,13 @@ pub(crate) async fn execute_agent_create(
                 request,
             },
         )
-        .await?;
+        .await.map_err(|mut error| {
+            error.message = format!("{}; Agent identity {} was reserved before dispatch; inspect it before retrying creation", error.message, agent_id);
+            error.hint = Some(vec![agent_id.clone()]);
+            ApiFailure::from(error)
+        })?;
+    let tree = auth.workload_tree(workspace_id).await?;
+    data["path"] = json!(tree.workload_path(&agent_id, &agent_name)?);
     let (actor_kind, actor_id) = control_audit_actor(session, subject);
     let payload = launch_profile_id.map_or_else(
         || json!({ "server_id": &server_id }),

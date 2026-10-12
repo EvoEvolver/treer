@@ -328,6 +328,7 @@ async fn state_with_managed_agent() -> AppState {
         last_seen_at: now,
     };
     let agent = treer_protocol::AgentInfo {
+        path: None,
         run_generation: 0,
         agent_id: "agent-a".to_string(),
         workspace_id: "default".to_string(),
@@ -2162,6 +2163,7 @@ async fn voice_command_turns_asr_text_into_agent_prompt() {
         last_seen_at: now,
     };
     let agent = treer_protocol::AgentInfo {
+        path: None,
         run_generation: 0,
         agent_id: "ag_reviewer".to_string(),
         workspace_id: "default".to_string(),
@@ -2497,6 +2499,7 @@ fn launch_profiles_become_interactive_shell_requests() {
     let request = agent_request_from_launch_profile(
         &profile,
         LaunchAgentProfileRequest {
+            folder_id: None,
             server_id: Some("machine-a".to_string()),
             agent_name: None,
             cwd: Some("reviews/42".to_string()),
@@ -2515,6 +2518,7 @@ fn launch_profiles_become_interactive_shell_requests() {
     let request = agent_request_from_launch_profile(
         &profile,
         LaunchAgentProfileRequest {
+            folder_id: None,
             server_id: None,
             agent_name: None,
             cwd: None,
@@ -2888,7 +2892,9 @@ async fn message_api_pins_durable_policy_and_hides_recipient_resolution_details(
     .await
     .expect_err("enforced policy must hide the recipient");
 
-    for error in [&nonexistent, &duplicate, &hidden] {
+    assert_eq!(nonexistent.error.code, "agent_not_in_folder");
+    assert_eq!(nonexistent.error.hint, Some(vec![]));
+    for error in [&duplicate, &hidden] {
         assert_eq!(error.status, StatusCode::NOT_FOUND);
         assert_eq!(error.error.code, "message_recipient_unavailable");
         assert_eq!(

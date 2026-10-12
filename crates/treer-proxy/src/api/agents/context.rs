@@ -8,6 +8,8 @@ use super::*;
 pub(crate) struct AgentRequestContext {
     state: AppState,
     policy: PolicyEngine,
+    auth: AuthStore,
+    caller: Option<String>,
     workspace_id: String,
     subject: Option<PolicySubject>,
 }
@@ -16,6 +18,7 @@ impl AgentRequestContext {
     pub(crate) async fn new(
         state: &AppState,
         policy: &PolicyEngine,
+        auth: &AuthStore,
         machine: Option<&MachineSession>,
         headers: &HeaderMap,
         workspace_id: &str,
@@ -24,6 +27,11 @@ impl AgentRequestContext {
         Ok(Self {
             state: state.clone(),
             policy: policy.clone(),
+            auth: auth.clone(),
+            caller: headers
+                .get(AGENT_ID_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
             workspace_id: workspace_id.to_string(),
             subject,
         })
@@ -46,7 +54,14 @@ impl AgentRequestContext {
     }
 
     pub(crate) async fn resolve_agent(&self, target: &str) -> Result<AgentInfo, ApiFailure> {
-        Ok(self.state.resolve_agent(&self.workspace_id, target).await?)
+        resolve_workload_at(
+            &self.state,
+            &self.auth,
+            &self.workspace_id,
+            self.caller.as_deref(),
+            target,
+        )
+        .await
     }
 
     pub(crate) async fn authorize(

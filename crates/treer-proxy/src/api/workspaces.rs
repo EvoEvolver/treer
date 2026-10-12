@@ -76,12 +76,17 @@ pub(super) async fn delete_workspace(
 
 pub(super) async fn workspace_snapshot(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
     let mut snapshot = state.snapshot(&workspace_id).await?;
+    let tree = auth.workload_tree(&workspace_id).await?;
+    for agent in &mut snapshot.agents {
+        agent.path = Some(tree.workload_path(&agent.agent_id, &agent.name)?);
+    }
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),

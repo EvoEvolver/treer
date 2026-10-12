@@ -333,6 +333,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             "stable-id".into(),
             credential.clone(),
             CreateAgentRequest {
+                folder_id: None,
                 server_id: None,
                 kind: "command".into(),
                 name: "target".into(),
@@ -577,6 +578,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
                 id.into(),
                 new_workload_credential(),
                 CreateAgentRequest {
+                    folder_id: None,
                     server_id: None,
                     kind: "command".into(),
                     name: id.into(),
@@ -727,6 +729,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
         credential
     );
     let declaration = CreateAgentRequest {
+        folder_id: None,
         server_id: None,
         kind: "app".into(),
         name: "declared app".into(),
@@ -836,6 +839,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
             "declared".into(),
             None,
             CreateAgentRequest {
+                folder_id: None,
                 server_id: None,
                 kind: "app".into(),
                 name: "ignored".into(),
@@ -859,6 +863,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
             "declared".into(),
             None,
             CreateAgentRequest {
+                folder_id: None,
                 server_id: None,
                 kind: "app".into(),
                 name: "declared".into(),
@@ -886,6 +891,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
             "app-unit".into(),
             new_workload_credential(),
             CreateAgentRequest {
+                folder_id: None,
                 server_id: None,
                 kind: "app".into(),
                 name: "app unit".into(),
@@ -927,6 +933,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
             "admin-shell".into(),
             credential.clone(),
             CreateAgentRequest {
+                folder_id: None,
                 server_id: None,
                 kind: "shell".into(),
                 name: "temporary admin shell".into(),
@@ -1402,6 +1409,7 @@ fn prompt_text_uses_bracketed_paste_when_enabled() {
 #[test]
 fn explicit_command_agents_still_spawn_directly() {
     let request = CreateAgentRequest {
+        folder_id: None,
         server_id: None,
         kind: "command".to_string(),
         name: "shell".to_string(),
@@ -1423,6 +1431,7 @@ fn explicit_command_agents_still_spawn_directly() {
 #[test]
 fn bridge_agents_spawn_directly_and_keep_prompt_control_in_the_bridge() {
     let request = CreateAgentRequest {
+        folder_id: None,
         server_id: None,
         kind: "bridge".to_string(),
         name: "bridge".to_string(),
@@ -1445,6 +1454,7 @@ fn bridge_agents_spawn_directly_and_keep_prompt_control_in_the_bridge() {
 #[test]
 fn managed_apps_spawn_directly_with_explicit_service_registration() {
     let request = CreateAgentRequest {
+        folder_id: None,
         server_id: None,
         kind: "app".to_string(),
         name: "docs".to_string(),
@@ -1473,6 +1483,7 @@ fn managed_apps_spawn_directly_with_explicit_service_registration() {
 #[test]
 fn empty_command_request_opens_an_unmodified_interactive_terminal() {
     let request = CreateAgentRequest {
+        folder_id: None,
         server_id: None,
         kind: "command".to_string(),
         name: "terminal".to_string(),
@@ -1518,6 +1529,7 @@ fn virtual_host_snapshots_only_move_forward_on_one_connection() {
 #[test]
 fn profiles_preserve_argv_without_shell_interpretation_or_installation() {
     let request = CreateAgentRequest {
+        folder_id: None,
         server_id: None,
         kind: "shell".into(),
         name: "profile".into(),
@@ -1542,6 +1554,7 @@ fn profiles_preserve_argv_without_shell_interpretation_or_installation() {
 #[test]
 fn provider_kinds_and_namespace_ports_require_explicit_migration() {
     let mut request = CreateAgentRequest {
+        folder_id: None,
         server_id: None,
         kind: "codex".into(),
         name: "legacy".into(),

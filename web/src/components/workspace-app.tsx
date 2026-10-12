@@ -14,7 +14,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { WorkloadTree, type NewAgentFolder } from "@/components/workload-tree"
-import { appendAgentToTreeFolder } from "@/lib/api"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
 import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
@@ -531,32 +530,26 @@ export function WorkspaceApp() {
     if (!workspaceId || creatingAgent) return
     const creationWorkspaceId = workspaceId
     const folder = agentFolder
+    const placement = folder ? { folder_id: folder.folderId } : {}
     setCreatingAgent(true)
     try {
       let agent
       if (agentProfileId === "terminal") {
-        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "shell", name: agentName, cwd: agentCwd, args: [], cols: 120, rows: 36 }) })
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ ...placement, server_id: agentServerId, kind: "shell", name: agentName, cwd: agentCwd, args: [], cols: 120, rows: 36 }) })
       } else if (agentProfileId === "manual") {
         const parsed = parseCommandLine(agentCommandLine)
-        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, kind: "command", name: agentName, cwd: agentCwd, args: [parsed.command, ...parsed.args], cols: 120, rows: 36 }) })
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ ...placement, server_id: agentServerId, kind: "command", name: agentName, cwd: agentCwd, args: [parsed.command, ...parsed.args], cols: 120, rows: 36 }) })
       } else {
-        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(agentProfileId)}/launch`, { method: "POST", body: JSON.stringify({ server_id: agentServerId, agent_name: agentName, cols: 120, rows: 36 }) })
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(agentProfileId)}/launch`, { method: "POST", body: JSON.stringify({ ...placement, server_id: agentServerId, agent_name: agentName, cols: 120, rows: 36 }) })
       }
       const agentId = agent.agent_id
       if (!agentId) throw new Error("Create agent did not return an id")
-      // Creation is complete even when the separate placement request fails.
-      // Close the creation form so retrying placement cannot create duplicates.
+      // Name and final placement are reserved atomically by the Proxy.
       if (workspaceIdRef.current === creationWorkspaceId) {
         setCreateAgentOpen(false)
         setAgentFolder(null)
       }
-      if (folder) {
-        try { await appendAgentToTreeFolder(creationWorkspaceId, agentId, folder.folderId) }
-        catch (reason) {
-          if (workspaceIdRef.current === creationWorkspaceId) showError(new Error(`Agent ${agent.name} was created, but placing it in ${folder.path} failed. Use Move to folder to retry. ${String(reason)}`))
-        }
-        if (workspaceIdRef.current === creationWorkspaceId) setPlacementRevision((revision) => revision + 1)
-      }
+      if (folder && workspaceIdRef.current === creationWorkspaceId) setPlacementRevision((revision) => revision + 1)
       if (workspaceIdRef.current !== creationWorkspaceId) return
       setCreateAgentOpen(false)
       showAgentTerminal(agentId)

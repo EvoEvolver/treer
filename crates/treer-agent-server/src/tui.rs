@@ -687,6 +687,7 @@ mod tests {
     fn proxy_failure_preserves_local_agents() {
         let mut app = App::new("default").expect("app");
         app.agents.push(AgentInfo {
+            path: None,
             agent_id: "agent-a".to_string(),
             run_generation: 0,
             workspace_id: "default".to_string(),

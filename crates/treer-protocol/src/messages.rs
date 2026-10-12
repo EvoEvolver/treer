@@ -2,7 +2,7 @@ use super::*;
 
 /// Stable identity attached to a Core Message.
 ///
-/// `name` and `role` are immutable display snapshots. Authorization always uses
+/// `name`, `path`, and `role` are immutable display snapshots. Authorization always uses
 /// `kind` and `id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +36,8 @@ impl From<AppPrincipalKind> for MessagePrincipalKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessagePrincipal {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub kind: MessagePrincipalKind,
     pub id: String,
     pub name: String,
@@ -46,6 +48,7 @@ pub struct MessagePrincipal {
 impl From<AppPrincipal> for MessagePrincipal {
     fn from(value: AppPrincipal) -> Self {
         Self {
+            path: None,
             kind: value.kind.into(),
             id: value.id,
             name: value.name,

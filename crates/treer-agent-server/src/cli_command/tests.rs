@@ -685,3 +685,61 @@ fn managed_app_commands_parse() {
         }) if target == "soul"
     ));
 }
+
+#[test]
+fn agent_and_app_help_explain_paths_and_sibling_scope() {
+    use clap::CommandFactory;
+    let mut cli = Args::command();
+    let help = cli
+        .find_subcommand_mut("agent")
+        .unwrap()
+        .render_long_help()
+        .to_string();
+    assert!(help.contains("../team/agent"));
+    assert!(help.contains("siblings only"));
+    assert!(help.contains("agent_not_in_folder"));
+    let help = cli
+        .find_subcommand_mut("app")
+        .unwrap()
+        .render_long_help()
+        .to_string();
+    assert!(help.contains("Bare names never fall back"));
+    for action in ["send", "reply"] {
+        let help = cli
+            .find_subcommand_mut("message")
+            .unwrap()
+            .find_subcommand_mut(action)
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("Agent tree path"));
+        assert!(help.contains("sibling Agent name"));
+    }
+
+    for target in [
+        "/team/reviewer",
+        "../team/reviewer",
+        "./reviewer",
+        "sub/reviewer",
+        "ag_stable",
+        "app_stable",
+        "self",
+        ".",
+    ] {
+        for verb in [
+            "show",
+            "read",
+            "start",
+            "stop",
+            "restart",
+            "wait",
+            "transcript",
+        ] {
+            assert!(Args::try_parse_from(["treer", "agent", verb, target]).is_ok());
+        }
+        assert!(Args::try_parse_from([
+            "treer", "message", "send", "--to", target, "--body", "hello"
+        ])
+        .is_ok());
+    }
+}

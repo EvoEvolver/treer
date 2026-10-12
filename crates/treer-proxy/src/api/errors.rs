@@ -69,10 +69,13 @@ impl From<ProtocolError> for ApiFailure {
             "workspace_not_found"
             | "server_not_found"
             | "agent_not_found"
+            | "agent_not_in_folder"
             | "recipient_not_found" => StatusCode::NOT_FOUND,
-            "workspace_exists" | "agent_ambiguous" | "server_ambiguous" | "recipient_ambiguous" => {
-                StatusCode::CONFLICT
-            }
+            "workspace_exists"
+            | "agent_name_conflict"
+            | "agent_ambiguous"
+            | "server_ambiguous"
+            | "recipient_ambiguous" => StatusCode::CONFLICT,
             "machine_file_exists" => StatusCode::CONFLICT,
             "agent_startup_not_found" => StatusCode::NOT_FOUND,
             "policy_denied" | "policy_subject_mismatch" | "agent_identity_mismatch" => {

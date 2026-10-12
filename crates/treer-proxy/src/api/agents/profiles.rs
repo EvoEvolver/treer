@@ -10,6 +10,7 @@ pub(crate) async fn list_agent_launch_profiles(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -37,6 +38,7 @@ pub(crate) async fn get_agent_launch_profile(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -68,6 +70,7 @@ pub(crate) async fn create_agent_launch_profile(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -109,6 +112,7 @@ pub(crate) async fn update_agent_launch_profile(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -153,6 +157,7 @@ pub(crate) async fn delete_agent_launch_profile(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -197,6 +202,7 @@ pub(crate) async fn launch_agent_profile(
     let context = AgentRequestContext::new(
         &state,
         &policy,
+        &auth,
         machine.as_ref().map(|value| &value.0),
         &headers,
         &workspace_id,
@@ -240,6 +246,7 @@ pub(crate) fn agent_request_from_launch_profile(
     args.push(profile.command.clone());
     args.extend(profile.args.clone());
     Ok(CreateAgentRequest {
+        folder_id: request.folder_id,
         server_id: request.server_id,
         kind: "shell".to_string(),
         name: agent_name,

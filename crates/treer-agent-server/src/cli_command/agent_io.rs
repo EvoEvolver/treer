@@ -24,7 +24,7 @@ pub(super) async fn read_agent(
     target: &str,
     lines: usize,
 ) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     client
         .value(
             Method::GET,
@@ -41,7 +41,7 @@ pub(super) async fn read_agent_transcript(
     cursor: Option<String>,
     limit: usize,
 ) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     let mut path = format!(
         "api/agents/{}/transcript?limit={}",
         path_segment(&target),
@@ -60,7 +60,7 @@ pub(super) async fn read_agent_transcript(
 }
 
 pub(super) async fn stop_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     client
         .value(
             Method::POST,
@@ -75,7 +75,7 @@ pub(super) async fn rename_agent(
     target: &str,
     name: String,
 ) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     client
         .value(
             Method::PATCH,
@@ -86,7 +86,7 @@ pub(super) async fn rename_agent(
 }
 
 pub(super) async fn delete_agent(client: &ApiClient, target: &str) -> anyhow::Result<Value> {
-    let target = normalize_target(target)?;
+    let target = workload_tree::resolve_target(client, target).await?;
     client
         .value(
             Method::DELETE,

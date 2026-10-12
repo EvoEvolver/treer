@@ -117,6 +117,7 @@ struct ApiClient {
 
 #[derive(Debug)]
 struct CliFailure {
+    hint: Option<Vec<String>>,
     code: String,
     message: String,
 }
@@ -182,10 +183,12 @@ impl ApiClient {
         if !status.is_success() {
             let failure = serde_json::from_slice::<ApiError>(&bytes)
                 .map(|error| CliFailure {
+                    hint: error.error.hint,
                     code: error.error.code,
                     message: error.error.message,
                 })
                 .unwrap_or_else(|_| CliFailure {
+                    hint: None,
                     code: "invalid_api_error".to_string(),
                     message: format!("Treer API returned {status} without a valid JSON error"),
                 });
@@ -206,7 +209,7 @@ impl ApiClient {
     }
 
     async fn get_agent(&self, target: &str) -> anyhow::Result<AgentInfo> {
-        let target = normalize_target(target)?;
+        let target = workload_tree::resolve_target(self, target).await?;
         self.request(
             Method::GET,
             &format!("api/agents/{}", path_segment(&target)),
@@ -216,7 +219,7 @@ impl ApiClient {
     }
 
     async fn prompt(&self, target: &str, text: String) -> anyhow::Result<AgentInfo> {
-        let target = normalize_target(target)?;
+        let target = workload_tree::resolve_target(self, target).await?;
         self.request(
             Method::POST,
             &format!("api/agents/{}/prompt", path_segment(&target)),
@@ -272,7 +275,7 @@ async fn execute() {
         eprintln!(
             "{}",
             serde_json::to_string(&json!({
-                "error": {"code": code, "message": message}
+                "error": {"code": code, "message": message, "hint": error.downcast_ref::<CliFailure>().and_then(|failure| failure.hint.clone())}
             }))
             .unwrap_or_else(|_| {
                 "{\"error\":{\"code\":\"cli_failed\",\"message\":\"Treer command failed\"}}"
@@ -287,6 +290,7 @@ async fn run_cli() -> anyhow::Result<()> {
     let raw = env::args().skip(2).collect::<Vec<_>>();
     if let Some(message) = removed_command(&raw) {
         return Err(CliFailure {
+            hint: None,
             code: "command_removed".into(),
             message: message.into(),
         }
@@ -617,14 +621,6 @@ fn resolve_self(
             format!("current machine {server_id} is missing from workspace discovery")
         })?;
     Ok((machine.clone(), agent.clone()))
-}
-
-fn normalize_target(target: &str) -> anyhow::Result<String> {
-    if matches!(target, "self" | ".") {
-        return std::env::var("TREER_AGENT_ID")
-            .context("self target requires TREER_AGENT_ID inside a managed agent");
-    }
-    Ok(target.to_string())
 }
 
 fn path_segment(value: &str) -> String {

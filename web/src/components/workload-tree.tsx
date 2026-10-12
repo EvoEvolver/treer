@@ -100,10 +100,9 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   function itemPath(item: Item, parent: string | null) {
     const folder = tree.folders.find((entry) => entry.folder_id === (item.kind === "folder" ? item.id : parent))
     if (item.kind === "folder") return folder ? folderPath(folder) : `/${item.name}`
-    // App rows can have a friendlier label than their Agent name. CLI paths
-    // resolve the stored workload name, so copying must preserve that name.
-    const agentName = agents.find((entry) => entry.agent_id === item.id)?.name ?? item.name
-    return `${folder ? folderPath(folder) : ""}/${agentName}`
+    // App deployment labels are the canonical workload labels; legacy runtime
+    // inventory may still contain the retired app: display prefix.
+    return `${folder ? folderPath(folder) : ""}/${item.name}`
   }
   async function copyPath(path: string) {
     setCopyNotice("")

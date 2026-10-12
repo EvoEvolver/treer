@@ -17,7 +17,7 @@ treer app create --machine self --name gits --cwd treer --port 9430 \
   GITS_DATA_DIR=.treer/apps/gits \
   GITS_PUBLIC_URL=http://gits.internal \
   python3 apps/gits/gits.py
-treer app show gits
+treer app show /gits
 ```
 
 Read `http://gits.internal/` with an Agent client for the Markdown manual, or

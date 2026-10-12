@@ -26,7 +26,8 @@ async fn authorize_tree(
             "authenticated identity is required",
         ));
     }
-    let context = AgentRequestContext::new(state, policy, machine, headers, workspace).await?;
+    let context =
+        AgentRequestContext::new(state, policy, auth, machine, headers, workspace).await?;
     context
         .authorize(action, PolicyResource::new(RESOURCE_AGENT_TREE, workspace))
         .await

@@ -10,6 +10,8 @@ pub struct CreateWorkspaceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateAgentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     pub kind: String,
     pub name: String,
@@ -191,6 +193,8 @@ pub struct UpdateAgentLaunchProfileRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchAgentProfileRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

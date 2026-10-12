@@ -78,7 +78,26 @@ impl AuthStore {
         agent_id: &str,
         name: &str,
     ) -> Result<(), AuthFailure> {
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        treer_protocol::validate_workload_label(name)
+            .map_err(|e| AuthFailure::bad_request("invalid_agent_name", &e.message))?;
+        let mut transaction = self.lock_workload_tree(workspace_id).await?;
+        let folder: Option<String> = sqlx::query_scalar(
+            "SELECT folder_id FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2",
+        )
+        .bind(workspace_id)
+        .bind(agent_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?
+        .flatten();
+        workload_tree::validate_workload_name(
+            &mut transaction,
+            workspace_id,
+            folder.as_deref(),
+            name,
+            Some(agent_id),
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO agent_names(agent_id, workspace_id, name, updated_at) \
              VALUES($1, $2, $3, $4) \
@@ -122,6 +141,14 @@ impl AuthStore {
         &self,
         snapshot: &mut AgentServerSnapshot,
     ) -> Result<Vec<String>, AuthFailure> {
+        let mut tx = self
+            .lock_workload_tree(&snapshot.server.workspace_id)
+            .await?;
+        for agent in &snapshot.agents {
+            sqlx::query("INSERT INTO agent_names(agent_id,workspace_id,name,updated_at) VALUES($1,$2,COALESCE((SELECT name FROM app_deployments WHERE workspace_id=$2 AND runtime_agent_id=$1 LIMIT 1),$3),$4) ON CONFLICT(agent_id) DO NOTHING").bind(&agent.agent_id).bind(&agent.workspace_id).bind(&agent.name).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        }
+        tx.commit().await.map_err(AuthFailure::database)?;
+        let tree = self.workload_tree(&snapshot.server.workspace_id).await?;
         let rows = sqlx::query("SELECT agent_id, name FROM agent_names WHERE workspace_id = $1")
             .bind(&snapshot.server.workspace_id)
             .fetch_all(&self.pool)
@@ -135,6 +162,10 @@ impl AuthStore {
             if let Some(name) = names.get(&agent.agent_id) {
                 agent.name.clone_from(name);
             }
+            agent.path = Some(
+                tree.workload_path(&agent.agent_id, &agent.name)
+                    .map_err(|e| AuthFailure::bad_request("invalid_workload_tree", &e.message))?,
+            );
         }
         let deleted = sqlx::query_scalar::<_, String>(
             "SELECT agent_id FROM deleted_agents WHERE workspace_id = $1",

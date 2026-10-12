@@ -38,6 +38,7 @@ impl TerminalQuery {
 pub(crate) async fn agent_terminal(
     State(state): State<AppState>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     machine: Option<Extension<MachineSession>>,
     Path((workspace_id, agent_id)): Path<(String, String)>,
@@ -46,7 +47,15 @@ pub(crate) async fn agent_terminal(
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiFailure> {
     browser.validate_if_present(&headers)?;
-    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    let agent = resolve_workload_at(
+        &state,
+        &auth,
+        &workspace_id,
+        headers.get(AGENT_ID_HEADER).and_then(|v| v.to_str().ok()),
+        &agent_id,
+    )
+    .await?;
+    let agent_id = agent.agent_id.clone();
     let subject = control_policy_subject(
         &state,
         machine.as_ref().map(|value| &value.0),

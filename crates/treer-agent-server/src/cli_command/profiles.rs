@@ -7,7 +7,6 @@ pub(super) async fn run_profile_command(
     match command {
         ProfileCommand::List => client.value(Method::GET, "api/launch-profiles", None).await,
         ProfileCommand::Show { target } => {
-            let target = normalize_target(&target)?;
             client
                 .value(
                     Method::GET,
@@ -62,7 +61,6 @@ pub(super) async fn run_profile_command(
             {
                 bail!("profile update requires at least one changed field");
             }
-            let target = normalize_target(&target)?;
             client
                 .value(
                     Method::PATCH,
@@ -78,7 +76,6 @@ pub(super) async fn run_profile_command(
                 .await
         }
         ProfileCommand::Delete { target } => {
-            let target = normalize_target(&target)?;
             client
                 .value(
                     Method::DELETE,
@@ -94,7 +91,6 @@ pub(super) async fn run_profile_command(
             cwd,
             folder,
         } => {
-            let target = normalize_target(&target)?;
             let server_id = match machine {
                 Some(machine) => Some(resolve_machine(client, &machine).await?.server_id),
                 None => None,
@@ -104,6 +100,7 @@ pub(super) async fn run_profile_command(
                 folder.as_deref(),
                 &format!("api/launch-profiles/{}/launch", path_segment(&target)),
                 serde_json::to_value(LaunchAgentProfileRequest {
+                    folder_id: None,
                     server_id,
                     agent_name: name,
                     cwd,

@@ -273,7 +273,7 @@ impl AuthStore {
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
              created_at, created_by, updated_at, updated_by FROM app_deployments \
-             WHERE workspace_id = $1 AND (app_id = $2 OR lower(name) = lower($2))",
+             WHERE workspace_id = $1 AND (app_id = $2 OR runtime_agent_id = $2 OR name = $2) ORDER BY (app_id = $2) DESC, (runtime_agent_id = $2) DESC, app_id",
         )
         .bind(workspace_id)
         .bind(target.trim())
@@ -312,6 +312,11 @@ impl AuthStore {
     ) -> Result<AppDeployment, AuthFailure> {
         let update_guard = self.virtual_hosts_update.lock().await;
         let name = validate_resource_name(&request.name, "App")?;
+        treer_protocol::validate_workload_label(&name)
+            .map_err(|e| AuthFailure::bad_request("invalid_agent_name", &e.message))?;
+        let mut transaction = self.lock_workload_tree(workspace_id).await?;
+        workload_tree::validate_workload_name(&mut transaction, workspace_id, None, &name, None)
+            .await?;
         let command = validate_launch_profile_command(&request.command)?;
         let args = validate_launch_profile_args(request.args)?;
         let cwd = validate_launch_profile_cwd(&request.cwd)?;
@@ -328,10 +333,16 @@ impl AuthStore {
             ));
         }
         let now = Utc::now();
+        let service_id = format!("svc_{}", Uuid::new_v4().simple());
+        let service_taken: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM machine_services WHERE workspace_id=$1 AND lower(name)=lower($2))").bind(workspace_id).bind(&name).fetch_one(&mut *transaction).await.map_err(AuthFailure::database)?;
         let service = MachineService {
-            service_id: format!("svc_{}", Uuid::new_v4().simple()),
+            service_id: service_id.clone(),
             workspace_id: workspace_id.to_string(),
-            name: name.clone(),
+            name: if service_taken {
+                format!("{}-{}", name, &service_id[4..12])
+            } else {
+                name.clone()
+            },
             server_id: server_id.clone(),
             target_agent_id: None,
             primary: false,
@@ -370,7 +381,7 @@ impl AuthStore {
             updated_at: now,
             updated_by: actor.to_string(),
         };
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+
         sqlx::query(
             "INSERT INTO machine_services(service_id, workspace_id, name, server_id, target_agent_id, \
              target_host, target_port, protocol, created_at, created_by, updated_at, updated_by) \
@@ -426,6 +437,16 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(app_deployment_write_error)?;
+        sqlx::query(
+            "INSERT INTO agent_names(agent_id,workspace_id,name,updated_at) VALUES($1,$2,$3,$4)",
+        )
+        .bind(&deployment.app_id)
+        .bind(workspace_id)
+        .bind(&deployment.name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         drop(update_guard);
         self.refresh_virtual_network_hosts()

@@ -94,7 +94,7 @@ else:
     description = meta.get("description") or ""
 
 existing = subprocess.run(
-    ["treer", "agent", "admin", "profile", "show", name],
+    ["treer", "agent", "admin", "profile", "show", f"./{name}"],
     capture_output=True,
     text=True,
 )
@@ -130,10 +130,10 @@ create_agent() {
 # Restore the JSON launch arguments as positional parameters, preserving spaces.
 eval "set -- $(python3 -c 'import json, shlex, sys; print(" ".join(shlex.quote(a) for a in json.loads(sys.argv[1])))' "$LAUNCH_ARGS")"
 
-if treer agent show "$NAME" >/dev/null 2>&1; then
-  STATUS="$(treer agent show "$NAME" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status") or "")')"
+if treer agent show "./$NAME" >/dev/null 2>&1; then
+  STATUS="$(treer agent show "./$NAME" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status") or "")')"
   if [ "$STATUS" = "failed" ] || [ "$STATUS" = "exited" ]; then
-    treer agent admin delete "$NAME" >/dev/null
+    treer agent admin delete "./$NAME" >/dev/null
     create_agent "$@"
   else
     echo "Agent $NAME already exists ($STATUS)"
@@ -151,7 +151,7 @@ deadline = time.time() + 300
 last = "not visible"
 while time.time() < deadline:
     result = subprocess.run(
-        ["treer", "agent", "show", name],
+        ["treer", "agent", "show", f"./{name}"],
         capture_output=True,
         text=True,
     )

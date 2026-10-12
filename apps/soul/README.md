@@ -24,7 +24,7 @@ treer app create --machine self --name soul --cwd . --port 9420 \
   SOUL_DATA_DIR=.treer/apps/soul \
   SOUL_PUBLIC_URL=http://soul.internal \
   python3 apps/soul/soul.py
-treer app show soul
+treer app show /soul
 ```
 
 Install the client from any managed Agent in that workspace:

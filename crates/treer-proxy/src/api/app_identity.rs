@@ -233,7 +233,10 @@ pub(super) async fn resolve_workspace_app_recipients(
         } else {
             target
         };
-        let recipient = resolve_app_principal(&principals, target)?;
+        let tree = auth.workload_tree(&claims.workspace_id).await?;
+        let caller =
+            (claims.principal_kind == AppPrincipalKind::Agent).then_some(claims.sub.as_str());
+        let recipient = resolve_tree_principal(&principals, &tree, caller, target)?;
         if seen.insert((recipient.kind, recipient.id.clone())) {
             recipients.push(recipient);
         }
@@ -359,6 +362,7 @@ pub(super) async fn workspace_app_principals(
         .collect())
 }
 
+#[cfg(test)]
 pub(super) fn resolve_app_principal(
     principals: &[AppPrincipal],
     target: &str,
@@ -404,6 +408,7 @@ pub(super) async fn app_message_identity(
                 user_id: claims.sub.clone(),
             },
             MessagePrincipal {
+                path: None,
                 kind: MessagePrincipalKind::Human,
                 id: claims.sub,
                 name: claims.name,
@@ -438,6 +443,7 @@ pub(super) async fn app_message_identity(
                     agent_id: agent.agent_id.clone(),
                 },
                 MessagePrincipal {
+                    path: None,
                     kind: MessagePrincipalKind::Agent,
                     id: agent.agent_id,
                     name: agent.name,
@@ -447,4 +453,117 @@ pub(super) async fn app_message_identity(
         }
     };
     Ok((workspace_id, subject, principal))
+}
+
+pub(super) fn resolve_tree_principal(
+    principals: &[AppPrincipal],
+    tree: &treer_protocol::WorkloadTree,
+    caller: Option<&str>,
+    target: &str,
+) -> Result<AppPrincipal, ProtocolError> {
+    if let Some(principal) = principals.iter().find(|p| p.id == target) {
+        return Ok(principal.clone());
+    }
+    let rows = principals
+        .iter()
+        .filter(|p| p.kind == AppPrincipalKind::Agent)
+        .map(|p| treer_protocol::WorkloadTarget {
+            id: p.id.clone(),
+            name: p.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let agent = tree.resolve_target(&rows, caller, target);
+    let humans = principals
+        .iter()
+        .filter(|p| p.kind == AppPrincipalKind::Human && p.name == target)
+        .collect::<Vec<_>>();
+    match (agent, humans.as_slice()) {
+        (Ok(id), []) => principals
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(|| ProtocolError::new("recipient_not_found", "recipient is unavailable")),
+        (Err(_), [human]) if !target.contains('/') && !matches!(target, "self" | ".") => {
+            Ok((*human).clone())
+        }
+        (Err(error), []) => Err(error),
+        _ => Err(ProtocolError::new(
+            "recipient_ambiguous",
+            "more than one recipient matches; use a path or stable ID",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tree_recipient_tests {
+    use super::*;
+    use treer_protocol::{WorkloadFolder, WorkloadPlacement, WorkloadTree};
+    #[test]
+    fn message_targets_select_siblings_or_paths_without_global_fallback() {
+        let tree = WorkloadTree {
+            folders: vec![WorkloadFolder {
+                folder_id: "team".into(),
+                name: "team".into(),
+                parent_id: None,
+            }],
+            placements: vec![
+                WorkloadPlacement {
+                    agent_id: "ag_caller".into(),
+                    folder_id: Some("team".into()),
+                    position: 0,
+                },
+                WorkloadPlacement {
+                    agent_id: "ag_peer".into(),
+                    folder_id: Some("team".into()),
+                    position: 1,
+                },
+            ],
+        };
+        let principals = vec![
+            AppPrincipal {
+                kind: AppPrincipalKind::Agent,
+                id: "ag_peer".into(),
+                name: "reviewer".into(),
+                role: None,
+            },
+            AppPrincipal {
+                kind: AppPrincipalKind::Agent,
+                id: "ag_root".into(),
+                name: "reviewer".into(),
+                role: None,
+            },
+            AppPrincipal {
+                kind: AppPrincipalKind::Agent,
+                id: "ag_other".into(),
+                name: "other".into(),
+                role: None,
+            },
+            AppPrincipal {
+                kind: AppPrincipalKind::Human,
+                id: "usr_owner".into(),
+                name: "Owner".into(),
+                role: Some("owner".into()),
+            },
+        ];
+        for (target, expected) in [
+            ("reviewer", "ag_peer"),
+            ("./reviewer", "ag_peer"),
+            ("../reviewer", "ag_root"),
+            ("/reviewer", "ag_root"),
+            ("/team/reviewer", "ag_peer"),
+            ("ag_root", "ag_root"),
+            ("Owner", "usr_owner"),
+        ] {
+            assert_eq!(
+                resolve_tree_principal(&principals, &tree, Some("ag_caller"), target)
+                    .unwrap()
+                    .id,
+                expected
+            );
+        }
+        let error =
+            resolve_tree_principal(&principals, &tree, Some("ag_caller"), "other").unwrap_err();
+        assert_eq!(error.code, "agent_not_in_folder");
+        assert_eq!(error.hint.unwrap(), ["/other"]);
+    }
 }
