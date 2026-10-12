@@ -24,6 +24,7 @@ export interface SubmissionRecord {
   notify: PromptNotify | null;
   receipt: Receipt;
   notification: { attempts: number; nextAttempt: number; error: string | null; delivered: boolean } | null;
+  priorTurnId?: string | null;
 }
 export class QueueError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }

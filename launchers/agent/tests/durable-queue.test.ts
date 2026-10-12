@@ -118,6 +118,28 @@ test("steered messages correlate to the same turn and send one terminal result e
   assert.equal(queue.submission(steer.id)!.state, "done"); queue.close();
 });
 
+test("an accepted ACP-style prompt does not wait for completion, and commands without a turn do not reuse an old assistant result", async () => {
+  const runtime = new Fake(); runtime.harness.capabilities.steer = false;
+  let release!: () => void;
+  runtime.prompt = async (text) => {
+    runtime.calls.push(text); runtime.thread.status = "running";
+    await new Promise<void>((done) => { release = done; });
+    runtime.thread.status = "idle";
+  };
+  const queue = new PromptQueue(asRuntime(runtime), () => {});
+  const receipt = await queue.submit("ACP long inference", "queue");
+  assert.equal(receipt.disposition, "sent"); assert.equal(queue.submission(receipt.id)!.state, "running");
+  release(); await tick(); queue.close();
+  const commands = new Fake();
+  commands.thread.turns = [{ id: "previous", status: "completed", startedAt: null, error: null, items: [{ id: "old", kind: "agentMessage", text: "NOT THIS SUBMISSION" }] }];
+  commands.prompt = async () => {};
+  const commandQueue = new PromptQueue(asRuntime(commands), () => {});
+  const command = await commandQueue.submit("/goal clear");
+  assert.equal(commandQueue.submission(command.id)!.state, "done");
+  assert.equal(commandQueue.submission(command.id)!.turn_id, null);
+  assert.equal(commandQueue.submission(command.id)!.assistant_preview, null); commandQueue.close();
+});
+
 test("journal rejects symlinks/corruption and notification validation never accepts a missing operator recipient", async (t) => {
   const { file, root } = await fixture(t);
   const store = new QueueStore(file); store.save([]);

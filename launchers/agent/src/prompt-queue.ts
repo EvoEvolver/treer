@@ -103,6 +103,7 @@ export class PromptQueue {
   }
 
   private async dispatch(record: SubmissionRecord) {
+    record.priorTurnId = this.runtime.snapshot(10_000).thread?.turns?.at(-1)?.id ?? null;
     record.submission.state = "running"; record.submission.position = null;
     this.persist(); this.changed();
     const sender = record.submission.sender;
@@ -110,7 +111,8 @@ export class PromptQueue {
     try {
       await this.runtime.prompt(prefix + record.text);
       const thread = this.runtime.snapshot(10_000).thread;
-      record.submission.turn_id ??= thread?.activeTurnId ?? thread?.turns?.at(-1)?.id ?? null;
+      const latest = thread?.turns?.at(-1)?.id;
+      record.submission.turn_id ??= thread?.activeTurnId ?? (latest && latest !== record.priorTurnId ? latest : null);
       this.persist();
     } catch (error) {
       this.finish(record, "failed", error instanceof Error ? error.message : String(error));
@@ -144,7 +146,8 @@ export class PromptQueue {
     let changed = false;
     for (const record of this.records) {
       if (record.submission.state !== "running") continue;
-      record.submission.turn_id ??= thread?.activeTurnId ?? thread?.turns?.at(-1)?.id ?? null;
+      const latest = thread?.turns?.at(-1)?.id;
+      record.submission.turn_id ??= thread?.activeTurnId ?? (latest && latest !== record.priorTurnId ? latest : null);
       const turn = thread?.turns?.find((entry) => entry.id === record.submission.turn_id);
       if (turn && turn.status === "inProgress") continue;
       if (!turn && thread?.status === "running") continue;
