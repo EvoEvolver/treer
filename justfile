@@ -20,7 +20,7 @@ service-canary:
 
 check:
     node scripts/check-docs.mjs
-    python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
+    python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
     node --test scripts/release-r2.test.mjs scripts/machine-artifacts.test.mjs scripts/release-security.test.mjs
     node --test scripts/install-path.test.mjs scripts/install-checksums.test.mjs scripts/ais-e2e.test.mjs
     cd web && pnpm typecheck
@@ -89,6 +89,14 @@ ais-e2e:
 messaging-e2e:
     cargo test -p treer-proxy message_
     just app-test
+
+# Closed fake machines only; this never invokes an enrolled service.
+machine-update-test:
+    python3 -m unittest discover -s scripts/tests -p 'test_update_machine.py' -v
+
+release-tooling-test:
+    python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+    node --test scripts/ais-e2e.test.mjs
 
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}

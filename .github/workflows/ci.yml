@@ -112,3 +112,22 @@ jobs:
           name: agent-launcher-screenshots
           path: ${{ runner.temp }}/launcher-screenshots
           if-no-files-found: ignore
+
+  release-tooling:
+    name: Release tooling and fake machine updates
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Closed release, checksum, detachment and rollback tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+      - name: Documentation links and launcher test isolation
+        run: |
+          node scripts/check-docs.mjs
+          node --test scripts/ais-e2e.test.mjs

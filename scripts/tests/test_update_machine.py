@@ -161,9 +161,15 @@ else:
         self.assertEqual(json.loads(self.state.read_text())["events"], [])
 
     def test_local_manifest_must_match_online(self):
-        with patch.object(update, "fetch", return_value=("0" * 64 + "  treer\n").encode()):
+        real_fetch = update.fetch
+        changed = (self.artifacts / "SHA256SUMS").read_bytes().replace(
+            update.digest(self.artifacts / "treer").encode(), b"0" * 64)
+        def online(url, *args, **kwargs):
+            return changed if url.endswith("SHA256SUMS") else real_fetch(url, *args, **kwargs)
+        with patch.object(update, "fetch", side_effect=online):
             code, result = self.invoke()
         self.assertEqual(code, 1)
+        self.assertIn("differs from Canary", result["error"])
         self.assertEqual(json.loads(self.state.read_text())["events"], [])
 
     def test_redirect_is_rejected(self):
