@@ -1,5 +1,7 @@
 import json
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -60,6 +62,30 @@ class AcpLauncherProfilesTest(unittest.TestCase):
         lock = json.loads((ROOT / "optional-ui/remote-codex.lock.json").read_text())
         self.assertRegex(lock["commit"], r"^[0-9a-f]{40}$")
         self.assertNotIn("ref", lock)
+
+    def test_builtin_profile_launch_forwards_ui_without_external_dist(self):
+        with tempfile.TemporaryDirectory(prefix="acp builtin ") as temporary:
+            root = Path(temporary).resolve()
+            script = root / "scripts/treer-agent.sh"
+            script.parent.mkdir()
+            shutil.copy2(ROOT / "scripts/treer-agent.sh", script)
+            runtime = root / ".build/runtime-headless/release/treer-acp"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            runtime.chmod(0o755)
+            for profile in self.profiles:
+                if profile["presentation"] != "builtin-ui":
+                    continue
+                result = subprocess.run(
+                    [str(script), *profile["run"]["args"]],
+                    cwd=root,
+                    env={"PATH": "/usr/bin:/bin"},
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.stdout.splitlines(), ["--cwd", str(root), *profile["run"]["args"]])
+                self.assertNotIn("--ui-dist", result.stdout)
 
     def test_profile_launch_requires_a_resolved_machine(self):
         result = subprocess.run(
