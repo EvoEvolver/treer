@@ -83,6 +83,13 @@ returns an explicit unsupported-schema error. It never strips selectors or
 conditions to manufacture an unsafe v1 downgrade. Upgrade Core and Controller
 with `policy.path-rules.v2` support before publishing path rules.
 
+Before publishing schema 2, upgrade and drain **all** old Proxy replicas. A
+capability response or successful validation from one replica cannot establish
+fleet-wide support: old replicas may retain stale v1 policy or use their configured
+fail-open behavior after rejecting v2. Before rolling a Proxy back to a v1-only
+version, restore a v1 policy and confirm every replica has loaded it. App-side
+negotiation alone cannot make a mixed-version Proxy fleet safe.
+
 A rule has an ID, signed 32-bit priority, allow/deny effect, subjects, actions and
 resources. Subjects/resources are OR lists; each selector's fields are AND.
 Schema 2 adds `tree` selectors: `kind`, `name`, `folder_id`, and one of `path_eq`,
