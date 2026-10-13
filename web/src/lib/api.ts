@@ -146,10 +146,13 @@ export interface AppDeployment {
   updated_by: string
 }
 
+export type PolicyPublishAuthority = "owner_session" | "provider_operator"
+
 export interface WorkspacePolicyProvider {
   workspace_id: string
   app_id: string
   service_id: string
+  publish_authority?: PolicyPublishAuthority
   failure_mode: "fail_closed" | "fail_open"
   max_stale_seconds: number
   revision_hint: number
@@ -158,6 +161,7 @@ export interface WorkspacePolicyProvider {
 }
 
 export interface PolicyProviderStatus {
+  capabilities?: string[]
   provider?: WorkspacePolicyProvider
   app?: AppDeployment
   fallback?: {

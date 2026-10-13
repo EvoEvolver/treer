@@ -1,3 +1,4 @@
+import { PolicyPublishAuthoritySettings } from "@/components/policy-publish-authority"
 import { EmptyState, Field, IconButton, Status } from "@/components/control-plane-ui"
 import { LaunchProfilesList } from "@/components/launch-profiles-list"
 import { MachineItem } from "@/components/machine-view"
@@ -89,6 +90,9 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
     if (machines.some((machine) => machine.server_id === policyInstallMachineId && machine.status === "online")) return
     setPolicyInstallMachineId(machines.find((machine) => machine.status === "online")?.server_id ?? "")
   }, [machines, policyInstallMachineId])
+  useEffect(() => {
+    if (window.location.hash === "#policy-provider") document.getElementById("policy-provider")?.scrollIntoView({ block: "start" })
+  }, [workspace?.workspace_id, policyProvider])
   async function savePolicyProvider() {
     if (!workspace || !policyAppId) return
     const maxStaleSeconds = Number(policyStaleSeconds)
@@ -209,7 +213,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
       </div>
     </section>
 
-    <section className="border-b py-6">
+    <section id="policy-provider" className="scroll-mt-4 border-b py-6">
       <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
         <div><div className="flex items-center gap-2"><h2 className="text-sm font-semibold">Policy Provider</h2>{policyProvider?.provider && <Status value={policyProvider.app?.status ?? "unavailable"} />}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Workspace authorization supplied by a Managed App.</p></div>
         <div className="space-y-4">
@@ -222,6 +226,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
           {!policyProvider?.provider && isOwner && <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><Field label="Install default App on"><Select value={policyInstallMachineId || undefined} onValueChange={setPolicyInstallMachineId} disabled={policyBusy}><SelectTrigger aria-label="Default Policy App machine"><SelectValue placeholder="No online machine" /></SelectTrigger><SelectContent>{machines.filter((machine) => machine.status === "online").map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Button variant="outline" onClick={() => void installDefaultPolicyApp()} disabled={!policyInstallMachineId || policyBusy}>{policyBusy ? <RotateCw className="animate-spin" /> : <Download />}Install Default Policy App</Button></div>}
           <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => void savePolicyProvider()} disabled={!isOwner || !policyAppId || policyBusy}>{policyBusy && <RotateCw className="animate-spin" />}Apply</Button>{policyProvider?.app && policyProvider.app.status !== "running" && <Button size="sm" variant="outline" onClick={() => void policyLifecycle("start")} disabled={!isOwner || policyBusy}><Play />Start</Button>}{policyProvider?.app?.status === "running" && <><Button size="sm" variant="outline" onClick={() => void policyLifecycle("restart")} disabled={!isOwner || policyBusy}><RotateCw />Restart</Button><Button size="sm" variant="outline" onClick={() => void policyLifecycle("stop")} disabled={!isOwner || policyBusy}><Square />Stop</Button></>}{policyProvider?.provider && <Button size="sm" variant="outline" onClick={() => void removePolicyProvider()} disabled={!isOwner || policyBusy}>Remove</Button>}{policyProvider?.app?.public_url && <Button size="sm" variant="outline" asChild><a href={policyProvider.app.public_url} target="_blank" rel="noreferrer"><ExternalLink />Open Policy App</a></Button>}</div>
           {policyProvider?.provider && <div className="grid gap-2 border-y py-3 text-[11px] text-muted-foreground sm:grid-cols-3"><span>Announced <strong className="text-foreground">rev {policyProvider.provider.revision_hint}</strong></span><span>Cached <strong className="text-foreground">{policyProvider.cache.revision === undefined ? "none" : `rev ${policyProvider.cache.revision}`}</strong></span><span>Age <strong className="text-foreground">{policyProvider.cache.age_seconds === undefined ? "-" : `${policyProvider.cache.age_seconds}s`}</strong></span></div>}
+          <PolicyPublishAuthoritySettings key={`${workspace.workspace_id}/${policyProvider?.provider?.app_id ?? "none"}`} workspaceId={workspace.workspace_id} status={policyProvider} isOwner={isOwner} disabled={preview || policyBusy} onSaved={(provider) => setPolicyProvider((current) => current ? { ...current, provider } : current)} />
           {(policyError || policyProvider?.cache.last_error) && <p className="text-xs text-destructive">{policyError ?? policyProvider?.cache.last_error}</p>}
           {!apps.length && !machines.some((machine) => machine.status === "online") && <p className="text-xs text-muted-foreground">Connect a machine to install the default Policy App.</p>}
         </div>

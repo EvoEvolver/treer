@@ -32,6 +32,31 @@ operation. The editor scrolls on short mobile screens and preserves input after
 a denied operation. Managed Apps have separate settings; their startup editing
 requires the forthcoming App update API.
 
+## Trusted Policy publication settings
+
+Workspace settings → Policy Provider shows the Core-confirmed `publish_authority`.
+Owners can switch between `owner_session` and `provider_operator`. Enabling the
+latter requires a separate warning/confirmation: Policy App administration token
+holders gain full v2 publication/enforce authority without per-request owner
+approval. The warning links the operator guide and recommends isolating the
+Policy administration Agent, including Tree-management and machine-account risks.
+Non-owners see read-only status; Core still checks owner authority on every write.
+
+Writes go only to Core's browser-session
+`PUT /api/workspaces/<workspace_id>/policy-provider/publish-authority`, with
+`expected_app_id` guarding against a changed binding. No App/service identity
+token is collected, stored, or sent. Success displays the confirmed mode and
+Core audit action `policy_provider.publish_authority.set`; failures keep the
+confirmed state and display the server error. Missing capability
+`policy.publish-authority.v1`, an unknown/missing enum, an unsupported route or an
+unconfirmed response is unavailable, with no legacy/App fallback.
+
+The trusted landing URL is
+`/orgs/<organization_id>/workspaces/<workspace_id>#policy-provider`. It selects
+the workspace, opens settings and scrolls to the Policy Provider block on desktop
+and mobile. Policy App links must use the Core-supplied `treer_url` for this exact
+workspace; the console never derives its origin from an App-owned URL or token.
+
 ## Local verification
 
 ```sh
