@@ -17,6 +17,9 @@ for (let i = 2; i < process.argv.length; i += 2) {
 }
 if (Boolean(options.controller) === Boolean(options.bundle) || !options.screenshots) throw new Error("Select exactly one Controller executable or development bundle, plus screenshots");
 const launcher = resolve(import.meta.dirname, ".."), windows = process.platform === "win32";
+// Include literal argv, missing/escaping shim and actual descendant-cleanup
+// regressions in the native gate, not just Linux's full unit-test job.
+execFileSync(process.execPath, ["--import", "tsx", "--test", join(launcher, "tests/process.test.ts")], { cwd: launcher, env: hermeticEnv(), stdio: "inherit" });
 const parent = windows ? process.env.LOCALAPPDATA : resolve(launcher, "../../.treer");
 if (!isAbsolute(parent || "")) throw new Error("An absolute LOCALAPPDATA is required on Windows");
 mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -110,7 +113,7 @@ try {
   assert.ok(JSON.stringify(await (await localFetch(base + "/v1/transcript", { headers })).json()).includes("Done now."));
   const stateDir = join(machine, ".treer/agents", env.TREER_AGENT_ID), stateFile = join(stateDir, "agent-ui.json");
   assert.equal(JSON.parse(readFileSync(stateFile)).threadId, "sess-new"); aclCheck(stateDir);
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, env: hermeticEnv() });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, extraHTTPHeaders: { ...headers, "x-treer-interface-source": "proxy-ui" } });
   const page = await context.newPage(), errors = [];
   page.on("pageerror", error => errors.push(error.message));
