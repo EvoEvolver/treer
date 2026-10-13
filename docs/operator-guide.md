@@ -83,6 +83,10 @@ as a fallback.
 Managed Apps do not add a new security boundary or secret store. More complex
 Apps may still use an external supervisor and register ordinary Treer services.
 
+Apps receive `TREER_PROXY_URL` from the Controller's configured Proxy base URL
+(HTTP(S) origin with URL credentials, query and fragment removed), overriding
+an inherited value. This is public routing configuration, not an identity token.
+
 `--public-url` is the URL that other machines can reach. `stage-artifacts`
 places the current platform's `treer-agent-host`, `treer-agent-server`, and
 `treer` binaries under `dist/<platform>` for the proxy to serve. Release

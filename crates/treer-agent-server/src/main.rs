@@ -288,6 +288,8 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
         },
         _ => anyhow::bail!("Host sync returned an unexpected response"),
     };
+    let proxy_http = normalize_http_url(args.proxy.clone())?;
+    let proxy_public_url = public_proxy_url(&proxy_http)?;
     let (runtime, mut host_disconnected) = ControllerRuntime::from_sync(
         host,
         sync,
@@ -296,6 +298,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
             workspace_id: workspace.clone(),
             server_id: server_id.clone(),
             agent_server_url,
+            proxy_public_url,
             treer_binary: sibling_treer_binary(),
             interface_cache_path: args.host_socket.with_extension("interfaces.json"),
             startup_store_path: service::startup_state_path(&server_id)?,
@@ -304,7 +307,6 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
     runtime.restore_cached_interfaces().await;
-    let proxy_http = normalize_http_url(args.proxy.clone())?;
     let proxy_ws = agent_websocket_url(args.proxy)?;
     let mut server = proxy::server_info(
         server_id.clone(),
@@ -648,6 +650,17 @@ fn require_loopback_listen(listen: SocketAddr) -> Result<()> {
     Ok(())
 }
 
+/// Workloads receive public routing configuration, never URL credentials.
+fn public_proxy_url(url: &Url) -> Result<String> {
+    let mut url = normalize_http_url(url.clone())?;
+    url.set_username("")
+        .map_err(|_| anyhow::anyhow!("invalid proxy URL authority"))?;
+    url.set_password(None)
+        .map_err(|_| anyhow::anyhow!("invalid proxy URL authority"))?;
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
 fn normalize_http_url(mut url: Url) -> Result<Url> {
     match url.scheme() {
         "http" | "https" => {}
@@ -704,6 +717,21 @@ fn sibling_treer_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workload_proxy_url_contains_only_public_base() {
+        let input = url::Url::parse(
+            "wss://user:fixture-secret@proxy.example:8443/connect?key=fixture#secret",
+        )
+        .unwrap();
+        assert_eq!(
+            super::public_proxy_url(&input).unwrap(),
+            "https://proxy.example:8443/"
+        );
+        assert_eq!(
+            super::public_proxy_url(&url::Url::parse("http://127.0.0.1:9000/").unwrap()).unwrap(),
+            "http://127.0.0.1:9000/"
+        );
+    }
     #[test]
     fn plain_network_requires_explicit_legacy_migration() {
         use crate::service::NetworkMode;

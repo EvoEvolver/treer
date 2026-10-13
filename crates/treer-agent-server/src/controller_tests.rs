@@ -109,6 +109,7 @@ async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
         workspace_id: "workspace".into(),
         server_id: "server".into(),
         agent_server_url: "http://127.0.0.1:1".into(),
+        proxy_public_url: "https://proxy.example/".into(),
         treer_binary: None,
         interface_cache_path: root.join("interfaces.json"),
         startup_store_path: root.join("startup.json"),
@@ -116,6 +117,10 @@ async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
     };
     let (runtime, _) =
         ControllerRuntime::from_sync(host.clone(), initial, events, config()).unwrap();
+    assert_eq!(
+        runtime.process_environment(Some(("command", "fixture")))["TREER_PROXY_URL"],
+        "https://proxy.example/"
+    );
     // Queue preflight must reject both terminal-only and legacy AIS Agents
     // without writing to their PTY (this Host only accepts inventory Sync).
     for capabilities in [vec![], vec!["prompt.submit".to_string()]] {
@@ -361,6 +366,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             workspace_id: "workspace".into(),
             server_id: "server".into(),
             agent_server_url: "http://127.0.0.1:1".into(),
+            proxy_public_url: "https://proxy.example/".into(),
             treer_binary: None,
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: saved_path.clone(),
@@ -571,6 +577,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
                 workspace_id: "cold-workspace".into(),
                 server_id: "cold-server".into(),
                 agent_server_url: "http://127.0.0.1:1".into(),
+                proxy_public_url: "https://proxy.example/".into(),
                 treer_binary: None,
                 interface_cache_path: root.join("interfaces.json"),
                 startup_store_path: root.join("startup.json"),
@@ -1161,6 +1168,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
             workspace_id: "workspace".into(),
             server_id: "server".into(),
             agent_server_url: "http://127.0.0.1:1".into(),
+            proxy_public_url: "https://proxy.example/".into(),
             treer_binary: None,
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: root.join("startup.json"),
