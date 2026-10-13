@@ -38,6 +38,8 @@ class SchemaTests(unittest.TestCase):
         doc = copy.deepcopy(baseline);doc['rules'][0]['bindings'] = {'a':{'var':'a'}};cases.append(doc)
         doc = copy.deepcopy(baseline);doc['rules'][0]['conditions'] = [{'op':'resource_below_folder','folder':{'var':'missing'}}];cases.append(doc)
         doc = copy.deepcopy(baseline);doc['rules'][0]['priority'] = True;cases.append(doc)
+        doc = copy.deepcopy(baseline);doc['rules'][0]['subjects'][0]['group'] = '';cases.append(doc)
+        doc = copy.deepcopy(baseline);doc['rules'][0]['subjects'][0]['group'] = [];cases.append(doc)
         doc = copy.deepcopy(baseline);doc['rules'][0]['conditions'] = [{'op':'same_folder'}] * 33;cases.append(doc)
         doc = copy.deepcopy(baseline);doc['rules'][0]['bindings'] = {str(i):{'path':'/'} for i in range(9)};cases.append(doc)
         for index,doc in enumerate(cases):

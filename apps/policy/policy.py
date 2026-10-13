@@ -167,9 +167,10 @@ def _validate_selector(selector: object, fields: set[str], groups: dict[str, Any
             validate_token(selector[field], f"selector {field}")
     if selector.get("tree") is not None:
         validate_tree_selector(selector["tree"])
-    group = selector.get("group") or selector.get("principal_group")
-    if group is not None and (not isinstance(group, str) or group not in groups):
-        raise PolicyError(400, "unknown_policy_group", f"selector references unknown group {group}")
+    for field in ("group", "principal_group"):
+        group = selector.get(field)
+        if group is not None and (not isinstance(group, str) or group not in groups):
+            raise PolicyError(400, "unknown_policy_group", "selector references an unknown group")
     if "self" in selector and not isinstance(selector["self"], bool):
         raise PolicyError(400, "invalid_policy_rule", "selector self must be boolean")
 
