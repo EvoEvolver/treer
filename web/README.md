@@ -54,7 +54,8 @@ unconfirmed response is unavailable, with no legacy/App fallback.
 The trusted landing URL is
 `/orgs/<organization_id>/workspaces/<workspace_id>#policy-provider`. It selects
 the workspace, opens settings and scrolls to the Policy Provider block on desktop
-and mobile. Policy App links must use the Core-supplied `treer_url` for this exact
+and mobile. An inaccessible/unknown deep-link target shows an error instead of
+falling back to another workspace. Policy App links must use the Core-supplied `treer_url` for this exact
 workspace; the console never derives its origin from an App-owned URL or token.
 
 ## Local verification

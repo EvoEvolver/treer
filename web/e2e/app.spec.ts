@@ -1755,6 +1755,13 @@ for (const mobile of [false, true]) {
       await expect(page.locator('#policy-provider')).toBeInViewport()
       await expect(block(page).getByRole('button')).toHaveCount(0)
     })
+    for (const target of ['/orgs/org-1/workspaces/missing#policy-provider', '/orgs/missing/workspaces/ws-1#policy-provider']) {
+      test(`unavailable deep link never opens a different workspace: ${target}`, async ({ page }) => {
+        await page.goto(target)
+        await expect(page.getByText('Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.')).toBeVisible()
+        await expect(block(page)).toHaveCount(0)
+      })
+    }
     test('canceling confirmation never writes', async ({ page }) => {
       const requests = await installFixture(page)
       await page.goto(landing)

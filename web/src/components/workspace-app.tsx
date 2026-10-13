@@ -184,6 +184,9 @@ export function WorkspaceApp() {
     const data = await api<{ organizations: Organization[] }>("/api/organizations")
     setOrganizations(data.organizations)
     const routeSelection = routeSelectionRef.current
+    if (routingRef.current.hash === "#policy-provider" && routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
+      throw new Error("Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.")
+    }
     const selected = preferred && data.organizations.some((item) => item.organization_id === preferred)
       ? preferred
       : routeSelection.organizationId && data.organizations.some((item) => item.organization_id === routeSelection.organizationId)
@@ -208,6 +211,9 @@ export function WorkspaceApp() {
     if (organizationIdRef.current !== organizationId) return
     setWorkspaces(data.workspaces)
     const routeSelection = routeSelectionRef.current
+    if (routingRef.current.hash === "#policy-provider" && routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
+      throw new Error("Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.")
+    }
     const selected = routeSelection.organizationId === organizationId
       && routeSelection.workspaceId
       && data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)
