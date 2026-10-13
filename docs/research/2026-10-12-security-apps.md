@@ -1,5 +1,9 @@
 # Apps security review — 2026-10-12
 
+Retirement note: Paper was subsequently removed from the repository at the
+user's request. Paper findings and validation below describe the audited snapshot
+only; they are not current App deployment instructions or outstanding Paper work.
+
 Scope: source at `3372b34`, Soul, Issues, Mail, email-endpoint, Policy,
 Gits, Paper, Tower and Telegram. This is a focused source review and local
 regression exercise, not a penetration-test certification or a claim that all

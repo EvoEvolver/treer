@@ -1135,8 +1135,8 @@ as a proxy-only address; ordinary HTTP clients such as curl and Python urllib
 need no token code:
 
 ```bash
-treer service register --name paper --protocol http --port 3000
-curl http://paper.treer/path
+treer service register --name example-http --protocol http --port 3000
+curl http://example-http.treer/path
 # Stable-ID addresses also work:
 curl http://svc_YOUR_SERVICE_ID.treer/path
 python3 -c 'import urllib.request; print(urllib.request.urlopen("http://svc_YOUR_SERVICE_ID.treer/path").read())'

@@ -206,8 +206,8 @@ try {
   await check('service names resolve case-insensitively and follow rename without changing identity',async()=>{
     const before=await probe(agents.b,'proxy-name-before','http','http://LOCAL-HTTP.treer/identity');
     assert.equal(before.response.claims.aud,services.http);assert.equal(before.response.claims.sub,agents.b);
-    await api(`/api/workspaces/${ws}/services/${services.http}`,{name:'paper'},{method:'PATCH'});
-    const after=await probe(agents.b,'proxy-name-after','http','http://paper.treer/identity');
+    await api(`/api/workspaces/${ws}/services/${services.http}`,{name:'renamed-http'},{method:'PATCH'});
+    const after=await probe(agents.b,'proxy-name-after','http','http://renamed-http.treer/identity');
     assert.equal(after.response.claims.aud,services.http);assert.equal(after.response.claims.sub,agents.b);
     const code="import json,urllib.request,urllib.error\ntry: urllib.request.urlopen('http://local-http.treer/identity');raise Exception('old name still resolved')\nexcept urllib.error.HTTPError as e: print(json.dumps({'status':e.code}))";
     assert.equal((await command(agents.b,'proxy-old-name',[],{program:['python3','-c',code]})).status,404);
@@ -295,7 +295,7 @@ try {
     await wait('Controller restart',()=>cli('a','status'));
     for (let i=0;i<2;i++) assert((await cli('a','runtime','restore','--all')).items.some(item=>item.workload_id===agents.a&&item.state==='attached'));
     const after=(await snapshot()).agents.find(a=>a.agent_id===agents.a);assert.equal(after.pid,before.pid);assert.equal(after.started_at,before.started_at);
-    const resumed=await probe(agents.a,'proxy-hot-restored','http','http://paper.treer/identity');
+    const resumed=await probe(agents.a,'proxy-hot-restored','http','http://renamed-http.treer/identity');
     assert.equal(resumed.proxy,proxyEntries.a);assert.equal(resumed.response.claims.sub,agents.a);
   });
   await check('prepare stopped, completed and invalid-startup recovery cases',async()=>{
@@ -320,7 +320,7 @@ try {
     assert.equal(app.service_id,apps.public.service_id);assert.equal(app.public_url,apps.public.public_url);
     assert.equal((await appInfo(apps.private.app_id)).status,'stopped');
     await wait('restored App route',async()=> (await api('/',undefined,{raw:true,headers:{Cookie:'',Host:new URL(app.public_url).host}})).status===200);
-    const restored=await probe(agents.b,'proxy-cold-restored','http','http://paper.treer/identity');
+    const restored=await probe(agents.b,'proxy-cold-restored','http','http://renamed-http.treer/identity');
     assert.equal(restored.response.claims.sub,agents.b);
     const restoredApp=(await probe(agents.a,'app-proxy-cold-restored','http',`http://${app.service_id}.treer/proxy?service=${services.http}`)).response;
     assert.equal(restoredApp.claims.sub,restoredApp.runtime_id);assert.equal(restoredApp.claims.aud,services.http);

@@ -63,9 +63,6 @@ telegram-test:
 soul-test:
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
 
-paper-test:
-    npm --prefix apps/paper test
-
 updater-test:
     python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
 
@@ -74,7 +71,6 @@ app-test:
     python3 -m unittest discover -s apps/gits/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
-    npm --prefix apps/paper test
     just agent-launcher-test
 
 agent-launcher-test:

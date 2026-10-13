@@ -335,7 +335,7 @@ New managed Agents and Apps inherit a dedicated HTTP proxy entry. For ordinary
 HTTP code or curl, use a service name or stable ID from `treer service list`:
 
 ```bash
-curl http://paper.treer/path
+curl http://example-http.treer/path
 # Or use the stable ID:
 curl http://svc_YOUR_SERVICE_ID.treer/path
 ```
