@@ -633,6 +633,7 @@ async fn raw_public_tcp_is_refused_for_the_active_policy_provider_service() {
             "owner",
             service.server_id.clone(),
             treer_protocol::CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some(service.server_id.clone()),
                 name: "Policy".into(),
                 command: "python3".into(),
@@ -703,6 +704,7 @@ async fn concurrent_provider_selection_and_raw_tcp_publication_are_mutually_excl
             "owner",
             service.server_id.clone(),
             treer_protocol::CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some(service.server_id.clone()),
                 name: "Policy".into(),
                 command: "python3".into(),
