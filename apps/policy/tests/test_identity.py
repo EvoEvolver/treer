@@ -147,6 +147,15 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity='agent-valid',extra={'Authorization':'Bearer '+ADMIN})[0],503)
         self.assertNotIn(ADMIN,json.dumps(self.proxy.calls))
 
+    def test_embedded_operator_header_survives_core_consumed_bearer(self):
+        payload={'expected_revision':1,'mode':'monitor','document':policy.template_document('team-isolation',{})['document']}
+        status, _, _=self.request('POST','/v1/policy/publish',payload,extra={'Authorization':'','X-Policy-Admin-Token':ADMIN})
+        self.assertEqual(status,200)
+        for value in ('','forged'):
+            self.assertEqual(self.request('POST','/v1/policy/invalidate',{},extra={'X-Policy-Admin-Token':value})[0],401,'Invalid custom capability cannot fall back to valid Bearer')
+        self.assertEqual(self.request('POST','/v1/policy/invalidate',{},extra={'Authorization':'','X-Policy-Admin-Token':ADMIN,'Origin':'https://evil.test'})[0],403)
+        self.assertNotIn(ADMIN,json.dumps(self.proxy.calls))
+
     def test_injected_identity_precedes_cookie_and_operator_capability(self):
         with self.app.auth.store.connect() as db: db.execute('INSERT INTO sessions VALUES(?,?,?)',(policy.digest('session'),'human-owner',time.time()+100))
         for token,expected in [('forged',401),('',401),('expired',401),('wrong-audience',401),('revoked',403)]:

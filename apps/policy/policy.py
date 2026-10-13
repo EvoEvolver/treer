@@ -918,7 +918,9 @@ class PolicyHandler(BaseHTTPRequestHandler):
         token = self._operator_token()
         if not token:
             raise PolicyError(503, "policy_edits_locked", "Policy editing is disabled until an operator configures an admin token")
-        supplied = self.headers.get("Authorization", "")
+        # Embedded Core tunnels consume Authorization. A dedicated App header
+        # survives that sanitizer; its presence is authoritative (no fallback).
+        supplied = ('Bearer ' + self.headers.get('X-Policy-Admin-Token', '')) if 'X-Policy-Admin-Token' in self.headers else self.headers.get('Authorization', '')
         if not hmac.compare_digest(supplied.encode(), ("Bearer " + token).encode()):
             raise PolicyError(401, "policy_admin_required", "Operator policy administration credential required")
         if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session'):

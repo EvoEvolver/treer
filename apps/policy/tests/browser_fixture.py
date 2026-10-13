@@ -21,6 +21,7 @@ class Gateway(BaseHTTPRequestHandler):
         path=self.path
         if path.startswith(PREFIX): path='/'+path[len(PREFIX):]
         headers={k:v for k,v in self.headers.items() if not k.lower().startswith('x-treer-') and k.lower() not in ('host','connection','cookie')}
+        if self.path.startswith(PREFIX): headers.pop('Authorization',None)
         # Direct fallback route deliberately has no injected identity.
         if path.startswith('/fallback/'):
             path='/'+path[len('/fallback/'):]

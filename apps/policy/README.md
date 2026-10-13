@@ -50,9 +50,11 @@ have editing disabled until an operator configures a capability. Default bundled
 installations use a private machine-local token file, provisioned by the installer
 flag described below. Existing `POLICY_ADMIN_TOKEN` environments remain supported:
 the value must be 32–8192 printable, non-whitespace ASCII characters.
-Supply `Authorization: Bearer TOKEN` and
-`Content-Type: application/json`; the UI has a password field and retains its
-value only in page memory. Never put it in URLs, source control or shell history.
+Supply `Authorization: Bearer TOKEN` (CLI/direct access), or the dedicated
+`X-Policy-Admin-Token: TOKEN` header used by the browser (Core embedded tunnels
+consume Authorization), and `Content-Type: application/json`; the UI has a password field and retains its
+value only in page memory. An invalid dedicated header never falls back to
+a valid Bearer capability. Both channels retain identity and CSRF checks. Never put it in URLs, source control or shell history.
 Protect its environment/configuration and use workspace-only ingress. Existing
 instances upgrading must configure this secret to resume editing; reads and
 Controller bundle polling continue without it. Injected identity/role headers
@@ -385,8 +387,10 @@ bypasses the Treer path gate. Restrict host/container networking accordingly.
 policy cannot prevent that user from reading a file directly or connecting to a
 local raw port. Use OS/network isolation in addition to path policy.
 
-The App reads authority from Core without caching and sends no management token
-to Core. Operator validate/explain independently check the current Provider
+The App reads authority from Core without caching and forwards no management
+token to Core authority/diagnostic APIs. Browser/CLI requests to the App still
+carry the token through the ordinary App forwarding channel; use private ingress
+and HTTPS for any non-managed remote connection. Operator validate/explain independently check the current Provider
 runtime and current database choice on every call. Switching back does not
 cancel a write already validated in flight; rotate the token as needed. Upgrade
 all Proxy replicas first: one capability response does not prove fleet readiness.

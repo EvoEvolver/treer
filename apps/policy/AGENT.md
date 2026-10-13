@@ -82,7 +82,8 @@ Provision it through an authorized private local terminal/secret mount, never
 Treer exec output or Messages. The client requires a caller-owned 0700 directory
 and caller-owned 0600 regular file, refuses symlinks and redirects, and never
 prints the token. Submit `{expected_revision,mode,document}`; preview uses Core's
-explain request. Tokens stay in this App and are never forwarded to Core.
+explain request. Management tokens are never forwarded to Core authority/diagnostic APIs;
+requests to the App carry them through normal private App forwarding.
 Use the Agent's own managed HTTP proxy/workload identity. In default mode,
 operator-only Agent v2 publication/preview is rejected.
 

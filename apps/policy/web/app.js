@@ -9,7 +9,7 @@ async function request(path, options = {}) {
   const response = await fetch(applicationUrl(path), {
     ...options,
     headers: { "content-type": "application/json", "X-Policy-Request":"1",
-      ...(document.getElementById("admin-token").value ? {Authorization:"Bearer " + document.getElementById("admin-token").value} : {}), ...(options.headers || {}) },
+      ...(document.getElementById("admin-token").value ? {"X-Policy-Admin-Token":document.getElementById("admin-token").value} : {}), ...(options.headers || {}) },
   })
   const body = await response.json()
   if (!response.ok) throw new Error(body.error?.message || `HTTP ${response.status}`)
