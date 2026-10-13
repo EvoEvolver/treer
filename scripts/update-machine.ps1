@@ -8,7 +8,8 @@ param(
     [string]$StageDirectory,
     [string]$ArtifactBase = 'https://proxy.canary.treer.ai/artifacts/windows-x86_64/',
     [ValidateSet('treer-agent-server','treer')][string]$Binary,
-    [ValidateRange(1,1800)][int]$TimeoutSeconds = 180
+    [ValidateRange(1,1800)][int]$TimeoutSeconds = 180,
+    [switch]$LocalTerminal
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -96,6 +97,23 @@ function New-UpdateProcess($Executable, $Arguments, $WorkingDirectory) {
         if ($value) { $start.EnvironmentVariables[$key] = $value }
     }
     return $start
+}
+function Assert-UpdateOutsideJob {
+    if (!('TreerUpdateJobGuard' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class TreerUpdateJobGuard {
+    [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsProcessInJob(IntPtr process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
+}
+'@
+    }
+    $inJob = $false
+    if (![TreerUpdateJobGuard]::IsProcessInJob([TreerUpdateJobGuard]::GetCurrentProcess(), [IntPtr]::Zero, [ref]$inJob)) { throw 'cannot_verify_update_process_lifetime' }
+    if ($inJob) { throw 'activation_requires_independent_local_terminal_outside_windows_job' }
 }
 function Get-UpdateVersion($Path) {
     $start = New-UpdateProcess $Path '--version' ([IO.Path]::GetDirectoryName($Path))
@@ -282,17 +300,21 @@ function Invoke-WindowsMachineUpdate {
         @{status='downloaded';binary=$Binary} | ConvertTo-Json; return
     }
     if ($Action -eq 'Apply') {
+        if (!$LocalTerminal) { throw 'apply_requires_local_terminal_flag_not_treer_exec' }
+        Assert-UpdateOutsideJob
         # File lock is inherited by no child. Worker itself takes the lock before any mutation.
         $worker = Join-Path $stage 'worker.ps1'
         if ($stage.Contains('"') -or $stage.Contains("`r") -or $stage.Contains("`n")) { throw 'invalid_worker_path' }
         $shell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
         $start = New-UpdateProcess $shell ('-NoProfile -NonInteractive -File "' + $worker + '" -Action Worker -StageDirectory "' + $stage + '"') $stage
-        # No inherited stdout/stderr pipe: restarting Controller cannot hold exec open.
+        # Activation comes only from a local terminal outside any Windows Job.
+        # No worker launch through exec or another Controller-owned process.
         $process = [Diagnostics.Process]::Start($start)
         $workerId = $process.Id; $process.Dispose()
         @{status='submitted';worker_pid=$workerId;stage=$stage} | ConvertTo-Json; return
     }
     if ($Action -eq 'Worker') {
+        Assert-UpdateOutsideJob
         $lock = $null
         try {
             $lock = [IO.File]::Open((Join-Path $job.bin_directory '.treer-machine-update.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)

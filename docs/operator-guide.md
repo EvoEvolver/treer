@@ -1641,15 +1641,19 @@ New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Treer" | Out-Null
 .\update-machine.ps1 -Action Prepare -Commit $commit -ConfigPath $config -BinDirectory $bin
 .\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer-agent-server
 .\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer
-.\update-machine.ps1 -Action Apply -StageDirectory $stage
+# Run Apply in an independent local user terminal, NEVER through treer exec.
+.\update-machine.ps1 -Action Apply -StageDirectory $stage -LocalTerminal
 # Query in a new invocation after the Controller reconnects.
 .\update-machine.ps1 -Action Status -StageDirectory $stage
 ```
 
 Each download is separate and deadline-bounded for the 30-second exec limit.
-Apply submits a clean-environment PowerShell worker with no inherited output
-pipes; do not synchronously wait on `restart-controller` through the Controller
-being replaced. `submitted` is not success. The private stage holds progress
+Prepare, Download and Status may run through exec. Apply must run from an
+independent local user terminal with `-LocalTerminal`; it verifies that the
+process is outside every Windows Job and otherwise refuses activation. Neither
+Start-Process nor DETACHED_PROCESS proves escape from a Controller/Host Job.
+Apply submits a clean-environment PowerShell worker; do not synchronously wait
+on `restart-controller` through the Controller being replaced. `submitted` is not success. The private stage holds progress
 and an atomic `result.json`; poll until `complete`, `rolled_back`,
 `rollback_failed` or `failed`. Never retry activation blindly after a lost reply.
 If a worker disappears, inspect the receipt, running Controller build and backup
