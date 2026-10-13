@@ -55,6 +55,9 @@ the plan identifies every maintained document that must change at completion.
 
 ## Design proposals
 
+- [Web security review, 2026-10-12](research/2026-10-12-security-web.md):
+  local browser/header and native cookie checks, remaining interface trust
+  boundaries, dependency advisories and explicit verification limits.
 - [Architecture review, 2026-10-12](research/2026-10-12-architecture-review.md):
   severity-ranked source audit of ownership, delivery, environment inheritance,
   recovery, release compatibility, App deployment, and tree semantics; records

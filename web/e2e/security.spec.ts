@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { securityHeaders } from '../worker/security-headers'
 import { postEmbedTheme } from '../src/lib/embed-ui'
+import { formatCommandLine, parseCommandLine } from '../src/lib/command-line'
 
 const origin = 'http://127.0.0.1:4199'
 let worker: ChildProcess
@@ -92,4 +93,32 @@ test('same-origin script-enabled iframe can reach parent and user API despite sa
   await page.goto('http://127.0.0.1:4200/')
   await expect(page.locator('body')).toHaveAttribute('data-child-authority', 'true')
   await expect(page.locator('iframe')).not.toHaveAttribute('sandbox')
+})
+
+test('HttpOnly prevents reads but SameSite does not block a sibling-origin request', async ({ page, context }) => {
+  await context.addCookies([{ name: 'treer_session', value: 'synthetic-only', url: 'http://127.0.0.1:4200/', httpOnly: true, sameSite: 'Strict' }])
+  const cookies: Record<string, boolean> = {}
+  await page.route('http://127.0.0.1:4200/**', (route) => {
+    const url = new URL(route.request().url())
+    cookies[url.pathname] = (route.request().headers().cookie ?? '').includes('synthetic-only')
+    return route.fulfill({ contentType: 'text/html', body: '<main>synthetic fixture</main>' })
+  })
+  await page.route('http://localhost:4200/', (route) => route.fulfill({ contentType: 'text/html', body: '<main>cross-site fixture</main>' }))
+  await page.route('http://127.0.0.1:4203/', (route) => route.fulfill({ contentType: 'text/html', body: '<main>sibling-origin fixture</main>' }))
+  await page.goto('http://127.0.0.1:4200/')
+  expect(await page.evaluate(() => document.cookie.includes('synthetic-only'))).toBe(false)
+  await page.goto('http://localhost:4200/')
+  await page.evaluate(() => fetch('http://127.0.0.1:4200/cross-site', { method: 'POST', credentials: 'include', mode: 'no-cors', body: 'fake' }).then(() => undefined))
+  expect(cookies['/cross-site']).toBe(false)
+  await page.goto('http://127.0.0.1:4203/')
+  await page.evaluate(() => fetch('http://127.0.0.1:4200/same-site', { method: 'POST', credentials: 'include', mode: 'no-cors', body: 'fake' }).then(() => undefined))
+  expect(cookies['/same-site']).toBe(true)
+})
+
+
+test('command formatter preserves newline arguments and rejects shell comment/operator tokens', () => {
+  const args = ['#literal', 'first\nsecond', '$(synthetic)', '; fake', "single'quote"]
+  expect(parseCommandLine(formatCommandLine('synthetic-command', args))).toEqual({ command: 'synthetic-command', args })
+  expect(() => parseCommandLine('synthetic-command # comment\nother-command')).toThrow()
+  expect(() => parseCommandLine('synthetic-command && other-command')).toThrow()
 })

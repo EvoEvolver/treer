@@ -182,12 +182,13 @@ configuration and end-to-end verification; not completed here.
 
 **Phenomenon/local reproduction.** Isolated `pnpm audit --json` against the
 committed lockfile returned 16 advisory entries: critical 1, high 6, moderate 6,
-low 3. Counts describe advisories, not sixteen independent remotely exploitable
-Treer bugs. `pnpm why` located these chains:
+low 3. After the direct shell-quote update, the repeated audit returned 15:
+critical 0, high 6, moderate 6, low 3 (nonzero exit remains expected). Counts
+describe advisories, not independent remotely exploitable Treer bugs. `pnpm why` located these chains:
 
 | Dependency | Installed / chain | Advisory evidence |
 | --- | --- | --- |
-| shell-quote | 1.10.0; browser runtime | GHSA-pqg4-j6r4-53mv (critical upstream): quote comment-object followed by line terminator |
+| shell-quote | 1.10.0 baseline → 1.11.0 fixed; browser runtime | GHSA-pqg4-j6r4-53mv (critical upstream): quote comment-object followed by line terminator |
 | sharp | 0.35.2; Wrangler → Miniflare (dev) | GHSA-rgj7-g3m4-5g8c, GHSA-wq5f-xc86-pv6w |
 | undici | 7.29.0; Wrangler → Miniflare (dev) | 10 entries: GHSA-3wwx-pv8p-q78v, GHSA-pmjh-fq2x-6v4x, GHSA-r53p-7pc4-xj5r, GHSA-rfgv-xxqx-mfg5, GHSA-3xpg-4rpp-hhhm, GHSA-2jfj-6hjv-fm6j, GHSA-2gqq-gqf2-x968, GHSA-w293-vg96-wgc3, GHSA-8436-99hf-9mmv, GHSA-rx4f-c7p8-82vq |
 | braces | 3.0.3; Tailwind/chokidar/micromatch (dev) | GHSA-vfj7-8cjw-p6xm |
@@ -201,14 +202,14 @@ The runtime `formatCommandLine` calls `quote([command, ...args])` with strings;
 comment-object condition is not demonstrated reachable through Treer's typed
 startup editor. This is not grounds to ignore the advisory or call it Treer P0.
 
-**Recommendation/status.** Open: upgrade to upstream fixed releases, preferably
+**Recommendation/status.** Upgraded direct shell-quote to 1.11.0 and added newline/quoted-string round-trip and comment/operator rejection regressions. Remaining toolchain advisories are open: upgrade to upstream fixed releases, preferably
 Wrangler/Tailwind/PostCSS parents, verify lockfile and rerun build/browser tests
 and audit. Review dependency provenance as well as registry severity; do not
 silently force incompatible transitive versions. Keep developer servers loopback
-and builds isolated from privileged credentials. No dependency upgrade was
-bundled into this security-boundary change.
+and builds isolated from privileged credentials. Only the direct shell-quote dependency was upgraded in this change; transitive
+toolchain upgrades are separate compatibility work.
 
-**Change size.** Small for direct shell-quote upgrade; moderate for toolchain
+**Change size.** Small for the completed direct shell-quote upgrade; moderate for toolchain
 updates/compatibility. A future clean audit is not asserted.
 
 ## Checks without a demonstrated finding
@@ -227,12 +228,18 @@ updates/compatibility. A future clean audit is not asserted.
 - Backend login/admin cookies are HttpOnly, SameSite=Strict and conditionally
   Secure; ingress cookies use Lax. Production must enable Secure and HTTPS.
   JSON mutation requests and exact credentialed CORS are useful defenses but
-  not universal CSRF proof. Missing-Origin and same-site sibling/App-origin
-  cases require the core-dev API audit; no blanket CSRF-safe claim is made.
+  not universal CSRF proof. A synthetic browser regression confirms Strict cookies are omitted cross-site
+  but included on a same-site sibling-origin POST. Missing-Origin and sibling/App-origin
+  API enforcement still require the core-dev API audit; no blanket CSRF-safe claim is made.
 - Native errors may include upstream/localized error details; frontend text
   escaping is not secret redaction. No real error payloads were sampled.
 
 ## Verification and deployment limits
+
+Results: full browser suite **97/97 passed** before the dependency follow-up;
+security suite **7/7 passed**, including added SameSite and command quoting cases.
+Build, Worker typecheck, Foundation regression, iOS project syntax and docs checks
+passed. The dependency follow-up receives focused startup-editor/Worker retesting.
 
 Run from this worktree, with synthetic identities and isolated environment:
 
