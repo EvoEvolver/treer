@@ -28,16 +28,21 @@ try {
         if ($errors.Count) { throw ($errors | Out-String) }
     }
     # Rejected origins must fail before any request or installation write.
+    $rejectedCaseNumber = 0
     foreach ($case in @(
         @{ Uri = 'http://fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
         @{ Uri = 'http://127.0.0.1.fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
         @{ Uri = 'http://localhost.fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
         @{ Uri = 'http://[::2]/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'http://127.0.0.2/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'http://[::1%251]/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'http://[%3A%3A1]/artifacts/'; Error = '*supply an HTTP(S) -ArtifactBase URL*' }
         @{ Uri = 'http://[::ffff:127.0.0.1]/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
         @{ Uri = 'https://fixture-user:fixture-password@fixture.invalid/artifacts/'; Error = '*must not contain credentials*' }
         @{ Uri = 'http://fixture-user:fixture-password@127.0.0.1/artifacts/'; Error = '*must not contain credentials*' }
     )) {
-        Write-Host 'Testing rejected artifact origin (no URL or credential output). '
+        $rejectedCaseNumber += 1
+        Write-Host ('Testing rejected artifact origin case ' + $rejectedCaseNumber)
         $beforeRequests = $fixture.RequestCount
         $rejected = $false
         try {
@@ -51,14 +56,17 @@ try {
         }
     }
     # Network responses stay mocked, but URL parsing and the actual install are real.
+    $allowedCaseNumber = 0
     foreach ($origin in @(
         'https://fixture.invalid/artifacts/'
         'http://localhost/artifacts/'
+        'http://LOCALHOST/artifacts/'
         'http://127.0.0.1/artifacts/'
         'http://[::1]/artifacts/'
         'http://[0:0:0:0:0:0:0:1]/artifacts/'
     )) {
-        Write-Host ('Testing allowed artifact origin: ' + $origin)
+        $allowedCaseNumber += 1
+        Write-Host ('Testing allowed artifact origin case ' + $allowedCaseNumber)
         $beforeRequests = $fixture.RequestCount
         & ./scripts/install.ps1 -ArtifactBase $origin -InstallDir $installation
         if ($fixture.RequestCount -le $beforeRequests) { throw 'Allowed artifact origin did not reach the download step.' }
