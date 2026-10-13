@@ -438,12 +438,18 @@ fn node_major(value: &[u8]) -> Option<u32> {
 }
 
 fn validate_controller(value: &Value) -> Result<()> {
+    validate_controller_with_floor(value, treer_protocol::MINIMUM_LAUNCHER_SECURITY_EPOCH)
+}
+
+fn validate_controller_with_floor(value: &Value, minimum_epoch: u32) -> Result<()> {
     let reported: treer_protocol::LauncherControllerContract =
         serde_json::from_value(value.clone())
             .context("launcher_controller_unsupported: missing or invalid Controller contract")?;
     let required = controller_contract();
     if reported.protocol != required.protocol
-        || reported.minimum_launcher_security_epoch.is_none()
+        || reported
+            .minimum_launcher_security_epoch
+            .is_none_or(|epoch| epoch < minimum_epoch)
         || required
             .features
             .iter()
@@ -644,6 +650,7 @@ mod tests {
     fn compatibility_is_explicit_and_old_controllers_fail_closed() {
         let contract = serde_json::to_value(controller_contract()).unwrap();
         validate_controller(&contract).unwrap();
+        assert!(validate_controller_with_floor(&contract, 2).is_err());
         assert!(validate_controller(&json!({"protocol":"treer.agent-interface/v1"})).is_err());
         for field in ["features", "capabilities"] {
             let mut old = contract.clone();
@@ -751,7 +758,24 @@ mod tests {
                         .permissions()
                         .mode()
                         & 0o777,
-                    0o600
+                    if FILES
+                        .iter()
+                        .find(|file| file.path == "scripts/install.mjs")
+                        .unwrap()
+                        .executable
+                    {
+                        0o700
+                    } else {
+                        0o600
+                    }
+                );
+                assert_eq!(
+                    fs::metadata(stage.0.join("scripts/install.mjs"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o077,
+                    0
                 );
             }
         }
