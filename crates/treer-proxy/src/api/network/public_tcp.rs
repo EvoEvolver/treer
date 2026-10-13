@@ -307,7 +307,7 @@ pub(super) fn spawn_public_tcp_listeners(state: AppState, auth: AuthStore) {
                                 let valid = async {
                                     let current = auth.resolve_machine_service(&workspace,&id).await;
                                     let enabled = sqlx::query_scalar::<_,bool>("SELECT p.enabled FROM public_tcp_services p JOIN machine_services s USING(service_id) JOIN workspaces w ON w.workspace_id=s.workspace_id WHERE p.service_id=$1 AND w.deleted_at IS NULL").bind(&id).fetch_optional(&auth.pool()).await;
-                                    matches!(enabled,Ok(Some(true))) && matches!(current,Ok(ref value) if value == &service) && service_destination_identity_active(&auth,&service).await
+                                    matches!(enabled,Ok(Some(true))) && matches!(current,Ok(ref value) if value == &service) && matches!(is_active_policy_provider_service(&auth.pool(),&workspace,&id).await, Ok(false)) && service_destination_identity_active(&auth,&service).await
                                 };
                                 if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),valid).await,Ok(true)) { break; }
                             }

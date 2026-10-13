@@ -425,7 +425,10 @@ the ingress from the App record and does not accept a service, hostname, or
 arbitrary ingress identifier from the caller. An App selected as the active
 Policy Provider cannot be switched to public HTTP access or published as raw
 public TCP: selection, publication and every accepted public-TCP connection
-check the active Provider service.
+check the active Provider service. PostgreSQL triggers serialize selection and
+publication under one advisory lock, so concurrent requests on any Proxy cannot
+both succeed, and open public-TCP streams are closed within about a second of a
+Provider selection.
 
 ## Policy And Rollout
 

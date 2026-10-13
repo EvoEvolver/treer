@@ -682,3 +682,26 @@ CREATE OR REPLACE TRIGGER treer_credentials_update_revision AFTER UPDATE OF revo
     FOR EACH ROW WHEN (OLD.revoked_at IS DISTINCT FROM NEW.revoked_at) EXECUTE FUNCTION treer_tree_revision_changed();
 CREATE OR REPLACE TRIGGER treer_deleted_agents_revision AFTER INSERT OR DELETE ON deleted_agents
     FOR EACH ROW EXECUTE FUNCTION treer_tree_revision_changed();
+
+-- A Policy Provider service must never be raw-public TCP. Both writers take the
+-- same transaction advisory lock before checking the other table, so concurrent
+-- publication and selection (on any Proxy replica) cannot both succeed.
+CREATE OR REPLACE FUNCTION enforce_private_policy_provider_tcp() RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(74839202);
+    IF TG_TABLE_NAME = 'public_tcp_services' THEN
+        IF NEW.enabled AND EXISTS (SELECT 1 FROM workspace_policy_providers WHERE service_id = NEW.service_id) THEN
+            RAISE EXCEPTION 'policy_provider_must_be_private' USING ERRCODE = 'check_violation';
+        END IF;
+    ELSIF EXISTS (SELECT 1 FROM public_tcp_services WHERE service_id = NEW.service_id AND enabled) THEN
+        RAISE EXCEPTION 'policy_provider_must_be_private' USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS public_tcp_provider_private ON public_tcp_services;
+CREATE TRIGGER public_tcp_provider_private BEFORE INSERT OR UPDATE OF enabled, service_id ON public_tcp_services
+    FOR EACH ROW EXECUTE FUNCTION enforce_private_policy_provider_tcp();
+DROP TRIGGER IF EXISTS policy_provider_tcp_private ON workspace_policy_providers;
+CREATE TRIGGER policy_provider_tcp_private BEFORE INSERT OR UPDATE OF service_id ON workspace_policy_providers
+    FOR EACH ROW EXECUTE FUNCTION enforce_private_policy_provider_tcp();

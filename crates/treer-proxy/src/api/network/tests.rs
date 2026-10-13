@@ -689,3 +689,65 @@ async fn raw_public_tcp_is_refused_for_the_active_policy_provider_service() {
     .unwrap();
     assert!(!mapped);
 }
+
+#[tokio::test]
+async fn concurrent_provider_selection_and_raw_tcp_publication_are_mutually_exclusive() {
+    let (auth, _state, service, _token, _session, _receiver, _connection) =
+        relay_fixture("tcp-race").await;
+    let app = auth
+        .create_app_deployment(
+            "tcp-race",
+            "owner",
+            service.server_id.clone(),
+            treer_protocol::CreateAppDeploymentRequest {
+                server_id: Some(service.server_id.clone()),
+                name: "Policy".into(),
+                command: "python3".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8888,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    let pool = auth.pool();
+    // Selection in flight (uncommitted) while a publication of the same service starts.
+    let mut selecting = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO workspace_policy_providers(workspace_id,app_id,service_id,updated_at,updated_by) VALUES('tcp-race',$1,$2,'now','owner')")
+        .bind(&app.app_id)
+        .bind(&app.service_id)
+        .execute(&mut *selecting)
+        .await
+        .unwrap();
+    let publishing = {
+        let pool = pool.clone();
+        let service_id = app.service_id.clone();
+        tokio::spawn(async move {
+            sqlx::query("INSERT INTO public_tcp_services(service_id,public_port,enabled) VALUES($1,39991,TRUE)")
+                .bind(service_id)
+                .execute(&pool)
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!publishing.is_finished(), "publication must wait for the selection transaction");
+    selecting.commit().await.unwrap();
+    let error = publishing.await.unwrap().expect_err("publication must be rejected after selection");
+    assert!(error.to_string().contains("policy_provider_must_be_private"));
+    // Reverse order: an enabled mapping blocks later selection.
+    sqlx::query("DELETE FROM workspace_policy_providers WHERE workspace_id='tcp-race'").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO public_tcp_services(service_id,public_port,enabled) VALUES($1,39992,TRUE)")
+        .bind(&app.service_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = sqlx::query("INSERT INTO workspace_policy_providers(workspace_id,app_id,service_id,updated_at,updated_by) VALUES('tcp-race',$1,$2,'now','owner')")
+        .bind(&app.app_id)
+        .bind(&app.service_id)
+        .execute(&pool)
+        .await
+        .expect_err("selection must be rejected while raw TCP is enabled");
+    assert!(error.to_string().contains("policy_provider_must_be_private"));
+}
