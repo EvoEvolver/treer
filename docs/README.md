@@ -59,6 +59,10 @@ the plan identifies every maintained document that must change at completion.
 
 ## Design proposals
 
+- [Policy enforce migration](research/2026-10-12-policy-enforce-migration.md):
+  planning only; versioned deny defaults, administrator recovery, existing-workspace
+  previews, UI authority, token windows, rollout and rollback risks.
+
 - [Web security review, 2026-10-12](research/2026-10-12-security-web.md):
   local browser/header and native cookie checks, remaining interface trust
   boundaries, dependency advisories and explicit verification limits.
