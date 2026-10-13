@@ -12,9 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - mode: exact-e3-test-binary
-            runner: windows-2022
-            source: e3ed8ea99c80df072fd1b509b7def2ea235272ae
+          - mode: cold-2025
+            runner: windows-2025
+            source: f452023e25b4990425287787d38863d598ce733a
     timeout-minutes: 45
     env:
       RUST_VERSION: 1.90.0
