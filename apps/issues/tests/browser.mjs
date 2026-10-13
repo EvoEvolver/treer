@@ -13,6 +13,11 @@ function hermeticEnv(extra = {}) {
 }
 const screenshotDir = process.env.ISSUES_SCREENSHOT_DIR || '/tmp/treer-issues-screenshots';
 
+async function assign(surface,id) {
+  await surface.locator('#detail').getByRole('button',{name:'Assignee',exact:true}).click();
+  await surface.locator(`[data-principal-id="${id}"]`).click();
+}
+
 for (const width of [1280, 390]) test(`OAuth fallback with a contract double, issue workflow and XSS at ${width}px`, async () => {
   const fixture = spawn(process.env.PYTHON || 'python3', [fileURLToPath(new URL('./fixture.py', import.meta.url))], {env:hermeticEnv(), stdio:['ignore','pipe','pipe']});
   let stderr = ''; fixture.stderr.on('data',chunk => stderr += chunk);
@@ -31,7 +36,28 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     const title='Build <img src=x onerror=alert(1)> collaboration';
     await page.getByLabel('Title',{exact:true}).fill(title);
     await page.getByLabel('Description (Markdown source, rendered as text)',{exact:true}).fill('# Plan\n<script>window.xss=1</script>\nInvestigate shared development workflow.');
-    await page.getByLabel('Assignee',{exact:true}).last().selectOption('ag_a');
+    await page.locator('#detail').getByRole('button',{name:'Assignee',exact:true}).click();
+    const picker=page.getByRole('dialog',{name:'Choose assignee'});
+    assert.equal(await picker.getByText('PEOPLE',{exact:true}).count(),1);
+    assert.equal(await picker.getByText('AGENT TREE',{exact:true}).count(),1);
+    assert.equal(await picker.locator('details details').count(),2,'Nested folders preserve Agent tree');
+    assert.equal(await picker.locator('[data-principal-id="usr_a"]').count(),1);
+    assert.equal(await picker.locator('[data-principal-id="ag_no_path"]').count(),1,'Legacy directory remains usable');
+    await picker.locator('summary').filter({hasText:'engineering'}).click();
+    assert.equal(await picker.locator('[data-principal-id="ag_a"]').isVisible(),false);
+    await picker.locator('summary').filter({hasText:'engineering'}).click();
+    await picker.getByRole('searchbox',{name:'Search assignees'}).fill('Reviewer');
+    assert.equal(await picker.locator('[data-principal-id^="ag_"]').count(),2,'Same names retain distinct stable IDs');
+    await picker.getByRole('searchbox',{name:'Search assignees'}).fill('/engineering/review');
+    assert.equal(await picker.locator('[data-principal-id="ag_b"]').count(),1);
+    assert.equal(await picker.locator('[data-principal-id="ag_c"]').count(),0);
+    await picker.getByRole('searchbox',{name:'Search assignees'}).fill('');
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Open picker fits narrow screen');
+    await mkdir(screenshotDir,{recursive:true});
+    await page.screenshot({path:`${screenshotDir}/issues-assignee-${width}.png`,fullPage:true});
+    await picker.getByRole('searchbox',{name:'Search assignees'}).press('Escape');
+    assert.equal(await picker.isVisible(),false);
+    await assign(page,'ag_a');
     await page.getByLabel('Labels (comma separated)',{exact:true}).fill('team, backend');
     await page.getByRole('button',{name:'Create issue',exact:true}).click();
     await page.getByRole('heading',{name:title,exact:true}).waitFor();
@@ -41,7 +67,7 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     await page.getByRole('heading',{name:'Reproduce build failure',exact:true}).waitFor();
     await page.locator('#detail').getByLabel('Status',{exact:true}).selectOption('done');
     await page.getByRole('button',{name:'Save status / assignee',exact:true}).click();
-    await page.waitForFunction(()=>document.querySelector('#detail select')?.value==='done');
+    await page.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('done ·'));
     await page.locator('#detail').getByRole('link',{name:'#1',exact:true}).click();
     await page.getByRole('heading',{name:/Children · 1\/1/}).waitFor();
     await page.getByLabel('Comment (text / Markdown source)',{exact:true}).fill('<svg onload=alert(1)> Ready for review.');
@@ -103,7 +129,7 @@ for (const mode of ['embedded', 'ingress']) for (const width of [1280, 390]) {
       const title='Ship automatically authenticated <img src=x onerror=alert(1)> issues';
       await surface.getByLabel('Title',{exact:true}).fill(title);
       await surface.getByLabel('Description (Markdown source, rendered as text)',{exact:true}).fill('## Plan\n<script>window.xss=1</script>\nUse the existing Treer session; no second sign-in.');
-      await surface.getByLabel('Assignee',{exact:true}).last().selectOption('ag_b');
+      await assign(surface,'ag_b');
       await surface.getByLabel('Labels (comma separated)',{exact:true}).fill('team, auth');
       await surface.getByRole('button',{name:'Create issue',exact:true}).click();
       await surface.getByRole('heading',{name:title,exact:true}).waitFor();
@@ -113,13 +139,13 @@ for (const mode of ['embedded', 'ingress']) for (const width of [1280, 390]) {
       await surface.getByRole('heading',{name:'Verify current user identity',exact:true}).waitFor();
       await surface.locator('#detail').getByLabel('Status',{exact:true}).selectOption('done');
       await surface.getByRole('button',{name:'Save status / assignee',exact:true}).click();
-      await surface.waitForFunction(()=>document.querySelector('#detail select')?.value==='done');
+      await surface.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('done ·'));
       await surface.locator('#detail').getByRole('link',{name:'#1',exact:true}).click();
       await surface.getByRole('heading',{name:/Children · 1\/1/}).waitFor();
-      await surface.locator('#detail').getByLabel('Assignee',{exact:true}).selectOption('usr_a');
+      await assign(surface,'usr_a');
       await surface.locator('#detail').getByLabel('Status',{exact:true}).selectOption('in_progress');
       await surface.getByRole('button',{name:'Save status / assignee',exact:true}).click();
-      await surface.waitForFunction(()=>document.querySelector('#detail select')?.value==='in_progress');
+      await surface.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('in progress ·'));
       await surface.getByRole('button',{name:'Claim for 15 min',exact:true}).click();
       await surface.getByRole('button',{name:'Renew lease',exact:true}).waitFor();
       await surface.getByRole('button',{name:'Renew lease',exact:true}).click();

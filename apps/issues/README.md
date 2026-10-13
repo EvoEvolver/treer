@@ -224,3 +224,24 @@ state at a shared directory. Sessions and issue content remain plaintext;
 restrict/encrypt backups and disks. Same-UID Managed Apps are not isolated;
 use a separate unprivileged user or container/VM for critical services.
 Input limits and claim leases do not provide global rate/concurrency isolation.
+
+## Interface and assignee directory
+
+The interface uses a compact sidebar, status-grouped issue rows, local search,
+list/detail panes, quick personal/status views, and light/dark themes. `C` opens
+a new issue and `/` focuses search outside form fields. At 390px the panes stack.
+This is an initial Linear-inspired interface, not feature parity: projects,
+cycles, saved views, drag-and-drop and a kanban board are not implemented.
+
+Assignee pickers in creation, editing, details and filtering share one directory:
+humans appear under People; Agents appear in expandable folders using the
+canonical `path` supplied by Treer's permission-filtered App identity directory.
+Search matches names and paths, including identically named Agents in different
+folders. Selection always sends the stable principal ID, never a display name
+or a folder path. The App performs no additional privileged tree lookup. Older
+Proxies without directory paths show Agents under Placement unavailable until
+the Proxy is upgraded. Only identities visible to this App are listed.
+
+Browser tests additionally check nested folders, collapse/expand, human choices,
+name/path search, duplicate names, legacy missing paths, Escape handling and
+390px picker overflow. Screenshots are test artifacts under `/tmp`, not committed.

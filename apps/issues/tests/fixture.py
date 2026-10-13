@@ -14,9 +14,11 @@ from store import Store
 from issues import Application, Server
 from gateway import PREFIX, Ingress, ControlPlane, forward, issue_human_token, verify_human_token, FORWARDED
 
-PEOPLE = [{'kind':'agent','id':'ag_a','name':'Builder'}, {'kind':'agent','id':'ag_b','name':'Reviewer'},
+PEOPLE = [{'kind':'agent','id':'ag_a','name':'Builder','path':'/engineering/backend/Builder'}, {'kind':'agent','id':'ag_b','name':'Reviewer','path':'/engineering/review/Reviewer'},
           {'kind':'human','id':'usr_a','name':'Alice','role':'member'},
-          {'kind':'human','id':'usr_admin','name':'Admin','role':'admin'}]
+          {'kind':'human','id':'usr_admin','name':'Admin','role':'admin'},
+          {'kind':'agent','id':'ag_c','name':'Reviewer','path':'/design/Reviewer'},
+          {'kind':'agent','id':'ag_no_path','name':'Unplaced'}]
 TOKENS = {'agent-a':PEOPLE[0], 'agent-b':PEOPLE[1], 'human':PEOPLE[2], 'admin':PEOPLE[3]}
 
 
