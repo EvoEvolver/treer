@@ -182,8 +182,122 @@ async fn windows_machine_exec_node_and_powershell_keep_os_baseline() {
         ("tasklist.exe",vec!["/FI","PID eq 0","/NH"],""),
     ] {
         let response = runtime.exec_machine(MachineExecRequest { cwd:".".into(),command:command.into(),args:args.into_iter().map(str::to_owned).collect(),timeout_ms:30_000 }).await.unwrap();
-        assert_eq!(response.exit_code,Some(0),"{command} failed: {}",response.stderr);
+        assert!(!response.timed_out, "{command} timed out after {}ms: exit={:?} stdout={:?} stderr={:?}", response.duration_ms, response.exit_code, response.stdout, response.stderr);
+        assert_eq!(response.exit_code,Some(0),"{command} failed after {}ms: stdout={:?} stderr={:?}",response.duration_ms,response.stdout,response.stderr);
         assert!(response.stdout.contains(expected),"{command} did not complete its smoke check");
+    }
+    host.abort();
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Diagnostic only: use synthetic scripts, never print inherited values. The
+/// normal Windows smoke above remains the required pass/fail release gate.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "read-only native Windows diagnosis, run explicitly with --nocapture"]
+async fn windows_powershell_exec_diagnostics() {
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+
+    let root = test_root();
+    let (runtime, host) = runtime_for_exec(&root).await;
+    let scripts = [
+        ("startup", "exit 0"),
+        ("version", "Write-Output $PSVersionTable.PSVersion.ToString(); exit 0"),
+        ("baseline-presence", "Write-Output ('SystemRoot-present=' + [bool]$env:SystemRoot + ';USERPROFILE-present=' + [bool]$env:USERPROFILE); exit 0"),
+        ("rng", "$ErrorActionPreference='Stop'; try { [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); Write-Output 'powershell-ok'; exit 0 } catch { Write-Output ('synthetic-probe-error-type=' + $_.Exception.GetType().FullName + ';hresult=' + $_.Exception.HResult); exit 3 }"),
+    ];
+    // The first probes use precisely the production Controller exec path.
+    for (name, script) in scripts {
+        let response = runtime
+            .exec_machine(MachineExecRequest {
+                cwd: ".".into(),
+                command: "powershell.exe".into(),
+                args: vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    script.into(),
+                ],
+                timeout_ms: 5_000,
+            })
+            .await
+            .unwrap();
+        println!(
+            "production/{name}: exit={:?} timed_out={} duration_ms={} stdout={:?} stderr={:?}",
+            response.exit_code,
+            response.timed_out,
+            response.duration_ms,
+            response.stdout,
+            response.stderr
+        );
+    }
+    let baseline = treer_platform::machine_exec_environment();
+    println!(
+        "allowlisted names={:?}",
+        baseline.keys().collect::<Vec<_>>()
+    );
+    let extras = [
+        "PSModulePath",
+        "PUBLIC",
+        "PROCESSOR_IDENTIFIER",
+        "SESSIONNAME",
+    ];
+    for extra_count in [0, 1, 4] {
+        let mut environment: BTreeMap<OsString, OsString> = baseline.clone();
+        for name in &extras[..extra_count] {
+            if let Some(value) = std::env::var_os(name) {
+                environment.insert((*name).into(), value);
+            }
+        }
+        for pipe in [false, true] {
+            for (name, script) in scripts {
+                let mut command = tokio::process::Command::new("powershell.exe");
+                command
+                    .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                    .current_dir(&root)
+                    .env_clear()
+                    .envs(&environment)
+                    .stdin(if pipe { Stdio::piped() } else { Stdio::null() })
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true);
+                let mut child = command.spawn().unwrap();
+                // EOF, not an inherited terminal or any Agent's input stream.
+                drop(child.stdin.take());
+                let started = Instant::now();
+                let wait = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+                let timed_out = wait.is_err();
+                let status = match wait {
+                    Ok(status) => status.unwrap(),
+                    Err(_) => {
+                        child.kill().await.unwrap();
+                        child.wait().await.unwrap()
+                    }
+                };
+                use tokio::io::AsyncReadExt;
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                child
+                    .stdout
+                    .take()
+                    .unwrap()
+                    .read_to_end(&mut stdout)
+                    .await
+                    .unwrap();
+                child
+                    .stderr
+                    .take()
+                    .unwrap()
+                    .read_to_end(&mut stderr)
+                    .await
+                    .unwrap();
+                println!("direct/{name}/extras={:?}/stdin={}: exit={:?} timed_out={} duration_ms={} stdout={:?} stderr={:?}",
+                    &extras[..extra_count], if pipe { "closed-pipe" } else { "nul" }, status.code(), timed_out,
+                    started.elapsed().as_millis(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+            }
+        }
     }
     host.abort();
     drop(runtime);
