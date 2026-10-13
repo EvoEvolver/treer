@@ -309,3 +309,22 @@ Self-hosted Compose pulls those images (`image:`, not `build: .`) and applies
 later versions from `/admin`. See [Self-hosted Compose](../deploy/README.md).
 Hosted Railway continues to rebuild the Proxy from the promoted commit in each
 environment. The frontend artifact is already byte-identical across promotion.
+
+### Windows manual machine update gate
+
+`scripts/update-machine.ps1` is the operator-reviewed Canary checksum workflow,
+not the signed release-channel updater. Its HTTPS `SHA256SUMS` pins integrity;
+it does not authenticate an independent publisher. It needs only Windows
+PowerShell 5.1 or PowerShell 7 and Windows/.NET facilities, not git, Python, npm
+or a Unix shell. See the operator guide for split steps and receipts.
+
+Next-version Windows acceptance must actually run Node 22, PowerShell crypto
+and tasklist through exec and through App/Agent workload launch paths; verifying
+environment maps alone is insufficient. The artifact job runs the update
+transaction fixtures under both PowerShell shells, including real running-image
+rename and private DACL assertions, with the candidate's native binaries.
+Launcher installation plus a fake ACP Agent with its registered UI must also
+pass in a closed native Windows fixture. Pending native tests are not evidence
+of success; a failing job blocks release rather than being retried into green.
+The operator then updates win_native explicitly and checks its App/UI Agent;
+release automation must not update that machine or restart existing Agents.

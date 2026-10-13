@@ -1608,3 +1608,70 @@ interruption or restore original process PIDs. No machine update is performed
 by repository tests; run `python3 -m unittest discover -s scripts/tests -p
  'test_update_machine.py'` for fake Controller/CLI, checksum, transport,
 activation-order, detachment and rollback checks.
+
+### Windows split-step manual machine update
+
+For a reviewed Canary set, use `scripts/update-machine.ps1` from a trusted local
+copy. This is separate from signed release-channel updates: same-origin
+`SHA256SUMS` verifies integrity, not an independent publisher signature. It uses
+PowerShell 5.1/7 and .NET; no git, Python or shell launcher is required. It never
+updates or restarts the Host, changes the enrolled root, or restarts Agents.
+Only one local detached workspace install may share the binary directory.
+
+Use the machine account's real `LOCALAPPDATA`, `SystemRoot`, `windir`,
+`USERPROFILE`, `USERNAME`, `APPDATA`, `ProgramData`, `HOMEDRIVE`/`HOMEPATH`,
+`ComSpec`, `PATHEXT`, `PATH`, `TEMP` and `TMP`. The fixed exec environment
+preserves this Windows baseline while excluding workload credentials, provider
+settings and loader hooks. Updating an old Controller does not itself repair a
+polluted invocation environment: stage from an ordinary trusted user PowerShell
+terminal if the old exec path lacks these values. Do not forward Agent secrets
+or invent user directories. Node, PowerShell crypto and tasklist failures can
+indicate a missing baseline rather than a broken application. Node's trusted
+absolute executable path may be needed when it is absent from PATH.
+
+```powershell
+# Read-only plan; no network or process changes.
+.\update-machine.ps1
+# Fill these from the reviewed release and this machine's installed service.
+$commit = 'FULL_40_CHARACTER_SOURCE_SHA'
+$config = "$env:LOCALAPPDATA\Treer\agent-servers\SERVER-controller.json"
+$bin = "$env:LOCALAPPDATA\Treer\bin"
+$stage = "$env:LOCALAPPDATA\Treer\stage-$commit"
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Treer" | Out-Null
+.\update-machine.ps1 -Action Prepare -Commit $commit -ConfigPath $config -BinDirectory $bin
+.\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer-agent-server
+.\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer
+.\update-machine.ps1 -Action Apply -StageDirectory $stage
+# Query in a new invocation after the Controller reconnects.
+.\update-machine.ps1 -Action Status -StageDirectory $stage
+```
+
+Each download is separate and deadline-bounded for the 30-second exec limit.
+Apply submits a clean-environment PowerShell worker with no inherited output
+pipes; do not synchronously wait on `restart-controller` through the Controller
+being replaced. `submitted` is not success. The private stage holds progress
+and an atomic `result.json`; poll until `complete`, `rolled_back`,
+`rollback_failed` or `failed`. Never retry activation blindly after a lost reply.
+If a worker disappears, inspect the receipt, running Controller build and backup
+locally before taking further action. A machine sleep, power loss or worker
+termination is not an automatically recoverable transaction.
+
+The worker checks staged hashes and source commits before mutation, saves both
+old executables in a private `backup-<oldsha>-<unique-id>` directory, renames
+running exe files to unique `.old` names and installs the replacement. It replaces
+Controller first, requests only `service --workspace ... restart-controller`,
+then requires a fresh Controller epoch, matching machine/workspace/build,
+Proxy connection, path-aware capability and identical Agent IDs/PIDs/generations.
+Only then does it replace CLI. Failure restores saved binaries and verifies the
+old Controller's readiness and Agent inventory; `rollback_failed` requires local
+operator repair. Preserve backups and `.old` images until verified and no
+process uses them. No automatic cleanup or root migration occurs. In particular,
+existing `C:\Windows\System32` roots remain unchanged; new enrollment must use
+an explicit user-owned `--root` as described above.
+
+Receipts contain only status, commit, backup path and preservation flags. Local
+operator credentials are read only in memory for loopback inventory and are
+never passed in argv or written to progress/error logs. The worker strips
+inherited Treer, HTTP proxy and Node/loader variables from child processes.
+This protects accidental disclosure; the same Windows user can still alter
+scripts, files and processes and is not an isolation boundary.

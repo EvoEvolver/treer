@@ -80,6 +80,11 @@ jobs:
       - name: Test Windows PowerShell installer compatibility
         shell: powershell
         run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Test Windows machine update transactions
+        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Test Windows PowerShell machine update compatibility
+        shell: powershell
+        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
