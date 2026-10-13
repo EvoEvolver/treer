@@ -661,7 +661,7 @@ class PolicyServer(ThreadingHTTPServer):
                         raise PolicyError(503, 'identity_not_configured', 'Configure this Managed App service ID and public URL')
                 for url in (proxy, public):
                     parsed = urlsplit(url)
-                    if parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username or parsed.password:
+                    if parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
                         raise PolicyError(503, 'identity_not_configured', 'App identity URLs must be absolute HTTP(S) origins without credentials')
                 auth_path = self.RequestHandlerClass.store.path.with_suffix('.auth.sqlite3')
                 self.auth = Auth(AuthStore(auth_path), proxy, service, workspace, public)

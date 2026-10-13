@@ -153,7 +153,7 @@ async function loadHistory() {
         try { document.getElementById("history-document").textContent = JSON.stringify(await request(`v1/policy/revisions/${revision.revision}`), null, 2) }
         catch (error) { showError("history-error", error) }
       })
-      rollback.textContent = `Restore revision ${revision.revision}`
+      rollback.textContent = `Restore revision ${revision.revision}`; rollback.className="secondary"
       rollback.disabled = revision.revision === state.bundle.revision
       rollback.addEventListener("click", async () => {
         if (!window.confirm(`Restore revision ${revision.revision} (${revision.mode}) as a new policy revision? This changes active permissions.`)) return
@@ -267,7 +267,7 @@ async function loadTemplates() {
     const {templates}=await request("v1/templates"),list=document.getElementById("template-list");list.replaceChildren()
     for(const template of templates) {
       const card=document.createElement("article"),title=document.createElement("h3"),description=document.createElement("p"),button=document.createElement("button")
-      title.textContent=template.name;description.textContent=template.description;button.textContent="Use as editable monitor draft"
+      title.textContent=template.name;description.textContent=template.description;button.textContent="Use as editable monitor draft";button.className="primary"
       button.addEventListener("click",async()=>{
         try {
           if(state.dirty && !window.confirm("Replace the current unpublished draft?")) return

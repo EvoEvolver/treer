@@ -57,7 +57,7 @@
             <label>Relationship<select id="rule-relation"><option value="">None</option><option value="same_folder">Same folder</option><option value="resource_below_subject_folder">Target below actor folder</option><option value="resource_below_folder">Target below fixed folder</option><option value="keep">Preserve advanced conditions/bindings</option></select></label>
             <label>Fixed folder path<input id="rule-folder-path" value="/"></label>
             <label class="check-label"><input id="rule-strict" type="checkbox"> Descendants only (strict)</label>
-            <button type="submit" id="apply-rule">Add / update draft rule</button><button type="button" id="new-rule" class="secondary">New rule</button>
+            <button type="submit" id="apply-rule" class="primary">Add / update draft rule</button><button type="button" id="new-rule" class="secondary">New rule</button>
           </form>
           <p>Globs use whole-component * and one terminal **. Human principals have no folder placement. Advanced IDs, groups, OR selectors, include_self=false and bindings remain editable in JSON.</p>
         </details>

@@ -21,7 +21,7 @@ class PolicyServerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.port = free_port()
-        environment = {k:v for k,v in os.environ.items() if not k.startswith(("TREER_","AGENT_UI_","CODEX_UI_","POLICY_")) and k.lower() not in ("http_proxy","https_proxy","all_proxy","no_proxy")}
+        environment = {"PATH":os.environ.get("PATH", os.defpath), "HOME":self.temporary.name, "PYTHONUTF8":"1"}
         environment.update(
             {
                 "POLICY_LISTEN": f"127.0.0.1:{self.port}",
@@ -165,7 +165,7 @@ class PolicyServerTest(unittest.TestCase):
             shutil.copyfile(source, install_root / name)
 
         bundled_port = free_port()
-        environment = {k:v for k,v in os.environ.items() if not k.startswith(("TREER_","AGENT_UI_","CODEX_UI_","POLICY_")) and k.lower() not in ("http_proxy","https_proxy","all_proxy","no_proxy")}
+        environment = {"PATH":os.environ.get("PATH", os.defpath), "HOME":self.temporary.name, "PYTHONUTF8":"1"}
         environment["POLICY_ADMIN_TOKEN"] = "synthetic-policy-admin-credential-32-chars"
         environment["TREER_WORKSPACE_ID"] = "ws_bundled"
         for name in (
