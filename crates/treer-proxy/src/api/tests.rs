@@ -1561,12 +1561,18 @@ async fn trailing_slash_browser_tunnel_route_is_registered() {
         "/api/workspaces/default/virtual-hosts/self.test/proxy/",
         "/api/workspaces/default/apps/app-1/ui/",
         "/api/workspaces/default/apps/app-1/ui/app.js",
+        "/api/workspaces/default/agents/agent-1/interface/ui",
+        "/api/workspaces/default/agents/agent-1/interface/ui/",
+        "/api/workspaces/default/agents/agent-1/interface/ui/ws",
     ] {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri(uri)
+                    .header("x-treer-interface-source", "controller-api")
+                    .header("x-treer-agent-id", "agent-1")
+                    .header("x-treer-interface-instance", "forged")
                     .body(Body::empty())
                     .expect("tunnel request"),
             )
