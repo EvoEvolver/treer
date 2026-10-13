@@ -6,11 +6,7 @@ permissions:
   contents: read
 jobs:
   windows:
-    name: Windows artifact environment ${{ matrix.mode }}
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [strict, diagnostic]
+    name: Windows artifact environment matrix
     runs-on: windows-2022
     timeout-minutes: 45
     env:
@@ -44,15 +40,9 @@ jobs:
         run: |
           cargo test --locked -p treer-platform -p treer-agent-runtime -p treer-agent-host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Strict original Windows filter on cold runner
-        if: matrix.mode == 'strict'
+      - name: Cold full-parent and filtered environment matrix
         run: |
-          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_ -- --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Cold isolated artifact diagnostics
-        if: matrix.mode == 'diagnostic'
-        run: |
-          cargo test --locked -p treer-agent-server --bin treer-agent-server controller::exec_environment_tests::windows_artifact_powershell_diagnostics -- --exact --ignored --nocapture --test-threads=1
+          cargo test --locked -p treer-agent-server --bin treer-agent-server controller::exec_environment_tests::windows_artifact_powershell_environment_matrix -- --exact --ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Record parent metadata only after probes
         if: always()
