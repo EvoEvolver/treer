@@ -277,3 +277,12 @@ path; Node 22+ must be installed in that CI job. Filtered Host/PTY inheritance i
 tested independently with synthetic machine/operator/enrollment credentials.
 Unix runs do not constitute native Windows execution evidence; record the
 Windows CI result separately before claiming that platform verified.
+
+The ignored `windows_powershell_exec_diagnostics` probe separates startup,
+version reporting, baseline existence and synthetic RNG execution. It records
+exit code, timeout, duration and only synthetic output; environment diagnostics
+show names/existence, not values. NUL versus a closed input pipe and selected OS
+baseline additions are compared without weakening the normal Windows gate.
+An exit code of 1 after 30 seconds can be the exec timeout's forced termination,
+not proof of a script or CLR error. Native Windows results, rather than Unix
+compilation or static guesses about missing variables, determine support.

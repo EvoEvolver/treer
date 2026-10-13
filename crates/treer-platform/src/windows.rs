@@ -26,6 +26,70 @@ fn checked(success: i32) -> io::Result<()> {
     }
 }
 
+/// Build a registry/OS baseline for the Controller's own service account, not
+/// for an interactive user and not from the invoking workload's environment.
+pub fn current_user_environment(
+) -> io::Result<std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>> {
+    use windows_sys::Win32::System::{Environment::*, Memory::*};
+    struct EnvironmentBlock(*mut std::ffi::c_void);
+    impl Drop for EnvironmentBlock {
+        fn drop(&mut self) {
+            unsafe {
+                DestroyEnvironmentBlock(self.0);
+            }
+        }
+    }
+    unsafe {
+        let mut token = ptr::null_mut();
+        checked(OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        ))?;
+        let token = OwnedHandle::from_raw_handle(token);
+        let mut block = ptr::null_mut();
+        checked(CreateEnvironmentBlock(&mut block, token.as_raw_handle(), 0))?;
+        let block = EnvironmentBlock(block);
+        if block.0.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing OS environment block",
+            ));
+        }
+        // Bound parsing by the committed readable region as well as a fixed
+        // cap. Never scan a malformed pointer up to an arbitrary global length.
+        let mut info: MEMORY_BASIC_INFORMATION = mem::zeroed();
+        if VirtualQuery(block.0, &mut info, mem::size_of_val(&info)) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if info.State != MEM_COMMIT || info.Protect & (PAGE_NOACCESS | PAGE_GUARD) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unreadable OS environment block",
+            ));
+        }
+        let offset = (block.0 as usize)
+            .checked_sub(info.BaseAddress as usize)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid OS environment allocation",
+                )
+            })?;
+        let available = info.RegionSize.checked_sub(offset).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid OS environment allocation",
+            )
+        })?;
+        let length = (available / mem::size_of::<u16>()).min(256 * 1024);
+        super::environment::parse_windows_environment_block(std::slice::from_raw_parts(
+            block.0.cast::<u16>(),
+            length,
+        ))
+    }
+}
+
 /// Metadata from an already-open, non-reparse-following handle.
 pub fn transfer_file_identity(file: &std::fs::File) -> io::Result<(u64, u64, u32, u32)> {
     use windows_sys::Win32::Storage::FileSystem::*;

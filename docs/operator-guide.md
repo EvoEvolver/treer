@@ -1235,6 +1235,14 @@ a sandbox: monitor/allow Policy can still permit ordinary sensitive files inside
 that root, and direct same-account OS access remains unrestricted.
 
 Windows machine exec has a 30-second ceiling and is owned by the Controller.
+Its OS/profile environment is rebuilt for the Controller's own Windows account,
+then filtered; running the Controller as SYSTEM or another service account does
+not select the logged-in user's profile. An unloaded service profile is not
+automatically loaded. If obtaining the OS block fails, the existing filtered
+environment remains the fallback. Explicit absolute tool PATH entries survive;
+empty/relative entries do not. Treer credentials, proxies and loader hooks are
+not forwarded. `-NoProfile` prevents PowerShell profile scripts from loading,
+but does not remove the native runtime's OS initialization requirements.
 Running `service restart-controller` inside that exec can lose its reply when
 the Controller is replaced, even if restart succeeded. Run activation from a
 host terminal or a Host-owned managed command instead; inspect its output after

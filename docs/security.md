@@ -121,6 +121,16 @@ they never receive machine/enrollment/operator credential placeholders from the
 Controller. Previously those names were inserted with empty values: names alone
 were not evidence that the actual service secrets leaked.
 
+On Windows, machine exec obtains that baseline with `CreateEnvironmentBlock`
+for the current Controller process token, with inheritance disabled, then applies
+the same allowlist. Profile variables belong to that account (including a
+service account or SYSTEM), not an interactive user or the calling Agent. It
+does not load another user's profile. If the OS API fails, it falls back to the
+filtered caller baseline; this fallback still grants no Treer credentials.
+PATH retains explicitly configured absolute tool directories and appends the OS
+PATH with case-insensitive deduplication; empty and relative segments are removed.
+No workspace directory is appended implicitly. TEMP/TMP remain configurable.
+
 This reduces ambient environment exposure, not machine-account authority. Exec
 still runs as the machine's OS user and can read that user's accessible files,
 including local CLI configuration; omitting a credential from its environment
