@@ -82,3 +82,17 @@ test("workflows pin all external actions and never persist checkout credentials"
   }
   assert.ok(publish.indexOf("retag-ghcr.sh validate") < publish.lastIndexOf("Log in to GHCR"));
 });
+
+
+test("Proxy image build contexts include every embedded Policy asset", () => {
+  const source = readFileSync(new URL("../crates/treer-proxy/src/api/policy_provider.rs", import.meta.url), "utf8");
+  const assets = [...source.matchAll(/include_bytes!\("\.\.\/\.\.\/\.\.\/\.\.\/(apps\/policy\/[^" ]+)"\)/g)].map((match) => match[1]);
+  assert.ok(assets.includes("apps/policy/treer-policy"));
+  for (const name of ["Dockerfile", "Dockerfile.hosted"]) {
+    const dockerfile = readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
+    const copied = dockerfile.split("\n").filter((line) => line.startsWith("COPY ")).flatMap((line) => line.trim().split(/\s+/).slice(1, -1));
+    for (const asset of assets) {
+      assert.ok(copied.some((path) => asset === path || asset.startsWith(path.replace(/\/$/, "") + "/")), `${name} omits embedded asset ${asset}`);
+    }
+  }
+});

@@ -7,7 +7,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY skills ./skills
 COPY scripts/install.ps1 ./scripts/install.ps1
-COPY apps/policy/AGENT.md apps/policy/policy.py ./apps/policy/
+COPY apps/policy/AGENT.md apps/policy/policy.py apps/policy/treer-policy ./apps/policy/
 COPY apps/policy/web ./apps/policy/web
 RUN set -eu; \
     cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \

@@ -136,6 +136,10 @@ silently falling back to an older GitHub `latest` Release.
 
 ## Workspace Apps
 
+Both Proxy Docker build contexts include the Policy client and all other embedded
+Policy assets. The release tooling gate checks these files against the source
+`include_bytes!` references before an image build.
+
 Mail and Telegram are source Apps, not additional Rust machine binaries and not
 part of the Cloudflare control-plane artifact. Deploy them from the same clean
 source commit, build Mail's `web/dist`, and record the revision. Configuration,
