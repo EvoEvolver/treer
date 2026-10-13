@@ -702,6 +702,9 @@ npm --prefix launchers/agent ci
 npm --prefix launchers/agent run check
 npm --prefix launchers/agent test
 # Unit tests use fake Codex, ACP, and native Claude processes.
+# Optional embedded-binary integration: sealed fake enrolled CLI, no credentials
+# or Agent creation/restarts. Requires a Controller built with the portable payload.
+node launchers/agent/tests/core-installer.mjs /absolute/path/to/treer-agent-server
 # Browser regression and desktop/390px screenshots, with an isolated fake Codex.
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
 npm --prefix launchers/agent exec -- playwright install chromium
