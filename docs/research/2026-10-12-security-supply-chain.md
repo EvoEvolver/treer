@@ -1,6 +1,6 @@
 # Supply-chain and release security review — 2026-10-12
 
-Status: local review; workflow fixes committed in `d3844fd`, approved by core-dev
+Status: local review; workflow fixes committed in `53139a8` (reviewed as `d3844fd`), approved by core-dev
 with an independent 3/3 regression run. Source baseline: `732da11` (same dependency locks as
 the released `3372b34`). This is evidence and a remediation plan, not a security
 certification or permission to deploy critical services.
@@ -252,9 +252,11 @@ container completion does **not** mean the dependency audit passed.
   tests; approved to launcher-dev. Git pinning is not publisher authentication.
 - Actual platform scopes/rotations, native Windows audit, Python/OS-image CVEs,
   independent builds and live-machine downgrade were not verified.
-- core-dev approved the workflow fix and is adding the requested
-  `docs/security.md` Unsupported Claims update in its owned security-core work.
-  Dependency owners are preparing separate reviewed patches; this report's table
+- core-dev approved the workflow fix. Its reviewed `3c2fd89` adds the requested
+  `docs/security.md` Unsupported Claims and upgrades rustls/quinn-proto; its
+  offline re-scan still reports rsa and maintenance warnings. web-dev's merged
+  review upgrades shell-quote; apps-dev's merged review refreshes affected Paper
+  and Mail locks. Those owner checks are separate evidence; this report's table
   intentionally preserves the original snapshot. No audit fix is deployed.
 
 Primary references: [GitHub secure workflow use](https://docs.github.com/en/actions/reference/security/secure-use),
