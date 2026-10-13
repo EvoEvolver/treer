@@ -37,6 +37,7 @@ credential alone authorizes diagnostics; the App cannot act as an owner deputy.
 - `GET /v1/templates`, `POST /v1/templates/team-isolation`
 - `POST /v1/policy/explain`, `GET /v1/policy/decisions`
 - `POST /v1/policy/test` (legacy v1 only)
+- `GET /v1/policy/authority`, `/treer-policy` (single-file client)
 
 Policy administration is locked by default. An operator must configure the
 private `POLICY_ADMIN_TOKEN` and supply it as Bearer authentication with JSON
@@ -48,9 +49,11 @@ this token in URLs, source control or logs. Bundle reads remain unchanged.
 Schema-2 path policies require a schema-2 capable Core/Controller. The manifest
 advertises policy.bundle.v2; bundle callers must request max_schema_version=2.
 Never downgrade by removing Tree selectors/conditions. Use monitor initially.
-Human diagnostics and v2 publication use injected App identity first, or OAuth
-fallback, with per-request verification and current owner authorization in Core.
-Publishing still requires the separate private operator Bearer. Human mutations
+Owner diagnostics and default v2 publication use injected App identity first,
+or OAuth fallback, with per-request verification and current owner authorization
+in Core. Owner-enabled operator publication uses the runtime-only Core bridge
+instead. Publishing still requires the separate private operator capability
+(Bearer for CLI/direct access, X-Policy-Admin-Token for browser tunnels). Human mutations
 also need X-Policy-Request: 1 and valid browser Origin/Fetch Metadata.
 Rollback preserves monotonic revisions and checks concurrent edits.
 See README for grammar, editable templates, migration, backups and limits.

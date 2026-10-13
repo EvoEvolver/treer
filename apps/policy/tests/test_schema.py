@@ -1,5 +1,7 @@
 """Schema v2 and editable template contracts; no managed environment."""
 import copy
+import json
+import re
 import importlib.util
 import unittest
 from pathlib import Path
@@ -10,6 +12,29 @@ spec.loader.exec_module(policy)
 class SchemaTests(unittest.TestCase):
     def rule_document(self):
         return policy.template_document('team-isolation', {})['document']
+
+    def test_readme_isolation_example_scope_and_priority(self):
+        readme=(Path(__file__).resolve().parents[1]/'README.md').read_text()
+        example=next(json.loads(block) for block in re.findall(r'```json\n(.*?)\n```', readme, re.S) if 'policy-admin-access' in block)
+        policy.validate_document(example)
+        # This example uses only literal path_eq, so replacing each exact path
+        # with a stable test ID is equivalent to Core's exact tree match. Use
+        # the production v1 evaluator for the same descending-priority semantics;
+        # this does not emulate Core's full v2 engine or OS/network isolation.
+        translated=copy.deepcopy(example);translated['schema_version']=1
+        for rule in translated['rules']:
+            for selector in rule['subjects'] + rule['resources']:
+                tree=selector.pop('tree', None)
+                if tree:
+                    self.assertTrue(set(tree) <= {'path_eq','kind'})
+                    selector['id']=tree['path_eq']
+        bundle={'revision':1,'mode':'enforce','document':translated}
+        for action in ('identity.token.issue','service.connect','network.connect'):
+            for actor,expected in (('/policy-admin/maintainer','allow'),('/team/worker','deny')):
+                result=policy.evaluate_request({'subject':{'kind':'agent','id':actor},'action':action,'resource':{'kind':'machine.service','id':'/policy-admin/policy'}},bundle)
+                self.assertEqual(result['decision'],expected)
+            result=policy.evaluate_request({'subject':{'kind':'agent','id':'/team/worker'},'action':action,'resource':{'kind':'machine.service','id':'/other/app'}},bundle)
+            self.assertEqual(result['decision'],'allow','Example must not deny unrelated Apps')
 
     def test_templates_only_generate_valid_monitor_drafts(self):
         for template in policy.TEMPLATES:

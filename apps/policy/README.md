@@ -135,7 +135,7 @@ contain this secret. No file content appears in App errors or status responses.
 Every publication retains an immutable snapshot in the private atomic state
 file, including mode and timestamp. `GET /v1/policy/history` lists the latest
 100 retained revisions; `GET /v1/policy/revisions/N` reads a snapshot. Both require
-operator Bearer authentication. `POST /v1/policy/rollback` accepts
+the operator capability (Bearer or dedicated browser header). `POST /v1/policy/rollback` accepts
 `{"expected_revision":CURRENT,"revision":OLD}` and publishes the old document
 and mode as a **new, higher revision**, then invalidates the Proxy. It cannot
 rewind the revision counter or silently override a concurrent publication.
@@ -228,7 +228,7 @@ parameters. Cookies are HttpOnly, SameSite=Lax and Secure on HTTPS.
 
 Human state changes and diagnostic reads require `X-Policy-Request: 1`, a permitted Origin when
 present, and same-origin/same-site Fetch Metadata. Operator writes additionally
-reject cross-origin Fetch Metadata and require JSON and the operator Bearer.
+reject cross-origin Fetch Metadata and require JSON and the operator capability.
 OAuth/identity cannot replace that administration capability. Use workspace-only
 ingress; all policy/bundle reads are visible to workspace callers and direct
 local-machine access must be separately protected.
@@ -358,7 +358,7 @@ these schema-2 rules into the existing document (do not replace unrelated rules)
 ```json
 {
   "schema_version": 2, "defaults": {}, "groups": {}, "rules": [
-    {"id":"policy-admin-access","priority":10,"effect":"allow",
+    {"id":"policy-admin-access","priority":30,"effect":"allow",
      "subjects":[{"kind":"agent","tree":{"path_eq":"/policy-admin/maintainer"}}],
      "actions":["identity.token.issue","service.connect","network.connect"],
      "resources":[{"tree":{"kind":"app","path_eq":"/policy-admin/policy"}}]},
@@ -369,7 +369,8 @@ these schema-2 rules into the existing document (do not replace unrelated rules)
 }
 ```
 
-Confirm actual App/Agent paths and action/resource matching with Core explain.
+Core evaluates higher priority numbers first; the scoped allow (30) therefore
+precedes the general deny (20). Confirm actual App/Agent paths and action/resource matching with Core explain.
 Keep monitor initially, inspect decision logs, and explicitly enable enforce
 only after owner access and recovery checks: **monitor does not block access**.
 These two rules cover the App access gate only. Separately restrict other
