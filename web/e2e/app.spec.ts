@@ -1744,6 +1744,17 @@ for (const mobile of [false, true]) {
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
       await page.screenshot({ path: testInfo.outputPath('trusted-settings.png') })
     })
+    test('trusted deep link selects the named workspace in another organization', async ({ page }) => {
+      await page.route('**/api/workspaces/ws-2/policy-provider', (route) => ok(route, {
+        provider: { ...provider('provider_operator'), workspace_id: 'ws-2' }, capabilities: [capability], cache: {},
+      }))
+      await page.goto('/orgs/org-2/workspaces/ws-2#policy-provider')
+      await expect(page.getByRole('heading', { name: 'Experiments', exact: true })).toBeVisible()
+      await expect(block(page)).toContainText('Current: Provider operator')
+      await expect(block(page)).toContainText('Read only')
+      await expect(page.locator('#policy-provider')).toBeInViewport()
+      await expect(block(page).getByRole('button')).toHaveCount(0)
+    })
     test('canceling confirmation never writes', async ({ page }) => {
       const requests = await installFixture(page)
       await page.goto(landing)
