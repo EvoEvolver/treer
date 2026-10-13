@@ -2666,8 +2666,34 @@ async fn persisted_names_are_applied_to_controller_snapshots() {
         .set_agent_name("workspace-a", "agent-a", "reviewer")
         .await
         .expect("store agent name");
+    let mut snapshot = security_test_snapshot();
+
+    store
+        .apply_server_name(&mut snapshot.server)
+        .await
+        .expect("apply machine name");
+    store
+        .apply_agent_names(&mut snapshot)
+        .await
+        .expect("apply agent names");
+    assert_eq!(snapshot.server.name, "build-machine");
+    assert_eq!(snapshot.agents[0].name, "reviewer");
+    store
+        .delete_agent("workspace-a", "agent-a")
+        .await
+        .expect("persist deletion");
+    snapshot.agents[0].name = "original-agent".to_string();
+    let deleted = store
+        .apply_agent_names(&mut snapshot)
+        .await
+        .expect("apply deletion");
+    assert_eq!(deleted, ["agent-a"]);
+    assert!(snapshot.agents.is_empty());
+}
+
+fn security_test_snapshot() -> AgentServerSnapshot {
     let now = Utc::now();
-    let mut snapshot = AgentServerSnapshot {
+    AgentServerSnapshot {
         server: ServerInfo {
             server_id: "server-a".to_string(),
             workspace_id: "workspace-a".to_string(),
@@ -2707,31 +2733,93 @@ async fn persisted_names_are_applied_to_controller_snapshots() {
             output_revision: 0,
             interface: None,
         }],
-    };
+    }
+}
 
+#[tokio::test]
+async fn controller_snapshot_cannot_cross_persisted_agent_identity_binding() {
+    let store = AuthStore::for_test("test-password").await;
+    store.seed_test_workspace("workspace-a").await;
+    store.seed_test_workspace("workspace-b").await;
+    for (workspace, server) in [("workspace-a", "server-b"), ("workspace-b", "server-a")] {
+        store
+            .create_agent_credential(workspace, server, "agent-a")
+            .await
+            .unwrap();
+        let mut snapshot = security_test_snapshot();
+        assert_eq!(
+            store
+                .validate_agent_event(&snapshot.agents[0])
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_identity_mismatch"
+        );
+        assert_eq!(
+            store
+                .apply_agent_names(&mut snapshot)
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_identity_mismatch"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM agent_names WHERE agent_id='agent-a'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "rejected inventory must not persist a name");
+        sqlx::query("DELETE FROM agent_credentials WHERE agent_id='agent-a'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
     store
-        .apply_server_name(&mut snapshot.server)
+        .set_agent_name("workspace-b", "agent-a", "legacy-victim")
         .await
-        .expect("apply machine name");
+        .unwrap();
+    assert_eq!(
+        store
+            .apply_agent_names(&mut security_test_snapshot())
+            .await
+            .unwrap_err()
+            .code(),
+        "agent_identity_mismatch"
+    );
+    sqlx::query("DELETE FROM agent_names WHERE agent_id='agent-a'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    // Matching identities and credential-less legacy inventory remain supported.
+    let mut snapshot = security_test_snapshot();
+    store.apply_agent_names(&mut snapshot).await.unwrap();
     store
-        .apply_agent_names(&mut snapshot)
+        .create_agent_credential("workspace-a", "server-a", "agent-a")
         .await
-        .expect("apply agent names");
+        .unwrap();
+    store.apply_agent_names(&mut snapshot).await.unwrap();
+    store
+        .validate_agent_event(&snapshot.agents[0])
+        .await
+        .unwrap();
+}
 
-    assert_eq!(snapshot.server.name, "build-machine");
-    assert_eq!(snapshot.agents[0].name, "reviewer");
-
-    store
-        .delete_agent("workspace-a", "agent-a")
-        .await
-        .expect("persist deletion");
-    snapshot.agents[0].name = "original-agent".to_string();
-    let deleted = store
-        .apply_agent_names(&mut snapshot)
-        .await
-        .expect("apply deletion");
-    assert_eq!(deleted, ["agent-a"]);
-    assert!(snapshot.agents.is_empty());
+#[tokio::test]
+async fn controller_snapshot_rejects_nested_foreign_identity_before_name_write() {
+    let store = AuthStore::for_test("test-password").await;
+    store.seed_test_workspace("workspace-a").await;
+    store.seed_test_workspace("workspace-b").await;
+    for (workspace, server) in [("workspace-b", "server-a"), ("workspace-a", "server-b")] {
+        let mut snapshot = security_test_snapshot();
+        snapshot.agents[0].workspace_id = workspace.into();
+        snapshot.agents[0].server_id = server.into();
+        assert!(store.apply_agent_names(&mut snapshot).await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_names")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
 }
 
 #[test]

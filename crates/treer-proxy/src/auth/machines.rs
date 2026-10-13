@@ -141,9 +141,33 @@ impl AuthStore {
         &self,
         snapshot: &mut AgentServerSnapshot,
     ) -> Result<Vec<String>, AuthFailure> {
+        // The authenticated socket binds the outer server, not its nested inventory.
+        // Reject forged identities before persisting names or updating routing state.
+        if snapshot.agents.iter().any(|agent| {
+            agent.workspace_id != snapshot.server.workspace_id
+                || agent.server_id != snapshot.server.server_id
+        }) {
+            return Err(AuthFailure::forbidden(
+                "agent_identity_mismatch",
+                "Controller inventory contains an Agent outside its machine scope",
+            ));
+        }
+        let agent_ids: Vec<&str> = snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.agent_id.as_str())
+            .collect();
         let mut tx = self
             .lock_workload_tree(&snapshot.server.workspace_id)
             .await?;
+        Self::validate_agent_bindings(
+            &snapshot.server.workspace_id,
+            &snapshot.server.server_id,
+            &agent_ids,
+            &mut tx,
+        )
+        .await?;
+        // Credential-less legacy inventory may still register previously unknown IDs.
         for agent in &snapshot.agents {
             sqlx::query("INSERT INTO agent_names(agent_id,workspace_id,name,updated_at) VALUES($1,$2,COALESCE((SELECT name FROM app_deployments WHERE workspace_id=$2 AND runtime_agent_id=$1 LIMIT 1),$3),$4) ON CONFLICT(agent_id) DO NOTHING").bind(&agent.agent_id).bind(&agent.workspace_id).bind(&agent.name).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await.map_err(AuthFailure::database)?;
         }
@@ -180,6 +204,46 @@ impl AuthStore {
             .agents
             .retain(|agent| !deleted_set.contains(agent.agent_id.as_str()));
         Ok(deleted)
+    }
+
+    pub(crate) async fn validate_agent_event(
+        &self,
+        agent: &treer_protocol::AgentInfo,
+    ) -> Result<(), AuthFailure> {
+        let mut connection = self.pool.acquire().await.map_err(AuthFailure::database)?;
+        Self::validate_agent_bindings(
+            &agent.workspace_id,
+            &agent.server_id,
+            &[&agent.agent_id],
+            &mut connection,
+        )
+        .await
+    }
+
+    async fn validate_agent_bindings(
+        workspace_id: &str,
+        server_id: &str,
+        agent_ids: &[&str],
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<(), AuthFailure> {
+        let foreign_binding: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_credentials WHERE agent_id = ANY($1) \
+             AND (workspace_id <> $2 OR server_id <> $3)) \
+             OR EXISTS(SELECT 1 FROM agent_names WHERE agent_id = ANY($1) AND workspace_id <> $2)",
+        )
+        .bind(agent_ids)
+        .bind(workspace_id)
+        .bind(server_id)
+        .fetch_one(connection)
+        .await
+        .map_err(AuthFailure::database)?;
+        if foreign_binding {
+            return Err(AuthFailure::forbidden(
+                "agent_identity_mismatch",
+                "Controller inventory conflicts with a persisted Agent identity",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn delete_agent(

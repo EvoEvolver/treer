@@ -25,6 +25,12 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
+- Controller snapshots and incremental Agent events are checked against durable
+  Agent credential bindings before changing routing state. Nested inventory must
+  match the authenticated machine's workspace and server ID. Unknown legacy
+  Agents without durable credentials remain supported; they are not proof of a
+  durable machine binding. Command responses must match their pending target
+  machine and arrive through a current machine connection.
 - An Agent can register or clear only its own Agent Interface Server. The
   Controller verifies the registered loopback manifest before advertising it and
   never forwards the workload credential to the interface. Its local recovery
@@ -39,9 +45,9 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
   separately. Context edges do not expand visibility.
 - Message bodies stay out of ordinary logs, audit payloads, domain events, and
   outbox envelopes. They remain plaintext in Core PostgreSQL.
-- Organization and workspace management plus successful lifecycle mutations
-  produce append-only audit events without prompts, terminal data, commands, or
-  secrets.
+- Organization and workspace management plus lifecycle mutations record
+  body-free audit events. Several lifecycle routes log and continue when audit
+  persistence fails; audit completeness and tamper-proof storage are not promised.
 - Machine exec and file upload require current workspace access and distinct
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
@@ -90,6 +96,34 @@ clients ignore environment proxies; external proxy variables are preserved for
 user tools, but are not a control-plane transport configuration.
 
 ## Unsupported Claims
+
+Treer does not currently provide deny-by-default workspace permissions. Absent
+an enforcing Policy, the default permits authenticated workspace actions; monitor
+mode does not enforce denials. Use explicit enforce-mode rules and treat workspace
+members and enrolled machines as trusted administrators until these are reviewed.
+
+Bearer service tokens can be replayed until expiry. Agent tokens and per-request
+human forwarding tokens last 60 seconds; human App OAuth tokens last 12 hours.
+Membership and service checks are not session revocation: logging out or resetting
+a password does not invalidate an already issued App JWT. Workload signature
+verification does not uniformly recheck Agent/machine revocation or current Policy.
+Do not claim immediate token revocation or single-use bearer tokens.
+
+PostgreSQL and NATS are trusted control-plane backends, not tenant isolation
+boundaries. Opaque login/admin/ingress sessions and signing-key metadata require
+confidential database access and backups. The Compose NATS service has no broker
+authentication; its published ports are loopback, but its private Docker network
+must also be trusted. Use network isolation, least-privilege backend credentials
+and transport protection for external backends. Treer does not guarantee global
+login throttling, workload quotas, bounded WebSocket backlogs, complete audit
+delivery, or protection against backend administrators modifying audit records.
+
+Proxy help hides configured administrator-password and NATS-URL environment
+values, alongside existing secret arguments. This is diagnostic hygiene, not a
+general guarantee of log redaction: arbitrary command/environment values and
+debug HTTP URLs may still contain user-provided secrets. Avoid dumping process
+environments, configuration files, request queries, or startup snapshots in support
+logs; protect log and backup access with the same account boundary as live secrets.
 
 Do not describe Treer as zero trust, mutually untrusted multi-tenancy,
 end-to-end encrypted from the Proxy, per-user provider credential isolation, or

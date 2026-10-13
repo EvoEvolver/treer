@@ -1,6 +1,82 @@
 use super::*;
 
 #[tokio::test]
+async fn command_results_require_the_target_machine_and_current_connection() {
+    let state = AppState::new();
+    let owner_id = Uuid::new_v4();
+    let intruder_id = Uuid::new_v4();
+    let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
+    let (intruder_tx, _intruder_rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance(test_server(), owner_id, "owner".into(), owner_tx)
+        .await
+        .unwrap();
+    let mut intruder = test_server();
+    intruder.server_id = "intruder".into();
+    state
+        .register_server_instance(intruder, intruder_id, "intruder".into(), intruder_tx)
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        async move {
+            state
+                .send_command("alpha", "server", AgentCommand::ShutdownMachine)
+                .await
+        }
+    });
+    let ProxyMessage::Command { envelope } =
+        serde_json::from_str(&expect_text(owner_rx.recv().await.unwrap())).unwrap()
+    else {
+        panic!("expected command");
+    };
+    let fake_result = CommandResult::success(
+        envelope.command_id.clone(),
+        serde_json::json!({"fake":true}),
+    );
+    assert_eq!(
+        state
+            .complete_command_from("alpha", "intruder", intruder_id, fake_result)
+            .await
+            .unwrap_err()
+            .code,
+        "command_identity_mismatch"
+    );
+    assert!(state
+        .inner
+        .pending
+        .lock()
+        .await
+        .contains_key(&envelope.command_id));
+    assert_eq!(
+        state
+            .complete_command_from(
+                "alpha",
+                "server",
+                Uuid::new_v4(),
+                CommandResult::success(envelope.command_id.clone(), serde_json::json!({}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "duplicate_machine_connection"
+    );
+    state
+        .complete_command_from(
+            "alpha",
+            "server",
+            owner_id,
+            CommandResult::success(envelope.command_id, serde_json::json!({"real":true})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        waiting.await.unwrap().unwrap(),
+        serde_json::json!({"real":true})
+    );
+}
+
+#[tokio::test]
 async fn old_controller_rejects_prompt_delivery_without_receiving_unknown_frames() {
     let state = AppState::new();
     let (tx, mut rx) = mpsc::unbounded_channel();

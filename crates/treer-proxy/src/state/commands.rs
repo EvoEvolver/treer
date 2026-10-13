@@ -137,6 +137,32 @@ impl AppState {
         .await
     }
 
+    pub async fn complete_command_from(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        connection_id: Uuid,
+        result: CommandResult,
+    ) -> Result<(), ProtocolError> {
+        self.require_current_connection(workspace_id, server_id, connection_id)
+            .await?;
+        let mut pending = self.inner.pending.lock().await;
+        if let Some(command) = pending.get(&result.command_id) {
+            if command.server.workspace_id != workspace_id || command.server.server_id != server_id
+            {
+                return Err(ProtocolError::new(
+                    "command_identity_mismatch",
+                    "command result does not belong to this machine",
+                ));
+            }
+        }
+        if let Some(command) = pending.remove(&result.command_id) {
+            let _ = command.result.send(result);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub async fn complete_command(&self, result: CommandResult) {
         if let Some(pending) = self.inner.pending.lock().await.remove(&result.command_id) {
             let _ = pending.result.send(result);

@@ -68,7 +68,7 @@ struct Args {
         help = "Fallback URL for platform binaries absent from the local artifact directory"
     )]
     release_artifact_base_url: Url,
-    #[arg(long, env = "ADMIN_PASSWORD")]
+    #[arg(long, env = "ADMIN_PASSWORD", hide_env_values = true)]
     admin_password: Option<String>,
     #[arg(long, env = "CLOUDFLARE_API_TOKEN", hide_env_values = true)]
     cloudflare_api_token: Option<String>,
@@ -107,6 +107,7 @@ struct Args {
     #[arg(
         long,
         env = "TREER_NATS_URL",
+        hide_env_values = true,
         help = "NATS server URL for domain events and multi-Proxy live routing"
     )]
     nats_url: Option<String>,
@@ -423,6 +424,57 @@ fn app_public_url(configured: Option<Url>, proxy_public_url: &Url) -> Result<Url
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_help_redacts_configured_credentials() {
+        if std::env::var_os("TREER_SECURITY_HELP_FIXTURE").is_some() {
+            let error = Args::try_parse_from(["treer-proxy", "--help"]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+            let help = error.to_string();
+            for secret in [
+                "audit-admin-sentinel",
+                "audit-nats-sentinel",
+                "audit-db-sentinel",
+            ] {
+                assert!(
+                    !help.contains(secret),
+                    "help must not expose configured credentials"
+                );
+            }
+            for variable in ["ADMIN_PASSWORD", "TREER_NATS_URL", "DATABASE_URL"] {
+                assert!(
+                    help.contains(variable),
+                    "configuration names should remain discoverable"
+                );
+            }
+            return;
+        }
+        // Never inspect the test runner's real credential environment or mutate
+        // its global environment. Only the child receives synthetic secrets.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::proxy_help_redacts_configured_credentials",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("TREER_SECURITY_HELP_FIXTURE", "1")
+            .env("ADMIN_PASSWORD", "audit-admin-sentinel")
+            .env(
+                "TREER_NATS_URL",
+                "nats://audit:audit-nats-sentinel@127.0.0.1:1",
+            )
+            .env(
+                "DATABASE_URL",
+                "postgres://audit:audit-db-sentinel@127.0.0.1:1/audit",
+            )
+            .status()
+            .expect("run isolated help fixture");
+        assert!(
+            status.success(),
+            "credential redaction failed in isolated child"
+        );
+    }
 
     #[test]
     fn unspecified_listen_address_advertises_loopback_by_default() {

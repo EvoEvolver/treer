@@ -367,6 +367,10 @@ async fn handle(
             }
             AgentServerMessage::AgentEvent { agent } => {
                 if identity_matches(&identity, &agent.workspace_id, &agent.server_id) {
+                    if let Err(error) = auth.validate_agent_event(&agent).await {
+                        send_error(&outgoing_tx, error.into_parts().1);
+                        continue;
+                    }
                     if let Err(error) = state.apply_agent_event(connection_id, agent).await {
                         send_error(&outgoing_tx, error);
                     }
@@ -375,8 +379,13 @@ async fn handle(
                 }
             }
             AgentServerMessage::CommandResult { result } => {
-                if identity.is_some() {
-                    state.complete_command(result).await;
+                if let Some((workspace_id, server_id)) = identity.as_ref() {
+                    if let Err(error) = state
+                        .complete_command_from(workspace_id, server_id, connection_id, result)
+                        .await
+                    {
+                        send_error(&outgoing_tx, error);
+                    }
                 } else {
                     send_error(&outgoing_tx, identity_error());
                 }
