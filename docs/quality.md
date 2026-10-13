@@ -277,3 +277,16 @@ path; Node 22+ must be installed in that CI job. Filtered Host/PTY inheritance i
 tested independently with synthetic machine/operator/enrollment credentials.
 Unix runs do not constitute native Windows execution evidence; record the
 Windows CI result separately before claiming that platform verified.
+
+The ignored `windows_powershell_exec_diagnostics` probe records only synthetic
+output, names/existence, exit codes, timeouts and durations. Native runs
+38477160912/38477787941 showed that no PSModulePath caused output/RNG probes to
+time out, while adding that one variable restored them with either NUL or a
+closed input pipe. Ordinary versus verbatim cwd made no difference; Node worked
+with both. No production cwd conversion was added. Regular Windows smoke tests
+retain strict exit/timeout assertions and exercise version, presence and RNG;
+an actual Controller-spawned Node/Rust child asserts the initial module path
+equals the fixed system directory, while PowerShell asserts that its startup
+search still contains it. Native PowerShell may add account-default directories;
+that does not excuse a failure of the initial environment equality assertion.
+Diagnosis is not the full release gate.

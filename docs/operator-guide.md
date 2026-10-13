@@ -1235,6 +1235,14 @@ a sandbox: monitor/allow Policy can still permit ordinary sensitive files inside
 that root, and direct same-account OS access remains unrestricted.
 
 Windows machine exec has a 30-second ceiling and is owned by the Controller.
+Windows PowerShell 5.1 receives a fixed system module search directory from
+Win32 rather than an inherited PSModulePath. The path supplied by Treer excludes
+`ProgramFiles/WindowsPowerShell/Modules` and user Documents modules;
+third-party `Install-Module` auto-loading is not part of this baseline. Extra
+module configuration requires a separate explicit design. PowerShell can
+reconstruct its environment during startup, so the environment boundary is
+not a module-execution sandbox. `-NoProfile` skips profile scripts; it does not
+remove the native runtime's OS/module initialization requirements.
 Running `service restart-controller` inside that exec can lose its reply when
 the Controller is replaced, even if restart succeeded. Run activation from a
 host terminal or a Host-owned managed command instead; inspect its output after

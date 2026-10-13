@@ -121,6 +121,25 @@ they never receive machine/enrollment/operator credential placeholders from the
 Controller. Previously those names were inserted with empty values: names alone
 were not evidence that the actual service secrets leaked.
 
+For Windows PowerShell 5.1, machine exec does not inherit `PSModulePath`.
+Treer supplies only `System32/WindowsPowerShell/v1.0/Modules` under the Windows
+installation directory returned by Win32, and also corrects SystemRoot/windir
+from that query. It does not read an OS environment block or trust caller or
+registry overrides for this directory. Symlink/reparse indirection in the
+system module directory is rejected. Logs record source/count or an OS error
+code, never directory values. No CurrentUser/Documents or
+`ProgramFiles/WindowsPowerShell/Modules` path is supplied by Treer; automatically
+loading third-party `Install-Module` installations is outside this default
+baseline, and explicit extra-module configuration needs a separate design.
+PowerShell itself can reconstruct module search paths during startup; this
+initial environment is not a sandbox or a promise that native runtime state
+cannot change. System-module integrity depends on OS directory protections,
+not protection from administrators or same-account processes with write access.
+In particular, Windows PowerShell 5.1 may add that account's default CurrentUser
+and AllUsers module directories; Treer does not restrict that native auto-loading.
+Use a separate OS account/container when those account-owned modules must be
+isolated from Agents.
+
 This reduces ambient environment exposure, not machine-account authority. Exec
 still runs as the machine's OS user and can read that user's accessible files,
 including local CLI configuration; omitting a credential from its environment
@@ -178,6 +197,10 @@ separate OS accounts/containers where that authority is not appropriate.
   `install.ps1` itself refuses cleartext non-loopback artifact origins.
 
 ## Unsupported Claims
+
+Treer does not constrain Windows PowerShell's startup reconstruction or automatic
+loading of that account's default CurrentUser/AllUsers modules. Its fixed exec
+module environment is not a native-runtime sandbox.
 
 Public Unix and Windows bootstrap installers check SHA256 hashes from the same
 artifact origin before installation; Windows also checks matching build identities.

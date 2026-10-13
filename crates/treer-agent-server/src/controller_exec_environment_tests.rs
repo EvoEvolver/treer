@@ -75,7 +75,8 @@ fn machine_exec_does_not_inherit_credentials_or_inject_empty_identity_variables(
     }
     child
         .env("HTTP_PROXY", "http://127.0.0.1:1")
-        .env("HTTPS_PROXY", "http://127.0.0.1:1");
+        .env("HTTPS_PROXY", "http://127.0.0.1:1")
+        .env("PSModulePath", "synthetic-user-writable-module-path");
     let output = child.output().unwrap();
     assert!(
         output.status.success(),
@@ -169,6 +170,19 @@ fn machine_exec_child_fixture() {
             "missing Windows baseline {name}"
         );
     }
+    #[cfg(windows)]
+    {
+        let root = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let expected = root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("Modules");
+        assert!(
+            std::env::var_os("PSModulePath") == Some(expected.into_os_string()),
+            "Controller child module path is not the fixed system directory"
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -178,11 +192,16 @@ async fn windows_machine_exec_node_and_powershell_keep_os_baseline() {
     let (runtime, host) = runtime_for_exec(&root).await;
     for (command,args,expected) in [
         ("node",vec!["-e","const assert=require('node:assert'); for(const k of ['SystemRoot','windir','USERPROFILE','APPDATA','LOCALAPPDATA']) assert.ok(process.env[k],k); assert.ok(!Object.keys(process.env).some(k=>k.toUpperCase().startsWith('TREER_'))); console.log(1+1)"],"2"),
+        ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$PSVersionTable.PSVersion) { exit 2 }; Write-Output 'powershell-version-ok'; exit 0"],"powershell-version-ok"),
+        ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE -or !$env:PSModulePath) { exit 2 }; Write-Output 'powershell-baseline-ok'; exit 0"],"powershell-baseline-ok"),
+        ("node",vec!["-e","const a=require('node:assert'); const p=require('node:path'); a.equal(process.env.PSModulePath,p.win32.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','Modules')); console.log('node-module-path-equal=True')"],"node-module-path-equal=True"),
+        ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","$expected=[IO.Path]::Combine($env:SystemRoot,'System32\\WindowsPowerShell\\v1.0\\Modules'); $contains=@($env:PSModulePath -split ';' | Where-Object { [string]::Equals($_,$expected,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0; Write-Output ('powershell-system-module-present=' + $contains); if (!$contains) { exit 3 }; exit 0"],"powershell-system-module-present=True"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE) { exit 2 }; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); Write-Output 'powershell-ok'"],"powershell-ok"),
         ("tasklist.exe",vec!["/FI","PID eq 0","/NH"],""),
     ] {
         let response = runtime.exec_machine(MachineExecRequest { cwd:".".into(),command:command.into(),args:args.into_iter().map(str::to_owned).collect(),timeout_ms:30_000 }).await.unwrap();
-        assert_eq!(response.exit_code,Some(0),"{command} failed: {}",response.stderr);
+        assert!(!response.timed_out, "{command} timed out after {}ms: exit={:?} stdout={:?} stderr={:?}",response.duration_ms,response.exit_code,response.stdout,response.stderr);
+        assert_eq!(response.exit_code,Some(0),"{command} failed after {}ms: stdout={:?} stderr={:?}",response.duration_ms,response.stdout,response.stderr);
         assert!(response.stdout.contains(expected),"{command} did not complete its smoke check");
     }
     host.abort();

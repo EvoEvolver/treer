@@ -109,9 +109,96 @@ pub fn machine_exec_variable_allowed(name: &str) -> bool {
 }
 
 pub fn machine_exec_environment() -> BTreeMap<OsString, OsString> {
-    std::env::vars_os()
+    let environment = std::env::vars_os()
         .filter(|(key, _)| machine_exec_variable_allowed(&key.to_string_lossy()))
-        .collect()
+        .collect();
+    #[cfg(windows)]
+    return windows_system_exec_environment(
+        environment,
+        super::windows::system_windows_directory(),
+    );
+    #[cfg(not(windows))]
+    environment
+}
+
+/// No environment-block reading: fixed OS installation paths only. Caller
+/// module paths are not an opt-in; arbitrary modules need a separate design.
+#[cfg(any(windows, test))]
+fn windows_system_exec_environment(
+    mut environment: BTreeMap<OsString, OsString>,
+    system: std::io::Result<std::path::PathBuf>,
+) -> BTreeMap<OsString, OsString> {
+    environment.retain(|name, _| !name.to_string_lossy().eq_ignore_ascii_case("PSMODULEPATH"));
+    let system = match system {
+        Ok(system) => system,
+        Err(error) => {
+            tracing::warn!(
+                os_error = error.raw_os_error(),
+                "Windows installation directory unavailable; module path omitted"
+            );
+            return environment;
+        }
+    };
+    environment.retain(|name, _| {
+        !matches!(
+            name.to_string_lossy().to_ascii_uppercase().as_str(),
+            "SYSTEMROOT" | "WINDIR"
+        )
+    });
+    environment.insert("SystemRoot".into(), system.clone().into_os_string());
+    environment.insert("windir".into(), system.clone().into_os_string());
+    let modules = system
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("Modules");
+    if system_module_directory_is_valid(&modules) {
+        environment.insert("PSModulePath".into(), modules.into_os_string());
+        tracing::debug!(
+            source = "system_default",
+            segments = 1,
+            "Configured Windows PowerShell module search"
+        );
+    } else {
+        tracing::warn!(
+            source = "system_default",
+            segments = 0,
+            "Windows system module directory unavailable"
+        );
+    }
+    environment
+}
+
+#[cfg(any(windows, test))]
+fn system_module_directory_is_valid(path: &std::path::Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let mut prefix = std::path::PathBuf::new();
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return false;
+        }
+        prefix.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&prefix) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() {
+            return false;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return false;
+            }
+        }
+    }
+    path.is_dir()
 }
 
 /// Call only from synchronous binary entry points, before creating threads or
@@ -146,6 +233,59 @@ pub fn clean_process_environment_before_threads() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_system_modules_ignore_caller_paths_and_systemroot_overrides() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("trr-system-modules-{}", std::process::id()));
+        let modules = root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("Modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        let source = BTreeMap::from([
+            ("PSModulePath".into(), "synthetic-user-module-path".into()),
+            (
+                "psmodulepath".into(),
+                "synthetic-workspace-module-path".into(),
+            ),
+            ("SYSTEMROOT".into(), "synthetic-caller-systemroot".into()),
+        ]);
+        let environment = windows_system_exec_environment(source, Ok(root.clone()));
+        assert_eq!(
+            environment[&OsString::from("PSModulePath")],
+            modules.into_os_string()
+        );
+        assert_eq!(
+            environment[&OsString::from("SystemRoot")],
+            root.clone().into_os_string()
+        );
+        assert!(!environment.contains_key(&OsString::from("psmodulepath")));
+        assert!(
+            !machine_exec_variable_allowed("PSModulePath"),
+            "caller module paths must remain outside inheritance allowlist"
+        );
+        let failed = windows_system_exec_environment(
+            BTreeMap::from([("PSModulePath".into(), "synthetic-caller-modules".into())]),
+            Err(std::io::Error::from_raw_os_error(5)),
+        );
+        assert!(!failed.contains_key(&OsString::from("PSModulePath")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_module_validation_rejects_symlink_indirection() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("trr-module-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("user-writable")).unwrap();
+        std::os::unix::fs::symlink(root.join("user-writable"), root.join("alias")).unwrap();
+        assert!(!system_module_directory_is_valid(&root.join("alias")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn machine_exec_allowlist_keeps_windows_baseline_and_drops_all_treer_identity() {
@@ -193,6 +333,7 @@ mod tests {
             "DYLD_INSERT_LIBRARIES",
             "AWS_SECRET_ACCESS_KEY",
             "SSH_AUTH_SOCK",
+            "PSModulePath",
         ] {
             assert!(
                 !machine_exec_variable_allowed(name),
