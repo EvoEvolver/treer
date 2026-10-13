@@ -1547,3 +1547,27 @@ test("startup command fits 390px and short screens with long argv and errors", a
   await expect(command).toHaveValue(/long literal value/)
   await page.screenshot({ path: testInfo.outputPath("startup-desktop.png") })
 })
+
+test('untrusted Agent names render as text without running markup', async ({ page }) => {
+  const payload = '<img src=x onerror="window.fakeXss=true">'
+  await page.route('**/api/workspaces/ws-1/snapshot', (route) => ok(route, { ...snapshot, agents: [{ ...agentA, name: payload, path: '/' + payload }] }))
+  await page.goto('/')
+  await expect(page.getByRole('treeitem', { name: payload, exact: true })).toBeVisible()
+  expect(await page.evaluate(() => (window as Window & { fakeXss?: boolean }).fakeXss)).toBeUndefined()
+  expect(await page.locator('img[onerror]').count()).toBe(0)
+})
+
+test('authorization return rejects external, credential and fragment destinations', async ({ page }) => {
+  await page.goto('/')
+  const results = await page.evaluate(async () => {
+    const { authorizationReturnUrl } = await import('/src/lib/control-plane.ts')
+    const { proxyUrl } = await import('/src/lib/api.ts')
+    const origin = new URL(proxyUrl('/')).origin
+    return ['https://outside.example.test/api/apps/oauth/authorize', origin + '/api/other', origin.replace('://', '://user:fake@') + '/api/apps/oauth/authorize', origin + '/api/apps/oauth/authorize#fake', origin + '/api/apps/oauth/authorize?state=synthetic'].map((value) => {
+      history.replaceState(null, '', '?return_to=' + encodeURIComponent(value))
+      return authorizationReturnUrl()
+    })
+  })
+  expect(results.slice(0, 4)).toEqual([null, null, null, null])
+  expect(results[4]).toContain('/api/apps/oauth/authorize?state=synthetic')
+})

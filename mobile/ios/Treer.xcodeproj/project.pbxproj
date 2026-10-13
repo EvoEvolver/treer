@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A20261012AEC000000000001 /* SessionCookie.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20261012AEC000000000002 /* SessionCookie.swift */; };
 		022635868344CEB1606D8F2E /* ConfirmCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A9902E841A1E1A9B3555612 /* ConfirmCardTests.swift */; };
 		0CBD152E55FF46C4EBA35260 /* TerminalFrames.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DB110D6408FE8624CFA7DA3 /* TerminalFrames.swift */; };
 		0F84B13B98CE672FB81D958D /* HomeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6520830D00753E2C3B7CF2 /* HomeScreen.swift */; };
@@ -63,6 +64,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A20261012AEC000000000002 /* SessionCookie.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCookie.swift; sourceTree = "<group>"; };
 		033E85C9B9D2604BD3C342F2 /* ProxySetupScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxySetupScreen.swift; sourceTree = "<group>"; };
 		04942358DCA05C474F0A6F3C /* JSONCoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONCoding.swift; sourceTree = "<group>"; };
 		06D786B3831E77CABBC4806C /* AppSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSession.swift; sourceTree = "<group>"; };
@@ -196,6 +198,7 @@
 			isa = PBXGroup;
 			children = (
 				E1F8EA51D60A5FABEEC8EA2A /* APIClient.swift */,
+				A20261012AEC000000000002 /* SessionCookie.swift */,
 				5A1B99A1CCDC37622D499C9F /* Attention.swift */,
 				8AEAD4F10B649AF66BD08364 /* ConfirmCard.swift */,
 				6C565F31B07363EB667CC926 /* EventSocket.swift */,
@@ -392,6 +395,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				37FC779A62F5574CC165FADF /* APIClient.swift in Sources */,
+				A20261012AEC000000000001 /* SessionCookie.swift in Sources */,
 				74268D6E67BC664055F9E90D /* AddMachineSheet.swift in Sources */,
 				10F1483F980076B8843042E3 /* AgentAISWebView.swift in Sources */,
 				A0B86BE61D5821D01FCC7AF5 /* AgentDetailScreen.swift in Sources */,

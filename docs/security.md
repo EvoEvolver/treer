@@ -109,6 +109,18 @@ secrets directly in argv; use files or a secret provider already protected for
 the machine account. Anyone with that account's authority can modify the same
 state or execute an equivalent command.
 
+Browser sandbox flags do not isolate trusted App or Agent Interface JavaScript
+from the user's Proxy authority. Embedded pages share the Proxy origin and can
+make authenticated requests to that origin; if the control plane is also hosted
+there, `allow-scripts` plus `allow-same-origin` permits access to the parent page.
+Native WebView bridges currently lack a complete frame-origin and navigation
+boundary. HttpOnly cookies prevent direct script reads, not authenticated API
+calls or bridge abuse. Do not open untrusted interfaces with a privileged user
+session. See the [2026-10-12 Web security review](research/2026-10-12-security-web.md)
+for local reproductions, remaining work, and verification limits. CSP and
+anti-framing headers are defense in depth, not evidence of a complete XSS,
+CSRF, or mobile WebView security audit.
+
 Apps do not create a security boundary. Managed Apps currently run through the
 same Host process runtime as command Agents, under the installing machine
 account. Externally managed Apps inherit their supervisor's authority.
@@ -247,9 +259,10 @@ workspace-authenticated Managed App UI tunnel, the Proxy issues a fresh
 issuing when membership is revoked. The App receives it in
 `X-Treer-Identity-Token`, so **App code can act as the current user through that
 service's App APIs until this token expires**. This is intentional delegation
-to trusted workspace code, not merely a login hint. App compromise exposes that
-short-lived, service-scoped authority; it does not reveal the platform login
-session or grant another App's audience. Apps must verify tokens and current
+to trusted workspace code, not merely a login hint. Exposure of this forwarded token grants that short-lived, service-scoped
+authority; the token itself does not reveal the platform login session or grant
+another App's audience. This token scope does not isolate browser-embedded App
+JavaScript from the Proxy-origin session authority described above. Apps must verify tokens and current
 membership on every request, avoid logging/persisting forwarded tokens, and
 apply their own data permissions. The 12-hour OAuth token is never used for
 per-request forwarding. Public ingress issues no human identity, even if the

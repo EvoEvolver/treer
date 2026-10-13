@@ -36,3 +36,19 @@ starts its own loopback Vite process and never reuses an existing server. Set
 The same-name Agent and startup editor cases cover desktop and 390px viewports;
 the long-command editor test writes desktop and mobile screenshots under the
 ignored `test-results/` directory for visual inspection.
+
+## Browser security boundary
+
+The Cloudflare Worker runs before every static/SPA response. It adds a fresh
+script nonce and CSP, denies framing, disables MIME sniffing and referrer
+transmission, and marks HTML/config/health as `no-store`. Do not cache rewritten
+HTML at an upstream edge: its script nonce must match its CSP. Nginx adds the
+anti-framing, MIME and referrer headers, but its static shell does not have the
+Worker's nonce-based script restriction. These changes require a normal release;
+source inspection and local Wrangler tests do not verify deployed Canary headers.
+
+App/Agent Interface iframes remain trusted code with Proxy-origin user authority.
+Their sandbox is not a tenant or user-session security boundary. See the
+[security review](../docs/research/2026-10-12-security-web.md). The security suite
+starts its own local-only Wrangler and uses synthetic identities; build the
+bundle before running `pnpm test:e2e security.spec.ts --workers=1`.

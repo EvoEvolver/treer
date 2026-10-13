@@ -1,3 +1,9 @@
+map $uri $treer_cache_control {
+    default "no-cache";
+    /health "no-store";
+    /config.json "no-store";
+}
+
 server {
     listen ${PORT};
     listen [::]:${PORT};
@@ -5,21 +11,20 @@ server {
 
     root /usr/share/nginx/html;
     index index.html;
+    add_header X-Frame-Options "DENY" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'; object-src 'none'; base-uri 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Cache-Control $treer_cache_control always;
 
     location = /health {
         default_type application/json;
-        add_header Cache-Control "no-store";
         return 200 '{"service":"treer-app","status":"ok"}';
     }
 
     location = /config.json {
         default_type application/json;
-        add_header Cache-Control "no-store";
         return 200 '{"proxy_url":"${TREER_PROXY_PUBLIC_URL}"}';
-    }
-
-    location = /index.html {
-        add_header Cache-Control "no-cache";
     }
 
     location / {

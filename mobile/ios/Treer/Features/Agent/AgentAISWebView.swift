@@ -181,18 +181,8 @@ final class AgentUIBridge: NSObject, ObservableObject, WKScriptMessageHandler {
     }
 
     func injectCookie(for proxy: URL, token: String) {
-        guard let host = proxy.host else { return }
-        let store = WKWebsiteDataStore.default().httpCookieStore
-        var properties: [HTTPCookiePropertyKey: Any] = [
-            .name: "treer_session",
-            .value: token,
-            .domain: host,
-            .path: "/",
-            .originURL: proxy
-        ]
-        if let cookie = HTTPCookie(properties: properties) {
-            store.setCookie(cookie)
-        }
+        guard let cookie = SessionCookie.make(for: proxy, token: token) else { return }
+        WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie)
     }
 
     static func relativePath(from rawURL: String) -> String {
