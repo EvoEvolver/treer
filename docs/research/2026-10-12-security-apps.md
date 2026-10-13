@@ -104,7 +104,9 @@ Reachability and operator configuration are explicit prerequisites below.
   checked compression format. Existing traversal/link/device/member-count and
   payload checks remain. Stream cap includes tar overhead; gzip/bzip2/xz/plain
   are supported, other compression autodetection is disabled. This bounds
-  expansion, not total CPU/concurrency/slow-client cost.
+  expansion, not total CPU/concurrency/slow-client cost. In particular an xz
+  decoder dictionary allocation is not bounded by the decoded-output limit;
+  container memory/CPU quotas remain necessary.
 
 ### A6 — P1: permissive local state and temporary-file modes (fixed in reviewed stores)
 
@@ -181,6 +183,28 @@ Reachability and operator configuration are explicit prerequisites below.
 - Recommendation/change: small fix: DOM nodes and `textContent` for all result
   fields; no interpolation of App/user strings into HTML.
 
+### A11 — P2 locally unproven dependency exploit paths (updated)
+
+- Phenomenon: release-eng's isolated lockfile audit identified Paper's
+  `proxy-addr` 2.0.7, `source-map-js` 1.2.1 and development `undici` 8.10.1,
+  plus Mail's development `source-map-js` 1.2.1. Upstream assigns critical/high
+  ratings; this review does **not** equate those ratings with proven Treer P0/P1.
+- Local reproduction: resolve the tracked locks and run `npm audit` / `pnpm audit`
+  in a private temporary HOME with scripts disabled for installation. Paper does
+  not enable Express `trust proxy`; the vulnerable trust-subnet configuration
+  was not found. Source-map-js and undici are development tooling dependencies,
+  not a demonstrated public App request exploit path.
+- Impact: vulnerable packages are present; build/tooling exposure or future
+  configuration changes may make their affected paths relevant.
+- Recommendation/change: small lockfile updates: Paper proxy-addr 2.0.8,
+  source-map-js 1.2.2 and undici 8.11.2; Mail source-map-js 1.2.2. No unrelated
+  dependency ranges or application authentication model changed. Fresh install,
+  Paper tests and Mail build verify compatibility; audit results are a dated
+  snapshot, not proof of vulnerability absence.
+- Primary references: [proxy-addr advisory](https://github.com/advisories/GHSA-jqcg-44mw-7w3h),
+  [source-map-js release](https://github.com/7rulnik/source-map-js/releases/tag/v1.2.2),
+  [undici security release](https://github.com/nodejs/undici/releases/tag/v8.10.2).
+
 ## Other inspected boundaries and limits
 
 - Soul rejects absolute/traversing paths, links and special files before storing
@@ -193,7 +217,7 @@ Reachability and operator configuration are explicit prerequisites below.
   workloads, not a safe rendering sandbox. No guarantee about all dependencies
   or native compiler vulnerabilities is inferred from this review.
 - App OAuth callback URLs come from operator configuration. Mail return paths
-  are relative and reject `//`/external URLs; Issues/Soul use their configured
+  accept only the App root `/` and reject other paths/external URLs; Issues/Soul use their configured
   App root. No local open redirect was demonstrated. Core OAuth/PKCE code is
   owned/audited separately, not certified by these App tests.
 - Soul/Issues/email-endpoint validate supplied identities before falling back
@@ -226,3 +250,53 @@ Focused component suites and documentation check results are recorded in the
 final validation section before merge. Browser tests use only fake local Proxy
 identity/OAuth behavior, not deployed Treer login. Security-boundary changes
 require core-dev/release-eng review before merging.
+
+### Remaining P2: Mail history inspection also acknowledges deliveries
+
+`recent_messages()` currently calls Core receive/ack while handling
+`GET /api/messages`. Source inspection and the fake-Proxy Mail test show the
+side effect. A reachable top-level browser navigation can therefore change the
+signed-in human's read/unread delivery state; it does not disclose the response
+to a foreign origin or grant message-send authority. Move acknowledgement to an
+explicit protected POST/read action in a follow-up that also defines the UI's
+read-state behavior (small-to-medium UI/API change). The new POST guards do not
+claim to remove this existing GET side effect.
+
+## Completed validation and cross-review
+
+| Local check | Result |
+| --- | --- |
+| Cross-App synthetic security regressions | 9 passed |
+| Soul server / client | 11 / 14 passed |
+| Issues / Mail / Policy | 8 / 5 / 5 passed |
+| email-endpoint API/CLI | 16 passed, fake Proxy/outbox only |
+| Telegram / Tower / Gits | 8 / 5 / 3 passed |
+| Paper after fresh updated-lock installation | 19 passed |
+| Mail updated-lock installation and TypeScript/Vite build | passed |
+| Paper npm audit / Mail pnpm audit, 2026-10-12 review | zero reported advisories after updates |
+| Soul browser ingress + iframe, desktop/390px | 4 passed |
+| Policy guarded writes/text rendering, desktop/390px | 2 passed |
+| Mail injected-human ingress + iframe, desktop/390px | 4 passed |
+| email-endpoint browser OAuth/PKCE, replies, ingress/iframe, desktop/390px | passed |
+| Documentation checker and diff whitespace check | passed |
+
+Component commands ran with cleared runtime/proxy variables or an allowlisted
+private temporary HOME environment. Initial fresh Paper browser tests could not
+find the browser cache under that private HOME; rerun explicitly selecting the
+installed test-browser cache passed. A first Mail mobile selector targeted a
+hidden list preview; checking the visible message article passed. Neither was a
+product security failure. No provider/harness login or real secret was used.
+
+Screenshots are local-only artifacts under `/tmp/apps-security-browser/`
+(Policy/Mail), `/tmp/email-endpoint-browser/` and the Soul browser test artifact
+directory. Narrow Policy text rendering was inspected; the malicious synthetic
+rule ID remains literal text. App fake-gateway tests are not a claim of deployed
+Proxy or production OAuth validation. No Rust/Core tests or online probes were
+run for this Apps-only change.
+
+core-dev reviewed `df14efd` and independently ran the 9 boundary tests;
+Core Message `msg_bc122dabb6b942a2985766913e5facc4` approves merge, calls out the
+operator capability containment (not workspace-role authorization), and notes
+xz dictionary/CPU limits. The security-model owner carries the matching
+Unsupported Claims update in the separate `security-core` change. Lockfile
+and browser-test follow-ups do not grant new authority.

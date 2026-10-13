@@ -50,3 +50,7 @@ OAuth tokens: encrypt disks/backups and restrict backup permissions. Managed
 Apps share their OS account's authority; use a separate unprivileged user or
 container/VM on machines running critical services. No comprehensive per-user
 rate/concurrency limit or encryption-at-rest is provided by Mail itself.
+
+Known read-state limitation: `GET /api/messages` currently acknowledges visible
+Core deliveries. It should be replaced by an explicit protected POST read action;
+the current GET is not a strictly side-effect-free inspection endpoint.

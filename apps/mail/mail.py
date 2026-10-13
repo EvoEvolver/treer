@@ -651,7 +651,11 @@ class MailHandler(BaseHTTPRequestHandler):
 
     def _session(self) -> BrowserSession:
         if "X-Treer-Identity-Token" in self.headers or "Authorization" in self.headers:
-            token = self.headers.get("X-Treer-Identity-Token") if "X-Treer-Identity-Token" in self.headers else self.headers.get("Authorization", "").removeprefix("Bearer ")
+            if "X-Treer-Identity-Token" in self.headers:
+                token = self.headers.get("X-Treer-Identity-Token")
+            else:
+                value = self.headers.get("Authorization", "")
+                token = value[7:] if value.startswith("Bearer ") else None
             c = self.server.application.verify_human(token)
             return BrowserSession("", token, c["workspace_id"], c["service_id"], c["sub"], c["name"], c["role"], c["exp"])
         return self.server.application.authenticated_session(self._raw_session())

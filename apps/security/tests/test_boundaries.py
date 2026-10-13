@@ -62,6 +62,20 @@ class Boundaries(unittest.TestCase):
             self.assertEqual(app.authenticated_session(raw).user_id,'u_test')
             with self.assertRaises(mail.MailError):app.finish_oauth('synthetic-code',state,browser='browser-owner')
 
+    def test_mail_rejects_invalid_human_claims_and_removed_members(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as tmp:
+            app=self.mail_app(Path(tmp))
+            app.config=replace(app.config,workspace_id='ws_test')
+            original=app.api.request
+            for changes in ({'service_id':'svc_other'},{'workspace_id':'ws_other'},{'principal_kind':'agent'},{'exp':1},{'sub':'absent'}):
+                def request(method,path,**kwargs):
+                    response=original(method,path,**kwargs)
+                    if path.endswith('/identity/verify'):response['claims'].update(changes)
+                    return response
+                app.api.request=request
+                with self.assertRaises(mail.MailError):app.verify_human('synthetic-human')
+
     def test_policy_default_read_only_and_no_identity_header_bypass(self):
         with tempfile.TemporaryDirectory() as tmp:
             policy.PolicyHandler.store=policy.PolicyStore(Path(tmp)/'policy.json','ws_test')
@@ -128,7 +142,9 @@ class Boundaries(unittest.TestCase):
         import base64
         self.assertTrue(secrets.scan_secrets(fake))
         self.assertEqual(secrets.scan_secrets(base64.b64encode(fake)),{})
-        self.assertEqual(secrets.scan_secrets(json.dumps({'token':'sk-'+'\\u0073yntheticToken12345'}).encode()),{})
+        encoded=b'{"token":"sk-\\u0073yntheticToken12345"}'
+        self.assertEqual(json.loads(encoded)['token'],fake.decode())
+        self.assertEqual(secrets.scan_secrets(encoded),{})
 
     def test_issues_oauth_browser_state_and_legacy_migration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,4 +201,3 @@ class Boundaries(unittest.TestCase):
             finally:os.umask(previous)
 
 if __name__=='__main__':unittest.main()
-
