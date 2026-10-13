@@ -233,3 +233,14 @@ a test that returns early is not distributed-path evidence. Configured raw-TCP
 allocation tests additionally require an isolated port range and are ignored by
 default. Local cold-Host tests do not prove physical reboot, OS boot-manager,
 public DNS/TLS, or production firewall behavior; record those separately.
+
+Machine exec environment regressions use a polluted synthetic parent and the
+real `ControllerRuntime::exec_machine` subprocess path. They assert absence of
+all Treer/UI variables, including former empty credential placeholders, and
+verify Agent/App launch templates retain only their own workload identity.
+Windows native tests additionally run Node arithmetic and baseline assertions,
+Windows PowerShell crypto initialization, and `tasklist` using the same exec
+path; Node 22+ must be installed in that CI job. Filtered Host/PTY inheritance is
+tested independently with synthetic machine/operator/enrollment credentials.
+Unix runs do not constitute native Windows execution evidence; record the
+Windows CI result separately before claiming that platform verified.

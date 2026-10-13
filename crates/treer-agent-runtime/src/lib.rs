@@ -836,6 +836,8 @@ mod tests {
             .env("TREER_WORKLOAD_CREDENTIAL", "old-credential")
             .env("TREER_AGENT_ID", "old-agent")
             .env("TREER_MACHINE_TOKEN", "old-machine-token")
+            .env("TREER_OPERATOR_CREDENTIAL", "old-operator-credential")
+            .env("TREER_ENROLLMENT_KEY", "old-enrollment-key")
             .env("ALL_PROXY", "http://127.0.0.1:1")
             .output()
             .unwrap();
@@ -901,9 +903,24 @@ mod tests {
             "AGENT_UI_INSTANCE_ID",
             "CODEX_UI_THREAD_ID",
             "TREER_MACHINE_TOKEN",
+            "TREER_OPERATOR_CREDENTIAL",
+            "TREER_ENROLLMENT_KEY",
             "ALL_PROXY",
         ] {
             assert!(std::env::var_os(name).is_none(), "inherited {name}");
+        }
+        #[cfg(windows)]
+        for name in [
+            "SystemRoot",
+            "windir",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+        ] {
+            assert!(
+                std::env::var_os(name).is_some(),
+                "missing Windows baseline {name}"
+            );
         }
         assert_eq!(std::env::var("TREER_AGENT_ID").unwrap(), "new-agent");
         assert_eq!(

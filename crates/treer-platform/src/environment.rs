@@ -53,6 +53,64 @@ pub fn inherited_environment() -> BTreeMap<OsString, OsString> {
         .collect()
 }
 
+/// Machine exec is not a workload identity. Pass only the OS/session baseline,
+/// never the Controller's service configuration, credentials or loader hooks.
+/// Names are compared without case so mixed-case Windows variables survive.
+pub fn machine_exec_variable_allowed(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    name.starts_with("LC_")
+        || matches!(
+            name.as_str(),
+            "PATH"
+                | "HOME"
+                | "USER"
+                | "LOGNAME"
+                | "SHELL"
+                | "LANG"
+                | "TMPDIR"
+                | "TEMP"
+                | "TMP"
+                | "TERM"
+                | "XDG_CONFIG_HOME"
+                | "XDG_CACHE_HOME"
+                | "XDG_DATA_HOME"
+                | "XDG_STATE_HOME"
+                | "XDG_RUNTIME_DIR"
+                | "SYSTEMROOT"
+                | "WINDIR"
+                | "SYSTEMDRIVE"
+                | "COMSPEC"
+                | "PATHEXT"
+                | "USERPROFILE"
+                | "USERNAME"
+                | "USERDOMAIN"
+                | "USERDOMAIN_ROAMINGPROFILE"
+                | "APPDATA"
+                | "LOCALAPPDATA"
+                | "ALLUSERSPROFILE"
+                | "PROGRAMDATA"
+                | "PROGRAMFILES"
+                | "PROGRAMFILES(X86)"
+                | "PROGRAMW6432"
+                | "COMMONPROGRAMFILES"
+                | "COMMONPROGRAMFILES(X86)"
+                | "COMMONPROGRAMW6432"
+                | "COMPUTERNAME"
+                | "OS"
+                | "PROCESSOR_ARCHITECTURE"
+                | "PROCESSOR_ARCHITEW6432"
+                | "NUMBER_OF_PROCESSORS"
+                | "PROCESSOR_LEVEL"
+                | "PROCESSOR_REVISION"
+        )
+}
+
+pub fn machine_exec_environment() -> BTreeMap<OsString, OsString> {
+    std::env::vars_os()
+        .filter(|(key, _)| machine_exec_variable_allowed(&key.to_string_lossy()))
+        .collect()
+}
+
 /// Call only from synchronous binary entry points, before creating threads or
 /// the Tokio runtime. Child launchers should use env_clear + inherited_environment.
 pub fn clean_process_environment_before_threads() -> std::io::Result<()> {
@@ -85,6 +143,58 @@ pub fn clean_process_environment_before_threads() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_exec_allowlist_keeps_windows_baseline_and_drops_all_treer_identity() {
+        for name in [
+            "SystemRoot",
+            "windir",
+            "USERPROFILE",
+            "USERNAME",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "ProgramData",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "COMPUTERNAME",
+            "ComSpec",
+            "PATHEXT",
+            "PATH",
+            "HOME",
+            "LC_MESSAGES",
+        ] {
+            assert!(
+                machine_exec_variable_allowed(name),
+                "missing OS baseline {name}"
+            );
+        }
+        for name in [
+            "TREER_MACHINE_TOKEN",
+            "treer_operator_credential",
+            "TREER_ENROLLMENT_KEY",
+            "TREER_WORKLOAD_CREDENTIAL",
+            "TREER_SERVER_ID",
+            "TREER_WORKSPACE_ID",
+            "TREER_PROXY_URL",
+            "TREER_BIN",
+            "AGENT_UI_SESSION_ID",
+            "CODEX_UI_THREAD_ID",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "AWS_SECRET_ACCESS_KEY",
+            "SSH_AUTH_SOCK",
+        ] {
+            assert!(
+                !machine_exec_variable_allowed(name),
+                "unexpected exec variable {name}"
+            );
+        }
+    }
 
     #[test]
     fn strips_identity_ui_and_loopback_proxies_but_preserves_service_configuration() {

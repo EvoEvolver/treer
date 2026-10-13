@@ -1109,6 +1109,12 @@ machine and returns JSON containing stdout, stderr, exit code, duration,
 timeout, and truncation state. Its working directory is relative to the Host
 root. It defaults to a 30-second timeout, caps each output stream at 64 KiB, and
 does not load shell syntax unless the executable is an explicit shell.
+Exec receives only an OS/session baseline, including Windows system and user
+profile variables. It receives no `TREER_*` identity, proxy variables, provider
+tokens or Node/loader hooks; it is not an implicit way to act as the calling
+Agent. Configure additional tools explicitly in the command or a trusted wrapper.
+The command still has the machine OS user's filesystem authority, so this is
+environment hygiene rather than credential or filesystem isolation.
 
 The machine details page also uploads one file of up to 16 MiB into an existing
 directory beneath the Host root. Proxy sends the content to the Controller in

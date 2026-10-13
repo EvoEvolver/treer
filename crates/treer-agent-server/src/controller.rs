@@ -1571,12 +1571,6 @@ impl ControllerRuntime {
 
     fn process_environment(&self, agent: Option<(&str, &str)>) -> BTreeMap<String, String> {
         let mut env = BTreeMap::from([
-            ("TREER_MACHINE_TOKEN".to_string(), String::new()),
-            ("TREER_OPERATOR_CREDENTIAL".to_string(), String::new()),
-            ("TREER_ENROLLMENT_KEY".to_string(), String::new()),
-            ("TREER_WORKLOAD_CREDENTIAL".to_string(), String::new()),
-            ("TREER_AGENT_ID".to_string(), String::new()),
-            ("TREER_IDENTITY_MODE".to_string(), String::new()),
             (
                 "TREER_WORKSPACE_ID".to_string(),
                 self.inner.workspace_id.clone(),
@@ -1609,31 +1603,8 @@ impl ControllerRuntime {
         env
     }
 
-    fn machine_exec_environment(&self) -> BTreeMap<String, String> {
-        let mut env = self.process_environment(None);
-        for name in [
-            "HOME",
-            "USER",
-            "LOGNAME",
-            "SHELL",
-            "LANG",
-            "LC_ALL",
-            "LC_CTYPE",
-            "TMPDIR",
-            "TEMP",
-            "TMP",
-            "TERM",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-            "XDG_RUNTIME_DIR",
-        ] {
-            if let Ok(value) = std::env::var(name) {
-                env.insert(name.to_string(), value);
-            }
-        }
-        env
+    fn machine_exec_environment(&self) -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+        treer_platform::machine_exec_environment()
     }
 
     pub fn authenticate_agent(
@@ -2811,3 +2782,7 @@ fn workload_credential_matches(expected: &str, supplied: &str) -> bool {
 #[cfg(test)]
 #[path = "controller_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "controller_exec_environment_tests.rs"]
+mod exec_environment_tests;

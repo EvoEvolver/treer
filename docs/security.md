@@ -95,6 +95,23 @@ same-account access remains possible. The Controller's control-plane HTTP
 clients ignore environment proxies; external proxy variables are preserved for
 user tools, but are not a control-plane transport configuration.
 
+Machine `exec` uses a separate minimal OS environment allowlist. It carries no
+`TREER_*`, `AGENT_UI_*` or `CODEX_UI_*` identity/configuration, environment proxy,
+provider credential or loader-hook variables; it does not silently delegate the
+calling Agent's workload identity. Windows keeps the native system/profile
+baseline (including `SystemRoot`, `windir`, `USERPROFILE`, AppData, ProgramFiles,
+ComSpec and PATH) with case-insensitive name matching. Agent/App launches instead
+inherit the filtered Host baseline and receive their own fresh workload identity;
+they never receive machine/enrollment/operator credential placeholders from the
+Controller. Previously those names were inserted with empty values: names alone
+were not evidence that the actual service secrets leaked.
+
+This reduces ambient environment exposure, not machine-account authority. Exec
+still runs as the machine's OS user and can read that user's accessible files,
+including local CLI configuration; omitting a credential from its environment
+does not isolate it from that account. Restrict `machine.exec` using Policy and
+separate OS accounts/containers where that authority is not appropriate.
+
 - The administrator password is compared as fixed-length SHA-256 digests with a
   constant-time comparison, and sign-in for an unknown email verifies a decoy
   password hash. This reduces timing differences that reveal password length or
