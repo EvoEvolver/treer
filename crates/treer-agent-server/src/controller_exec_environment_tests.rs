@@ -37,6 +37,7 @@ async fn runtime_for_exec(root: &Path) -> (ControllerRuntime, tokio::task::JoinH
         },
         events,
         ControllerConfig {
+            protected_paths: vec![],
             workspace_id: "fixture-workspace".into(),
             server_id: "fixture-server".into(),
             agent_server_url: "http://127.0.0.1:1".into(),
