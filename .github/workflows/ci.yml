@@ -36,8 +36,10 @@ jobs:
           node --version
           powershell.exe -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Run frozen read-only diagnostics
+      - name: Test native OS baseline and strict machine exec
         run: |
-          cargo test --locked -p treer-agent-server --bin treer-agent-server controller::exec_environment_tests::windows_powershell_exec_diagnostics -- --exact --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/windows-exec-diagnostic.log"
+          cargo test --locked -p treer-platform -- --nocapture 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/windows-platform.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Select-String -LiteralPath "$env:RUNNER_TEMP/windows-exec-diagnostic.log" -SimpleMatch "production/startup:" -Quiet)) { throw "diagnostic test did not execute" }
+          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_machine_exec -- --nocapture 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/windows-exec.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -LiteralPath "$env:RUNNER_TEMP/windows-exec.log" -SimpleMatch 'windows_machine_exec_node_and_powershell_keep_os_baseline ... ok' -Quiet)) { throw 'strict native exec regression did not pass' }
