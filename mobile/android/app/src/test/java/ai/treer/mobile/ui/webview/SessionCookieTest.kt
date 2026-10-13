@@ -18,6 +18,8 @@ class SessionCookieTest {
     }
     @Test fun rejectsHeaderInjectionAndCredentialBearingUrls() {
         assertNull(sessionCookieHeader("https://proxy.example.test", "fake; Domain=example.test"))
+        assertNull(sessionCookieHeader("https://proxy.example.test", "fake\n"))
+        assertNull(sessionCookieHeader("https://proxy.example.test", "fake\r\n"))
         assertNull(sessionCookieHeader("https://user:fake@proxy.example.test", "synthetic-session"))
         assertNull(sessionCookieHeader("javascript:alert(1)", "synthetic-session"))
     }

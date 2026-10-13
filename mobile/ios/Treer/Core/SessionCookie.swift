@@ -7,7 +7,7 @@ enum SessionCookie {
         guard ["https", "http"].contains(proxy.scheme ?? ""), proxy.host != nil,
               proxy.user == nil, proxy.password == nil,
               !token.isEmpty,
-              token.range(of: "^[A-Za-z0-9_.~-]+$", options: .regularExpression) != nil
+              token.range(of: "[^A-Za-z0-9_.~-]", options: .regularExpression) == nil
         else { return nil }
         return "treer_session=\(token); Path=/; HttpOnly; SameSite=Strict" +
             (proxy.scheme == "https" ? "; Secure" : "")

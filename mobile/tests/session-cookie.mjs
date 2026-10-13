@@ -18,6 +18,8 @@ assert(SessionCookie.header(for: https, token: token)!.contains("SameSite=Strict
 assert(SessionCookie.make(for: URL(string: "http://127.0.0.1/")!, token: token)!.isHTTPOnly)
 assert(!SessionCookie.make(for: URL(string: "http://127.0.0.1/")!, token: token)!.isSecure)
 assert(SessionCookie.make(for: https, token: "fake; Domain=example.test") == nil)
+assert(SessionCookie.make(for: https, token: "fake\\n") == nil)
+assert(SessionCookie.make(for: https, token: "fake\\r\\n") == nil)
 assert(SessionCookie.make(for: URL(string: "https://user:fake@proxy.example.test/")!, token: token) == nil)
 assert(SessionCookie.make(for: URL(string: "javascript:alert(1)")!, token: token) == nil)
 print("Foundation session-cookie checks passed (synthetic values only)")
