@@ -60,6 +60,11 @@ fn windows_real_host_detached_restart_and_stop() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("windows process matrix completed: exec=4 command=4 app=4 restart=1"),
+        "isolated matrix must actually run, not pass an empty filter"
+    );
 }
 
 #[cfg(windows)]
@@ -181,7 +186,9 @@ async fn windows_isolated_host_fixture() {
         },
     )
     .unwrap();
+    let old_epoch = windows_wait_controller_epoch(&fixture.1, None).await;
     windows_check_process_paths(&runtime, &host, &fixture.0.executable, &fixture.1.workspace).await;
+    windows_wait_controller_epoch(&fixture.1, Some(&old_epoch)).await;
     let spawn = HostSpawnRequest {
         process_id: "survivor".into(),
         command: "powershell.exe".into(),
@@ -365,6 +372,24 @@ async fn windows_check_process_paths(
     let HostResponse::Synced { .. } = host.sync(Default::default()).await.unwrap() else {
         panic!("Host did not survive hot restart")
     };
+    println!("windows process matrix completed: exec=4 command=4 app=4 restart=1");
+}
+
+#[cfg(windows)]
+async fn windows_wait_controller_epoch(config: &ServiceConfig, previous: Option<&str>) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(epoch) = controller_epoch(config).await {
+            if Some(epoch.as_str()) != previous {
+                return epoch;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "isolated Controller did not expose a fresh epoch"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 #[test]

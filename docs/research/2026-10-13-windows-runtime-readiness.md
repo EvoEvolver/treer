@@ -14,7 +14,8 @@ not a macOS build or cross-target check.
    and rejects an existing reparse chain. Unix still defaults to cwd. Existing
    enrollments retain their saved root; an explicit conflicting root is rejected
    rather than silently ignored. Add offline `service relocate-root --root ...
-   --accept-workload-migration`, requiring a stopped Host and an existing target.
+   --accept-workload-migration`, Windows-only, requiring a stopped Host and an
+   existing target, serialized with Windows Host startup.
    Preserve machine ID, tokens, local address and saved startup state. No file
    copying, credential export, or service activation. Atomic individual config
    writes roll back on a reported second-write failure; service startup refuses

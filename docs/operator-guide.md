@@ -1217,7 +1217,10 @@ treer.exe machine show MACHINE_ID
 Stopping the Host terminates its Agents/Apps. Relocation preserves machine ID,
 credentials and saved startup state, but does not move files, rewrite cwd/absolute
 executable paths, or start anything. Check those paths and launcher installations
-before restore. Individual configuration writes are atomic; startup rejects a
+before restore. Reinstall the launcher in the new root and update saved profiles
+and startup paths explicitly; the old `.treer` directory is not moved or cleaned.
+`relocate-root` currently supports Windows only, using the same lock as Host
+startup. Individual configuration writes are atomic; startup rejects a
 Host/Controller root mismatch after an interrupted migration. Rerun relocation
 with the intended root while stopped to reconcile it. Changing root is not a
 side effect of transfer or binary installation. Treer root constraints do not make machine file access

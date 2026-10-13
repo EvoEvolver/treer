@@ -855,12 +855,20 @@ pub fn restart_controller(workspace: &str) -> Result<()> {
 }
 
 pub fn relocate_root(workspace: &str, root: &Path) -> Result<()> {
-    let (paths, config) = installed_service(workspace)?;
+    #[cfg(not(windows))]
+    {
+        let _ = (workspace, root);
+        bail!("service relocate-root currently supports Windows only");
+    }
     #[cfg(windows)]
-    let _lock = treer_platform::LocalLock::acquire(&config.server_id)?;
-    relocate_root_at(&paths, &config, root)
+    {
+        let (paths, config) = installed_service(workspace)?;
+        let _lock = treer_platform::LocalLock::acquire(&config.server_id)?;
+        relocate_root_at(&paths, &config, root)
+    }
 }
 
+#[cfg(any(windows, test))]
 fn relocate_root_at(paths: &ServicePaths, config: &ServiceConfig, root: &Path) -> Result<()> {
     if host_is_running(&config.host_socket) {
         bail!(
@@ -895,6 +903,7 @@ fn relocate_root_at(paths: &ServicePaths, config: &ServiceConfig, root: &Path) -
         return Err(error);
     }
     println!("treer: root updated; no files were moved and no service was started");
+    println!("treer: reinstall the launcher in the new root and review saved absolute startup/profile paths; the old .treer directory was not moved or cleaned");
     Ok(())
 }
 

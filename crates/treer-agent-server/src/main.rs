@@ -107,7 +107,9 @@ enum ServiceCommand {
     Restart,
     #[command(about = "Hot restart only the replaceable Controller")]
     RestartController,
-    #[command(about = "Change a stopped machine's root; does not move files or start services")]
+    #[command(
+        about = "Windows: change a stopped machine's root without moving files or starting services"
+    )]
     RelocateRoot {
         #[arg(long)]
         root: PathBuf,
