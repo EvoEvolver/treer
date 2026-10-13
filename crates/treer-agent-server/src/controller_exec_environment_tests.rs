@@ -271,3 +271,172 @@ async fn windows_artifact_powershell_diagnostics() {
     drop(runtime);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Full-parent inheritance is intentionally confined to a disposable GitHub
+/// runner. Do not run this diagnostic on an enrolled machine or managed Agent.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "isolated CI-only parent/child environment comparison; not a release gate"]
+async fn windows_artifact_powershell_environment_matrix() {
+    assert!(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"));
+    assert!(std::env::var("CI").as_deref() == Ok("true"));
+    let root = test_root();
+    let (runtime, host) = runtime_for_exec(&root).await;
+    let baseline = runtime.machine_exec_environment();
+    for name in ["USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+        eprintln!(
+            "environment-matrix variable={name} parent_equals_child={}",
+            baseline.get(std::ffi::OsStr::new(name)) == std::env::var_os(name).as_ref()
+        );
+    }
+    let mut variants = vec![
+        ("full-parent", None),
+        ("controller-baseline", Some(baseline.clone())),
+    ];
+    for (label, keys) in [
+        ("analysis-cache-only", vec!["PSModuleAnalysisCachePath"]),
+        ("module-path-only", vec!["PSModulePath"]),
+        (
+            "ps-group",
+            vec![
+                "PSModuleAnalysisCachePath",
+                "PSModulePath",
+                "PSDisableModuleAnalysisCacheCleanup",
+                "POWERSHELL_DISTRIBUTION_CHANNEL",
+                "POWERSHELL_UPDATECHECK",
+            ],
+        ),
+        (
+            "os-extra-group",
+            vec![
+                "PUBLIC",
+                "PROCESSOR_IDENTIFIER",
+                "SESSIONNAME",
+                "LOGONSERVER",
+                "DriverData",
+            ],
+        ),
+        (
+            "combined-extra-group",
+            vec![
+                "PSModuleAnalysisCachePath",
+                "PSModulePath",
+                "PSDisableModuleAnalysisCacheCleanup",
+                "POWERSHELL_DISTRIBUTION_CHANNEL",
+                "POWERSHELL_UPDATECHECK",
+                "PUBLIC",
+                "PROCESSOR_IDENTIFIER",
+                "SESSIONNAME",
+                "LOGONSERVER",
+                "DriverData",
+            ],
+        ),
+    ] {
+        let mut environment = baseline.clone();
+        let mut added = vec![];
+        for key in keys {
+            if let Some(value) = std::env::var_os(key) {
+                // This is a diagnostic opt-in, not a production allowlist.
+                // Names are case insensitive on Windows: replace the old key.
+                environment.retain(|name, _| !name.to_string_lossy().eq_ignore_ascii_case(key));
+                environment.insert(key.into(), value);
+                added.push(key);
+            }
+        }
+        eprintln!("environment-matrix variant={label} added-variable-names={added:?}");
+        variants.push((label, Some(environment)));
+    }
+    let mut disabled_cache = baseline.clone();
+    disabled_cache.insert("PSModuleAnalysisCachePath".into(), "NUL".into());
+    variants.push(("analysis-cache-disabled", Some(disabled_cache)));
+    let mut previous_size = None;
+    let mut cache_state = || {
+        let default_cache = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|path| {
+                path.join("Microsoft")
+                    .join("Windows")
+                    .join("PowerShell")
+                    .join("ModuleAnalysisCache")
+            });
+        let configured_cache = std::env::var_os("PSModuleAnalysisCachePath").map(PathBuf::from);
+        let cryptnet = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map(|path| {
+                path.join("AppData")
+                    .join("LocalLow")
+                    .join("Microsoft")
+                    .join("CryptnetUrlCache")
+            });
+        let size = default_cache
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len());
+        eprintln!("environment-matrix default-cache-exists={} default-cache-parent-exists={} configured-cache-exists={} default-cache-size-increased={} cryptnet-cache-exists={} cryptnet-cache-has-entries={}",
+            default_cache.as_ref().is_some_and(|path| path.is_file()),
+            default_cache.as_ref().and_then(|path| path.parent()).is_some_and(|path| path.is_dir()),
+            configured_cache.as_ref().is_some_and(|path| path.is_file()),
+            size.zip(previous_size).is_some_and(|(current, previous)| current > previous),
+            cryptnet.as_ref().is_some_and(|path| path.is_dir()),
+            cryptnet.as_ref().and_then(|path| std::fs::read_dir(path).ok()).is_some_and(|mut entries| entries.next().is_some()));
+        previous_size = size;
+    };
+    // Same argv/cwd/NUL/pipes/deadline for direct Rust and Controller. Output is
+    // captured only to test synthetic markers, never printed (even on failure).
+    let script = "Write-Output 'utility-matrix-ok'; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); [Console]::WriteLine('rng-matrix-ok'); exit 0";
+    for (label, environment) in variants {
+        for repetition in 1..=2 {
+            cache_state();
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .current_dir(&root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            if let Some(environment) = &environment {
+                command.env_clear().envs(environment);
+            }
+            let started = Instant::now();
+            match command.spawn() {
+                Ok(child) => {
+                    match tokio::time::timeout(Duration::from_millis(30_000), child.wait_with_output()).await {
+                        Ok(Ok(output)) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            eprintln!("environment-matrix variant={label} repetition={repetition} duration_ms={} timeout=false exit={:?} utility_ok={} rng_ok={} stderr_present={}", started.elapsed().as_millis(), output.status.code(), stdout.contains("utility-matrix-ok"), stdout.contains("rng-matrix-ok"), !output.stderr.is_empty());
+                        }
+                        Ok(Err(_)) => eprintln!("environment-matrix variant={label} repetition={repetition} wait_failed=true"),
+                        Err(_) => eprintln!("environment-matrix variant={label} repetition={repetition} duration_ms={} timeout=true", started.elapsed().as_millis()),
+                    }
+                }
+                Err(_) => eprintln!(
+                    "environment-matrix variant={label} repetition={repetition} spawn_failed=true"
+                ),
+            }
+            cache_state();
+        }
+    }
+    // Direct baseline and real Controller are separate controls; neither the
+    // full-parent diagnostic nor optional variables modify Controller behavior.
+    for repetition in 1..=2 {
+        let response = runtime
+            .exec_machine(MachineExecRequest {
+                cwd: ".".into(),
+                command: "powershell.exe".into(),
+                args: vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    script.into(),
+                ],
+                timeout_ms: 30_000,
+            })
+            .await
+            .unwrap();
+        eprintln!("environment-matrix variant=actual-controller repetition={repetition} duration_ms={} timeout={} exit={:?} utility_ok={} rng_ok={} stderr_present={}", response.duration_ms, response.timed_out, response.exit_code, response.stdout.contains("utility-matrix-ok"), response.stdout.contains("rng-matrix-ok"), !response.stderr.is_empty());
+    }
+    host.abort();
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -54,3 +54,38 @@ runner. A passing serial probe alone does not waive the concurrent artifact gate
 Any production repair requires its own fixed SHA, safety review and fresh full
 native gate. No production environment logic, timeout, cwd conversion, token
 environment block reading or launcher asset changes are in this diagnostic.
+
+## First diagnostic result and next controlled comparison
+
+Native run 38483146311 used two fresh artifact-prepared runners. Initial Node
+module equality was true. Utility output and RNG exceeded the diagnostic 5s cap;
+startup exit, Console version, disabled autoload and absolute Console version
+completed in 146–183ms (PS 5.1.20348.5622). The strict runner passed but its four
+cmdlet-dependent probes took 28255, 19531, 19717 and 19774ms. This is a repeated
+slow command/module path, **not evidence of a one-time warm-up cost**. Passing
+near the original deadline does not resolve the failed artifact publication.
+
+The next ignored CI-only test is
+`windows_artifact_powershell_environment_matrix`. It runs the same combined
+Utility-output/RNG script directly through Rust `Command`, first inheriting the
+runner's full parent environment, then using the Controller's filtered map.
+It also runs through the actual Controller. All controls use the same cwd,
+NUL stdin, piped output and original 30s deadline. Each variant runs twice;
+timeouts stay explicit and no output values or stderr are printed.
+
+Diagnostic-only add-back variants isolate `PSModuleAnalysisCachePath`,
+`PSModulePath`, a PS configuration group, an OS extras group, their combination,
+and fixed `PSModuleAnalysisCachePath=NUL` (not an inherited path). Parent/child
+profile values are compared only for equality. Module cache existence, parent
+directory existence, size-increase booleans and Cryptnet cache existence/entry
+presence are recorded before/after; no cache contents are read or paths logged.
+Full-parent inheritance is guarded by `CI=true` and `GITHUB_ACTIONS=true` and
+is only permitted on the disposable isolated runner, never enrolled machines.
+These guards are accidental-use protection, not an authentication boundary.
+
+Microsoft's [Windows PowerShell 5.1 documentation](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/main/reference/5.1/Microsoft.PowerShell.Core/About/about_Windows_PowerShell_5.1.md#module-analysis-cache)
+documents the default cache location and the `NUL` cache-disable diagnostic.
+Do not turn the restored caller paths or the cache-disable variant into a
+production allowlist change based on assumption. The variants run in order and
+can affect account caches: repeat on fresh runners if that confounds causality.
+No conclusion about the full-parent baseline exists until this native test runs.
