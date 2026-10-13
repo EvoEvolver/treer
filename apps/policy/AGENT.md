@@ -19,7 +19,10 @@ that notification without changing the bundle.
 
 Keep this Managed App's ingress set to Workspace access. Its mutation routes
 rely on Treer ingress authentication and must never be exposed anonymously.
-The App's workload credential is used only for the typed invalidation route.
+The App's workload credential is used for typed cache invalidation and the
+restricted diagnostic bridge: Core additionally requires the verified current
+human owner's App-audience token and the active Provider binding. Neither
+credential alone authorizes diagnostics; the App cannot act as an owner deputy.
 
 ## API
 

@@ -469,8 +469,8 @@ class Auth:
         self.workspace_id = workspace_id
         self.public_url = public_url.rstrip('/') + '/'
 
-    def request(self, method, path, token=None, body=None, form=None):
-        headers = {'Accept': 'application/json'}
+    def request(self, method, path, token=None, body=None, form=None, extra_headers=None):
+        headers = {'Accept': 'application/json', **(extra_headers or {})}
         if token:
             headers['Authorization'] = 'Bearer ' + token
         data = None
@@ -497,6 +497,20 @@ class Auth:
                         code, 'Treer rejected the request') from exc
         except (OSError, ValueError) as exc:
             raise AuthError(502, 'treer_unavailable', 'Treer API unavailable') from exc
+
+    def diagnostic(self, operation, token, body=None):
+        if operation not in ('validate', 'explain', 'decisions'):
+            raise AuthError(400, 'invalid_diagnostic', 'Unknown diagnostic operation')
+        runtime = os.environ.get('TREER_AGENT_ID')
+        credential = os.environ.get('TREER_WORKLOAD_CREDENTIAL')
+        if not runtime or not credential:
+            raise AuthError(503, 'managed_runtime_required', 'Core diagnostics require the configured Managed Policy App runtime')
+        # This restricted bridge requires BOTH current owner and current bound
+        # Provider runtime. The runtime credential never substitutes for a human.
+        return self.request('GET' if operation == 'decisions' else 'POST',
+            f'/api/apps/{self.service_id}/policy/{operation}', body=body,
+            extra_headers={'X-Treer-Identity-Token':token, 'X-Treer-Agent-Id':runtime,
+                           'X-Treer-Workload-Credential':credential})
 
     def verify(self, token):
         if not token or len(token) > 8192:
@@ -640,7 +654,7 @@ class PolicyServer(ThreadingHTTPServer):
     def identity_provider(self):
         with self.auth_lock:
             if self.auth is None:
-                proxy = os.environ.get('POLICY_PROXY_URL', '').rstrip('/')
+                proxy = (os.environ.get('POLICY_PROXY_URL') or os.environ.get('TREER_PROXY_URL', '')).rstrip('/')
                 service = os.environ.get('POLICY_SERVICE_ID')
                 public = os.environ.get('POLICY_PUBLIC_URL')
                 workspace = self.RequestHandlerClass.store.workspace_id
@@ -697,7 +711,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                     token, actor, _, _ = self._identity()
                     self._json(200, {'principal':actor, 'oauth_available':True})
                 else:
-                    self._json(200, {'principal':None, 'oauth_available':bool(os.environ.get('POLICY_PROXY_URL'))})
+                    self._json(200, {'principal':None, 'oauth_available':bool(os.environ.get('POLICY_PROXY_URL') or os.environ.get('TREER_PROXY_URL'))})
             elif parsed.path == "/api/auth/start":
                 auth = self._auth()
                 url, browser = auth.start()
@@ -711,8 +725,8 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 self._cookie('policy_oauth', '', 0)
                 self._redirect(auth.public_url)
             elif parsed.path == "/v1/policy/decisions":
-                token, _, _, _ = self._identity()
-                self._json(200, self._auth().request('GET', f'/api/apps/{self._auth().service_id}/policy/decisions', token))
+                token, _, _, _ = self._identity(mutation=True)
+                self._json(200, self._auth().diagnostic('decisions', token))
             elif parsed.path == "/v1/templates":
                 self._json(200, {"templates":TEMPLATES})
             elif parsed.path == "/v1/state":
@@ -762,7 +776,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 self._json(200, result)
             elif urlsplit(self.path).path == "/v1/policy/explain":
                 token, _, _, _ = self._identity(mutation=True)
-                self._json(200, self._auth().request('POST', f'/api/apps/{self._auth().service_id}/policy/explain', token, body))
+                self._json(200, self._auth().diagnostic('explain', token, body))
             elif urlsplit(self.path).path == "/v1/policy/publish":
                 self._validate_publish(body)
                 bundle = self.store.publish(body)
@@ -800,7 +814,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
             self._core_validate(token, document)
 
     def _core_validate(self, token, document):
-        result = self._auth().request('POST', f'/api/apps/{self._auth().service_id}/policy/validate', token, document)
+        result = self._auth().diagnostic('validate', token, document)
         if result.get('valid') is not True or result.get('recovery_guaranteed') is not True or 'policy.path-rules.v2' not in result.get('capabilities', []):
             raise PolicyError(409, 'policy_recovery_unconfirmed', 'Core must confirm path-policy support and owner recovery before publishing')
         return result

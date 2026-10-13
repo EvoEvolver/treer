@@ -40,6 +40,8 @@ with tempfile.TemporaryDirectory() as root:
     app=policy.PolicyServer(('127.0.0.1',0),policy.PolicyHandler);app.admin_token=ADMIN
     gateway=ThreadingHTTPServer(('127.0.0.1',0),Gateway);gateway.app=app
     origin=f'http://127.0.0.1:{gateway.server_port}'
+    os.environ['TREER_AGENT_ID']='runtime_policy'
+    os.environ['TREER_WORKLOAD_CREDENTIAL']='synthetic-runtime-credential'
     os.environ['POLICY_PROXY_URL']=f'http://127.0.0.1:{proxy.server_port}'
     app.auth=policy.Auth(policy.AuthStore(Path(root)/'auth.sqlite3'),os.environ['POLICY_PROXY_URL'],'svc_policy','ws_test',origin+PREFIX)
     threading.Thread(target=app.serve_forever,daemon=True).start()

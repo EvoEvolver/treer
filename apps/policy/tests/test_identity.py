@@ -37,7 +37,10 @@ class FakeProxy(BaseHTTPRequestHandler):
         elif self.path.endswith('/directory'):
             result={'principals':[] if token=='revoked' else [{'id':'owner','kind':'human','name':'Owner'},{'id':'member','kind':'human','name':'Member'}]}
         elif '/policy/' in self.path:
-            if token!='human-owner': status=403;result={'error':{'code':'workspace_owner_required'}}
+            token=self.headers.get('X-Treer-Identity-Token')
+            if self.headers.get('X-Treer-Agent-Id')!='runtime_policy' or self.headers.get('X-Treer-Workload-Credential')!='synthetic-runtime-credential':
+                status=403;result={'error':{'code':'policy_provider_required'}}
+            elif token!='human-owner': status=403;result={'error':{'code':'workspace_owner_required'}}
             elif self.path.endswith('/validate'): result={'valid':True,'schema_version':body['schema_version'],'recovery_guaranteed':getattr(self.server,'recovery',True),'capabilities':['policy.path-rules.v2']}
             elif self.path.endswith('/explain'): result={'explanation':{'computed_effect':'deny','effective_decision':'allow','mode':'monitor','matched_rule_id':'test-rule','policy_revision':2}}
             else: result={'decisions':[{'action':'agent.prompt','explanation':{'computed_effect':'deny','effective_decision':'allow'}}], 'scope':'this_proxy'}
@@ -48,7 +51,7 @@ class FakeProxy(BaseHTTPRequestHandler):
 class IdentityTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
-        self.environment=patch.dict(os.environ, {'PATH':os.defpath}, clear=True);self.environment.start()
+        self.environment=patch.dict(os.environ, {'PATH':os.defpath,'TREER_AGENT_ID':'runtime_policy','TREER_WORKLOAD_CREDENTIAL':'synthetic-runtime-credential'}, clear=True);self.environment.start()
         self.proxy=ThreadingHTTPServer(('127.0.0.1',0),FakeProxy);self.proxy.calls=[]
         self.proxy_thread=threading.Thread(target=self.proxy.serve_forever,daemon=True);self.proxy_thread.start()
         class Handler(policy.PolicyHandler):
@@ -103,6 +106,16 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':2,'revision':1})[0],200)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2},'human-member')[0],403)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2})[0],200)
+    def test_diagnostics_need_both_bound_runtime_and_human(self):
+        with patch.dict(os.environ, {'TREER_WORKLOAD_CREDENTIAL':''}):
+            self.assertEqual(self.request('GET','/v1/policy/decisions')[0],503)
+        with patch.dict(os.environ, {'TREER_WORKLOAD_CREDENTIAL':'forged'}):
+            self.assertEqual(self.request('GET','/v1/policy/decisions')[0],403)
+        self.assertEqual(self.request('GET','/v1/policy/decisions',extra={'Origin':'https://evil.test'})[0],403)
+        self.assertEqual(self.request('GET','/v1/policy/decisions',extra={'Sec-Fetch-Site':'cross-site'})[0],403)
+
+        self.assertEqual(self.request('GET','/v1/policy/decisions',extra={'X-Treer-Agent-Id':'forged','X-Treer-Workload-Credential':'forged'})[0],200)
+
     def test_unconfirmed_recovery_cannot_publish_or_restore_path_policy(self):
         document=policy.template_document('team-isolation',{})['document']
         self.proxy.recovery=False

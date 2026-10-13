@@ -123,11 +123,14 @@ validator before any v2 publication or rollback; errors leave state unchanged.
 
 ## Human identity and diagnostics
 
-Configure `POLICY_PROXY_URL` (Treer Proxy's HTTP(S) base), `POLICY_SERVICE_ID`
+Configure `POLICY_PROXY_URL` (Treer Proxy's HTTP(S) base; falls back to trusted
+`TREER_PROXY_URL`), `POLICY_SERVICE_ID`
 and `POLICY_PUBLIC_URL` (canonical App URL, including a tunnel prefix if used).
 With a Managed App runtime identity the latter two can be discovered through
-`treer app list`. No environment credential or operator token is forwarded as
-a human diagnostic credential. Keep the URLs operator-controlled.
+`treer app list`. No operator token is forwarded to Core. The restricted diagnostic bridge sends
+the current bound Provider runtime ID/workload credential **and** the verified
+human token; neither alone grants access. The runtime never substitutes for the
+caller. Keep the URLs operator-controlled.
 
 Browser authentication accepts `X-Treer-Identity-Token` first and verifies it
 on every request through `/.treer/apps/identity/verify` for this service and
@@ -138,7 +141,7 @@ browser nonce. Sessions and OAuth state are stored in a private adjacent
 `.auth.sqlite3`; callback URLs are fixed configuration, never user redirect
 parameters. Cookies are HttpOnly, SameSite=Lax and Secure on HTTPS.
 
-Human state changes require `X-Policy-Request: 1`, a permitted Origin when
+Human state changes and diagnostic reads require `X-Policy-Request: 1`, a permitted Origin when
 present, and same-origin/same-site Fetch Metadata. Operator writes additionally
 reject cross-origin Fetch Metadata and require JSON and the operator Bearer.
 OAuth/identity cannot replace that administration capability. Use workspace-only
@@ -147,11 +150,14 @@ local-machine access must be separately protected.
 
 The UI delegates simulation and bounded decision logs through Core
 `/api/apps/{service_id}/policy/explain`, `/validate`, and `/decisions` using the
-verified **human caller** token, never the App's workload token. Core recognizes that App-scoped owner token on its diagnostic routes. Core rejects
+verified **human caller** token alongside the current bound Provider runtime
+credential. Core checks both, with fresh runtime credential and owner membership
+validation; only the currently configured Provider can use this bridge. Core recognizes that App-scoped owner token on its diagnostic routes. Core rejects
 non-owners and stale membership. A Core without diagnostics returns an error;
 the App never substitutes a local path evaluator with different security rules.
 `/v1/policy/test` is retained only as a legacy v1 local dry-run endpoint.
-Logs show computed denials (what enforce would deny), effective decisions and
+Logs expose the latest 100 records from a 2048-record per-Proxy ring without
+pagination; they show computed denials (what enforce would deny), effective decisions and
 revision context; they are a bounded per-Proxy diagnostic view, not durable,
 complete or tamperproof auditing. No prompt/file bodies are logged by this App.
 
