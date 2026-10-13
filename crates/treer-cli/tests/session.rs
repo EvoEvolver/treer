@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use treer_protocol::cli::{CliInput, CliOutput, CliRequest};
 
@@ -174,9 +174,6 @@ async fn server_cannot_direct_client_credentials_to_another_origin() {
 async fn forwarding_stream_preserves_half_close_and_authentication() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_address = reserved.local_addr().unwrap();
-    drop(reserved);
     let server = tokio::spawn(async move {
         negotiate_path_targets(&listener).await;
         let (stream, _) = listener.accept().await.unwrap();
@@ -186,7 +183,8 @@ async fn forwarding_stream_preserves_half_close_and_authentication() {
             .send(Message::Text(
                 serde_json::to_string(&CliOutput::Forward {
                     path: "/api/services/test/connect".into(),
-                    listen: local_address.to_string(),
+                    // Let the real forward listener allocate and retain its port.
+                    listen: "127.0.0.1:0".into(),
                 })
                 .unwrap()
                 .into(),
@@ -217,15 +215,23 @@ async fn forwarding_stream_preserves_half_close_and_authentication() {
         .args(["service", "forward", "test"])
         .spawn()
         .unwrap();
-    let mut connected = None;
-    for _ in 0..100 {
-        if let Ok(stream) = tokio::net::TcpStream::connect(local_address).await {
-            connected = Some(stream);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let mut local = connected.expect("forward listener starts");
+    // A released reservation can be reused by another test or an outgoing TCP
+    // connection. Connecting to it is not proof that this CLI bound the port.
+    // Its readiness line is emitted only after the real bind succeeds.
+    let mut stderr = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), stderr.next_line())
+        .await
+        .expect("forward listener readiness timeout")
+        .unwrap()
+        .expect("CLI exited before binding forward listener");
+    let local_address: std::net::SocketAddr = ready
+        .strip_prefix("treer: forwarding on ")
+        .expect("forward listener readiness")
+        .parse()
+        .unwrap();
+    assert!(local_address.ip().is_loopback());
+    assert_ne!(local_address.port(), 0);
+    let mut local = tokio::net::TcpStream::connect(local_address).await.unwrap();
     local.write_all(b"payload\0after").await.unwrap();
     local.shutdown().await.unwrap();
     let mut response = Vec::new();
