@@ -156,6 +156,9 @@ async fn http_identity_is_bound_to_entry_and_denial_never_falls_back() {
             AGENT_ID_HEADER,
             WORKLOAD_CREDENTIAL_HEADER,
             "x-treer-operator-credential",
+            "x_treer_identity_token",
+            "x_treer_workload_credential",
+            "x_treer_agent_id",
             "proxy-authorization",
         ]
         .iter()
@@ -179,6 +182,9 @@ async fn http_identity_is_bound_to_entry_and_denial_never_falls_back() {
             .header(IDENTITY_HEADER, "spoof")
             .header(AGENT_ID_HEADER, "spoof")
             .header(WORKLOAD_CREDENTIAL_HEADER, "never-forward")
+            .header("X_TREER_IDENTITY_TOKEN", "spoof")
+            .header("X_TREER_AGENT_ID", "spoof")
+            .header("X_TREER_WORKLOAD_CREDENTIAL", "never-forward")
             .header("proxy-authorization", "never-forward")
             .body(vec![42; 1024 * 1024])
             .send()
