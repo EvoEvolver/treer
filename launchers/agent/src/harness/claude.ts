@@ -71,6 +71,8 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private goalCommandRunning = false;
   private goalGuard = new GoalGuard();
   private goalExit?: Promise<void>;
+  private pendingGoalExit: Goal | null = null;
+  private goalMutating = false;
   private goalPoll?: ReturnType<typeof setInterval>;
   private goalPolling = false;
   private goalTokenMessages = new Set<string>();
@@ -125,7 +127,8 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       if (resumed && this.options.stateFile) {
         const saved = record(readGoalState(this.options.stateFile + ".goal-usage.json"));
         if (saved.sessionId === this.sessionId && saved.goalKey === this.goalKey) {
-          if (saved.goal && ["blocked", "stale", "done", "cleared"].includes(text(record(saved.goal).status))) this.goal = saved.goal as unknown as Goal;
+          if (saved.pendingExit && this.goal?.status === "cleared") this.goal = saved.pendingExit as unknown as Goal;
+          else if (saved.goal && ["blocked", "stale", "done", "cleared"].includes(text(record(saved.goal).status))) this.goal = saved.goal as unknown as Goal;
           if (this.goal) {
             this.goal.tokensUsed = typeof saved.tokensUsed === "number" ? saved.tokensUsed : null;
             this.goal.timeUsedSeconds = typeof saved.timeUsedSeconds === "number" ? saved.timeUsedSeconds : null;
@@ -256,6 +259,16 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   async updateGoal(input: GoalUpdate) {
+    return this.mutateGoal(() => this.applyGoal(input));
+  }
+
+  private async mutateGoal(action: () => Promise<void>) {
+    if (this.goalMutating) throw new GoalError("A goal mutation is already pending; retry after it completes", 409);
+    this.goalMutating = true;
+    try { await action(); } finally { this.goalMutating = false; }
+  }
+
+  private async applyGoal(input: GoalUpdate) {
     if (["blocked", "stale", "done"].includes(input.status || "")) {
       if (!this.goal) throw new GoalError("No goal set", 409);
       if (!input.reason?.trim()) throw new GoalError("A goal exit requires reason");
@@ -263,8 +276,10 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       const goal = { ...this.goal, status: input.status!, reason: input.reason, requiredAction: input.requiredAction };
       const exit = async () => {
         // Clearing the native Stop hook is the actual release, not a UI-only status.
+        this.pendingGoalExit = goal; await this.saveGoalUsage();
         await this.goalCommand("clear");
         this.goal = goal;
+        this.pendingGoalExit = null;
         await this.saveGoalUsage(); this.publish(); this.emit("goal-exit", goal);
       };
       this.goalExit = exit().finally(() => { this.goalExit = undefined; });
@@ -292,6 +307,10 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   async clearGoal() {
+    return this.mutateGoal(() => this.applyClearGoal());
+  }
+
+  private async applyClearGoal() {
     const previous = this.goal;
     await this.goalCommand("clear");
     if (previous) { this.goal = { ...previous, status: "cleared", reason: "Goal cleared by user" }; await this.saveGoalUsage(); this.publish(); }
@@ -580,6 +599,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       const value = event.type === "system" ? text(event.content).replace(/^<local-command-stdout>|<\/local-command-stdout>$/g, "") : contentText(message.content);
       const set = /^Goal set: ([\s\S]+)$/.exec(value.trim());
       if (set) {
+        this.pendingGoalExit = null;
         this.goal = { id: key || randomUUID(), objective: set[1], status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: historical ? null : 0 };
         this.goalGuard = new GoalGuard();
         this.goalTokenMessages.clear(); this.queryGoalTokens = 0;
@@ -634,11 +654,15 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private async saveGoalUsage() {
     if (!this.options.stateFile || !this.goal) return;
     const path = this.options.stateFile + ".goal-usage.json";
-    writeGoalState(path, { sessionId: this.sessionId, goalKey: this.goalKey, goal: this.goal, tokensUsed: this.goal.tokensUsed, timeUsedSeconds: this.goal.timeUsedSeconds });
+    writeGoalState(path, { sessionId: this.sessionId, goalKey: this.goalKey, goal: this.goal, pendingExit: this.pendingGoalExit, tokensUsed: this.goal.tokensUsed, timeUsedSeconds: this.goal.timeUsedSeconds });
   }
 
   private blockGoal(reason: string) {
-    if (this.goalExit || this.goalCommandRunning || this.goal?.status !== "active") return;
+    if (this.goalExit || this.goal?.status !== "active") return;
+    if (this.goalMutating || this.goalCommandRunning) {
+      const id = this.goal.id;
+      setTimeout(() => { if (this.ready && this.goal?.id === id) this.blockGoal(reason); }, 25).unref(); return;
+    }
     void this.updateGoal({ status: "blocked", reason, requiredAction: "User: review the goal and external dependencies before explicitly setting a new goal" })
       .catch((error) => {
         // Native hooks still exist if clearing failed; never claim release succeeded.

@@ -487,6 +487,12 @@ its session ID/startup command. This supplies `AGENT_UI_URL`,
 `AGENT_UI_GOAL_COMMAND`, system guidance and monitoring; it does not clear an
 existing active goal merely on restart. No live Agents were restarted here.
 
+Before native clear, the adapter checkpoints the requested outcome and its
+thread/session generation. Resume reconciles a cleared native goal with that
+intent, retaining the reason/action and retrying its notification; a replacement
+goal invalidates the old intent. Overlapping mutations return 409 for retry
+rather than letting an old clear race a new objective.
+
 `npm run test:goal:live` runs both installed native CLIs in disposable directories,
 uses the real browser to set/complete/clear goals, and saves desktop/mobile
 screenshots in a temporary directory. It requires authenticated Codex and Claude

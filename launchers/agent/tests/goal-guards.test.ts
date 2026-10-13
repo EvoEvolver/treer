@@ -10,6 +10,7 @@ import { GoalGuard } from "../src/goals.js";
 import { ClaudeRuntime } from "../src/harness/claude.js";
 import { CodexRuntime } from "../src/harness/codex.js";
 import { GoalNotifications } from "../src/goal-notify.js";
+import { GoalExitRequests } from "../src/goal-exit.js";
 import { hermeticEnv, localFetch } from "./hermetic.mjs";
 const root = resolve(import.meta.dirname, "..");
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), "goal-guards-")));
@@ -81,6 +82,73 @@ test("Codex blocked/stale exits clear native continuation and restore launcher o
   const resumed = new CodexRuntime(join(root, "tests/fake-codex.mjs"), cwd, { stateFile });
   try { await resumed.start(); assert.equal(resumed.snapshot().goal?.status, "stale"); }
   finally { await resumed.stop(); }
+});
+
+for (const harness of ["codex", "claude"] as const) for (const replacement of [false, true]) test(`${harness} crash after native clear preserves ${replacement ? "a replacement goal" : "the terminal exit"}`, async () => {
+  const cwd = temp(), stateFile = join(cwd, "state"), requestFile = join(cwd, "exits.json"), configDir = join(cwd, "claude");
+  const oldConfig = process.env.FAKE_CLAUDE_CONFIG; process.env.FAKE_CLAUDE_CONFIG = configDir;
+  const create = () => harness === "codex" ? new CodexRuntime(join(root, "tests/fake-codex.mjs"), cwd, { stateFile }) : new ClaudeRuntime(join(root, "tests/fake-claude.mjs"), cwd, { stateFile, configDir });
+  const runtime = create();
+  const input = { status: "blocked" as const, reason: "External owner required", requiredAction: "Owner: provision environment" };
+  try {
+    await runtime.start(); await runtime.updateGoal({ objective: "hold external condition" });
+    await until(() => runtime.snapshot().thread?.status === "idle");
+    const pending = new GoalExitRequests(requestFile, runtime, () => {}); pending.enqueue(input); pending.close();
+    // Inject a crash immediately after native release, before updateGoal can
+    // store its terminal receipt. The durable intent must already exist.
+    if (harness === "codex") {
+      const client = (runtime as any).client, request = client.request.bind(client);
+      client.request = async (method: string, params: unknown) => { const result = await request(method, params); if (method === "thread/goal/clear") throw new Error("crash after native clear"); return result; };
+    } else {
+      const adapter = runtime as any, command = adapter.goalCommand.bind(adapter);
+      adapter.goalCommand = async (args: string) => { await command(args); if (args === "clear") throw new Error("crash after native clear"); };
+    }
+    await assert.rejects(runtime.updateGoal(input), /crash after native clear/);
+    if (replacement) await runtime.updateGoal({ objective: "hold replacement goal" });
+    await runtime.stop();
+    const resumed = create(); await resumed.start();
+    const requests = new GoalExitRequests(requestFile, resumed, () => {});
+    try {
+      await until(() => JSON.parse(readFileSync(requestFile, "utf8")).length === 0);
+      if (replacement) {
+        assert.equal(resumed.snapshot().goal?.status, "active"); assert.equal(resumed.snapshot().goal?.objective, "hold replacement goal");
+      } else {
+        assert.equal(resumed.snapshot().goal?.status, "blocked");
+        assert.equal(resumed.snapshot().goal?.reason, input.reason);
+        assert.equal(resumed.snapshot().goal?.requiredAction, input.requiredAction);
+        let notices = 0;
+        const notifications = new GoalNotifications(join(cwd, "notices.json"), () => {}, async (_to, _key, body) => {
+          assert.equal(JSON.parse(body).required_action, input.requiredAction); notices++;
+        }, async () => ["user_fixture"]);
+        notifications.enqueue(resumed.snapshot().goal!); await until(() => notices === 1); notifications.close();
+      }
+    } finally { requests.close(); await resumed.stop(); }
+  } finally { await runtime.stop(); if (oldConfig === undefined) delete process.env.FAKE_CLAUDE_CONFIG; else process.env.FAKE_CLAUDE_CONFIG = oldConfig; }
+});
+
+for (const harness of ["codex", "claude"] as const) test(`${harness} refuses overlapping goal edits while an exit is pending`, async () => {
+  const cwd = temp();
+  const runtime = harness === "codex" ? new CodexRuntime(join(root, "tests/fake-codex.mjs"), cwd) : new ClaudeRuntime(join(root, "tests/fake-claude.mjs"), cwd);
+  try {
+    await runtime.start(); await runtime.updateGoal({ objective: "hold external condition" });
+    const exit = runtime.updateGoal({ status: "blocked", reason: "No external environment" });
+    await assert.rejects(runtime.updateGoal({ objective: "Replacement" }), /already pending/);
+    await assert.rejects(runtime.clearGoal(), /already pending/);
+    await exit; assert.equal(runtime.snapshot().goal?.status, "blocked");
+  } finally { await runtime.stop(); }
+});
+
+test("Claude budget edits still release the goal after the mutation lock completes", async () => {
+  const runtime = new ClaudeRuntime(join(root, "tests/fake-claude.mjs"), temp());
+  try {
+    await runtime.start(); await runtime.updateGoal({ objective: "hold external condition" });
+    await until(() => runtime.snapshot().thread?.status === "idle");
+    await runtime.prompt("Report current state"); await until(() => runtime.snapshot().thread?.status === "idle");
+    assert.ok((runtime.snapshot().goal?.tokensUsed ?? 0) > 1);
+    await runtime.updateGoal({ tokenBudget: 1 });
+    await until(() => runtime.snapshot().goal?.status === "blocked");
+    assert.match(runtime.snapshot().goal!.reason!, /token budget/);
+  } finally { await runtime.stop(); }
 });
 
 test("goal notifications survive failure/restart and use identical Treer message idempotency keys", async () => {

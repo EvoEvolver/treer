@@ -36,6 +36,8 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
   readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false, goal: { pause: true, budget: true }, sessionTransfer: { export: true, import: true } } };
   private goal: Goal | null = null;
   private goalExitRecord: Goal | null = null;
+  private pendingGoalExit: Goal | null = null;
+  private goalMutating = false;
   private goalGuard = new GoalGuard();
   private goalBudgetExit = false;
   private goalTurnsSeen = new Set<string>();
@@ -167,9 +169,11 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     try {
       this.goal = mapGoal((await client.request<{ goal: unknown }>("thread/goal/get", { threadId: this.thread.id })).goal);
       if (this.options.stateFile) {
-        const saved = readGoalState(this.options.stateFile + ".goal-exit.json") as { threadId?: string; goal?: Goal; guard?: { id?: string; objective?: string; roundBudget?: number; roundsUsed?: number } } | undefined;
+        const saved = readGoalState(this.options.stateFile + ".goal-exit.json") as { threadId?: string; goal?: Goal; pendingExit?: Goal; guard?: { id?: string; objective?: string; roundBudget?: number; roundsUsed?: number } } | undefined;
         if (saved?.threadId === this.thread.id) {
-          if (!this.goal) this.goal = this.goalExitRecord = saved.goal ?? null;
+          // A durable intent belongs to this thread/generation. Native absence
+          // confirms release even when we crashed before saving its receipt.
+          if (!this.goal) this.goal = this.goalExitRecord = saved.pendingExit ?? saved.goal ?? null;
           if (this.goal && saved.guard?.objective === this.goal.objective) { this.goal.id = saved.guard.id; this.goal.roundBudget = saved.guard.roundBudget; this.goal.roundsUsed = saved.guard.roundsUsed; }
         }
       }
@@ -279,6 +283,16 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   async updateGoal(input: GoalUpdate) {
+    return this.mutateGoal(() => this.applyGoal(input));
+  }
+
+  private async mutateGoal(action: () => Promise<void>) {
+    if (this.goalMutating) throw new GoalError("A goal mutation is already pending; retry after it completes", 409);
+    this.goalMutating = true;
+    try { await action(); } finally { this.goalMutating = false; }
+  }
+
+  private async applyGoal(input: GoalUpdate) {
     if (!this.harness.capabilities.goal) throw new GoalError("Codex does not support goals", 501);
     if (!this.client || !this.thread) throw new GoalError("Codex is not ready", 503);
     if (["blocked", "stale", "done"].includes(input.status || "") && input.reason) {
@@ -286,8 +300,10 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       const goal = { ...this.goal, status: input.status!, reason: input.reason, requiredAction: input.requiredAction };
       // Clear the native continuation condition for every formal exit. Preserve
       // the richer launcher outcome separately; native has no stale status.
+      this.pendingGoalExit = goal; this.saveGoalExit();
       await this.client.request("thread/goal/clear", { threadId: this.thread.id, origin: "user" });
       this.goal = this.goalExitRecord = goal;
+      this.pendingGoalExit = null;
       this.saveGoalExit(); this.emit("state"); this.emit("goal-exit", goal); return;
     }
     const { reason: _reason, requiredAction: _action, roundBudget: _rounds, ...native } = input;
@@ -304,6 +320,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     }
     const result = await this.client.request<{ goal: unknown }>("thread/goal/set", { threadId: this.thread.id, origin: "user", ...native });
     this.goalExitRecord = null;
+    this.pendingGoalExit = null;
     this.goal = mapGoal(result.goal);
     if (this.goal) { this.goal.id = goalId; this.goal.roundBudget = this.goalGuard.roundBudget; this.goal.roundsUsed = this.goalGuard.rounds; }
     this.saveGoalExit();
@@ -311,6 +328,10 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   async clearGoal() {
+    return this.mutateGoal(() => this.applyClearGoal());
+  }
+
+  private async applyClearGoal() {
     if (!this.harness.capabilities.goal) throw new GoalError("Codex does not support goals", 501);
     if (!this.client || !this.thread) throw new GoalError("Codex is not ready", 503);
     const previous = this.goal;
@@ -322,7 +343,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
 
   private saveGoalExit() {
     if (!this.options.stateFile) return;
-    writeGoalState(this.options.stateFile + ".goal-exit.json", { threadId: this.thread?.id, goal: this.goalExitRecord, guard: { id: this.goal?.id, objective: this.goal?.objective, roundBudget: this.goalGuard.roundBudget, roundsUsed: this.goalGuard.rounds } });
+    writeGoalState(this.options.stateFile + ".goal-exit.json", { threadId: this.thread?.id, goal: this.goalExitRecord, pendingExit: this.pendingGoalExit, guard: { id: this.goal?.id, objective: this.goal?.objective, roundBudget: this.goalGuard.roundBudget, roundsUsed: this.goalGuard.rounds } });
   }
 
   snapshot(historyLimit?: number) {
@@ -598,6 +619,10 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
 
   private blockForBudget(reason: string) {
     if (this.goalBudgetExit) return;
+    if (this.goalMutating) {
+      const id = this.goal?.id;
+      setTimeout(() => { if (this.ready && this.goal?.id === id) this.blockForBudget(reason); }, 25).unref(); return;
+    }
     this.goalBudgetExit = true;
     void this.updateGoal({ status: "blocked", reason, requiredAction: "User: review the goal before explicitly setting a new one" })
       .catch((error) => this.emit("log", `Codex goal budget exit failed: ${String(error)}`))
