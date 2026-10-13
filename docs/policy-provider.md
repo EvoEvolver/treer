@@ -51,6 +51,23 @@ caller to retry; in-flight effects accepted earlier are not rolled back.
 Capability/schema incompatibility never falls through to fail-open or cached
 v1 rules. Outages continue to follow the configured failure/stale policy below.
 
+This hard rejection applies to the **new Proxy implementation**. Older deployed
+Proxy binaries (including d867347) reject parsing schema 2 but route that error
+through their existing stale/fail-open behavior; they may therefore continue to
+permit requests. Before publishing a v2 bundle, upgrade and drain **every** Proxy
+replica and upgrade the Provider's Controller. Keep the Provider on schema 1 and
+monitor until that deployment completes. A capability response from one replica
+does not prove the whole fleet is compatible. Rolling back Proxy binaries after
+v2 publication requires restoring a compatible v1 bundle first and reviewing
+its mode/defaults. The App's per-request capability check is not a fleet fence.
+
+The action index shares immutable rules and deduplicates repeated actions, so
+large conditions are not cloned once per action. Its storage scales with input
+bytes plus action references within the existing document limit. Directory and
+recipient discovery through App tokens are filtered by Core discovery/metadata
+and human-list Policy, while the verified human's own identity stays available
+for Provider authentication; this is not a general Owner action bypass.
+
 A workspace always has an explicit effective policy. If no Provider App is
 selected, an existing stored Workspace Policy remains active; otherwise Treer's
 built-in `Treer Default` baseline allows operations in monitor mode. This keeps

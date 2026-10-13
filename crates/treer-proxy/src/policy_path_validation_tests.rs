@@ -37,6 +37,8 @@ fn v2_contract_and_v1_compatibility_are_strict() {
 fn path_shapes_and_relation_limits_are_enforced() {
     for path in [
         "relative",
+        "//team/*",
+        "///team/*",
         "/team/../other",
         "/team//other",
         "/team/",

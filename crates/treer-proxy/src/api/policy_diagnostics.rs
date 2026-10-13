@@ -117,7 +117,10 @@ pub(super) async fn explain_policy(
         request.action,
         PolicyResource::new(request.resource.kind, resource_id),
     ));
-    let rescue = if request.action == crate::policy::ACTION_AGENT_TREE_MANAGE {
+    let rescue = if matches!(
+        request.action.as_str(),
+        crate::policy::ACTION_AGENT_TREE_MANAGE | crate::policy::ACTION_AGENT_TREE_READ
+    ) {
         if let PolicySubject::Human { user_id } = &request.subject {
             auth.require_workspace_owner(&workspace, user_id)
                 .await
@@ -134,7 +137,7 @@ pub(super) async fn explain_policy(
             effective_decision: treer_protocol::PolicyEffect::Allow,
             mode: treer_protocol::PolicyMode::Enforce,
             matched_rule_id: None,
-            reason: "owner Tree management recovery".into(),
+            reason: "owner Tree read/manage recovery".into(),
             policy_revision: 0,
             tree_revision: Some(snapshot.revision),
             source: "owner_break_glass".into(),
@@ -590,6 +593,29 @@ mod tests {
                 .await
                 .is_err());
             }
+        }
+        for action in [
+            crate::policy::ACTION_AGENT_TREE_MANAGE,
+            crate::policy::ACTION_AGENT_TREE_READ,
+        ] {
+            let candidate:ExplainRequest=serde_json::from_value(json!({"subject":{"kind":"human","id":"owner"},"action":action,"resource":{"kind":"agent.tree","id":"diagnostic"},"document":{"schema_version":2,"defaults":{action:"deny"}},"mode":"enforce"})).unwrap();
+            let response = explain_policy(
+                Extension(auth.clone()),
+                Extension(PolicyEngine::allow_all()),
+                Extension(owner.clone()),
+                Path("diagnostic".into()),
+                Json(candidate),
+            )
+            .await
+            .unwrap();
+            let body: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["explanation"]["source"], "owner_break_glass");
+            assert_eq!(body["explanation"]["effective_decision"], "allow");
         }
     }
 }

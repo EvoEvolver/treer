@@ -120,3 +120,9 @@ logs, not a tamper-proof audit trail. All diagnostic responses use no-store.
 Browser/operator owner routes remain under `/api/workspaces/{id}/policy/*`.
 GET policy-provider advertises supported_schema_versions `[1,2]` and capability
 `policy.path-rules.v2`; new fetches send `max_schema_version=2`.
+
+Deployment precondition: all Proxy replicas must be upgraded and old replicas
+drained before publishing v2. Old binaries reject v2 parsing but may convert it
+to stale/fail-open at runtime; single-replica negotiation cannot prevent this.
+Downgrading Proxy software requires a reviewed v1 bundle first. New Core hard
+rejects contract/validation errors instead of treating them as Provider outages.

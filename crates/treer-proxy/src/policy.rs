@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -744,13 +744,7 @@ impl ProviderPolicyEvaluator {
             Err(error) => {
                 // Incompatible contracts are not transient outages: never downgrade
                 // unknown rules through fail-open or a cached v1 policy.
-                if matches!(
-                    error.code.as_str(),
-                    "unsupported_command"
-                        | "unsupported_policy_provider_protocol"
-                        | "unsupported_policy_schema"
-                        | "unsupported_policy_provider"
-                ) {
+                if provider_contract_error(&error) {
                     return Err(error);
                 }
                 self.provider_failure(workspace_id, provider, previous, error.message)
@@ -826,8 +820,11 @@ impl ProviderPolicyEvaluator {
                 },
             )
             .await?;
-        let bundle: PolicyProviderBundle = serde_json::from_value(value).map_err(|error| {
-            ProtocolError::new("invalid_policy_provider_bundle", error.to_string())
+        let bundle: PolicyProviderBundle = serde_json::from_value(value).map_err(|_| {
+            ProtocolError::new(
+                "invalid_policy_contract",
+                "invalid Policy Provider bundle fields or types",
+            )
         })?;
         if bundle.protocol != POLICY_PROVIDER_PROTOCOL_V1 {
             return Err(ProtocolError::new(
@@ -842,7 +839,7 @@ impl ProviderPolicyEvaluator {
             ));
         }
         treer_proxy::policy_store::validate_document(&bundle.document)
-            .map_err(|error| ProtocolError::new(error.code(), error.to_string()))?;
+            .map_err(|error| ProtocolError::new("invalid_policy_contract", error.code()))?;
         if bundle.document.schema_version == 2 && !supports_v2 {
             return Err(ProtocolError::new(
                 "unsupported_policy_provider",
@@ -902,6 +899,20 @@ impl ProviderPolicyEvaluator {
         );
         Err(ProtocolError::new("policy_provider_unavailable", error))
     }
+}
+
+fn provider_contract_error(error: &ProtocolError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "unsupported_command"
+            | "unsupported_policy_provider_protocol"
+            | "unsupported_policy_schema"
+            | "unsupported_policy_provider"
+            | "invalid_policy_contract"
+            | "policy_provider_workspace_mismatch"
+            | "invalid_service_json"
+            | "service_http_response_too_large"
+    )
 }
 
 fn cached_provider_result(
@@ -1002,7 +1013,7 @@ pub(crate) struct CompiledWorkspacePolicy {
     mode: PolicyMode,
     defaults: BTreeMap<String, PolicyEffect>,
     groups: HashMap<String, Vec<PolicyPrincipalRef>>,
-    rules_by_action: HashMap<String, Vec<WorkspacePolicyRule>>,
+    rules_by_action: HashMap<String, Vec<Arc<WorkspacePolicyRule>>>,
 }
 
 struct DurablePolicyEvaluator {
@@ -1135,9 +1146,14 @@ impl CompiledWorkspacePolicy {
 
     fn compile(policy: WorkspacePolicy) -> Self {
         let stable_ties = policy.document.schema_version == 2;
-        let mut rules_by_action: HashMap<String, Vec<WorkspacePolicyRule>> = HashMap::new();
+        let mut rules_by_action: HashMap<String, Vec<Arc<WorkspacePolicyRule>>> = HashMap::new();
         for rule in policy.document.rules {
+            let rule = Arc::new(rule);
+            let mut seen = HashSet::new();
             for action in &rule.actions {
+                if !seen.insert(action) {
+                    continue;
+                }
                 rules_by_action
                     .entry(action.clone())
                     .or_default()

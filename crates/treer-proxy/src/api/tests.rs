@@ -12,6 +12,95 @@ use treer_protocol::{
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
 #[tokio::test]
+async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    sqlx::query("INSERT INTO users(id,email,email_verified,preferred_name,password_hash,created_at) VALUES('owner','owner@example.test',TRUE,'Owner','unused','test'),('other','other@example.test',TRUE,'Other','unused','test')").execute(&auth.pool()).await.unwrap();
+    sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_default','owner','owner','test'),('org_default','other','member','test')").execute(&auth.pool()).await.unwrap();
+    let app = auth
+        .create_app_deployment(
+            "default",
+            "owner",
+            "machine-a".into(),
+            CreateAppDeploymentRequest {
+                server_id: Some("machine-a".into()),
+                name: "Policy".into(),
+                command: "python3".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8888,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    auth.create_named_agent_credential("default", "machine-a", "agent-a", "agent-a", None)
+        .await
+        .unwrap();
+    auth.create_named_agent_credential("default", "machine-a", "agent-b", "reviewer", None)
+        .await
+        .unwrap();
+    let store = WorkspacePolicyStore::new(auth.pool());
+    let doc=serde_json::from_value(json!({"schema_version":2,"defaults":{"agent.discover":"deny","agent.metadata.read":"deny","human.list":"deny"},"rules":[{"id":"one","priority":0,"effect":"allow","subjects":[{"kind":"human","id":"owner"}],"actions":["agent.discover","agent.metadata.read"],"resources":[{"kind":"agent","tree":{"path_eq":"/agent-a"}}]}]})).unwrap();
+    store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            doc,
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let policy = PolicyEngine::durable(store);
+    let identity = IdentityIssuer::load(&auth, &Url::parse("https://proxy.example.test/").unwrap())
+        .await
+        .unwrap();
+    let token = identity
+        .issue_human_request("default", "owner", "Owner", "owner", &app.service_id)
+        .unwrap()
+        .access_token;
+    let headers = HeaderMap::from_iter([(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    )]);
+    let state = state_with_managed_agent().await;
+    let Json(directory) = workspace_app_directory(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Extension(policy.clone()),
+        Extension(identity.clone()),
+        Path(app.service_id.clone()),
+        headers.clone(),
+    )
+    .await
+    .unwrap();
+    let serialized = directory.to_string();
+    assert!(serialized.contains("agent-a"));
+    assert!(serialized.contains("owner"));
+    assert!(!serialized.contains("reviewer"));
+    assert!(!serialized.contains("other"));
+    let request: ResolveAppRecipientsRequest =
+        serde_json::from_value(json!({"recipients":["reviewer"]})).unwrap();
+    let error = resolve_workspace_app_recipients(
+        State(state),
+        Extension(auth),
+        Extension(policy),
+        Extension(identity),
+        Path(app.service_id),
+        headers,
+        Json(request),
+    )
+    .await
+    .unwrap_err();
+    assert!(!error.error.message.contains("agent-b"));
+}
+
+#[tokio::test]
 async fn prompt_queue_policy_denies_send_and_listing_before_dispatch() {
     let auth = AuthStore::for_test("test").await;
     auth.seed_test_workspace("default").await;

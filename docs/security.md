@@ -145,6 +145,19 @@ so selecting a Provider remains a trust decision. No token or caller attributes
 are stored in decision diagnostics. These logs are per-Proxy, bounded and
 volatile, and are not tamper-proof or complete durable audit records.
 
+Schema v2 deployment is not safe with a mixed fleet of old/new Proxy binaries:
+old Proxies can convert unsupported bundle errors into configured stale/fail-open
+decisions. Upgrade and drain all Proxy replicas before publishing v2; one
+replica's capability reply does not certify cluster compatibility. Reverting
+Proxy software requires a compatible v1 Provider bundle first.
+
+Service-audience directory and recipient resolution apply Core Agent discovery/
+metadata and human-list rules too; a denied Agent cannot be discovered through
+an App directory instead. The currently verified human's own identity remains
+available without enumerating others, allowing Provider authentication even
+when delegated human-list access is denied. Monitor still exposes authenticated
+workspace metadata; use enforce with explicit defaults to hide resources.
+
 PostgreSQL and NATS are trusted control-plane backends, not tenant isolation
 boundaries. Opaque login/admin/ingress sessions and signing-key metadata require
 confidential database access and backups. The Compose NATS service has no broker

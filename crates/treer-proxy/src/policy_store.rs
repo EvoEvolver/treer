@@ -285,7 +285,7 @@ fn validate_path_rule(
 }
 
 fn validate_policy_path(path: &str, glob: bool) -> Result<(), PolicyStoreError> {
-    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    let parts: Vec<_> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
     let valid = path.starts_with('/')
         && path.len() <= 4096
         && parts.len() <= 128

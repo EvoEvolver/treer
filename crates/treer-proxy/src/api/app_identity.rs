@@ -189,18 +189,20 @@ pub(super) async fn exchange_workspace_app_code(
 pub(super) async fn workspace_app_directory(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
     Extension(identity): Extension<IdentityIssuer>,
     Path(service_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiFailure> {
     let claims = authenticate_workspace_app(&auth, &identity, &headers, &service_id).await?;
-    let principals = workspace_app_principals(&state, &auth, &claims.workspace_id).await?;
+    let principals = visible_workspace_app_principals(&state, &auth, &policy, &claims).await?;
     Ok(Json(json!({ "principals": principals })))
 }
 
 pub(super) async fn resolve_workspace_app_recipients(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
     Extension(identity): Extension<IdentityIssuer>,
     Path(service_id): Path<String>,
     headers: HeaderMap,
@@ -213,7 +215,7 @@ pub(super) async fn resolve_workspace_app_recipients(
         ));
     }
     let claims = authenticate_workspace_app(&auth, &identity, &headers, &service_id).await?;
-    let principals = workspace_app_principals(&state, &auth, &claims.workspace_id).await?;
+    let principals = visible_workspace_app_principals(&state, &auth, &policy, &claims).await?;
     let sender = principals
         .iter()
         .find(|principal| principal.id == claims.sub && principal.kind == claims.principal_kind)
@@ -360,6 +362,66 @@ pub(super) async fn workspace_app_principals(
             role: Some(human.role),
         }))
         .collect())
+}
+
+/// Do not let a service-audience directory bypass ordinary Core discovery.
+/// The verified caller's own identity remains available without enumeration,
+/// so Provider authentication does not depend on delegated human-list rules.
+async fn visible_workspace_app_principals(
+    state: &AppState,
+    auth: &AuthStore,
+    policy: &PolicyEngine,
+    claims: &treer_protocol::AppIdentityClaims,
+) -> Result<Vec<AppPrincipal>, ApiFailure> {
+    let subject = match claims.principal_kind {
+        AppPrincipalKind::Human => PolicySubject::Human {
+            user_id: claims.sub.clone(),
+        },
+        AppPrincipalKind::Agent => PolicySubject::Agent {
+            agent_id: claims.sub.clone(),
+            server_id: claims.machine_id.clone().ok_or_else(|| {
+                ApiFailure::unauthorized("app_authentication_required", "machine binding required")
+            })?,
+        },
+    };
+    let all = workspace_app_principals(state, auth, &claims.workspace_id).await?;
+    let mut visible = Vec::new();
+    for principal in all {
+        if principal.kind == AppPrincipalKind::Human
+            && claims.principal_kind == AppPrincipalKind::Human
+            && principal.id == claims.sub
+        {
+            visible.push(principal);
+            continue;
+        }
+        let checks = if principal.kind == AppPrincipalKind::Agent {
+            vec![
+                PolicyRequest::new(
+                    &claims.workspace_id,
+                    subject.clone(),
+                    ACTION_AGENT_DISCOVER,
+                    PolicyResource::new(RESOURCE_AGENT, &principal.id),
+                ),
+                PolicyRequest::new(
+                    &claims.workspace_id,
+                    subject.clone(),
+                    ACTION_AGENT_METADATA_READ,
+                    PolicyResource::new(RESOURCE_AGENT, &principal.id),
+                ),
+            ]
+        } else {
+            vec![PolicyRequest::new(
+                &claims.workspace_id,
+                subject.clone(),
+                ACTION_HUMAN_LIST,
+                PolicyResource::new(RESOURCE_HUMAN_DIRECTORY, &claims.workspace_id),
+            )]
+        };
+        if policy.authorize_batch(&checks).await.is_ok() {
+            visible.push(principal);
+        }
+    }
+    Ok(visible)
 }
 
 #[cfg(test)]

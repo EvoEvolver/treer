@@ -4,10 +4,198 @@ use treer_protocol::{
     CreateWorkloadFolderRequest, UpdateWorkloadFolderRequest, WorkspacePolicyDocument,
 };
 
+#[tokio::test]
+async fn invalid_provider_contract_never_falls_back_to_stale_or_fail_open() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("contract").await;
+    let app = auth
+        .create_app_deployment(
+            "contract",
+            "owner",
+            "machine".into(),
+            treer_protocol::CreateAppDeploymentRequest {
+                server_id: Some("machine".into()),
+                name: "Policy".into(),
+                command: "python3".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8888,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    let state = AppState::new();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let connection = uuid::Uuid::new_v4();
+    let build = treer_protocol::BuildInfo {
+        version: "test".into(),
+        git_commit: "test".into(),
+    };
+    state
+        .register_server_instance_with_capabilities(
+            treer_protocol::ServerInfo {
+                server_id: "machine".into(),
+                workspace_id: "contract".into(),
+                name: "machine".into(),
+                hostname: "machine".into(),
+                root: "/tmp".into(),
+                controller_build: build.clone(),
+                host_build: build,
+                supervision: None,
+                labels: Default::default(),
+                available_agents: None,
+                status: treer_protocol::ServerStatus::Online,
+                connected_at: chrono::Utc::now(),
+                last_seen_at: chrono::Utc::now(),
+            },
+            connection,
+            "synthetic".into(),
+            vec![
+                treer_protocol::CAPABILITY_SERVICE_HTTP_FETCH.into(),
+                treer_protocol::CAPABILITY_POLICY_PATH_RULES.into(),
+            ],
+            tx,
+        )
+        .await
+        .unwrap();
+    for mode in [
+        PolicyProviderFailureMode::FailOpen,
+        PolicyProviderFailureMode::FailClosed,
+    ] {
+        for has_stale in [false, true] {
+            for malformed in ["unknown_condition", "invalid_path", "unknown_schema"] {
+                let store = PolicyProviderStore::new(auth.pool());
+                store
+                    .set(
+                        "contract",
+                        &app.app_id,
+                        &app.service_id,
+                        mode,
+                        300,
+                        0,
+                        "owner",
+                    )
+                    .await
+                    .unwrap();
+                let evaluator = Arc::new(ProviderPolicyEvaluator::new(
+                    store,
+                    auth.clone(),
+                    state.clone(),
+                ));
+                if has_stale {
+                    evaluator.cache.write().await.insert(
+                        "contract".into(),
+                        CachedProviderPolicy {
+                            app_id: app.app_id.clone(),
+                            checked_at: Instant::now() - POLICY_CACHE_TTL,
+                            loaded_at: Some(Instant::now()),
+                            policy: Some(Arc::new(CompiledWorkspacePolicy::allow(1))),
+                            last_error: None,
+                        },
+                    );
+                }
+                let task = tokio::spawn({
+                    let evaluator = evaluator.clone();
+                    async move { evaluator.compiled("contract").await }
+                });
+                for step in 0..2 {
+                    let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let crate::state::SocketFrame::Text(wire) = frame else {
+                        panic!("expected command")
+                    };
+                    let treer_protocol::ProxyMessage::Command { envelope } =
+                        serde_json::from_str(&wire).unwrap()
+                    else {
+                        panic!("expected command")
+                    };
+                    let mut doc = serde_json::to_value(document()).unwrap();
+                    match malformed {
+                        "unknown_condition" => {
+                            doc["rules"][0]["conditions"][0]["op"] = json!("future-condition")
+                        }
+                        "invalid_path" => {
+                            doc["rules"][0]["subjects"][0]["tree"]["path_glob"] = json!("//team/*")
+                        }
+                        _ => doc["schema_version"] = json!(99),
+                    }
+                    let value = if step == 0 {
+                        json!({"protocol":POLICY_PROVIDER_PROTOCOL_V1,"provider_name":"Synthetic","capabilities":["policy.bundle.v2"]})
+                    } else {
+                        json!({"protocol":POLICY_PROVIDER_PROTOCOL_V1,"workspace_id":"contract","revision":2,"mode":"enforce","generated_at":chrono::Utc::now(),"document":doc})
+                    };
+                    state
+                        .complete_command_from(
+                            "contract",
+                            "machine",
+                            connection,
+                            treer_protocol::CommandResult::success(envelope.command_id, value),
+                        )
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    task.await.unwrap().unwrap_err().code,
+                    "invalid_policy_contract",
+                    "{mode:?}/{has_stale}/{malformed}"
+                );
+                assert!(evaluator.cache.read().await.get("contract").is_none());
+            }
+        }
+    }
+}
+
 fn document() -> WorkspacePolicyDocument {
     serde_json::from_value(json!({"schema_version":2,"defaults":{"agent.prompt":"deny"},"rules":[
         {"id":"team","priority":100,"effect":"allow","subjects":[{"kind":"agent","tree":{"path_glob":"/team/*"}}],"actions":["agent.prompt"],"resources":[{"kind":"agent","tree":{"path_prefix":{"path":"/team","include_self":false}}}],"bindings":{"home":{"ref":"subject.tree.folder"}},"conditions":[{"op":"resource_below_folder","folder":{"var":"home"}}]}
     ]})).unwrap()
+}
+
+#[test]
+fn action_index_shares_large_rules_and_deduplicates_repeated_actions() {
+    for repeated in [false, true] {
+        let mut doc = document();
+        let rule = &mut doc.rules[0];
+        rule.actions = (0..5000)
+            .map(|i| {
+                if repeated {
+                    "agent.prompt".into()
+                } else {
+                    format!("action-{i}")
+                }
+            })
+            .collect();
+        rule.conditions = serde_json::from_value(json!(vec![
+            json!({"op":"resource_below_folder","folder":{"path":format!("/{}","x".repeat(4000))}});
+            32
+        ]))
+        .unwrap();
+        treer_proxy::policy_store::validate_document(&doc).unwrap();
+        let compiled = CompiledWorkspacePolicy::compile(WorkspacePolicy {
+            workspace_id: "w".into(),
+            revision: 1,
+            mode: PolicyMode::Monitor,
+            document: doc,
+            updated_at: chrono::Utc::now(),
+            updated_by: PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        });
+        let first = &compiled.rules_by_action.values().next().unwrap()[0];
+        assert_eq!(
+            compiled.rules_by_action.len(),
+            if repeated { 1 } else { 5000 }
+        );
+        for rules in compiled.rules_by_action.values() {
+            assert_eq!(rules.len(), 1);
+            assert!(Arc::ptr_eq(first, &rules[0]));
+        }
+    }
 }
 
 #[tokio::test]
