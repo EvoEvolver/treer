@@ -85,7 +85,7 @@ pub(super) async fn get_policy_provider(
         None
     };
     Ok(Json(
-        json!({ "provider": provider, "app": app, "cache": cache, "fallback": fallback }),
+        json!({ "provider": provider, "app": app, "cache": cache, "fallback": fallback,"supported_schema_versions":[1,2],"capabilities":[treer_protocol::CAPABILITY_POLICY_PATH_RULES] }),
     ))
 }
 
@@ -146,6 +146,7 @@ pub(super) async fn set_policy_provider(
             &workspace_id,
             &app.server_id,
             AgentCommand::FetchServiceHttp {
+                policy_schema_version: None,
                 port: app.port,
                 path: "/v1/manifest".to_string(),
                 max_bytes: POLICY_PROVIDER_MANIFEST_MAX_BYTES,
@@ -158,10 +159,10 @@ pub(super) async fn set_policy_provider(
             ApiFailure::bad_request("invalid_policy_provider_manifest", &error.to_string())
         })?;
     if manifest.protocol != POLICY_PROVIDER_PROTOCOL_V1
-        || !manifest
-            .capabilities
-            .iter()
-            .any(|capability| capability == POLICY_PROVIDER_BUNDLE_CAPABILITY_V1)
+        || !manifest.capabilities.iter().any(|capability| {
+            capability == POLICY_PROVIDER_BUNDLE_CAPABILITY_V1
+                || capability == treer_protocol::POLICY_PROVIDER_BUNDLE_CAPABILITY_V2
+        })
     {
         return Err(ApiFailure::bad_request(
             "unsupported_policy_provider",
@@ -171,6 +172,7 @@ pub(super) async fn set_policy_provider(
     let query = {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         query.append_pair("workspace_id", &workspace_id);
+        query.append_pair("max_schema_version", "2");
         query.finish()
     };
     let bundle_value = state
@@ -178,6 +180,11 @@ pub(super) async fn set_policy_provider(
             &workspace_id,
             &app.server_id,
             AgentCommand::FetchServiceHttp {
+                policy_schema_version: manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c == treer_protocol::POLICY_PROVIDER_BUNDLE_CAPABILITY_V2)
+                    .then_some(2),
                 port: app.port,
                 path: format!("/v1/policy/bundle?{query}"),
                 max_bytes: POLICY_PROVIDER_BUNDLE_MAX_BYTES,
@@ -196,6 +203,17 @@ pub(super) async fn set_policy_provider(
     }
     treer_proxy::policy_store::validate_document(&bundle.document)
         .map_err(|error| ApiFailure::bad_request(error.code(), &error.to_string()))?;
+    if bundle.document.schema_version == 2
+        && !manifest
+            .capabilities
+            .iter()
+            .any(|c| c == treer_protocol::POLICY_PROVIDER_BUNDLE_CAPABILITY_V2)
+    {
+        return Err(ApiFailure::bad_request(
+            "unsupported_policy_provider",
+            "schema v2 requires policy.bundle.v2 capability",
+        ));
+    }
     let provider = store
         .set(
             &workspace_id,

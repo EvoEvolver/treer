@@ -60,6 +60,13 @@ the plan identifies every maintained document that must change at completion.
 
 ## Design proposals
 
+- [Policy path rules](research/2026-10-13-policy-path-rules-design.md) and
+  [schema v2 contract](research/2026-10-13-policy-schema-v2-contract.md): current
+  Tree facts, component paths and folder relations, owner diagnostics, staged App
+  action checks, consistency, migration and recovery boundaries.
+- [Tree links](research/2026-10-13-tree-links-design.md): discovery/addressing
+  aliases without automatic grants; permissions remain separate Policy rules.
+
 - [Policy enforce migration](research/2026-10-12-policy-enforce-migration.md):
   planning only; versioned deny defaults, administrator recovery, existing-workspace
   previews, UI authority, token windows, rollout and rollback risks.

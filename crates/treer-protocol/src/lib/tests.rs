@@ -294,6 +294,7 @@ fn commands_added_after_protocol_v4_require_advertised_capabilities() {
     );
     assert_eq!(
         AgentCommand::FetchServiceHttp {
+            policy_schema_version: None,
             port: 8080,
             path: "/v1/manifest".to_string(),
             max_bytes: 4096,

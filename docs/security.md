@@ -126,6 +126,25 @@ a password does not invalidate an already issued App JWT. Workload signature
 verification does not uniformly recheck Agent/machine revocation or current Policy.
 Do not claim immediate token revocation or single-use bearer tokens.
 
+Policy schema v2 Tree facts are fetched from the current workspace in the
+primary database, independently of Provider cache age. A concurrent Tree change
+during evaluation rejects the request for retry; a move after acceptance does
+not revoke an in-flight operation. Human/machine subjects without Tree placement
+do not implicitly belong to root. Links do not grant rights. Defaults remain
+monitor/allow; schema v2 does not make an unconfigured workspace deny-by-default.
+
+Owner Tree read/manage and Provider configuration recovery cannot be denied by
+delegated Policy; current membership, workspace scoping and structural invariants
+still apply. Explain and monitor logs require current owner membership. The
+configured Provider's App diagnostics bridge additionally checks its current
+runtime credential, the human token's exact service audience and current service
+binding. This bridge only reads/simulates: it cannot install rules or delegate
+Owner mutations. A Provider can inspect workspace diagnostics only with a valid
+Owner token; malicious Provider code can misuse that token during its lifetime,
+so selecting a Provider remains a trust decision. No token or caller attributes
+are stored in decision diagnostics. These logs are per-Proxy, bounded and
+volatile, and are not tamper-proof or complete durable audit records.
+
 PostgreSQL and NATS are trusted control-plane backends, not tenant isolation
 boundaries. Opaque login/admin/ingress sessions and signing-key metadata require
 confidential database access and backups. The Compose NATS service has no broker

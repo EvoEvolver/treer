@@ -68,6 +68,8 @@ use crate::traffic::TrafficClass;
 use crate::updater::UpdaterClient;
 use crate::voice::{VoiceAsrConfig, VoiceServices};
 use crate::voice_llm::{self, VoiceCommandError, VoiceLlmConfig};
+mod policy_diagnostics;
+use policy_diagnostics::*;
 
 const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;
 const MAX_MACHINE_FILE_BYTES: usize = 16 * 1024 * 1024;

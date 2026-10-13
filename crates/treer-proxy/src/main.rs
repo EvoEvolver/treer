@@ -9,6 +9,7 @@ mod identity;
 mod message_store;
 pub mod policy;
 mod policy_provider_store;
+mod policy_tree;
 mod state;
 mod traffic;
 mod updater;

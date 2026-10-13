@@ -7,7 +7,7 @@ use treer_protocol::{
 
 // Router middleware establishes membership or machine/workload authentication.
 #[allow(clippy::too_many_arguments)]
-async fn authorize_tree(
+pub(super) async fn authorize_tree(
     state: &AppState,
     auth: &AuthStore,
     policy: &PolicyEngine,
@@ -20,6 +20,26 @@ async fn authorize_tree(
     if let Some(session) = session {
         auth.require_workspace_member(workspace, &session.user_id)
             .await?;
+        if matches!(action, ACTION_AGENT_TREE_MANAGE | ACTION_AGENT_TREE_READ)
+            && auth
+                .require_workspace_owner(workspace, &session.user_id)
+                .await
+                .is_ok()
+        {
+            tracing::info!(workspace_id=workspace,actor_id=%session.user_id,action,"owner Tree break-glass");
+            return Ok(());
+        }
+        policy
+            .authorize(&PolicyRequest::new(
+                workspace,
+                PolicySubject::Human {
+                    user_id: session.user_id.clone(),
+                },
+                action,
+                PolicyResource::new(RESOURCE_AGENT_TREE, workspace),
+            ))
+            .await?;
+        return Ok(());
     } else if machine.is_none() {
         return Err(ApiFailure::forbidden(
             "identity_required",

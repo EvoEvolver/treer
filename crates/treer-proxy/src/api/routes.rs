@@ -431,6 +431,18 @@ pub fn router(
                 .delete(clear_policy_provider),
         )
         .route(
+            "/api/workspaces/{workspace_id}/policy/explain",
+            post(explain_policy),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/policy/decisions",
+            get(policy_decisions),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/policy/validate",
+            post(validate_policy_document),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/policy-provider/default-app",
             post(install_default_policy_app),
         )
@@ -650,6 +662,18 @@ pub fn router(
         .route("/api/apps/oauth/authorize", get(authorize_workspace_app))
         .route("/api/apps/oauth/token", post(exchange_workspace_app_code))
         .route("/api/apps/{service_id}/email", post(send_app_email))
+        .route(
+            "/api/apps/{service_id}/policy/explain",
+            post(app_explain_policy),
+        )
+        .route(
+            "/api/apps/{service_id}/policy/decisions",
+            get(app_policy_decisions),
+        )
+        .route(
+            "/api/apps/{service_id}/policy/validate",
+            post(app_validate_policy_document),
+        )
         .route(
             "/api/apps/{service_id}/directory",
             get(workspace_app_directory),

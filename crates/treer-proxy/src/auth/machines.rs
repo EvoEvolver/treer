@@ -822,6 +822,28 @@ impl AuthStore {
         }))
     }
 
+    /// Authenticate a specifically bound runtime for owner diagnostics. Read the
+    /// current credential row: revocation/rotation must not use the normal cache.
+    pub(crate) async fn authenticate_bound_runtime(
+        &self,
+        workspace: &str,
+        server: &str,
+        agent: &str,
+        headers: &HeaderMap,
+    ) -> Result<(), AuthFailure> {
+        if optional_header(headers, AGENT_ID_HEADER)? != Some(agent) {
+            return Err(agent_auth_required());
+        }
+        let credential = optional_header(headers, WORKLOAD_CREDENTIAL_HEADER)?
+            .ok_or_else(agent_auth_required)?;
+        let hash:Option<String> = sqlx::query_scalar("SELECT c.secret_hash FROM agent_credentials c JOIN workspaces w ON w.workspace_id=c.workspace_id WHERE c.workspace_id=$1 AND c.server_id=$2 AND c.agent_id=$3 AND c.revoked_at IS NULL AND w.deleted_at IS NULL")
+            .bind(workspace).bind(server).bind(agent).fetch_optional(&self.pool).await.map_err(AuthFailure::database)?;
+        if !hash.is_some_and(|hash| fast_secret_matches(credential, &hash)) {
+            return Err(agent_auth_required());
+        }
+        Ok(())
+    }
+
     pub async fn active_agent_ids(
         &self,
         workspace_id: &str,

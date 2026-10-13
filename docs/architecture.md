@@ -252,6 +252,31 @@ send/read/receive/ack/import. A
 workspace without a Policy document currently defaults to allow; this is an
 explicit product limitation.
 
+Schema v2 adds bounded component path selectors and typed folder relations.
+Subject/resource Tree facts come from one repeatable-read primary PostgreSQL
+snapshot, never the Provider bundle or caller attributes. Tree mutations bump
+`workspaces.tree_revision` in the same transaction; authorization verifies that
+revision after evaluating a bundle and rejects `policy_tree_changed` if it
+changed (the caller may retry). Moving/renaming changes rule applicability
+without reloading the bundle. Tree facts are **not cached** in this version:
+multiple Proxies read the same committed DB truth, so lost NATS or PostgreSQL
+notification hints cannot retain old paths. PostgreSQL notifications prepare
+future invalidation; adding a Tree cache would require a separate consistency
+design. The acceptance check is not an atomic fence for subsequent network or
+Host effects; already accepted operations are not revoked by a later move.
+
+Owner Tree read/manage and Provider recovery remain static authenticated Core
+routes, outside delegated rules. Non-owner human Tree requests are evaluated
+by Policy. Owner-only explain resolves existing workspace IDs/paths and may
+simulate a validated candidate without installing it. Monitor would-deny
+diagnostics are bounded, body-free, per-Proxy in-memory records plus structured
+logs, not a durable global audit. The configured Provider diagnostics bridge
+requires its fresh runtime credential **and** a service-audience current human
+owner token; neither identity alone grants diagnostic access. Schema/capability
+incompatibility fails explicitly, including in fail-open mode. See the
+[v2 contract](research/2026-10-13-policy-schema-v2-contract.md) and
+[path-rule design](research/2026-10-13-policy-path-rules-design.md).
+
 ## Routing And State
 
 Machines connect outward to the Proxy over an authenticated WebSocket. The

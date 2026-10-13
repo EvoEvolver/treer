@@ -1,6 +1,41 @@
 use super::*;
 
 #[tokio::test]
+async fn old_controller_rejects_v2_policy_fetch_before_any_dispatch() {
+    let state = AppState::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            Uuid::new_v4(),
+            "old-policy".into(),
+            vec![treer_protocol::CAPABILITY_SERVICE_HTTP_FETCH.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let error = state
+        .send_command(
+            "alpha",
+            "server",
+            AgentCommand::FetchServiceHttp {
+                port: 8888,
+                path: "/v1/policy/bundle?max_schema_version=2".into(),
+                max_bytes: 1024,
+                timeout_ms: 1000,
+                policy_schema_version: Some(2),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unsupported_command");
+    assert!(error
+        .message
+        .contains(treer_protocol::CAPABILITY_POLICY_PATH_RULES));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn command_results_require_the_target_machine_and_current_connection() {
     let state = AppState::new();
     let owner_id = Uuid::new_v4();

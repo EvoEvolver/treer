@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,6 +16,11 @@ use treer_proxy::policy_store::WorkspacePolicyStore;
 use crate::auth::AuthStore;
 use crate::policy_provider_store::PolicyProviderStore;
 use crate::state::AppState;
+#[path = "policy_path_match.rs"]
+mod path_match;
+#[cfg(test)]
+#[path = "policy_path_tests.rs"]
+mod path_tests;
 
 pub const ACTION_NETWORK_CONNECT: &str = "network.connect";
 pub const ACTION_AGENT_DISCOVER: &str = "agent.discover";
@@ -114,6 +119,9 @@ pub struct PolicyRequest {
     pub subject: PolicySubject,
     pub action: String,
     pub resource: PolicyResource,
+    pub subject_tree: Option<treer_protocol::PolicyTreeContext>,
+    pub resource_tree: Option<treer_protocol::PolicyTreeContext>,
+    pub tree_revision: Option<u64>,
 }
 
 impl PolicyRequest {
@@ -128,6 +136,9 @@ impl PolicyRequest {
             subject,
             action: action.into(),
             resource,
+            subject_tree: None,
+            resource_tree: None,
+            tree_revision: None,
         }
     }
 
@@ -208,6 +219,7 @@ pub type PolicyFuture<'a> =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyBatchEvaluation {
+    pub explanations: Vec<PolicyExplanation>,
     pub evaluations: Vec<PolicyEvaluation>,
     pub revision: Option<u64>,
 }
@@ -227,6 +239,13 @@ pub struct PolicyBatchDenial {
 }
 
 pub trait PolicyEvaluator: Send + Sync {
+    fn explain<'a>(
+        &'a self,
+        _request: &'a PolicyRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<PolicyExplanation>, ProtocolError>> + Send + 'a>>
+    {
+        Box::pin(async { Ok(None) })
+    }
     fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a>;
 
     fn evaluate_batch<'a>(&'a self, requests: &'a [PolicyRequest]) -> PolicyBatchFuture<'a> {
@@ -236,6 +255,7 @@ pub trait PolicyEvaluator: Send + Sync {
                 evaluations.push(self.evaluate(request).await?);
             }
             Ok(PolicyBatchEvaluation {
+                explanations: Vec::new(),
                 evaluations,
                 revision: None,
             })
@@ -248,18 +268,116 @@ pub struct PolicyEngine {
     evaluators: Arc<[Arc<dyn PolicyEvaluator>]>,
     default_decision: PolicyDecision,
     provider: Option<Arc<ProviderPolicyEvaluator>>,
+    tree_pool: Option<sqlx::PgPool>,
+    records: Arc<Mutex<VecDeque<PolicyDecisionRecord>>>,
 }
 
 impl PolicyEngine {
+    async fn check_tree_revision(&self, request: &PolicyRequest) -> Result<(), ProtocolError> {
+        if let (Some(pool), Some(revision)) = (&self.tree_pool, request.tree_revision) {
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT tree_revision FROM workspaces WHERE workspace_id=$1 AND deleted_at IS NULL",
+            )
+            .bind(&request.workspace_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| {
+                ProtocolError::new(
+                    "policy_tree_unavailable",
+                    "cannot validate current Tree revision",
+                )
+            })?;
+            if current.and_then(|v| u64::try_from(v).ok()) != Some(revision) {
+                return Err(ProtocolError::new(
+                    "policy_tree_changed",
+                    "Tree changed during authorization; retry request",
+                ));
+            }
+        }
+        Ok(())
+    }
+    async fn enrich(&self, request: &PolicyRequest) -> Result<PolicyRequest, ProtocolError> {
+        match &self.tree_pool {
+            Some(pool) => Ok(
+                crate::policy_tree::TreeSnapshot::load(pool, &request.workspace_id)
+                    .await?
+                    .enrich(request),
+            ),
+            None => Ok(request.clone()),
+        }
+    }
+
+    pub async fn explain_request(
+        &self,
+        request: &PolicyRequest,
+    ) -> Result<PolicyExplanation, ProtocolError> {
+        let request = self.enrich(request).await?;
+        for evaluator in self.evaluators.iter() {
+            if let Some(mut explanation) = evaluator.explain(&request).await? {
+                explanation.tree_revision = request.tree_revision;
+                return Ok(explanation);
+            }
+            match evaluator.evaluate(&request).await? {
+                PolicyEvaluation::Abstain => {}
+                PolicyEvaluation::Decide(decision) => {
+                    return Ok(PolicyExplanation::baseline(decision, request.tree_revision))
+                }
+            }
+        }
+        Ok(PolicyExplanation::baseline(
+            self.default_decision.clone(),
+            request.tree_revision,
+        ))
+    }
+
+    async fn record(&self, request: &PolicyRequest, explanation: &PolicyExplanation) {
+        if explanation.mode != PolicyMode::Monitor
+            || explanation.computed_effect != PolicyEffect::Deny
+        {
+            return;
+        }
+        let (kind, id, _) = subject_parts(&request.subject);
+        let record = PolicyDecisionRecord {
+            workspace_id: request.workspace_id.clone(),
+            actor_kind: kind,
+            actor_id: id.into(),
+            action: request.action.clone(),
+            resource_kind: request.resource.kind.clone(),
+            resource_id: request.resource.id.clone(),
+            occurred_at: chrono::Utc::now(),
+            explanation: explanation.clone(),
+        };
+        tracing::info!(workspace_id=%record.workspace_id,actor_id=%record.actor_id,action=%record.action,resource_id=%record.resource_id,rule_id=?explanation.matched_rule_id,policy_revision=explanation.policy_revision,tree_revision=?request.tree_revision,"policy monitor would deny");
+        let mut records = self.records.lock().await;
+        if records.len() == 2048 {
+            records.pop_front();
+        }
+        records.push_back(record);
+    }
+
+    pub async fn decision_records(&self, workspace: &str) -> Vec<PolicyDecisionRecord> {
+        self.records
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .filter(|r| r.workspace_id == workspace)
+            .take(100)
+            .cloned()
+            .collect()
+    }
     pub fn allow_all() -> Self {
         Self::new(PolicyDecision::Allow, Vec::new())
     }
 
     pub fn durable(store: WorkspacePolicyStore) -> Self {
-        Self::new(
+        let pool = store.pool();
+        let mut engine = Self::new(
             PolicyDecision::Allow,
             vec![Arc::new(DurablePolicyEvaluator::new(store))],
-        )
+        );
+        engine.tree_pool = Some(pool);
+        engine
     }
 
     pub(crate) fn durable_with_provider(
@@ -268,6 +386,7 @@ impl PolicyEngine {
         auth: AuthStore,
         state: AppState,
     ) -> Self {
+        let pool = store.pool();
         let provider = Arc::new(ProviderPolicyEvaluator::new(provider_store, auth, state));
         Self {
             evaluators: vec![
@@ -277,6 +396,8 @@ impl PolicyEngine {
             .into(),
             default_decision: PolicyDecision::Allow,
             provider: Some(provider),
+            tree_pool: Some(pool),
+            records: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -288,6 +409,8 @@ impl PolicyEngine {
             evaluators: evaluators.into(),
             default_decision,
             provider: None,
+            tree_pool: None,
+            records: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -305,8 +428,14 @@ impl PolicyEngine {
     }
 
     pub async fn authorize(&self, request: &PolicyRequest) -> Result<(), ProtocolError> {
+        let request = self.enrich(request).await?;
         for evaluator in self.evaluators.iter() {
-            match evaluator.evaluate(request).await? {
+            if let Some(explanation) = evaluator.explain(&request).await? {
+                self.check_tree_revision(&request).await?;
+                self.record(&request, &explanation).await;
+                return explanation.into_decision().into_result();
+            }
+            match evaluator.evaluate(&request).await? {
                 PolicyEvaluation::Abstain => {}
                 PolicyEvaluation::Decide(decision) => return decision.into_result(),
             }
@@ -321,6 +450,21 @@ impl PolicyEngine {
         if requests.is_empty() {
             return Ok(PolicyBatchAuthorization { revision: None });
         }
+        let enriched = if let Some(pool) = &self.tree_pool {
+            let snapshot = crate::policy_tree::TreeSnapshot::load(pool, &requests[0].workspace_id)
+                .await
+                .map_err(|error| PolicyBatchDenial {
+                    request_index: 0,
+                    error,
+                })?;
+            requests
+                .iter()
+                .map(|r| snapshot.enrich(r))
+                .collect::<Vec<_>>()
+        } else {
+            requests.to_vec()
+        };
+        let requests = enriched.as_slice();
         let workspace_id = &requests[0].workspace_id;
         if requests
             .iter()
@@ -370,6 +514,17 @@ impl PolicyEngine {
                 }
                 revision = Some(batch_revision);
             }
+            self.check_tree_revision(&requests[0])
+                .await
+                .map_err(|error| PolicyBatchDenial {
+                    request_index: 0,
+                    error,
+                })?;
+            for (index, explanation) in batch.explanations.iter().enumerate() {
+                if unresolved.get(index) == Some(&true) {
+                    self.record(&requests[index], explanation).await;
+                }
+            }
             for (index, evaluation) in batch.evaluations.into_iter().enumerate() {
                 if !unresolved[index] {
                     continue;
@@ -399,6 +554,58 @@ impl PolicyEngine {
         }
         Ok(PolicyBatchAuthorization { revision })
     }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PolicyExplanation {
+    pub computed_effect: PolicyEffect,
+    pub effective_decision: PolicyEffect,
+    pub mode: PolicyMode,
+    pub matched_rule_id: Option<String>,
+    pub reason: String,
+    pub policy_revision: u64,
+    pub tree_revision: Option<u64>,
+    pub source: String,
+}
+impl PolicyExplanation {
+    fn into_decision(self) -> PolicyDecision {
+        if self.effective_decision == PolicyEffect::Allow {
+            PolicyDecision::Allow
+        } else {
+            PolicyDecision::Deny(PolicyDenial::new(
+                "policy_denied",
+                "workspace policy denied this operation",
+            ))
+        }
+    }
+    fn baseline(decision: PolicyDecision, tree_revision: Option<u64>) -> Self {
+        let effect = if matches!(decision, PolicyDecision::Allow) {
+            PolicyEffect::Allow
+        } else {
+            PolicyEffect::Deny
+        };
+        Self {
+            computed_effect: effect,
+            effective_decision: effect,
+            mode: PolicyMode::Monitor,
+            matched_rule_id: None,
+            reason: "Core fallback".into(),
+            policy_revision: 0,
+            tree_revision,
+            source: "baseline".into(),
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyDecisionRecord {
+    pub workspace_id: String,
+    pub actor_kind: PolicyPrincipalKind,
+    pub actor_id: String,
+    pub action: String,
+    pub resource_kind: String,
+    pub resource_id: String,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    pub explanation: PolicyExplanation,
 }
 
 const POLICY_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -535,6 +742,17 @@ impl ProviderPolicyEvaluator {
                     .await
             }
             Err(error) => {
+                // Incompatible contracts are not transient outages: never downgrade
+                // unknown rules through fail-open or a cached v1 policy.
+                if matches!(
+                    error.code.as_str(),
+                    "unsupported_command"
+                        | "unsupported_policy_provider_protocol"
+                        | "unsupported_policy_schema"
+                        | "unsupported_policy_provider"
+                ) {
+                    return Err(error);
+                }
                 self.provider_failure(workspace_id, provider, previous, error.message)
                     .await
             }
@@ -551,9 +769,47 @@ impl ProviderPolicyEvaluator {
             .resolve_app_deployment(workspace_id, app_id)
             .await
             .map_err(|error| error.into_parts().1)?;
+        let manifest_value = self
+            .state
+            .send_command(
+                workspace_id,
+                &app.server_id,
+                AgentCommand::FetchServiceHttp {
+                    policy_schema_version: None,
+                    port: app.port,
+                    path: "/v1/manifest".into(),
+                    max_bytes: 32 * 1024,
+                    timeout_ms: POLICY_PROVIDER_FETCH_TIMEOUT_MS,
+                },
+            )
+            .await?;
+        let manifest: treer_protocol::PolicyProviderManifest =
+            serde_json::from_value(manifest_value).map_err(|_| {
+                ProtocolError::new(
+                    "unsupported_policy_provider",
+                    "invalid Policy Provider manifest",
+                )
+            })?;
+        let supports_v2 = manifest
+            .capabilities
+            .iter()
+            .any(|c| c == treer_protocol::POLICY_PROVIDER_BUNDLE_CAPABILITY_V2);
+        if manifest.protocol != POLICY_PROVIDER_PROTOCOL_V1
+            || !supports_v2
+                && !manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c == treer_protocol::POLICY_PROVIDER_BUNDLE_CAPABILITY_V1)
+        {
+            return Err(ProtocolError::new(
+                "unsupported_policy_provider",
+                "unsupported Policy Provider capabilities",
+            ));
+        }
         let query = {
             let mut query = url::form_urlencoded::Serializer::new(String::new());
             query.append_pair("workspace_id", workspace_id);
+            query.append_pair("max_schema_version", "2");
             query.finish()
         };
         let value = self
@@ -562,6 +818,7 @@ impl ProviderPolicyEvaluator {
                 workspace_id,
                 &app.server_id,
                 AgentCommand::FetchServiceHttp {
+                    policy_schema_version: supports_v2.then_some(2),
                     port: app.port,
                     path: format!("/v1/policy/bundle?{query}"),
                     max_bytes: POLICY_PROVIDER_BUNDLE_MAX_BYTES,
@@ -586,6 +843,12 @@ impl ProviderPolicyEvaluator {
         }
         treer_proxy::policy_store::validate_document(&bundle.document)
             .map_err(|error| ProtocolError::new(error.code(), error.to_string()))?;
+        if bundle.document.schema_version == 2 && !supports_v2 {
+            return Err(ProtocolError::new(
+                "unsupported_policy_provider",
+                "schema v2 requires policy.bundle.v2 capability",
+            ));
+        }
         Ok(bundle)
     }
 
@@ -658,6 +921,30 @@ fn cached_provider_result(
 }
 
 impl PolicyEvaluator for ProviderPolicyEvaluator {
+    fn explain<'a>(
+        &'a self,
+        request: &'a PolicyRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<PolicyExplanation>, ProtocolError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let Some(policy) = self.compiled(&request.workspace_id).await? else {
+                return Ok(None);
+            };
+            let mut explanation = policy.explain(request);
+            explanation.source = "provider".into();
+            if let Some(cached) = self.cache.read().await.get(&request.workspace_id) {
+                if cached.last_error.is_some() {
+                    explanation.source = if cached.loaded_at.is_some() {
+                        "provider_stale"
+                    } else {
+                        "provider_fail_open"
+                    }
+                    .into();
+                }
+            }
+            Ok(Some(explanation))
+        })
+    }
     fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a> {
         Box::pin(async move {
             let Some(policy) = self.compiled(&request.workspace_id).await? else {
@@ -671,6 +958,7 @@ impl PolicyEvaluator for ProviderPolicyEvaluator {
         Box::pin(async move {
             let Some(first) = requests.first() else {
                 return Ok(PolicyBatchEvaluation {
+                    explanations: Vec::new(),
                     evaluations: Vec::new(),
                     revision: None,
                 });
@@ -686,11 +974,13 @@ impl PolicyEvaluator for ProviderPolicyEvaluator {
             }
             let Some(policy) = self.compiled(&first.workspace_id).await? else {
                 return Ok(PolicyBatchEvaluation {
+                    explanations: Vec::new(),
                     evaluations: vec![PolicyEvaluation::Abstain; requests.len()],
                     revision: None,
                 });
             };
             Ok(PolicyBatchEvaluation {
+                explanations: requests.iter().map(|r| policy.explain(r)).collect(),
                 evaluations: requests
                     .iter()
                     .map(|request| PolicyEvaluation::Decide(policy.evaluate(request)))
@@ -707,7 +997,7 @@ struct CachedWorkspacePolicy {
 }
 
 #[derive(Debug)]
-struct CompiledWorkspacePolicy {
+pub(crate) struct CompiledWorkspacePolicy {
     revision: u64,
     mode: PolicyMode,
     defaults: BTreeMap<String, PolicyEffect>,
@@ -756,6 +1046,18 @@ impl DurablePolicyEvaluator {
 }
 
 impl PolicyEvaluator for DurablePolicyEvaluator {
+    fn explain<'a>(
+        &'a self,
+        request: &'a PolicyRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<PolicyExplanation>, ProtocolError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Ok(self
+                .compiled(&request.workspace_id)
+                .await?
+                .map(|policy| policy.explain(request)))
+        })
+    }
     fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a> {
         Box::pin(async move {
             let Some(policy) = self.compiled(&request.workspace_id).await? else {
@@ -769,6 +1071,7 @@ impl PolicyEvaluator for DurablePolicyEvaluator {
         Box::pin(async move {
             let Some(first) = requests.first() else {
                 return Ok(PolicyBatchEvaluation {
+                    explanations: Vec::new(),
                     evaluations: Vec::new(),
                     revision: None,
                 });
@@ -784,11 +1087,13 @@ impl PolicyEvaluator for DurablePolicyEvaluator {
             }
             let Some(policy) = self.compiled(&first.workspace_id).await? else {
                 return Ok(PolicyBatchEvaluation {
+                    explanations: Vec::new(),
                     evaluations: vec![PolicyEvaluation::Abstain; requests.len()],
                     revision: None,
                 });
             };
             Ok(PolicyBatchEvaluation {
+                explanations: requests.iter().map(|r| policy.explain(r)).collect(),
                 evaluations: requests
                     .iter()
                     .map(|request| PolicyEvaluation::Decide(policy.evaluate(request)))
@@ -800,6 +1105,24 @@ impl PolicyEvaluator for DurablePolicyEvaluator {
 }
 
 impl CompiledWorkspacePolicy {
+    pub(crate) fn explain_document(
+        document: treer_protocol::WorkspacePolicyDocument,
+        mode: PolicyMode,
+        request: &PolicyRequest,
+    ) -> PolicyExplanation {
+        Self::compile(WorkspacePolicy {
+            workspace_id: request.workspace_id.clone(),
+            revision: 0,
+            mode,
+            document,
+            updated_at: chrono::Utc::now(),
+            updated_by: PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "simulation".into(),
+            },
+        })
+        .explain(request)
+    }
     fn allow(revision: u64) -> Self {
         Self {
             revision,
@@ -811,6 +1134,7 @@ impl CompiledWorkspacePolicy {
     }
 
     fn compile(policy: WorkspacePolicy) -> Self {
+        let stable_ties = policy.document.schema_version == 2;
         let mut rules_by_action: HashMap<String, Vec<WorkspacePolicyRule>> = HashMap::new();
         for rule in policy.document.rules {
             for action in &rule.actions {
@@ -826,6 +1150,13 @@ impl CompiledWorkspacePolicy {
                     .priority
                     .cmp(&left.priority)
                     .then_with(|| effect_order(right.effect).cmp(&effect_order(left.effect)))
+                    .then_with(|| {
+                        if stable_ties {
+                            left.id.cmp(&right.id)
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
+                    })
             });
         }
         Self {
@@ -843,36 +1174,51 @@ impl CompiledWorkspacePolicy {
     }
 
     fn evaluate(&self, request: &PolicyRequest) -> PolicyDecision {
-        let effect = self
-            .rules_by_action
-            .get(&request.action)
-            .and_then(|rules| {
-                rules.iter().find(|rule| {
-                    rule.subjects
+        self.explain(request).into_decision()
+    }
+
+    fn explain(&self, request: &PolicyRequest) -> PolicyExplanation {
+        let matched = self.rules_by_action.get(&request.action).and_then(|rules| {
+            rules.iter().find(|rule| {
+                rule.subjects
+                    .iter()
+                    .any(|s| self.subject_matches(s, request))
+                    && rule
+                        .resources
                         .iter()
-                        .any(|selector| self.subject_matches(selector, request))
-                        && rule
-                            .resources
-                            .iter()
-                            .any(|selector| self.resource_matches(selector, request))
-                })
+                        .any(|r| self.resource_matches(r, request))
+                    && path_match::conditions_match(rule, request)
             })
-            .map(|rule| rule.effect)
+        });
+        let effect = matched
+            .map(|r| r.effect)
             .or_else(|| self.defaults.get(&request.action).copied())
             .unwrap_or(PolicyEffect::Allow);
-        if self.mode == PolicyMode::Monitor || effect == PolicyEffect::Allow {
-            PolicyDecision::Allow
-        } else {
-            PolicyDecision::Deny(PolicyDenial::new(
-                "policy_denied",
-                "workspace policy denied this operation",
-            ))
+        PolicyExplanation {
+            computed_effect: effect,
+            effective_decision: if self.mode == PolicyMode::Monitor {
+                PolicyEffect::Allow
+            } else {
+                effect
+            },
+            mode: self.mode,
+            matched_rule_id: matched.map(|r| r.id.clone()),
+            reason: if matched.is_some() {
+                "rule matched"
+            } else {
+                "no rule matched; action default"
+            }
+            .into(),
+            policy_revision: self.revision,
+            tree_revision: request.tree_revision,
+            source: "workspace_policy".into(),
         }
     }
 
     fn subject_matches(&self, selector: &PolicySubjectSelector, request: &PolicyRequest) -> bool {
         let (kind, id, machine_id) = subject_parts(&request.subject);
         selector.kind.is_none_or(|expected| expected == kind)
+            && path_match::selector_matches(selector.tree.as_ref(), request.subject_tree.as_ref())
             && selector.id.as_deref().is_none_or(|expected| expected == id)
             && selector
                 .machine_id
@@ -886,10 +1232,11 @@ impl CompiledWorkspacePolicy {
     }
 
     fn resource_matches(&self, selector: &PolicyResourceSelector, request: &PolicyRequest) -> bool {
-        selector
-            .kind
-            .as_deref()
-            .is_none_or(|kind| kind == request.resource.kind)
+        path_match::selector_matches(selector.tree.as_ref(), request.resource_tree.as_ref())
+            && selector
+                .kind
+                .as_deref()
+                .is_none_or(|kind| kind == request.resource.kind)
             && selector
                 .id
                 .as_deref()
@@ -986,6 +1333,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async {
                 Ok(PolicyBatchEvaluation {
+                    explanations: Vec::new(),
                     evaluations: self.evaluations.clone(),
                     revision: Some(self.revision),
                 })

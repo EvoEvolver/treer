@@ -93,3 +93,48 @@ pub enum PolicyTreeCondition {
         strict: bool,
     },
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn typed_folder_references_round_trip_and_reject_ambiguous_fields() {
+        for value in [
+            serde_json::json!({"ref":"subject.tree.folder"}),
+            serde_json::json!({"var":"team"}),
+            serde_json::json!({"path":"/team"}),
+            serde_json::json!({"id":"folder_a"}),
+        ] {
+            let reference: PolicyFolderRef = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(reference).unwrap(), value);
+        }
+        assert!(serde_json::from_value::<PolicyFolderRef>(
+            serde_json::json!({"var":"team","id":"f"})
+        )
+        .is_err());
+    }
+    #[test]
+    fn policy_v2_fetch_requires_explicit_controller_capability() {
+        let command = crate::AgentCommand::FetchServiceHttp {
+            port: 8888,
+            path: "/v1/policy/bundle".into(),
+            max_bytes: 100,
+            timeout_ms: 1000,
+            policy_schema_version: Some(2),
+        };
+        assert_eq!(
+            command.required_capability(),
+            Some(crate::CAPABILITY_POLICY_PATH_RULES)
+        );
+        let wire = serde_json::to_value(&command).unwrap();
+        let restored: crate::AgentCommand = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            restored.required_capability(),
+            command.required_capability()
+        );
+        let legacy:crate::AgentCommand=serde_json::from_value(serde_json::json!({"action":"fetch_service_http","port":8888,"path":"/v1/manifest","max_bytes":100,"timeout_ms":1000})).unwrap();
+        assert_eq!(
+            legacy.required_capability(),
+            Some(crate::CAPABILITY_SERVICE_HTTP_FETCH)
+        );
+    }
+}

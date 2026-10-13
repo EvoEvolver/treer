@@ -893,6 +893,7 @@ impl ProxyClient {
                     .await,
             ),
             AgentCommand::FetchServiceHttp {
+                policy_schema_version: _,
                 port,
                 path,
                 max_bytes,

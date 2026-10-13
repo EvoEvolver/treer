@@ -6,12 +6,15 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use treer_protocol::{
     PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, WorkspacePolicy, WorkspacePolicyDocument,
-    POLICY_SCHEMA_VERSION,
+    POLICY_SCHEMA_VERSION, POLICY_SCHEMA_VERSION_V2,
 };
 
 pub const POLICY_CHANGED_CHANNEL: &str = "treer_policy_changed";
 pub const MAX_POLICY_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_POLICY_RULES: usize = 1_000;
+#[cfg(test)]
+#[path = "policy_path_validation_tests.rs"]
+mod path_validation_tests;
 
 #[derive(Clone)]
 pub struct WorkspacePolicyStore {
@@ -19,6 +22,9 @@ pub struct WorkspacePolicyStore {
 }
 
 impl WorkspacePolicyStore {
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
+    }
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -112,7 +118,10 @@ impl WorkspacePolicyStore {
 }
 
 pub fn validate_document(document: &WorkspacePolicyDocument) -> Result<(), PolicyStoreError> {
-    if document.schema_version != POLICY_SCHEMA_VERSION {
+    if !matches!(
+        document.schema_version,
+        POLICY_SCHEMA_VERSION | POLICY_SCHEMA_VERSION_V2
+    ) {
         return Err(PolicyStoreError::invalid(
             "unsupported_policy_schema",
             "workspace policy schema version is not supported",
@@ -143,6 +152,7 @@ pub fn validate_document(document: &WorkspacePolicyDocument) -> Result<(), Polic
     }
     let mut rule_ids = HashSet::new();
     for rule in &document.rules {
+        validate_path_rule(document.schema_version, rule)?;
         validate_token(&rule.id, "policy rule ID")?;
         if !rule_ids.insert(&rule.id) {
             return Err(PolicyStoreError::invalid(
@@ -183,6 +193,119 @@ pub fn validate_document(document: &WorkspacePolicyDocument) -> Result<(), Polic
         }
     }
     Ok(())
+}
+
+fn validate_path_rule(
+    schema: u32,
+    rule: &treer_protocol::WorkspacePolicyRule,
+) -> Result<(), PolicyStoreError> {
+    use treer_protocol::{PolicyFolderRef, PolicyTreeCondition};
+    let has_tree = rule.subjects.iter().any(|s| s.tree.is_some())
+        || rule.resources.iter().any(|s| s.tree.is_some())
+        || !rule.bindings.is_empty()
+        || !rule.conditions.is_empty();
+    if schema == POLICY_SCHEMA_VERSION && has_tree {
+        return Err(PolicyStoreError::invalid(
+            "unsupported_policy_schema",
+            "Tree conditions require policy schema 2",
+        ));
+    }
+    if rule.bindings.len() > 8 || rule.conditions.len() > 32 {
+        return Err(PolicyStoreError::invalid(
+            "policy_expression_too_large",
+            "policy rule permits at most 8 bindings and 32 conditions",
+        ));
+    }
+    let validate_ref =
+        |reference: &PolicyFolderRef, binding: bool| -> Result<(), PolicyStoreError> {
+            match reference {
+                PolicyFolderRef::Variable(v) if binding || !rule.bindings.contains_key(&v.var) => {
+                    Err(PolicyStoreError::invalid(
+                        "invalid_policy_binding",
+                        "binding chains or undeclared variables are not allowed",
+                    ))
+                }
+                PolicyFolderRef::Variable(_) | PolicyFolderRef::Field(_) => Ok(()),
+                PolicyFolderRef::Id(v) => validate_token(&v.id, "folder ID"),
+                PolicyFolderRef::Path(v) => validate_policy_path(&v.path, false),
+            }
+        };
+    for (name, value) in &rule.bindings {
+        validate_token(name, "binding name")?;
+        validate_ref(value, true)?;
+    }
+    for selector in rule
+        .subjects
+        .iter()
+        .filter_map(|s| s.tree.as_ref())
+        .chain(rule.resources.iter().filter_map(|s| s.tree.as_ref()))
+    {
+        if selector
+            .kind
+            .as_deref()
+            .is_some_and(|k| !matches!(k, "agent" | "app" | "folder"))
+        {
+            return Err(PolicyStoreError::invalid(
+                "invalid_policy_tree_kind",
+                "Tree kind must be agent, app or folder",
+            ));
+        }
+        if let Some(name) = &selector.name {
+            validate_token(name, "Tree name")?;
+        }
+        if let Some(id) = &selector.folder_id {
+            validate_token(id, "folder ID")?;
+        }
+        if usize::from(selector.path_eq.is_some())
+            + usize::from(selector.path_glob.is_some())
+            + usize::from(selector.path_prefix.is_some())
+            > 1
+        {
+            return Err(PolicyStoreError::invalid(
+                "invalid_policy_path",
+                "choose one path comparator",
+            ));
+        }
+        if let Some(path) = &selector.path_eq {
+            validate_policy_path(path, false)?;
+        }
+        if let Some(path) = &selector.path_glob {
+            validate_policy_path(path, true)?;
+        }
+        if let Some(prefix) = &selector.path_prefix {
+            validate_policy_path(&prefix.path, false)?;
+        }
+    }
+    for condition in &rule.conditions {
+        if let PolicyTreeCondition::ResourceBelowFolder { folder, .. } = condition {
+            validate_ref(folder, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_path(path: &str, glob: bool) -> Result<(), PolicyStoreError> {
+    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    let valid = path.starts_with('/')
+        && path.len() <= 4096
+        && parts.len() <= 128
+        && !path.chars().any(char::is_control)
+        && (path == "/"
+            || parts.iter().enumerate().all(|(i, p)| {
+                !p.is_empty()
+                    && p.trim() == *p
+                    && !matches!(*p, "." | "..")
+                    && (!glob
+                        || (!p.contains(['?', '[', ']', '\\'])
+                            && (!p.contains('*')
+                                || *p == "*"
+                                || (*p == "**" && i == parts.len() - 1))))
+            }));
+    if valid {
+        Ok(())
+    } else {
+        Err(PolicyStoreError::invalid("invalid_policy_path", "path must be bounded, absolute and canonical; glob uses whole components and one terminal **"))
+    }
 }
 
 fn require_group(

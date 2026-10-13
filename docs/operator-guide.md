@@ -867,6 +867,26 @@ subject/action/resource requests locally. Managed Agent requests carry their
 authenticated Agent identity; workload HTTP entries use the same subject and
 resolve service-name aliases to stable IDs before authorization.
 
+Path rules use bundle schema 2; consult the
+[fixed contract](research/2026-10-13-policy-schema-v2-contract.md) for complete
+JSON examples. `/team/*` selects direct children, `/infra/**` includes the
+folder and all descendants, and typed folder relations compare real Tree
+placement. Renaming/moving changes which rules match immediately; review rules
+before organizing a protected subtree. No Tree placement means no path match,
+not implicit root membership. New CLI/Controller/Proxy capability checks reject
+unsupported v2 Providers explicitly; update the Proxy and Provider's Controller
+before selecting a v2-only Provider. Existing v1 Providers remain compatible.
+
+Owners can call `/api/workspaces/{id}/policy/explain`, `/policy/decisions` and
+`/policy/validate` using their authenticated user/operator session. Explain can
+resolve actor/target canonical paths and simulate a candidate document without
+installing it. Only the configured Provider can access the App diagnostic bridge
+with both its runtime credential and the current Owner's service-audience token.
+The decision feed is the latest 100 monitor would-deny records on that Proxy,
+not durable or complete cluster history. Provider selection/removal/reinstallation
+and Owner Tree management remain available even if delegated rules deny all or
+the Provider is down. Core does not override denials on ordinary Agent commands.
+
 Managed Apps allocate their service and platform origin automatically:
 
 ```bash

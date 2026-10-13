@@ -41,6 +41,7 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_MACHINE_UPLOAD,
     CAPABILITY_RUNTIME_RESTORE,
     CAPABILITY_SERVICE_HTTP_FETCH,
+    CAPABILITY_POLICY_PATH_RULES,
 ];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
 /// Browser-defense provenance, not a secret or an OS process authentication token.

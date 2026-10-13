@@ -331,6 +331,7 @@ CREATE INDEX IF NOT EXISTS agent_credentials_workspace_server
 ALTER TABLE agent_credentials ADD COLUMN IF NOT EXISTS recovery_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 -- Workspace presentation metadata only; these folders have no filesystem effects.
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS tree_revision BIGINT NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS workload_folders (
     workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
     folder_id TEXT NOT NULL,
@@ -649,3 +650,35 @@ CREATE TABLE IF NOT EXISTS app_email_attempts (
  recipient_hash TEXT NOT NULL, status TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS app_email_attempts_rate ON app_email_attempts(workspace_id,created_at);
+
+-- Policy Tree facts are read from a consistent primary-DB snapshot. Notifications
+-- are invalidation hints only; a missed notification never authorizes stale paths.
+CREATE OR REPLACE FUNCTION treer_tree_revision_changed() RETURNS trigger AS $$
+DECLARE wid TEXT;
+BEGIN
+    IF TG_OP = 'UPDATE' AND OLD IS NOT DISTINCT FROM NEW THEN RETURN NULL; END IF;
+    IF TG_OP = 'DELETE' THEN wid := OLD.workspace_id; ELSE wid := NEW.workspace_id; END IF;
+    UPDATE workspaces SET tree_revision = tree_revision + 1 WHERE workspace_id = wid;
+    PERFORM pg_notify('treer_tree_changed', wid);
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER treer_folders_revision AFTER INSERT OR UPDATE OR DELETE ON workload_folders
+    FOR EACH ROW EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_placements_revision AFTER INSERT OR UPDATE OR DELETE ON workload_placements
+    FOR EACH ROW EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_names_revision AFTER INSERT OR DELETE ON agent_names
+    FOR EACH ROW EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_names_update_revision AFTER UPDATE OF name ON agent_names
+    FOR EACH ROW WHEN (OLD.name IS DISTINCT FROM NEW.name) EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_apps_revision AFTER INSERT OR DELETE ON app_deployments
+    FOR EACH ROW EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_apps_update_revision AFTER UPDATE OF name, runtime_agent_id ON app_deployments
+    FOR EACH ROW WHEN (OLD.name IS DISTINCT FROM NEW.name OR OLD.runtime_agent_id IS DISTINCT FROM NEW.runtime_agent_id)
+    EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_credentials_revision AFTER INSERT OR DELETE ON agent_credentials
+    FOR EACH ROW EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_credentials_update_revision AFTER UPDATE OF revoked_at ON agent_credentials
+    FOR EACH ROW WHEN (OLD.revoked_at IS DISTINCT FROM NEW.revoked_at) EXECUTE FUNCTION treer_tree_revision_changed();
+CREATE OR REPLACE TRIGGER treer_deleted_agents_revision AFTER INSERT OR DELETE ON deleted_agents
+    FOR EACH ROW EXECUTE FUNCTION treer_tree_revision_changed();

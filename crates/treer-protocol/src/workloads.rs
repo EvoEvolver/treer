@@ -416,6 +416,8 @@ pub enum AgentCommand {
     /// Fetches bounded JSON from a machine-local HTTP service. The Controller
     /// always connects to loopback; the Proxy cannot supply an arbitrary host.
     FetchServiceHttp {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy_schema_version: Option<u32>,
         port: u16,
         path: String,
         max_bytes: u32,
@@ -467,6 +469,10 @@ impl AgentCommand {
             | Self::UploadChunk { .. }
             | Self::UploadCommit { .. }
             | Self::UploadAbort { .. } => Some(CAPABILITY_MACHINE_UPLOAD),
+            Self::FetchServiceHttp {
+                policy_schema_version: Some(2),
+                ..
+            } => Some(CAPABILITY_POLICY_PATH_RULES),
             Self::FetchServiceHttp { .. } => Some(CAPABILITY_SERVICE_HTTP_FETCH),
             Self::Create { .. }
             | Self::Prompt { .. }

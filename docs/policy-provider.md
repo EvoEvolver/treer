@@ -13,6 +13,7 @@ Proxy-to-Controller command channel:
 
 - `GET /v1/manifest` returns `protocol`, `provider_name`, and additive
   `capabilities`. Version 1 requires `policy.bundle.v1`.
+  A schema v2 Provider advertises `policy.bundle.v2`.
 - `GET /v1/policy/bundle?workspace_id=...` returns `protocol`, `workspace_id`,
   monotonic `revision`, `mode`, `document`, and `generated_at`.
 
@@ -30,6 +31,25 @@ Provider protocol version. Existing subject, action, and resource strings stay
 owned by the Proxy.
 
 ## Default Policy
+
+Schema v2 adds path/glob/prefix selectors, typed folder bindings, and AND folder
+relations without changing defaults. New Core requests
+`max_schema_version=2`; old Core rejects schema 2 rather than dropping conditions.
+New Core accepts schema 1 unchanged. A v2 Provider also requires the Controller
+capability `policy.path-rules.v2`; unsupported Controllers fail before dispatch,
+including across Proxy replicas. The envelope stays `treer.policy-provider/v1`.
+Limits remain 256 KiB serialized document and 1000 rules, with at most 8 bindings,
+32 conditions per rule, and 4096-byte/128-component paths. `*` matches exactly
+one component; terminal `**` matches zero or more; prefixes use component
+boundaries, not string prefixes. The [fixed v2 contract](research/2026-10-13-policy-schema-v2-contract.md)
+has JSON examples, field definitions, and owner diagnostic bridge routes.
+
+Tree context is current database truth rather than bundle contents. Renames and
+moves immediately affect the next evaluation even while a previous bundle is
+cached. If the Tree changes during evaluation, `policy_tree_changed` asks the
+caller to retry; in-flight effects accepted earlier are not rolled back.
+Capability/schema incompatibility never falls through to fail-open or cached
+v1 rules. Outages continue to follow the configured failure/stale policy below.
 
 A workspace always has an explicit effective policy. If no Provider App is
 selected, an existing stored Workspace Policy remains active; otherwise Treer's
