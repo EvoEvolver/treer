@@ -95,6 +95,9 @@ test("goal notifications survive failure/restart and use identical Treer message
     assert.equal(JSON.parse(body).required_action, "Owner: enable environment"); sent = true;
   });
   await until(() => sent); assert.equal(keys[0], keys[1]); restored.close();
+  const again = new GoalNotifications(file, () => {}, async () => { throw new Error("Duplicate notification must not be resent"); });
+  again.enqueue({ objective: "Deploy", status: "blocked", reason: "External owner needed", requiredAction: "Owner: enable environment", tokenBudget: 1000, tokensUsed: 10, timeUsedSeconds: 1 });
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).pending.length, 0); again.close();
 });
 
 for (const disabled of [false, true]) test(`Agent goal command ${disabled ? "respects the disable switch" : "releases Claude hook, exposes reason in AIS state and sends user notification"}`, async () => {

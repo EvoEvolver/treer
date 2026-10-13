@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, realpathSync, readFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Goal, GoalUpdate } from "../src/model.js";
@@ -55,6 +55,14 @@ test("failed delivery retries without repeating the native edit and preserves st
   await restored.apply({ objective: "Retry me" }, "edit");
   assert.equal(fake.updates, 1); assert.equal(fake.prompts.length, 1); assert.equal(restored.state?.status, "sent");
   restored.close(); queue.close();
+});
+test("recovery reconciles a native update applied before its local acknowledgement checkpoint", async () => {
+  const file = join(temp(), "edits.json"), fake = new Fake(); fake.goal!.objective = "Already updated";
+  writeFileSync(file, JSON.stringify([{ id: "lost-ack", input: { objective: "Already updated" }, previous: { ...fake.goal, objective: "Old" }, goal: null, applied: false, applying: true, status: "pending" }]));
+  const queue = new PromptQueue(runtime(fake), () => {}), edits = new GoalEdits(file, runtime(fake), queue, () => {});
+  await edits.apply({ objective: "Already updated" }, "lost-ack");
+  assert.equal(fake.updates, 0); assert.equal(fake.prompts.length, 1); assert.equal(edits.state?.status, "sent");
+  edits.close(); queue.close();
 });
 test("fake Codex goal/set alone emits no prompt; launcher sends idle turn/start then busy steer", async () => {
   const cwd = temp(), calls = join(cwd, "calls"); process.env.FAKE_CODEX_CALLS = calls;

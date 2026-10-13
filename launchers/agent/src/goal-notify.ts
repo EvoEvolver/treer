@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { readGoalState, writeGoalState } from "./goal-storage.js";
 import type { Goal } from "./model.js";
 import { sendNotification } from "./prompt-notify.js";
@@ -18,6 +18,7 @@ export async function goalRecipients(): Promise<string[]> {
 /** Persist before sending; retry using immutable sender-scoped idempotency keys. */
 export class GoalNotifications {
   private pending: { id: string; goal: Goal; recipients?: string[] }[] = [];
+  private delivered: string[] = [];
   private running = false;
   private timer?: ReturnType<typeof setTimeout>;
   private closed = false;
@@ -25,15 +26,21 @@ export class GoalNotifications {
     private send = sendNotification, private recipients = goalRecipients, private retryMs = 1000) {
     const saved = readGoalState(file);
     if (saved !== undefined) {
-      if (!Array.isArray(saved) || saved.length > 256 || saved.some((entry) => typeof entry?.id !== "string" || !entry.goal || entry.recipients !== undefined && (!Array.isArray(entry.recipients) || entry.recipients.some((to: unknown) => typeof to !== "string")))) throw new Error("Invalid goal notification journal");
-      this.pending = saved;
+      const journal = Array.isArray(saved) ? { pending: saved, delivered: [] } : saved as { pending: unknown[]; delivered: string[] };
+      if (!Array.isArray(journal.pending) || journal.pending.length > 256 || !Array.isArray(journal.delivered) || journal.delivered.length > 1024 || journal.delivered.some((id) => typeof id !== "string") || journal.pending.some((entry: any) => typeof entry?.id !== "string" || !entry.goal || entry.recipients !== undefined && (!Array.isArray(entry.recipients) || entry.recipients.some((to: unknown) => typeof to !== "string")))) throw new Error("Invalid goal notification journal");
+      this.pending = journal.pending as typeof this.pending; this.delivered = journal.delivered;
     }
     queueMicrotask(() => { void this.flush(); });
   }
-  enqueue(goal: Goal) { if (this.pending.length >= 256) throw new Error("Goal notification outbox is full"); this.pending.push({ id: randomUUID(), goal: structuredClone(goal) }); this.save(); void this.flush(); }
+  enqueue(goal: Goal) {
+    const id = createHash("sha256").update(JSON.stringify([goal.id, goal.objective, goal.status, goal.reason, goal.requiredAction])).digest("hex");
+    if (this.delivered.includes(id) || this.pending.some((entry) => entry.id === id)) return;
+    if (this.pending.length >= 256) throw new Error("Goal notification outbox is full");
+    this.pending.push({ id, goal: structuredClone(goal) }); this.save(); void this.flush();
+  }
   close() { this.closed = true; if (this.timer) clearTimeout(this.timer); }
   private save() {
-    writeGoalState(this.file, this.pending);
+    writeGoalState(this.file, { pending: this.pending, delivered: this.delivered });
   }
   async flush() {
     if (this.running || this.closed) return;
@@ -47,7 +54,7 @@ export class GoalNotifications {
             objective: entry.goal.objective, status: entry.goal.status, reason: entry.goal.reason,
             required_action: entry.goal.requiredAction || null });
           for (const recipient of entry.recipients) await this.send(recipient, `goal-exit/${entry.id}`, body);
-          this.pending.shift(); this.save();
+          this.pending.shift(); this.delivered.push(entry.id); this.delivered = this.delivered.slice(-1024); this.save();
         } catch (error) {
           this.log(`Goal notification failed; retained for retry: ${error instanceof Error ? error.message : "unknown error"}`);
           this.timer = setTimeout(() => { void this.flush(); }, this.retryMs); this.timer.unref(); break;

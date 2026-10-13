@@ -5,7 +5,7 @@ import type { PromptQueue } from "./prompt-queue.js";
 import { readGoalState, writeGoalState } from "./goal-storage.js";
 import { GoalError } from "./goals.js";
 
-interface Edit { id: string; input: GoalUpdate; previous: Goal | null; goal: Goal | null; applied: boolean; status: "pending" | "sent" | "failed"; error?: string; promptId?: string; mode?: "steer" | "queue"; attempt?: number }
+interface Edit { id: string; input: GoalUpdate; previous: Goal | null; goal: Goal | null; applied: boolean; applying?: boolean; status: "pending" | "sent" | "failed"; error?: string; promptId?: string; mode?: "steer" | "queue"; attempt?: number }
 export function goalEditPrompt(previous: Goal | null, goal: Goal | null) {
   return `The user changed the goal. New objective (user-authored): ${goal?.objective || "None"}\nPrevious objective: ${previous?.objective || "None"}\nStatus: ${goal?.status || "cleared"}. Token budget: ${goal?.tokenBudget ?? "default"}. Round budget: ${goal?.roundBudget ?? "default"}.\n${goal?.status === "paused" ? "Pause goal-directed work and await the user's instructions." : "Use the updated goal and budget; do not keep following the previous objective."}`;
 }
@@ -54,7 +54,9 @@ export class GoalEdits {
         try {
           if (!edit.applied) {
             if (!this.runtime.updateGoal) throw new GoalError("Goals unsupported", 501);
-            await this.runtime.updateGoal(edit.input);
+            const current = this.runtime.snapshot().goal;
+            const recovered = edit.applying && current && Object.entries(edit.input).every(([key, value]) => current[key as keyof Goal] === value || key === "status" && value === "active" && current.status === "done");
+            if (!recovered) { edit.applying = true; this.save(); await this.runtime.updateGoal(edit.input); }
             edit.applied = true; edit.goal = structuredClone(this.runtime.snapshot().goal); this.save();
           }
           edit.mode ??= this.queue.busy ? "steer" : "queue"; this.save();

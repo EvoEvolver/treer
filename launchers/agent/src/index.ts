@@ -435,6 +435,10 @@ const goalExits = agentId && process.env.AGENT_UI_GOAL_AGENT_EXIT !== "0" ? new 
 const goalEdits = new GoalEdits(agentId ? threadStatePath(cwd, agentId) + ".goal-edits.json" : undefined, runtime, prompts, broadcast);
 runtime.on("goal-exit", (goal) => goalNotifications?.enqueue(goal));
 runtime.on("goal-exit-error", (goal) => goalNotifications?.enqueue(goal));
+runtime.on("state", () => {
+  const goal = runtime.snapshot().goal;
+  if (goal?.reason && ["blocked", "stale", "done"].includes(goal.status)) goalNotifications?.enqueue(goal);
+});
 runtime.on("exit", () => { void messageWatch?.stop(); prompts.close(); void runtime.stop().finally(() => process.exit(1)); });
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
