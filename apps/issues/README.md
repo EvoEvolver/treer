@@ -213,3 +213,14 @@ cookie and signed HMAC test tokens; it is not the production Ed25519 issuer or
 the full React control plane. Production signing, TTL, audience and membership
 revocation are checked by the Rust Proxy tests, and real release acceptance is
 still required.
+
+## Security review notes
+
+OAuth callbacks now require the initiating browser's expiring HttpOnly nonce
+as well as state/PKCE; previously pending OAuth flows must restart after upgrade.
+Authenticated upstream redirects are refused. Startup tightens the dedicated
+state directory to 0700 and uses private SQLite files/sidecars. Do not point
+state at a shared directory. Sessions and issue content remain plaintext;
+restrict/encrypt backups and disks. Same-UID Managed Apps are not isolated;
+use a separate unprivileged user or container/VM for critical services.
+Input limits and claim leases do not provide global rate/concurrency isolation.

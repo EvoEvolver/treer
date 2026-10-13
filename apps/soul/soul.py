@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import lzma
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from http.cookies import SimpleCookie
 import subprocess
 from soul_auth import Auth, Error as AuthError
 from soul_sessions import transfer_file_allowed
+from soul_archive import archive_mode
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -208,8 +210,12 @@ def validate_manifest(value: object, archive_files: set[str]) -> dict[str, objec
 
 def inspect_archive(path: Path) -> tuple[dict[str, object], list[dict[str, object]]]:
     try:
-        archive = tarfile.open(path, "r:*")
-    except (tarfile.TarError, OSError) as error:
+        try:
+            mode = archive_mode(path, MAX_EXPANDED_BYTES)
+        except ValueError as error:
+            raise SoulError(413, "archive_too_large", "Decoded tar stream exceeds limit") from error
+        archive = tarfile.open(path, mode)
+    except (tarfile.TarError, OSError, EOFError, lzma.LZMAError) as error:
         raise SoulError(400, "invalid_archive", "cannot read tar archive") from error
     with archive:
         files: dict[str, tarfile.TarInfo] = {}
@@ -523,7 +529,7 @@ def validate_public_url(value: str) -> str:
 def bundled_client(client_path, public_url):
     """Serve one executable artifact, with small adapter modules embedded."""
     prelude = '#!/usr/bin/env python3\nfrom __future__ import annotations\nimport sys, types, os\n'
-    for name in ('soul_secrets', 'soul_sessions'):
+    for name in ('soul_secrets', 'soul_sessions', 'soul_archive'):
         source = (APP_ROOT / (name + '.py')).read_text()
         prelude += f'module = types.ModuleType({name!r})\nsys.modules[{name!r}] = module\nexec({source!r}, module.__dict__)\n'
     prelude += f'os.environ.setdefault("TREER_SOUL_URL", {public_url!r})\n'

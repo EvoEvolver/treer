@@ -43,3 +43,14 @@ consistent across repository files.
 ```sh
 python3 -m unittest discover -s apps/gits/tests -p 'test_*.py' -v
 ```
+
+## Local state isolation
+
+Use a dedicated private state directory; startup tightens its permissions to
+0700. Python stores also use a private umask and private database files. Do not
+use a shared HOME/project directory as state. Backups remain plaintext and need
+restrictive permissions/encryption. This does not isolate same-UID processes.
+For critical services use a separate unprivileged user or container/VM with
+minimal mounts and resource limits. Workspace ingress is not per-user data ACL
+or comprehensive request-rate protection; retain this App's documented trusted
+workspace assumptions and do not make it public.

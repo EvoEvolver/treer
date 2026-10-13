@@ -219,3 +219,19 @@ A failed first import can leave partial Agent-local native storage; the launcher
 refuses overwrites. Inspect/move that dedicated native directory aside before
 retrying; a successful marker prevents all later reimport. Restore targets must
 be App-owned private directories, not user-supplied symlinks.
+
+## Security review limits
+
+Tar preflight bounds the **complete decoded stream**, including PAX/GNU metadata
+and padding, before parsing. Plain tar, gzip, bzip2 and xz are supported; other
+automatic compression formats are rejected. Tar overhead counts against the
+expanded-size cap. This complements path/link/member checks and does not supply
+global CPU, connection or rate isolation. Zip archives are unsupported.
+
+Secret scanning/redaction is heuristic: encoded (including base64/JSON unicode),
+compressed, custom or semantic secrets may be missed. An archive without a
+secret marker is not certified secret-free. Do not upload live credentials.
+Data and migration backups are plaintext; retain private directory/backup
+permissions and use encrypted disks/backups. Same-UID Apps and administrators
+can read data regardless of App ACLs. Deploy under a dedicated unprivileged user
+or container/VM with minimal mounts and quotas on critical-service machines.

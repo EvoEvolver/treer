@@ -83,7 +83,11 @@ def optional_hash(value: object, field: str) -> str | None:
 
 class TowerStore:
     def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        os.umask(0o077)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        if path.exists():
+            path.chmod(0o600)
         self.lock = threading.Lock()
         self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row

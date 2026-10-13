@@ -30,3 +30,9 @@ The App's workload credential is used only for the typed invalidation route.
 - `POST /v1/policy/publish`
 - `POST /v1/policy/invalidate`
 - `POST /v1/policy/test`
+
+Policy administration is locked by default. An operator must configure the
+private `POLICY_ADMIN_TOKEN` and supply it as Bearer authentication with JSON
+for publish/invalidate, or enter it in the browser password field. Workspace
+membership and self-reported role headers do not grant editing. Never include
+this token in URLs, source control or logs. Bundle reads remain unchanged.

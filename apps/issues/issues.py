@@ -108,11 +108,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self.dispatch('PATCH')
 
-    def raw_cookie(self):
+    def raw_cookie(self, name=COOKIE):
         cookies = http.cookies.SimpleCookie()
         try:
             cookies.load(self.headers.get('Cookie', ''))
-            return cookies[COOKIE].value if COOKIE in cookies else ''
+            return cookies[name].value if name in cookies else ''
         except http.cookies.CookieError:
             return ''
 
@@ -133,9 +133,9 @@ class Handler(BaseHTTPRequestHandler):
             fail('invalid_body', 'JSON object required')
         return value
 
-    def cookie(self, raw, age):
+    def cookie(self, raw, age, name=COOKIE):
         secure = '; Secure' if self.server.application.identity_provider().public_url.startswith('https://') else ''
-        return f'{COOKIE}={raw}; Path=/; Max-Age={age}; HttpOnly; SameSite=Lax{secure}'
+        return f'{name}={raw}; Path=/; Max-Age={age}; HttpOnly; SameSite=Lax{secure}'
 
     def redirect(self, target, cookie=None):
         self.reply(302, b'', 'text/plain', {'Location': target, **({'Set-Cookie': cookie} if cookie else {})})
@@ -159,11 +159,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(200, {'status': 'ok', 'service': 'issues'})
                 return
             if path == '/api/auth/start' and method == 'GET':
-                self.redirect(app.identity_provider().start())
+                location, browser = app.identity_provider().start()
+                self.redirect(location, self.cookie(browser, 600, 'treer_issues_oauth'))
                 return
             if path == '/api/auth/callback' and method == 'GET':
                 auth = app.identity_provider()
-                raw, age = auth.finish(query.get('code', ''), query.get('state', ''))
+                raw, age = auth.finish(query.get('code', ''), query.get('state', ''), self.raw_cookie('treer_issues_oauth'))
                 self.redirect(auth.public_url, self.cookie(raw, age))
                 return
             if not path.startswith('/v1/') and path != '/api/auth/logout':

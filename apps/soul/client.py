@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 from soul_secrets import redact
+from soul_archive import archive_mode
 from soul_sessions import export_session, import_session, launcher_path
 
 VERSION = '2.0.0'
@@ -346,7 +347,7 @@ def safe_extract(raw,destination):
     destination.mkdir(parents=True,exist_ok=False,mode=0o700)
     total=0
     seen=set()
-    with tarfile.open(fileobj=io.BytesIO(raw),mode='r:*') as archive:
+    with tarfile.open(fileobj=io.BytesIO(raw),mode=archive_mode(raw, MAX_BYTES)) as archive:
         count = 0
         for member in archive:
             count += 1

@@ -8,7 +8,7 @@ function applicationUrl(path) {
 async function request(path, options = {}) {
   const response = await fetch(applicationUrl(path), {
     ...options,
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
+    headers: { "content-type": "application/json", ...(["v1/policy/publish","v1/policy/invalidate"].includes(path) ? {Authorization: "Bearer " + document.getElementById("admin-token").value} : {}), ...(options.headers || {}) },
   })
   const body = await response.json()
   if (!response.ok) throw new Error(body.error?.message || `HTTP ${response.status}`)
@@ -110,7 +110,12 @@ document.getElementById("test-button").addEventListener("click", async () => {
     }) })
     const node = document.getElementById("decision")
     node.className = `decision ${result.decision}`
-    node.innerHTML = `<span class="decision-mark">${result.decision === "allow" ? "A" : "D"}</span><div><small>Decision · revision ${result.revision}</small><strong>${result.decision}</strong><p>${result.matched_rule_id ? `Rule ${result.matched_rule_id} · computed ${result.effect}` : `Default · computed ${result.effect}`}${result.mode === "monitor" && result.effect === "deny" ? " · monitor mode" : ""}</p></div>`
+    const marker = document.createElement("span");marker.className="decision-mark";marker.textContent=result.decision === "allow" ? "A" : "D";
+    const details = document.createElement("div"), label = document.createElement("small"), decision = document.createElement("strong"), explanation = document.createElement("p");
+    label.textContent=`Decision · revision ${result.revision}`;decision.textContent=result.decision;
+    explanation.textContent=result.matched_rule_id ? `Rule ${result.matched_rule_id} · computed ${result.effect}` : `Default · computed ${result.effect}`;
+    if(result.mode === "monitor" && result.effect === "deny") explanation.textContent += " · monitor mode";
+    details.append(label,decision,explanation);node.replaceChildren(marker,details);
   } catch (error) { showError("test-error", error) }
 })
 

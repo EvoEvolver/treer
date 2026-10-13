@@ -93,7 +93,9 @@ class RepositoryStore:
         self.public_url = public_url.rstrip("/")
         self.git_bin = git_bin
         self.lock = threading.Lock()
+        os.umask(0o077)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
 
     def create(self, name_value: object, description_value: object) -> dict[str, Any]:
         name = validate_name(name_value)

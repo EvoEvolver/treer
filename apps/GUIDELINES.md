@@ -195,3 +195,26 @@ Tests should prove that:
 Keep the App's README focused on deployment, configuration, state, backup, and
 operator concerns. Put the concise runtime manual in the content served from
 `/`, and keep both documents synchronized with executable behavior and tests.
+
+## App security and storage boundary
+
+Managed Apps run with their machine account's OS authority; registration, a
+workspace ingress gate and App-audience identity tokens are not process or
+filesystem isolation. On critical-service machines use a dedicated unprivileged
+user with private HOME, or a container/VM, minimal mounts/network and resource
+limits. Never mount Host/Docker sockets or unrelated credentials into an App.
+Same-UID processes can read each other's private files.
+
+Use a dedicated state directory (0700), private files/SQLite sidecars (0600) and
+private exclusive temporary files. Startup hardening may tighten an existing
+state directory; do not configure a shared HOME/project directory as App state.
+Backups need equivalent permissions and disk/backup encryption. App stores are
+plaintext unless explicitly documented otherwise. Secret scanning is heuristic
+and cannot prove absence of secrets, including encoded/compressed values.
+
+OAuth state must be short-lived, single-use and paired with an HttpOnly browser
+nonce; PKCE alone does not bind a server-retained state to a browser. Refuse
+upstream redirects when forwarding identity, OAuth or workload credentials.
+Request-size and owner-storage limits are not global rate/concurrency limits.
+Trusted-workspace Apps without principal ACLs must never be marketed as isolated
+services for hostile workspace members.

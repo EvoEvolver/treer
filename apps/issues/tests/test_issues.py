@@ -159,9 +159,9 @@ class IssuesTest(unittest.TestCase):
         for headers,media in (({},'text/markdown'),({'Accept':'text/html'},'text/html'),({'User-Agent':'Mozilla/test'},'text/html'),({'Accept':'text/html;q=.1,text/markdown;q=.9'},'text/markdown')):
             with urllib.request.urlopen(urllib.request.Request(self.base,headers=headers)) as r:
                 self.assertTrue(r.headers['Content-Type'].startswith(media));self.assertEqual(r.headers['Vary'],'Accept, User-Agent')
-        with urllib.request.urlopen(self.base+'api/auth/start') as r:
-            self.assertTrue(r.headers['Content-Type'].startswith('text/markdown'))
-            # urllib does not retain cookies, so explicit callback test uses a cookie jar below.
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(self.base+'api/auth/start')
+        self.assertEqual(denied.exception.code,401)
         import http.cookiejar
         jar=http.cookiejar.CookieJar();opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
         opener.open(self.base+'api/auth/start').close()

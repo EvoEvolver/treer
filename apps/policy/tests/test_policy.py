@@ -21,10 +21,11 @@ class PolicyServerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.port = free_port()
-        environment = os.environ.copy()
+        environment = {k:v for k,v in os.environ.items() if not k.startswith(("TREER_","AGENT_UI_","CODEX_UI_","POLICY_")) and k.lower() not in ("http_proxy","https_proxy","all_proxy","no_proxy")}
         environment.update(
             {
                 "POLICY_LISTEN": f"127.0.0.1:{self.port}",
+                "POLICY_ADMIN_TOKEN": "synthetic-policy-admin-credential-32-chars",
                 "POLICY_DATA_FILE": str(Path(self.temporary.name) / "policy.json"),
                 "TREER_WORKSPACE_ID": "ws_test",
             }
@@ -57,6 +58,7 @@ class PolicyServerTest(unittest.TestCase):
         headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], object]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        headers = {"Authorization":"Bearer synthetic-policy-admin-credential-32-chars", **(headers or {})}
         request_headers = dict(headers or {})
         encoded = None
         if body is not None:
@@ -69,6 +71,11 @@ class PolicyServerTest(unittest.TestCase):
         connection.close()
         value = json.loads(raw) if "json" in response_headers.get("content-type", "") else raw.decode()
         return response.status, response_headers, value
+
+    def test_mutations_reject_bad_credentials_and_cross_site(self) -> None:
+        for headers,status in [({"Authorization":""},401),({"Authorization":"Bearer forged"},401),({"Sec-Fetch-Site":"cross-site"},403),({"Sec-Fetch-Site":"same-site"},403)]:
+            actual,_,_=self.request("POST","/v1/policy/invalidate",{},headers)
+            self.assertEqual(actual,status)
 
     def test_root_manifest_and_bundle_contract(self) -> None:
         status, headers, manual = self.request("GET", "/")
@@ -158,7 +165,8 @@ class PolicyServerTest(unittest.TestCase):
             shutil.copyfile(source, install_root / name)
 
         bundled_port = free_port()
-        environment = os.environ.copy()
+        environment = {k:v for k,v in os.environ.items() if not k.startswith(("TREER_","AGENT_UI_","CODEX_UI_","POLICY_")) and k.lower() not in ("http_proxy","https_proxy","all_proxy","no_proxy")}
+        environment["POLICY_ADMIN_TOKEN"] = "synthetic-policy-admin-credential-32-chars"
         environment["TREER_WORKSPACE_ID"] = "ws_bundled"
         for name in (
             "POLICY_LISTEN",

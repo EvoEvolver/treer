@@ -40,7 +40,9 @@ def ident(value):
 class Store:
     def __init__(self, path, clock=time.time):
         self.path, self.clock = str(path), clock
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        os.umask(0o077)
+        Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        Path(path).parent.chmod(0o700)
         with self.connect() as db:
             db.executescript('''
                 PRAGMA journal_mode=WAL;
@@ -48,9 +50,14 @@ class Store:
                 CREATE TABLE IF NOT EXISTS activity(id INTEGER PRIMARY KEY AUTOINCREMENT,
                     issue_id INTEGER NOT NULL REFERENCES issues(id), data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS activity_issue ON activity(issue_id,id);
-                CREATE TABLE IF NOT EXISTS oauth(state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS oauth(state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires REAL NOT NULL, browser TEXT);
                 CREATE TABLE IF NOT EXISTS sessions(secret TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
             ''')
+        with self.connect() as db:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(oauth)')}
+            if 'browser' not in columns:
+                db.execute('ALTER TABLE oauth ADD COLUMN browser TEXT')
+                db.execute('DELETE FROM oauth')
         os.chmod(self.path, 0o600)
 
     @contextmanager

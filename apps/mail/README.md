@@ -32,3 +32,21 @@ mappings; protect and back it up like any application credential store.
 For a legacy Mail database, stop old writes, back it up, and run `migrate.py`
 with an operator-authenticated `treer` CLI. The import is resumable and does not
 modify the source database. Existing browser sessions require a new login.
+
+## Authentication and local security
+
+Supplied `X-Treer-Identity-Token` is verified per request before Bearer or OAuth
+cookie fallback; invalid supplied identity never falls back to a valid cookie.
+Mail accepts human principals with the App audience/current workspace membership.
+Optional `workspace_id` pins the workspace explicitly. Browser mutations require
+JSON, reject cross-site Fetch Metadata and compare Origin with `public_url`, `proxy_public_url` and
+explicit `browser_origins` (for any additional explicitly trusted tunnel origin).
+OAuth state is paired with an expiring HttpOnly SameSite browser nonce; older
+pending logins must restart. Upstream authenticated redirects are refused.
+
+Use a dedicated state directory: startup tightens it to 0700 and the session
+database to 0600, with private SQLite sidecars. The database contains plaintext
+OAuth tokens: encrypt disks/backups and restrict backup permissions. Managed
+Apps share their OS account's authority; use a separate unprivileged user or
+container/VM on machines running critical services. No comprehensive per-user
+rate/concurrency limit or encryption-at-rest is provided by Mail itself.

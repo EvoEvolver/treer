@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { access, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, access, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -451,6 +451,8 @@ export async function createPaperServer(options = {}) {
   const stateDir = path.resolve(options.stateDir || process.env.PAPER_STATE_DIR || path.join(process.cwd(), ".treer", "apps", "paper"));
   const projectDir = path.join(stateDir, "project");
   const buildDir = path.join(stateDir, "build");
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  await chmod(stateDir, 0o700);
   await mkdir(projectDir, { recursive: true });
   await mkdir(path.join(stateDir, "yjs"), { recursive: true });
   await mkdir(buildDir, { recursive: true });

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+for key in list(os.environ):
+    if key.startswith(('TREER_', 'AGENT_UI_', 'CODEX_UI_', 'MAIL_', 'POLICY_', 'SOUL_', 'ISSUES_', 'EMAIL_ENDPOINT_')) or key.lower() in ('http_proxy','https_proxy','all_proxy','no_proxy'):
+        del os.environ[key]
 import http.client
 import hashlib
 import json
@@ -104,6 +108,7 @@ class FakeProxyHandler(BaseHTTPRequestHandler):
                         "sub": "user-a",
                         "name": "Owner",
                         "role": "owner",
+                        "exp": 4070908800,
                     },
                 }
             )
@@ -219,6 +224,8 @@ class MailServerTest(unittest.TestCase):
     ) -> tuple[int, dict[str, str], object | None]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         headers = {"Cookie": self.cookie} if self.cookie else {}
+        if method == "POST":
+            headers["Origin"] = f"http://127.0.0.1:{self.port}"
         headers.update(request_headers or {})
         encoded = None
         if body is not None:
@@ -238,8 +245,9 @@ class MailServerTest(unittest.TestCase):
         self.assertEqual(status, 302)
         authorize = urllib.parse.urlsplit(headers["location"])
         state = urllib.parse.parse_qs(authorize.query)["state"][0]
+        browser_cookie = headers["set-cookie"].split(";", 1)[0]
         status, headers, _ = self.request(
-            "GET", f"/api/auth/callback?code=fake-code&state={urllib.parse.quote(state)}"
+            "GET", f"/api/auth/callback?code=fake-code&state={urllib.parse.quote(state)}", request_headers={"Cookie":browser_cookie}
         )
         self.assertEqual(status, 302)
         self.assertEqual(headers["location"], "/")

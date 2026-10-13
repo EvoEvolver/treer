@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import hmac
 import os
 import threading
+import tempfile
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import ProxyHandler, Request, build_opener, HTTPRedirectHandler
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -210,10 +212,14 @@ class PolicyStore:
                 "published_at": utc_now(),
             }
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-            temporary.write_text(json.dumps(next_state, indent=2) + "\n", encoding="utf-8")
-            os.chmod(temporary, 0o600)
-            temporary.replace(self.path)
+            descriptor, name = tempfile.mkstemp(prefix=".policy-", dir=self.path.parent)
+            temporary = Path(name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(next_state, indent=2) + "\n")
+                temporary.replace(self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
             self.state = next_state
             return self.bundle()
 
@@ -233,7 +239,7 @@ class PolicyStore:
                 headers={"content-type": "application/json", "x-treer-agent-id": agent_id, "x-treer-workload-credential": credential},
             )
             try:
-                with build_opener(ProxyHandler({})).open(request, timeout=5) as response:
+                with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=5) as response:
                     payload = json.load(response)
                 result = {"status": "synced", "accepted_revision": payload["accepted_revision"], "attempted_at": utc_now()}
             except (HTTPError, URLError, OSError, ValueError, KeyError) as error:
@@ -241,6 +247,11 @@ class PolicyStore:
         with self.lock:
             self.last_sync = result
         return result
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 class PolicyHandler(BaseHTTPRequestHandler):
@@ -275,6 +286,17 @@ class PolicyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            if urlsplit(self.path).path in ("/v1/policy/publish", "/v1/policy/invalidate"):
+                token = getattr(self.server, "admin_token", None)
+                if not token:
+                    raise PolicyError(503, "policy_edits_locked", "Policy editing is disabled until an operator configures an admin token")
+                supplied = self.headers.get("Authorization", "")
+                if not hmac.compare_digest(supplied.encode(), ("Bearer " + token).encode()):
+                    raise PolicyError(401, "policy_admin_required", "Operator policy administration credential required")
+                if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin"):
+                    raise PolicyError(403, "csrf_denied", "Cross-origin policy writes rejected")
+                if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                    raise PolicyError(415, "invalid_content_type", "Policy writes require application/json")
             body = self._read_json()
             if urlsplit(self.path).path == "/v1/policy/publish":
                 bundle = self.store.publish(body)
@@ -380,6 +402,9 @@ def main() -> None:
     data_file = Path(os.environ.get("POLICY_DATA_FILE", str(default_data_file))).resolve()
     PolicyHandler.store = PolicyStore(data_file, workspace_id)
     server = ThreadingHTTPServer((host, int(raw_port)), PolicyHandler)
+    server.admin_token = os.environ.get("POLICY_ADMIN_TOKEN") or None
+    if server.admin_token and (len(server.admin_token) < 32 or any(c.isspace() for c in server.admin_token)):
+        raise SystemExit("POLICY_ADMIN_TOKEN must contain at least 32 non-whitespace characters")
     print(f"Treer Policy Provider listening on {listen} for {workspace_id}")
     server.serve_forever()
 

@@ -37,7 +37,7 @@
         <div class="mode-row"><span>Runtime mode</span><div class="segments" role="group" aria-label="Policy mode"><button data-mode="monitor" class="active">Monitor</button><button data-mode="enforce">Enforce</button></div></div>
         <div class="editor-wrap">
           <div class="editor-toolbar"><span>policy.json</span><span id="editor-state">Current revision</span></div>
-          <textarea id="policy-editor" spellcheck="false" aria-label="Policy JSON"></textarea>
+          <label>Operator administration token <input id="admin-token" type="password" autocomplete="off" placeholder="Required to publish or retry sync"></label><textarea id="policy-editor" spellcheck="false" aria-label="Policy JSON"></textarea>
         </div>
         <div class="notice hidden" id="editor-error"></div>
       </section>

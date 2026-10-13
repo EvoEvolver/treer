@@ -85,6 +85,8 @@ class Config:
     proxy_public_url: str
     web_dir: Path
     database_path: Path
+    workspace_id: str | None = None
+    browser_origins: tuple[str, ...] = ()
 
     @property
     def callback_url(self) -> str:
@@ -105,6 +107,11 @@ class BrowserSession:
     preferred_name: str
     role: str
     expires_at: float
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 class TreerAppClient:
@@ -138,7 +145,7 @@ class TreerAppClient:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=API_TIMEOUT_SECONDS) as response:
                 payload = response.read(MAX_REQUEST_BYTES)
         except urllib.error.HTTPError as error:
             payload = error.read(MAX_REQUEST_BYTES)
@@ -167,7 +174,9 @@ class SessionStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.Lock()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        os.umask(0o077)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -195,30 +204,39 @@ class SessionStore:
                 """
             )
 
+        with self._connect() as connection:
+            cols = {row[1] for row in connection.execute("PRAGMA table_info(app_pending_oauth)")}
+            if "browser_hash" not in cols:
+                connection.execute("ALTER TABLE app_pending_oauth ADD COLUMN browser_hash TEXT")
+        path.chmod(0o600)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         return connection
 
-    def save_oauth(self, state: str, verifier: str, return_path: str, expires_at: float) -> None:
+    def save_oauth(self, state: str, verifier: str, return_path: str, expires_at: float, browser: str = "") -> None:
         now = time.time()
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM app_pending_oauth WHERE expires_at <= ?", (now,))
             connection.execute(
-                "INSERT INTO app_pending_oauth(state_hash, verifier, return_path, expires_at) VALUES (?, ?, ?, ?)",
-                (_secret_hash(state), verifier, return_path, expires_at),
+                "INSERT INTO app_pending_oauth(state_hash, verifier, return_path, expires_at, browser_hash) VALUES (?, ?, ?, ?, ?)",
+                (_secret_hash(state), verifier, return_path, expires_at, _secret_hash(browser) if browser else None),
             )
 
-    def consume_oauth(self, state: str) -> tuple[str, str] | None:
+    def consume_oauth(self, state: str, browser: str = "") -> tuple[str, str] | None:
+        if not browser:
+            return None
         now = time.time()
         state_hash = _secret_hash(state)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT verifier, return_path FROM app_pending_oauth WHERE state_hash = ? AND expires_at > ?",
-                (state_hash, now),
+                "SELECT verifier, return_path FROM app_pending_oauth WHERE state_hash = ? AND browser_hash = ? AND expires_at > ?",
+                (state_hash, _secret_hash(browser), now),
             ).fetchone()
-            connection.execute("DELETE FROM app_pending_oauth WHERE state_hash = ?", (state_hash,))
+            if row:
+                connection.execute("DELETE FROM app_pending_oauth WHERE state_hash = ?", (state_hash,))
             return (str(row["verifier"]), str(row["return_path"])) if row else None
 
     def save_session(
@@ -296,7 +314,7 @@ class MailApplication:
         self.api = api
         self.sessions = sessions
 
-    def start_oauth(self, return_to: str) -> str:
+    def start_oauth(self, return_to: str, browser: str = "") -> str:
         return_path = _local_return_path(return_to)
         state = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(48)
@@ -313,15 +331,15 @@ class MailApplication:
                 "code_challenge_method": "S256",
             }
         )
-        self.sessions.save_oauth(state, verifier, return_path, time.time() + 600)
+        self.sessions.save_oauth(state, verifier, return_path, time.time() + 600, browser)
         return urllib.parse.urljoin(
             self.config.proxy_public_url, f"api/apps/oauth/authorize?{query}"
         )
 
-    def finish_oauth(self, code: str, state: str) -> tuple[str, str, int]:
+    def finish_oauth(self, code: str, state: str, browser: str = "") -> tuple[str, str, int]:
         code = _bounded_string(code, "OAuth code", 4096)
         state = _bounded_string(state, "OAuth state", 4096)
-        pending = self.sessions.consume_oauth(state)
+        pending = self.sessions.consume_oauth(state, browser)
         if pending is None:
             raise MailError(401, "OAuth state is invalid or expired", "oauth_state_invalid")
         verifier, return_path = pending
@@ -338,16 +356,7 @@ class MailApplication:
         )
         access_token = _bounded_string(response.get("access_token"), "access token", 8192)
         expires_at = _timestamp(response.get("expires_at"), "access token expiry")
-        verified = self.api.request(
-            "POST",
-            "/.treer/apps/identity/verify",
-            body={"token": access_token, "audience": self.config.service_id},
-        )
-        if verified.get("active") is not True:
-            raise MailError(401, "OAuth identity is inactive", "oauth_identity_invalid")
-        claims = _object(verified.get("claims"), "OAuth identity claims")
-        if claims.get("principal_kind") != "human":
-            raise MailError(401, "OAuth identity is not human", "oauth_identity_invalid")
+        claims = self.verify_human(access_token)
         raw_token = "mas_" + secrets.token_urlsafe(48)
         record = self.sessions.save_session(raw_token, access_token, claims, expires_at)
         if record.service_id != self.config.service_id:
@@ -356,24 +365,35 @@ class MailApplication:
         max_age = max(1, int(record.expires_at - time.time()))
         return raw_token, return_path, max_age
 
+    def verify_human(self, token):
+        if not token:
+            raise MailError(401, "Treer human identity required", "mail_identity_invalid")
+        verified = self.api.request("POST", "/.treer/apps/identity/verify",
+                                    body={"token": token, "audience": self.config.service_id})
+        claims = verified.get("claims") or {}
+        if (verified.get("active") is not True or claims.get("principal_kind") != "human"
+                or claims.get("service_id") != self.config.service_id or not claims.get("sub")
+                or not claims.get("workspace_id") or claims.get("exp", 0) <= time.time()
+                or (self.config.workspace_id and claims["workspace_id"] != self.config.workspace_id)):
+            raise MailError(401, "Invalid Treer human identity", "mail_identity_invalid")
+        directory = self.api.request("GET", f"/api/apps/{self.config.service_id}/directory", access_token=token)["principals"]
+        principal = next((p for p in directory if p.get("kind") == "human" and p.get("id") == claims["sub"]), None)
+        if not principal:
+            raise MailError(401, "Human no longer has workspace access", "mail_identity_invalid")
+        claims["role"] = principal.get("role", "member")
+        return claims
+
     def authenticated_session(self, raw_token: str | None) -> BrowserSession:
         if not raw_token:
             raise MailError(401, "Mail login required", "mail_login_required")
         record = self.sessions.session(raw_token)
         if record is None:
             raise MailError(401, "Mail login required", "mail_login_required")
-        verified = self.api.request(
-            "POST",
-            "/.treer/apps/identity/verify",
-            body={"token": record.access_token, "audience": self.config.service_id},
-        )
-        if verified.get("active") is not True:
-            self.sessions.delete_session(raw_token)
-            raise MailError(401, "Mail login required", "mail_identity_inactive")
-        claims = _object(verified.get("claims"), "App identity claims")
+        claims = self.verify_human(record.access_token)
         name = _bounded_string(claims.get("name"), "user name", 256)
         role = _bounded_string(claims.get("role") or "member", "user role", 64)
-        if claims.get("sub") != record.user_id or claims.get("service_id") != record.service_id:
+        if (claims.get("sub") != record.user_id or claims.get("service_id") != record.service_id
+                or claims.get("workspace_id") != record.workspace_id):
             self.sessions.delete_session(raw_token)
             raise MailError(401, "Mail login required", "mail_identity_changed")
         if name != record.preferred_name or role != record.role:
@@ -532,6 +552,14 @@ class MailHandler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlsplit(self.path)
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            if method == "POST":
+                config = self.server.application.config
+                origin = urllib.parse.urlsplit(config.public_url)._replace(path="", query="", fragment="").geturl()
+                allowed = {origin, urllib.parse.urlsplit(config.proxy_public_url)._replace(path="", query="", fragment="").geturl(), *config.browser_origins}
+                if self.headers.get("Origin") not in allowed or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "same-site"):
+                    raise MailError(403, "Same-origin browser write required", "csrf_denied")
+                if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                    raise MailError(415, "application/json required", "request_body_invalid")
             if path == "/" and method in {"GET", "HEAD"}:
                 representation = root_representation(
                     self.headers.get("Accept", ""), self.headers.get("User-Agent", "")
@@ -555,11 +583,12 @@ class MailHandler(BaseHTTPRequestHandler):
                     {"service_id": config.service_id, "proxy_public_url": config.proxy_public_url},
                 )
             elif path == "/api/auth/start" and method == "GET":
-                location = self.server.application.start_oauth(query.get("return_to", ["/"])[0])
-                self._redirect(location)
+                browser = secrets.token_urlsafe(32)
+                location = self.server.application.start_oauth(query.get("return_to", ["/"])[0], browser)
+                self._redirect(location, self._session_cookie(browser, 600).replace(SESSION_COOKIE + "=", "treer_mail_oauth="))
             elif path == "/api/auth/callback" and method == "GET":
                 raw, location, max_age = self.server.application.finish_oauth(
-                    query.get("code", [""])[0], query.get("state", [""])[0]
+                    query.get("code", [""])[0], query.get("state", [""])[0], self._raw_cookie("treer_mail_oauth") or ""
                 )
                 cookie = self._session_cookie(raw, max_age)
                 self._redirect(location, cookie)
@@ -606,6 +635,9 @@ class MailHandler(BaseHTTPRequestHandler):
             self._error(MailError(500, "mail service operation failed", "mail_internal_error"))
 
     def _raw_session(self) -> str | None:
+        return self._raw_cookie(SESSION_COOKIE)
+
+    def _raw_cookie(self, name) -> str | None:
         header = self.headers.get("Cookie")
         if not header:
             return None
@@ -614,10 +646,14 @@ class MailHandler(BaseHTTPRequestHandler):
             cookies.load(header)
         except http.cookies.CookieError:
             return None
-        morsel = cookies.get(SESSION_COOKIE)
+        morsel = cookies.get(name)
         return morsel.value if morsel else None
 
     def _session(self) -> BrowserSession:
+        if "X-Treer-Identity-Token" in self.headers or "Authorization" in self.headers:
+            token = self.headers.get("X-Treer-Identity-Token") if "X-Treer-Identity-Token" in self.headers else self.headers.get("Authorization", "").removeprefix("Bearer ")
+            c = self.server.application.verify_human(token)
+            return BrowserSession("", token, c["workspace_id"], c["service_id"], c["sub"], c["name"], c["role"], c["exp"])
         return self.server.application.authenticated_session(self._raw_session())
 
     def _json_body(self) -> dict[str, Any]:
@@ -858,6 +894,8 @@ def load_config() -> Config:
         proxy_public_url=_normalized_url(value.get("proxy_public_url"), "Proxy public URL"),
         web_dir=web_dir,
         database_path=Path(state_dir) / "mail-state.sqlite3",
+        workspace_id=value.get("workspace_id"),
+        browser_origins=tuple(_normalized_url(origin, "browser origin").rstrip("/") for origin in value.get("browser_origins", [])),
     )
 
 

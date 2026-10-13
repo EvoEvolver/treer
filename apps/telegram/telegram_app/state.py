@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -11,7 +12,11 @@ class StateStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.RLock()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        os.umask(0o077)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        if path.exists():
+            path.chmod(0o600)
         with self._connect() as connection:
             connection.executescript(
                 """
