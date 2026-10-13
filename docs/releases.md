@@ -13,7 +13,9 @@ the local release manifest and the exact frontend artifact that passed Canary.
 - Policy Provider editing is now denied until an operator configures its
   `POLICY_ADMIN_TOKEN`; existing editing clients must supply the corresponding
   Bearer token. This token is a separate operator capability, not a Treer OAuth
-  administrator role. Do not expose it to workspace Agents or browser code.
+  administrator role. Keep it out of source, shared browser bundles and persisted
+  client storage. The Policy UI accepts it in a password field for page memory
+  only; same-account workloads still are not isolated from its server environment.
 - Upgrade Core before switching Agents to the strict launcher. An old Controller
   cannot provide the required forwarding provenance and the new launcher returns
   HTTP 403. Machine rollout order is **Proxy → Controller → CLI → coordinated
