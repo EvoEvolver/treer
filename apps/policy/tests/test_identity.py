@@ -51,9 +51,9 @@ class FakeProxy(BaseHTTPRequestHandler):
             elif getattr(self.server,'authority','owner_session')!='provider_operator':
                 status=403;result={'error':{'code':'provider_operator_required'}}
             elif self.path.endswith('/validate'):
-                result={'valid':True,'schema_version':body['schema_version'],'recovery_guaranteed':getattr(self.server,'recovery',True),'capabilities':['policy.path-rules.v2']}
+                result={'valid':True,'schema_version':body['schema_version'],'recovery_guaranteed':getattr(self.server,'recovery',True),'capabilities':[] if fault=='operator-missingcap' else ['policy.path-rules.v2','policy.publish-authority.v1']}
             else:
-                result={'explanation':{'computed_effect':'deny','effective_decision':'allow','mode':'monitor','matched_rule_id':'operator-rule','policy_revision':2}}
+                result={'explanation':{'computed_effect':'deny','effective_decision':'allow','mode':'monitor','matched_rule_id':'operator-rule','policy_revision':2},'capabilities':['policy.publish-authority.v1']}
         elif '/policy/' in self.path:
             token=self.headers.get('X-Treer-Identity-Token')
             if self.headers.get('X-Treer-Agent-Id')!='runtime_policy' or self.headers.get('X-Treer-Workload-Credential')!='synthetic-runtime-credential':
@@ -119,7 +119,7 @@ class IdentityTests(unittest.TestCase):
     def test_mixed_proxy_versions_and_mode_switch_fail_without_publication(self):
         document=policy.template_document('team-isolation',{})['document']
         publish={'expected_revision':1,'mode':'monitor','document':document}
-        for fault,expected in [('authority404',409),('missingcap',409),('operator404',409),('flip',403)]:
+        for fault,expected in [('authority404',409),('missingcap',409),('operator404',409),('operator-missingcap',409),('flip',403)]:
             self.proxy.authority='provider_operator';self.proxy.authority_fault=fault
             self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity=None)[0],expected,fault)
             self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],1)

@@ -300,6 +300,10 @@ async function loadAuthority() {
   const warning=document.getElementById('authority-warning')
   try {
     const result=await request('v1/policy/authority')
+    const settings=document.getElementById('authority-settings')
+    const treer=new URL(result.treer_url)
+    if(!['http:','https:'].includes(treer.protocol) || treer.username || treer.password) throw new Error('Invalid Treer settings origin')
+    settings.href=treer.href;settings.hidden=false
     if(result.publish_authority==='provider_operator') {
       text('publish-authority','Provider operator')
       warning.textContent='Full policy administration: anyone holding the operator token can publish rules and switch to enforce without further human approval. Use an isolated administration Agent and private token storage. Only the workspace owner can change the Provider or publication authority.'
@@ -310,6 +314,7 @@ async function loadAuthority() {
       warning.classList.remove('hidden')
     } else throw new Error('Core publication authority is unsupported')
   } catch(error) {
+    document.getElementById('authority-settings').hidden=true
     text('publish-authority','Unavailable')
     warning.textContent='Publication authority could not be verified. Operator-only publication is unavailable; update/check Core before using it.'
     warning.classList.remove('hidden')
