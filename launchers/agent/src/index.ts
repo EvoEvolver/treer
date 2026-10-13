@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,14 +29,16 @@ function setting(name: string) {
   return process.env[`AGENT_UI_${name}`] ?? process.env[`CODEX_UI_${name}`];
 }
 
-const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const appRoot = resolve(setting("APP_ROOT") || fileURLToPath(new URL("..", import.meta.url)));
 const publicDir = resolve(setting("PUBLIC_DIR") || join(appRoot, "public"));
 const port = Number(setting("PORT") ?? "0");
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("AGENT_UI_PORT must be a port from 0 to 65535");
 const cwd = resolve(setting("CWD") || process.cwd());
 const agentId = process.env.TREER_AGENT_ID || "";
 const interfaceInstanceId = setting("INSTANCE_ID") || `agent-ui-${process.pid}`;
-const interfaceCapabilities = ["prompt.submit", "transcript.read", "state.observe", "abort", "prompt.queue", "prompt.notify", "prompt.queue.read"];
+const interfaceContract = JSON.parse(readFileSync(join(appRoot, "interface-contract.json"), "utf8")) as { schema: string; protocol: string; capabilities: string[]; ui_path: string };
+if (interfaceContract.schema !== "treer.launcher-interface/v1" || interfaceContract.protocol !== "treer.agent-interface/v1" || !Array.isArray(interfaceContract.capabilities)) throw new Error("Unsupported launcher interface contract");
+const interfaceCapabilities = interfaceContract.capabilities;
 const initialHistoryLimit = 50;
 
 function createRuntime(): HarnessRuntime {
@@ -221,10 +223,10 @@ const server = createServer(async (request, response) => {
     }
     if (path === "/v1/manifest" && (method === "GET" || method === "HEAD")) {
       send(response, 200, {
-        protocol: "treer.agent-interface/v1",
+        protocol: interfaceContract.protocol,
         instance_id: interfaceInstanceId,
         capabilities: interfaceCapabilities,
-        ui_path: "/",
+        ui_path: interfaceContract.ui_path,
       });
       return;
     }

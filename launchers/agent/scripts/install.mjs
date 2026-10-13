@@ -1,35 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { profileTransaction } from "./profile-transaction.mjs";
+const { show, saveProfile, restoreProfile } = profileTransaction("treer");
 
 function run(command, args, options = {}) {
   return (execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options }) ?? "").trim();
-}
-function show(name) {
-  try { return JSON.parse(run("treer", ["agent", "admin", "profile", "show", name])); }
-  catch (error) {
-    if (!error.status || !/profile_not_found|not found|no profile/i.test(`${error.stdout || ""} ${error.stderr || ""}`)) throw error;
-    return null;
-  }
-}
-function saveProfile(profile, command, cwd, existing) {
-  const prefix = ["agent", "admin", "profile"];
-  run("treer", existing
-    ? [...prefix, "update", profile.name, "--description", profile.description, "--cwd", cwd, "--command", command, ...profile.args.flatMap((arg) => ["--arg", arg])]
-    : [...prefix, "create", profile.name, "--description", profile.description, "--cwd", cwd, command, "--", ...profile.args]);
-  const saved = show(profile.name);
-  if (!saved || saved.command !== command || saved.cwd !== cwd || JSON.stringify(saved.args) !== JSON.stringify(profile.args)) throw new Error(`Profile verification failed: ${profile.name}`);
-  console.log(`Verified profile: ${profile.name}`);
-}
-function restoreProfile({ name, previous }) {
-  const prefix = ["agent", "admin", "profile"];
-  if (!previous) { run("treer", [...prefix, "delete", name]); return; }
-  const args = previous.args ?? [];
-  run("treer", [...prefix, "update", previous.profile_id ?? name,
-    "--description", previous.description ?? "", "--cwd", previous.cwd,
-    "--command", previous.command,
-    ...(args.length ? args.flatMap((arg) => ["--arg", arg]) : ["--clear-args"])]);
 }
 function activate(root, target) {
   const temporary = join(root, `.current-${process.pid}`);
@@ -130,9 +107,25 @@ function main() {
     rmSync(lock, { recursive: true });
   }
 }
-try { main(); }
+try {
+  if (process.argv[2] === "--controller-request") {
+    const { controllerInstall } = await import("./controller-install.mjs");
+    const chunks = [], buffer = Buffer.alloc(4096); let length = 0, read;
+    while ((read = readSync(0, buffer, 0, buffer.length, null)) > 0) {
+      length += read; if (length > 128 * 1024) throw new Error("Controller install request too large");
+      chunks.push(Buffer.from(buffer.subarray(0, read)));
+    }
+    console.log(JSON.stringify(controllerInstall(JSON.parse(Buffer.concat(chunks).toString("utf8")))));
+  } else main();
+}
 catch (error) {
-  console.error(error.message);
-  if (error.stderr) console.error(String(error.stderr));
+  const safeMessage = error instanceof SyntaxError ? "Invalid launcher installation metadata" : error.message;
+  console.error(safeMessage);
+  if (process.argv[2] === "--controller-request") {
+    const message = String(safeMessage);
+    const code = /rollback incomplete/.test(message) ? "profile_rollback_incomplete" : /Profile verification failed/.test(message) ? "profile_verification_failed" : /owns the lock/.test(message) ? "install_locked" : /lacks launcher|protocol\/contract mismatch|handshake unavailable/.test(message) ? "launcher_incompatible" : "launcher_install_failed";
+    console.log(JSON.stringify({ error: { code, message } }));
+  }
+  if (process.argv[2] !== "--controller-request" && error.stderr) console.error(String(error.stderr));
   process.exitCode = 1;
 }

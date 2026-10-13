@@ -32,16 +32,18 @@ def main():
         raise RuntimeError("treer whoami does not match the injected Agent identity")
     launcher = Path(__file__).resolve().with_name("treer-agent.sh")
     app = launcher.parent.parent
-    if not os.access(launcher, os.X_OK) or not os.access(app / "node_modules/.bin/tsx", os.X_OK):
+    portable = (app / "runtime.mjs").is_file()
+    if not portable and (not os.access(launcher, os.X_OK) or not os.access(app / "node_modules/.bin/tsx", os.X_OK)):
         raise RuntimeError(f"Agent UI launcher/dependencies missing; run npm ci in {app}")
     tool = os.environ.get("CLAUDE_BIN", "claude") if args.harness == "claude" else "codex" if args.harness == "codex" else args.acp_command
-    for command in ("node", "curl", tool):
+    for command in (("node", tool) if portable else ("node", "curl", tool)):
         if not shutil.which(command):
             raise RuntimeError(f"{command} is not on PATH")
     # startup --cwd is relative to the machine root, not to this Agent.
     # Keep the requested startup command rooted at '.', but pin the Codex cwd
     # explicitly so migrating an Agent in a repository does not move its session.
-    command = ["treer", "agent", "startup", "set", "--cwd", ".", "--", str(launcher), "--harness", args.harness,
+    entry = [str(Path(shutil.which("node")).resolve()), str(app / "scripts/treer-agent.mjs")] if portable else [str(launcher)]
+    command = ["treer", "agent", "startup", "set", "--cwd", ".", "--", *entry, "--harness", args.harness,
                "--session-id", args.session_id, "--cwd", str(Path.cwd())]
     if args.harness == "acp":
         command += ["--acp-command", args.acp_command]

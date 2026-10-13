@@ -1,0 +1,7 @@
+{
+  "schema": "treer.launcher-interface/v1",
+  "protocol": "treer.agent-interface/v1",
+  "capabilities": ["prompt.submit", "transcript.read", "state.observe", "abort", "prompt.queue", "prompt.notify", "prompt.queue.read"],
+  "ui_path": "/",
+  "required_features": ["launcher.install.v1", "agent.interface-provenance.v1", "agent.prompt-delivery.v1"]
+}

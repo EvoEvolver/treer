@@ -33,4 +33,4 @@ if (manifest.ui_path != null) {
   if (typeof manifest.ui_path !== "string" || !manifest.ui_path.startsWith("/")) throw new Error("Invalid AIS UI path");
   args.push("--ui-path", manifest.ui_path);
 }
-execFileSync("treer", args, { stdio: "inherit" });
+execFileSync(process.env.AGENT_UI_TREER_BIN || "treer", args, { stdio: "inherit" });

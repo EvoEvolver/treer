@@ -71,6 +71,63 @@ do not limit concurrent requests, accumulated transcripts or model tool output.
 
 ## Installation and updates
 
+The default launcher is installed through the local Controller (next release):
+
+```bash
+treer-agent-server launcher install --node /absolute/trusted/path/to/node
+treer-agent-server launcher update --node /absolute/trusted/path/to/node
+treer-agent-server launcher status --node /absolute/trusted/path/to/node
+treer-agent-server launcher rollback --node /absolute/trusted/path/to/node
+```
+
+Official binaries embed the same-release portable runtime, UI, profiles and
+installer, authenticated by the signed Controller artifact. No repository,
+Git, npm, dependency downloads or Agent creation/restart is needed to install.
+Node 22+ is an external prerequisite; its executable is not authenticated by
+the Controller signature. Use a trusted absolute path. Provider CLIs and their
+authentication remain the operator's responsibility. A development Controller
+without the built runtime refuses installation unless explicit `--allow-network`
+and a trusted npm CLI enable lockfile-pinned `npm ci --ignore-scripts`.
+
+The installer checks every file's size/SHA256, the interface contract and the
+actual selected Controller handshake before activation. The content version is
+`sha256-<SHA256 of bundle-manifest.json bytes>`; that manifest covers all payload
+files and records the source commit. The private machine-local installation is
+`<machine.root>/.treer/launchers/agent/<content-version>/`. New profiles use an
+absolute Node executable plus stable `run.mjs`; an atomic `current.json` pointer
+works without Windows symlink privileges. Running launchers resolve physical
+assets once and retain them across updates. Version directories remain for
+rollback; profile writes are read back, and failures restore prior profiles and
+the pointer. If profile restoration fails, the candidate stays usable and the
+error is explicit. No update restarts running Agents. A private installation
+lock serializes mutations; stale locks require manual inspection, not PID-based
+automatic breaking. Unix state files use 0600 and managed directories use 0700;
+Windows relies on the owning account's private-directory ACL boundary rather
+than pretending POSIX mode bits provide ACL isolation.
+
+Status reports current/previous/retained versions, integrity and compatibility;
+Core adds visible local Agent startup version references, never their argument
+values. Unknown old Controller contracts are reported as unknown and cannot
+install/update/rollback. Missing required features or protocol mismatch fail
+explicitly. The Node entry repeats the Controller handshake before starting the
+runtime. A new Controller may accept an older declared contract only if its
+capabilities and required features are supported.
+
+`install.sh`, `apply.sh` and the Git bootstrap below are legacy/development
+entry points, deprecated for default production installation. They retain the
+shared profile save/readback/restoration code, but their Git source is not
+authenticated as an official embedded release. `switch.sh` is a separate
+explicit Unix session migration/restart operation; installation never invokes
+it. Packaged switch uses the portable Node entry and does not require tsx/curl.
+
+Release preparation runs `npm ci` with the repository lockfile, then
+`node launchers/agent/scripts/prepare-bundle.mjs --output ABS_DIR --source-commit FULL_SHA`.
+The empty/new output contains `runtime.mjs` (including JavaScript dependencies,
+without optional native WebSocket addons), assets/scripts/profiles/contract and
+`bundle-manifest.json`. The build tool is lockfile-pinned. Official Cargo builds
+require this exact-source verified payload; same-account tampering, compromised
+build tools and untrusted operator-selected Node remain outside this guarantee.
+
 For a checkout-free install, choose a **full 40-character lowercase commit SHA**
 from a reviewed release and use the same value in the download URL and `--ref`:
 
