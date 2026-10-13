@@ -172,7 +172,11 @@ always run again. These receipts are local operator state, not signed build
 attestations. Native workflow failures remain failures: inspect the failed job
 and explicitly rerun it with `gh run rerun <run-id> --failed` before resuming.
 No failing test is skipped or automatically retried by the wrapper.
-The deployed frontend must also match the candidate HTML byte for byte.
+The deployed frontend must match the candidate HTML byte for byte except for the
+Worker's per-response `nonce` attribute inserted into real script start tags.
+The gate reconstructs that exact transformation from the candidate and requires
+each script nonce to match the response's nonce-only CSP; arbitrary normalization,
+changed script content and other HTML changes are rejected.
 
 `--notify` sends only after the release passes, with an idempotency key derived
 from the full commit. `--agent` checks the caller before any release changes and
