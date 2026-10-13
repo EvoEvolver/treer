@@ -71,6 +71,41 @@ do not limit concurrent requests, accumulated transcripts or model tool output.
 
 ## Installation and updates
 
+For a checkout-free install, choose a **full 40-character lowercase commit SHA**
+from a reviewed release and use the same value in the download URL and `--ref`:
+
+```bash
+sha=FULL_40_CHARACTER_COMMIT_SHA; curl -fsSL "https://raw.githubusercontent.com/EvoEvolver/treer/$sha/launchers/agent/bootstrap.sh" | sh -s -- --ref "$sha" --agent codex
+```
+
+Bootstrap requires Treer, Node.js 22+, npm, Git and tar. It shallow/sparse-fetches
+only the launcher, checks HEAD against `--ref`, runs the existing installer with
+the supplied arguments and removes its temporary checkout. It never creates or
+restarts an Agent. `--repository URL` is available for a trusted mirror; `--source`
+is intentionally rejected. A missing prerequisite reports installation guidance.
+The whole script is a function invoked only on its last line, so a truncated
+download before that call does no installation work. The SHA is required as an
+argument because a piped script cannot discover which URL curl downloaded.
+
+Or inspect a manually fetched sparse checkout before running anything:
+
+```bash
+sha=FULL_40_CHARACTER_COMMIT_SHA
+git clone --depth 1 --filter=blob:none --no-checkout https://github.com/EvoEvolver/treer.git treer-launcher
+git -C treer-launcher sparse-checkout init --cone
+git -C treer-launcher sparse-checkout set launchers/agent
+git -C treer-launcher fetch --depth 1 origin "$sha"
+git -C treer-launcher checkout --detach FETCH_HEAD
+test "$(git -C treer-launcher rev-parse HEAD)" = "$sha"
+./treer-launcher/launchers/agent/install.sh --source ./treer-launcher --agent codex
+```
+
+Pinning a full SHA prevents a branch/tag moving between download and installation;
+Git verifies object identity and bootstrap verifies the selected HEAD. It does
+not authenticate a release signature or an untrusted mirror/download origin.
+Trust the reviewed bootstrap and HTTPS source; for stronger assurance download,
+inspect and run the script instead of piping it directly to a shell.
+
 Node.js 22+, npm, Git, tar and the Treer CLI must be on PATH. Install provider
 CLIs and authenticate them separately; the launcher does not read another
 provider's credentials. From a checkout, save one or more profiles:
