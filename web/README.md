@@ -13,6 +13,20 @@ are workspace Tree addresses, independent of a machine working directory.
 Rename, create and move conflicts keep the editor open and display the backend's
 error. Renaming or moving retains the selected Agent's stable identity.
 
+Folder expansion is cached in browser localStorage under
+`treer:folder-expansion:v1:<workspace_id>`, keyed by stable folder IDs. Uncached
+folders, including newly created folders, start collapsed. Toggles save
+immediately; reload and workspace switching preserve both expanded and collapsed
+choices. Renaming/moving a folder retains its preference. Successful tree reads
+prune deleted IDs; failed reads never erase the cache. If browser storage is
+unavailable, the tree still toggles in memory and starts collapsed on reload.
+
+Selecting a different Agent reveals and saves only its ancestor folders, leaving
+other preferences intact. The initial/default Agent selection does not override
+collapsed preferences, so a user can collapse the selected Agent's folder and
+reload without reopening it. The current console has no Agent deep-link route;
+a future explicit deep-link selection should use the same reveal behavior.
+
 **Edit startup command** reads the current argv and saves it through one restart
 operation. The editor scrolls on short mobile screens and preserves input after
 a denied operation. Managed Apps have separate settings; their startup editing
