@@ -12,6 +12,11 @@ function fixture(t) {
   const bytes = Buffer.from('console.log("fixture")');
   writeFileSync(join(directory, 'runtime.mjs'), bytes);
   const manifest = { schema: 'treer.launcher-payload/v1', source_commit: commit, node_min: 22, entry: 'runtime.mjs', runtime_ready: true, files: [{ path: 'runtime.mjs', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), executable: false }] };
+  for (const path of ['interface-contract.json', 'profiles.json', 'scripts/install.mjs', 'scripts/installed-runner.mjs', 'scripts/treer-agent.mjs']) {
+    if (path.startsWith('scripts/')) mkdirSync(join(directory, 'scripts'), { recursive: true });
+    writeFileSync(join(directory, path), bytes);
+    manifest.files.push({ ...manifest.files[0], path });
+  }
   const save = () => writeFileSync(join(directory, 'bundle-manifest.json'), JSON.stringify(manifest));
   save(); return { directory, manifest, save };
 }
@@ -47,4 +52,19 @@ test('launcher build dependency installs disable lifecycle scripts in every buil
     assert.ok(installs.length > 0, path);
     for (const line of installs) assert.match(line, /--ignore-scripts(?: |$)/, path);
   }
+});
+
+test('required launcher entries and portable path names fail closed', t => {
+  for (const required of ['runtime.mjs', 'interface-contract.json', 'profiles.json', 'scripts/install.mjs', 'scripts/installed-runner.mjs', 'scripts/treer-agent.mjs']) {
+    const f = fixture(t);
+    f.manifest.files = f.manifest.files.filter(file => file.path !== required);
+    rmSync(join(f.directory, required)); f.save();
+    assert.throws(() => verifyBundle(f.directory, commit), /Missing required payload file/);
+  }
+  for (const name of ['bad./entry.mjs', 'bad /entry.mjs', 'entry.mjs.', 'entry.mjs ']) {
+    const f = fixture(t); f.manifest.files[0].path = name; f.save();
+    assert.throws(() => verifyBundle(f.directory, commit), /Unsafe payload path/);
+  }
+  const f = fixture(t); f.manifest.files.push({ ...f.manifest.files[0], path: 'RUNTIME.mjs' }); f.save();
+  assert.throws(() => verifyBundle(f.directory, commit), /Case-insensitive payload path collision/);
 });

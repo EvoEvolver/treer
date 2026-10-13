@@ -11,9 +11,14 @@ export function verifyBundle(directory, commit) {
   assert.ok(isAbsolute(directory));
   assert.match(commit, /^[a-f0-9]{40}$/);
   assert.ok(lstatSync(directory).isDirectory() && !lstatSync(directory).isSymbolicLink());
+  const safeComponent = p => p && p !== '.' && p !== '..' && !/[\\:\x00-\x1f\x7f]/.test(p) && !/[. ]$/.test(p);
   const found = new Map();
   function walk(path, prefix = '') {
+    const folded = new Set();
     for (const name of readdirSync(path)) {
+      assert.ok(safeComponent(name), 'Unsafe payload path');
+      assert.ok(!folded.has(name.toLowerCase()), 'Case-insensitive payload path collision');
+      folded.add(name.toLowerCase());
       const relative = prefix + name, full = join(path, name), stat = lstatSync(full);
       assert.ok(!stat.isSymbolicLink(), 'Payload links are forbidden');
       if (stat.isDirectory()) walk(full, relative + '/');
@@ -30,12 +35,14 @@ export function verifyBundle(directory, commit) {
   assert.equal(manifest.entry, 'runtime.mjs');
   assert.equal(manifest.runtime_ready, true);
   assert.ok(Array.isArray(manifest.files));
-  const names = new Set();
+  const names = new Set(), foldedNames = new Set();
   for (const file of manifest.files) {
     assert.equal(typeof file.path, 'string');
-    assert.ok(file.path.split('/').every(p => p && p !== '.' && p !== '..' && !/[\\:\x00-\x1f]/.test(p)), 'Unsafe payload path');
+    assert.ok(file.path.split('/').every(safeComponent), 'Unsafe payload path');
     assert.ok(file.path !== 'bundle-manifest.json' && !names.has(file.path));
     assert.ok(!file.path.split('/').includes('node_modules'));
+    assert.ok(!foldedNames.has(file.path.toLowerCase()), 'Case-insensitive payload path collision');
+    foldedNames.add(file.path.toLowerCase());
     names.add(file.path);
     assert.equal(typeof file.executable, 'boolean');
     assert.ok(Number.isSafeInteger(file.size) && file.size >= 0);
@@ -45,7 +52,9 @@ export function verifyBundle(directory, commit) {
     assert.equal(content.length, file.size);
     assert.equal(createHash('sha256').update(content).digest('hex'), file.sha256);
   }
-  assert.ok(names.has('runtime.mjs'), 'Missing portable runtime');
+  for (const required of ['runtime.mjs', 'interface-contract.json', 'profiles.json', 'scripts/install.mjs', 'scripts/installed-runner.mjs', 'scripts/treer-agent.mjs']) {
+    assert.ok(names.has(required), `Missing required payload file: ${required}`);
+  }
   assert.equal(found.size, names.size + 1, 'Unlisted payload file');
   return 'sha256-' + createHash('sha256').update(bytes).digest('hex');
 }

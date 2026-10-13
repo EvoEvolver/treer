@@ -80,7 +80,8 @@ Official native builds use Node 22 and lockfile-pinned `npm ci --ignore-scripts`
 CI checkout to prepare the launcher's portable runtime and UI. Dependency
 lifecycle scripts are disabled; target installation stays offline and
 does not require npm or Git. The bundle manifest records the exact source commit
-and every file's size/SHA256. Preparation independently verifies those bytes and
+and every file's size/SHA256. Preparation requires all six launcher entry assets,
+rejects trailing dots/spaces and case-insensitive path collisions, verifies bytes, and
 sets `TREER_LAUNCHER_PAYLOAD_DIR` plus `TREER_REQUIRE_LAUNCHER_BUNDLE=1` before
 Cargo. Missing or invalid portable runtime payloads fail official builds; Core
 also validates the actual embedded bytes. Controller signatures cover the
