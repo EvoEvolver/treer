@@ -204,6 +204,15 @@ only Controller semantic calls may attest queue senders. Old Core lacks provenan
 and must be updated before strict launchers are enabled. See the
 [forwarding contract](architecture.md#browser-defense-forwarding-provenance).
 
+Native Codex/Claude and ACP launch modes default to unattended full authority
+and inherit the Agent's own Treer credential for tools. Session export excludes
+known credential/configuration files, but it does not redact secrets embedded
+in allowed conversation or memory files. Transcript, provider stderr, tool
+output and completion notifications likewise have no general content-redaction
+guarantee. Treat exported archives and histories as sensitive data. Message
+source attribution and non-system-instruction warnings do not guarantee that
+the model will resist prompt injection or decline malicious instructions.
+
 Repository launchers are optional code executed with the Agent's operating-
 system authority. Treer's binary installer, updater, and release artifacts do
 not fetch or install them. The optional `launchers/agent` launcher is obtained
