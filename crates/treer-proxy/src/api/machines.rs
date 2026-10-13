@@ -117,7 +117,7 @@ pub(super) fn is_cleartext_remote(url: &Url) -> bool {
         }
 }
 
-fn windows_bootstrap_commands(public_url: &Url, key: &str) -> (String, String) {
+pub(super) fn windows_bootstrap_commands(public_url: &Url, key: &str) -> (String, String) {
     let mut url = public_url.clone();
     url.set_path("/install.ps1");
     url.set_query(None);
@@ -125,7 +125,7 @@ fn windows_bootstrap_commands(public_url: &Url, key: &str) -> (String, String) {
     let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
     (
         format!("Invoke-WebRequest {} -OutFile \"$env:TEMP\\treer-install.ps1\"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:TEMP\\treer-install.ps1\"; if ($LASTEXITCODE -eq 0) {{ $env:Path += \";$env:LOCALAPPDATA\\Treer\\bin\" }}", quote(url.as_str())),
-        format!("treer-agent-server connect --key {} --proxy {}", quote(key), quote(public_url.as_str())),
+        format!("if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {{ throw 'LOCALAPPDATA is required for a user-owned Treer root' }}; $treerRoot = Join-Path $env:LOCALAPPDATA 'Treer\\workspace'; New-Item -ItemType Directory -Force -Path $treerRoot -ErrorAction Stop | Out-Null; treer-agent-server connect --root \"$treerRoot\" --key {} --proxy {}", quote(key), quote(public_url.as_str())),
     )
 }
 

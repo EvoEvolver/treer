@@ -2932,6 +2932,24 @@ fn bootstrap_separates_public_installation_from_workspace_connection() {
 }
 
 #[test]
+fn windows_bootstrap_creates_an_explicit_user_root_before_connect() {
+    let (install, connect) = windows_bootstrap_commands(
+        &Url::parse("https://treer.example/").unwrap(),
+        "enrollment'test",
+    );
+    assert!(!install.contains("enrollment"));
+    assert!(connect.contains("IsNullOrWhiteSpace($env:LOCALAPPDATA)"));
+    assert!(connect.contains("Join-Path $env:LOCALAPPDATA 'Treer\\workspace'"));
+    assert!(
+        connect.contains("New-Item -ItemType Directory -Force -Path $treerRoot -ErrorAction Stop")
+    );
+    assert!(connect.contains("connect --root \"$treerRoot\" --key 'enrollment''test'"));
+    assert!(connect.find("New-Item").unwrap() < connect.find(" connect ").unwrap());
+    assert!(!connect.contains("relocate-root"));
+    assert!(!connect.contains("System32"));
+}
+
+#[test]
 fn installer_is_posix_shell_and_keeps_enrollment_separate() {
     let config = test_config();
     let script = render_install_script(&config.public_url);

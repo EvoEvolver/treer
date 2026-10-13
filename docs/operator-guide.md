@@ -1,5 +1,12 @@
 # Treer operator guide
 
+The web console's **Add machine** Windows connection command creates
+`%LOCALAPPDATA%\Treer\workspace` and explicitly passes it as `connect --root`.
+Run it for a new enrollment only. It does not migrate an existing enrollment;
+an existing root mismatch is rejected and requires the explicit, offline root
+migration procedure below. Remote cleartext HTTP installer commands remain
+withheld.
+
 This is the detailed reference for installing, developing, deploying, and
 operating Treer. Start with the root [README](../README.md) for the product
 overview, then use the section matching the task at hand.
