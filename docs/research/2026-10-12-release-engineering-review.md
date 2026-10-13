@@ -80,3 +80,27 @@ documentation with the single launcher without changing runtime behavior.
 
 Soul server/client v2 implementation is still pending merge at this review
 point; its contract review above must not be read as implementation approval.
+
+## Release preparation review — 2026-10-12
+
+The preceding sections preserve their original review snapshots. Subsequent
+security work is recorded in the dated Core, Apps, Web, launcher and supply-chain
+reviews; in particular, the launcher origin/provenance findings above are not an
+assertion that their original implementation is still the current candidate.
+
+Core approved Unix bootstrap `e602d01` and machine-update tooling `d62fffb`
+in Core Message `msg_f36fde4bbc0044ac91aaeb96e68e71d9`. It independently ran
+10 checksum fixtures, three release-security tests, 22 fake-machine/wrapper tests,
+and the closed AIS wrapper test, plus documentation and diff checks. The checksum
+set is verified before any binary replacement or execution. The update script
+preserves Controller-before-CLI ordering, clean detached startup, Agent identity
+and process checks, and explicit cold-restart acknowledgement and rollback limits.
+Rebasing these patches onto the approved launcher/bootstrap and installer changes
+does not constitute a new live-machine acceptance test.
+
+Release engineering also re-ran the approved launcher bootstrap's four local
+fixture tests before merging `5e74a28` (reviewed originally as `947504f`).
+`release-ci-preflight` remains outside this release to avoid expanding its gate.
+The final clean candidate still requires the full native gate, exact-SHA GitHub
+CI, all five artifact platforms and standard Canary checks. No machine update,
+Host/Controller restart or Agent restart is authorized by these review results.
