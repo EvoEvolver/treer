@@ -36,6 +36,15 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
       - name: Record source commit
         run: '"TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Prepare verified launcher payload
+        run: |
+          npm --prefix launchers/agent ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/prepare-launcher-release.mjs --output "$env:RUNNER_TEMP/treer-launcher-payload" --source-commit "$env:TREER_BUILD_COMMIT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Select MSVC Rust
         run: |
@@ -111,6 +120,17 @@ jobs:
       - name: Record source commit
         shell: bash
         run: echo "TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Prepare verified launcher payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix launchers/agent ci
+          node scripts/prepare-launcher-release.mjs --output "$RUNNER_TEMP/treer-launcher-payload" --source-commit "$TREER_BUILD_COMMIT"
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2

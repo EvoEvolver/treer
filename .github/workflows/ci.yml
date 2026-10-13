@@ -44,7 +44,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/install-checksums.test.mjs
+        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Build workspace binaries

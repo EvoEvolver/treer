@@ -76,6 +76,19 @@ deploy the Railway Proxy, Core Message code, or Mail/Telegram App processes.
 
 ## Machine artifacts
 
+Official native builds use Node 22 and lockfile-pinned `npm ci` in the trusted
+CI checkout to prepare the launcher's portable runtime and UI. Dependencies may
+run lifecycle scripts in that build job; target installation stays offline and
+does not require npm or Git. The bundle manifest records the exact source commit
+and every file's size/SHA256. Preparation independently verifies those bytes and
+sets `TREER_LAUNCHER_PAYLOAD_DIR` plus `TREER_REQUIRE_LAUNCHER_BUNDLE=1` before
+Cargo. Missing or invalid portable runtime payloads fail official builds; Core
+also validates the actual embedded bytes. Controller signatures cover the
+payload, not the externally selected Node executable. Native Node, PowerShell
+and installer checks are only claimed after their platform jobs actually pass.
+Local artifact staging and self-host image builds use the same preparation.
+
+
 The `Build release artifacts` GitHub workflow runs only by manual dispatch or
 for a pushed `v*` tag. Its matrix uses native runners for `linux-x86_64`,
 `linux-aarch64`, `darwin-x86_64`, `darwin-aarch64`, and `windows-x86_64`. Windows
