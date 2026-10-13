@@ -301,9 +301,13 @@ async function loadAuthority() {
   try {
     const result=await request('v1/policy/authority')
     const settings=document.getElementById('authority-settings')
-    const treer=new URL(result.treer_url)
-    if(!['http:','https:'].includes(treer.protocol) || treer.username || treer.password) throw new Error('Invalid Treer settings origin')
-    settings.href=treer.href;settings.hidden=false
+    settings.hidden=true
+    if(typeof result.treer_url==='string') {
+      try {
+        const treer=new URL(result.treer_url)
+        if(['http:','https:'].includes(treer.protocol) && !treer.username && !treer.password) {settings.href=treer.href;settings.hidden=false}
+      } catch { /* Core authority remains valid even without a console link. */ }
+    }
     if(result.publish_authority==='provider_operator') {
       text('publish-authority','Provider operator')
       warning.textContent='Full policy administration: anyone holding the operator token can publish rules and switch to enforce without further human approval. Use an isolated administration Agent and private token storage. Only the workspace owner can change the Provider or publication authority.'

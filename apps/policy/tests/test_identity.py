@@ -46,7 +46,7 @@ class FakeProxy(BaseHTTPRequestHandler):
                 status=404;result={'error':{'code':'route_not_found'}}
             elif self.path.endswith('/publish-authority'):
                 result={'publish_authority':getattr(self.server,'authority','owner_session'),
-                    'capabilities':[] if fault=='missingcap' else ['policy.publish-authority.v1'], 'provider':{'app_id':'app_policy'}}
+                    'capabilities':[] if fault=='missingcap' else ['policy.publish-authority.v1'], 'provider':{'app_id':'app_policy'},'treer_url':'https://console.test/'}
                 if fault == 'flip': self.server.authority='owner_session'
             elif getattr(self.server,'authority','owner_session')!='provider_operator':
                 status=403;result={'error':{'code':'provider_operator_required'}}
@@ -99,6 +99,7 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],1)
         self.proxy.authority='provider_operator'
         self.assertEqual(self.request('GET','/v1/policy/authority')[1]['publish_authority'],'provider_operator')
+        self.assertEqual(self.request('GET','/v1/policy/authority')[1]['treer_url'],'https://console.test/','Preserve Core console URL, not the API origin')
         for identity in ('forged','expired','wrong-audience',''):
             self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity=identity)[0],401)
         self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity='agent-valid',extra={'Authorization':'Bearer forged'})[0],401)

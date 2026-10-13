@@ -743,7 +743,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                     raise PolicyError(409, "unsupported_policy_schema", "This bundle requires a schema v2 capable Proxy")
                 self._json(200, self.store.bundle())
             elif parsed.path == "/v1/policy/authority":
-                self._json(200, {**self._auth().publish_authority(), 'treer_url':self._auth().proxy_url})
+                self._json(200, self._auth().publish_authority())
             elif parsed.path == "/v1/session":
                 if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session') or ('Authorization' in self.headers and self.headers.get('Authorization') != 'Bearer ' + str(self._operator_token())):
                     token, actor, _, _ = self._identity()

@@ -64,6 +64,7 @@ for(const width of [1280,390]) test(`Operator authority warning and member publi
   await page.locator('#identity-status').filter({hasText:'Treer: Member'}).waitFor();
   await page.locator('#publish-authority').filter({hasText:'Provider operator'}).waitFor();
   await page.locator('#authority-warning').filter({hasText:'without further human approval'}).waitFor();
+  assert.equal(await page.locator('#authority-settings').getAttribute('href'),'https://console.test/');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await mkdir('/tmp/policy-operator-browser',{recursive:true});
   await page.screenshot({path:`/tmp/policy-operator-browser/authority-${width}.png`,fullPage:true});
