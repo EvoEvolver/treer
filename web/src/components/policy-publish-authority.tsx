@@ -57,7 +57,7 @@ export function PolicyPublishAuthoritySettings({ workspaceId, status, isOwner, d
     {error && <p role="alert" className="break-words text-xs text-destructive">{error}</p>}
     <Dialog open={confirm} onOpenChange={(open) => { if (!busy) setConfirm(open) }}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
-        <DialogHeader><DialogTitle>Allow provider operator publication?</DialogTitle><DialogDescription>This grants full Policy administration authority to holders of the Policy App administration token.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="pr-6 leading-6">Allow provider operator publication?</DialogTitle><DialogDescription>This grants full Policy administration authority to holders of the Policy App administration token.</DialogDescription></DialogHeader>
         <p className="text-sm leading-6">Token holders can publish v2 rules and switch to enforce without an owner approving each publication. A compromised token or administration Agent can change workspace authorization.</p>
         <p className="text-sm leading-6">Recommended: use Policy to isolate the Agent that administers Policy. Restrict its Tree path, tree moves, control of that Agent, machine exec and file access. Agents sharing an OS user are not isolated by 0600 files or loopback ports.</p>
         <a className="text-sm underline underline-offset-4" href={guide} target="_blank" rel="noreferrer">Operator guide: isolate the Policy administration Agent</a>
