@@ -88,7 +88,7 @@ export function authorizationReturnUrl() {
     const candidate = new URL(value)
     const proxy = new URL(proxyUrl("/"))
     const allowedPaths = new Set(["/.treer/ingress/authorize", "/api/apps/oauth/authorize"])
-    return candidate.origin === proxy.origin && allowedPaths.has(candidate.pathname) ? candidate.toString() : null
+    return !candidate.username && !candidate.password && !candidate.hash && candidate.origin === proxy.origin && allowedPaths.has(candidate.pathname) ? candidate.toString() : null
   } catch {
     return null
   }

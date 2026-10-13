@@ -22,11 +22,11 @@ export function withEmbedTheme(src: string, theme: Theme): string {
 export function postEmbedTheme(frame: HTMLIFrameElement | null | undefined, theme: Theme) {
   const target = frame?.contentWindow
   if (!target) return
-  let origin = "*"
+  // Appearance is not privileged data, but never broadcast to an unknown origin.
   try {
-    if (frame?.src) origin = new URL(frame.src, window.location.href).origin
-  } catch {
-    origin = "*"
-  }
-  target.postMessage({ type: EMBED_THEME_MESSAGE_TYPE, theme }, origin)
+    if (!frame?.src) return
+    const url = new URL(frame.src, window.location.href)
+    if (!['http:', 'https:'].includes(url.protocol)) return
+    target.postMessage({ type: EMBED_THEME_MESSAGE_TYPE, theme }, url.origin)
+  } catch { return }
 }

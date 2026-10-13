@@ -137,11 +137,8 @@ fun AgentWebViewScreen(
 }
 
 private fun injectSessionCookie(baseUrl: String, token: String) {
-    val uri = Uri.parse(baseUrl)
-    val host = uri.host ?: return
-    val secure = if (uri.scheme == "https") "Secure;" else ""
-    CookieManager.getInstance().setCookie(baseUrl, "treer_session=$token; Path=/; $secure")
-    CookieManager.getInstance().setCookie("https://$host", "treer_session=$token; Path=/; $secure")
+    val header = sessionCookieHeader(baseUrl, token) ?: return
+    CookieManager.getInstance().setCookie(baseUrl, header)
     CookieManager.getInstance().flush()
 }
 

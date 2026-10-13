@@ -72,3 +72,19 @@ the interface UI tunnel.
 just mobile-ios-ci
 just mobile-android-ci
 ```
+
+## WebView security limitations
+
+Injected session cookies are host-only, HttpOnly and SameSite=Strict, with Secure
+for HTTPS. HTTP development endpoints have no transport confidentiality. This
+protects direct cookie reads; it does not isolate embedded JavaScript or restrict
+native bridge authority. Current native bridges still need origin/frame checks,
+navigation restrictions and request-path confinement before untrusted interfaces
+can be supported. Android also enables remote WebView debugging, mixed content
+and third-party cookies; these are remaining hardening work, not safe defaults
+for untrusted content. See the [Web security review](../docs/research/2026-10-12-security-web.md).
+
+Run `node mobile/tests/session-cookie.mjs` from the repository root for the
+isolated Foundation regression (Swift toolchain required). Android's
+`SessionCookieTest` covers the equivalent header builder. Neither test certifies
+runtime WKWebView/Android CookieManager enforcement; device tests remain needed.

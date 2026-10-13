@@ -109,6 +109,18 @@ secrets directly in argv; use files or a secret provider already protected for
 the machine account. Anyone with that account's authority can modify the same
 state or execute an equivalent command.
 
+Browser sandbox flags do not isolate trusted App or Agent Interface JavaScript
+from the user's Proxy authority. Embedded pages share the Proxy origin and can
+make authenticated requests to that origin; if the control plane is also hosted
+there, `allow-scripts` plus `allow-same-origin` permits access to the parent page.
+Native WebView bridges currently lack a complete frame-origin and navigation
+boundary. HttpOnly cookies prevent direct script reads, not authenticated API
+calls or bridge abuse. Do not open untrusted interfaces with a privileged user
+session. See the [2026-10-12 Web security review](research/2026-10-12-security-web.md)
+for local reproductions, remaining work, and verification limits. CSP and
+anti-framing headers are defense in depth, not evidence of a complete XSS,
+CSRF, or mobile WebView security audit.
+
 Apps do not create a security boundary. Managed Apps currently run through the
 same Host process runtime as command Agents, under the installing machine
 account. Externally managed Apps inherit their supervisor's authority.
