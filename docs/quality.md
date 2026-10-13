@@ -225,6 +225,16 @@ cargo test -p treer-proxy network
 
 The subprocess fixtures require freshly built sibling executables:
 
+Recovery fixtures assert privileged inherited credentials are **absent**, rather
+than replaced with empty environment entries. A panic in a fake Host can close
+its RPC and make the Controller report `Failed`; distinguish that fixture
+failure from a production restoration failure. The isolated real-Host cold
+restart test additionally checks Agent and App child-process identity bindings,
+absence of stale machine/operator/enrollment/UI environment, stable workload
+credentials, and that stopped/revoked workloads are not relaunched. Child output
+contains identity markers and SHA-256 of fixture-generated credentials only,
+never credential values; this ignored Unix fixture also requires `openssl`.
+
 ```sh
 cargo build -p treer-agent-host -p treer-agent-server -p treer-cli
 cargo test -p treer-agent-server recovery_real_host_cold_restart -- --ignored

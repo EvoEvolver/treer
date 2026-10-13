@@ -514,6 +514,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
 #[tokio::test]
 #[ignore = "requires cargo build -p treer-agent-host immediately before this isolated real-Host test"]
 async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
+    use sha2::Digest;
     use std::os::unix::fs::PermissionsExt;
     use treer_host_protocol::HostDaemonConfig;
     use treer_protocol::RuntimeRestoreState;
@@ -606,6 +607,15 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
                 .arg("run")
                 .arg("--config")
                 .arg(&config_path)
+                .env("TREER_MACHINE_TOKEN", "fixture-not-a-token")
+                .env("TREER_OPERATOR_CREDENTIAL", "fixture-not-an-operator")
+                .env("TREER_ENROLLMENT_KEY", "fixture-not-an-enrollment")
+                .env("AGENT_UI_INSTANCE_ID", "fixture-stale-caller")
+                .env("TREER_AGENT_ID", "fixture-stale-agent")
+                .env("TREER_WORKLOAD_CREDENTIAL", "fixture-stale-workload")
+                .env("HTTP_PROXY", "http://127.0.0.1:1")
+                .env("HTTPS_PROXY", "http://127.0.0.1:1")
+                .env("ALL_PROXY", "http://127.0.0.1:1")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .kill_on_drop(true)
@@ -619,11 +629,13 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
     let args = vec![
         "/bin/sh".into(),
         "-c".into(),
-        "printf '%s\\n' \"$1\"; exec sleep 120".into(),
+        "test \"$TREER_AGENT_ID\" = \"$2\" && test \"$TREER_WORKSPACE_ID\" = cold-workspace && test \"$TREER_SERVER_ID\" = cold-server && test -n \"$TREER_WORKLOAD_CREDENTIAL\" && test -z \"${TREER_MACHINE_TOKEN+x}${TREER_OPERATOR_CREDENTIAL+x}${TREER_ENROLLMENT_KEY+x}${AGENT_UI_INSTANCE_ID+x}${ALL_PROXY+x}\" && test \"$HTTP_PROXY\" = \"$TREER_HTTP_PROXY\" && test \"$HTTPS_PROXY\" = \"$TREER_HTTP_PROXY\" && test \"$HTTP_PROXY\" != http://127.0.0.1:1 || exit 91; printf '%s\\n' \"$1\"; printf 'identity-ok:%s\\n' \"$TREER_AGENT_ID\"; printf '%s' \"$TREER_WORKLOAD_CREDENTIAL\" | openssl dgst -sha256; exec sleep 120".into(),
         "launcher".into(),
         literal.into(),
     ];
-    for id in ["survivor", "stopped"] {
+    for id in ["survivor", "stopped", "revoked", "cold-app"] {
+        let mut process_args = args.clone();
+        process_args.push(id.into());
         first
             .create(
                 &format!("create-{id}"),
@@ -632,10 +644,10 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
                 CreateAgentRequest {
                     folder_id: None,
                     server_id: None,
-                    kind: "command".into(),
+                    kind: if id == "cold-app" { "app" } else { "command" }.into(),
                     name: id.into(),
                     cwd: ".".into(),
-                    args: args.clone(),
+                    args: process_args,
                     cols: 80,
                     rows: 24,
                     publish_ports: vec![],
@@ -647,12 +659,20 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
     }
     let before = first.get_startup("survivor").unwrap();
     assert_eq!(before.command, "/bin/sh");
-    assert_eq!(before.args, args[1..]);
+    assert_eq!(before.args[..args.len() - 1], args[1..]);
+    let before_credential = first
+        .inner
+        .startup_store
+        .get("survivor")
+        .unwrap()
+        .workload_credential;
     first.stop("stop-intent", "stopped").await.unwrap();
     assert!(!first.get_startup("stopped").unwrap().enabled);
     shutdown(&mut first_host).await;
     first.inner.workload_proxies.remove("survivor");
     first.inner.workload_proxies.remove("stopped");
+    first.inner.workload_proxies.remove("revoked");
+    first.inner.workload_proxies.remove("cold-app");
     let saved = StartupStore::load(root.join("startup.json")).unwrap();
     assert!(
         saved.get("survivor").unwrap().spec.enabled,
@@ -665,7 +685,11 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
         .list()
         .iter()
         .any(|agent| agent.agent_id == "stopped" && agent.status.is_terminal()));
-    let active = vec!["survivor".to_string(), "stopped".to_string()];
+    let active = vec![
+        "survivor".to_string(),
+        "stopped".to_string(),
+        "cold-app".to_string(),
+    ];
     let (a, b) = tokio::join!(
         second.restore_runtime(&active),
         second.restore_runtime(&active)
@@ -686,6 +710,25 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
             .state,
         RuntimeRestoreState::SkippedStopped
     );
+    assert!(a
+        .items
+        .iter()
+        .any(|item| item.workload_id == "revoked"
+            && item.state == RuntimeRestoreState::IdentityRevoked));
+    assert!(a
+        .items
+        .iter()
+        .any(|item| item.workload_id == "cold-app" && item.state == RuntimeRestoreState::Started));
+    assert!(
+        second
+            .inner
+            .startup_store
+            .get("survivor")
+            .unwrap()
+            .workload_credential
+            == before_credential,
+        "cold restoration preserves the stable workload credential"
+    );
     let HostResponse::Synced { processes, .. } =
         second.inner.host.sync(Default::default()).await.unwrap()
     else {
@@ -693,34 +736,50 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
     };
     assert_eq!(
         processes.iter().filter(|process| process.running).count(),
-        1
+        2
     );
-    assert_eq!(processes[0].process_id, "survivor");
+    assert!(processes
+        .iter()
+        .filter(|process| process.running)
+        .all(|process| matches!(process.process_id.as_str(), "survivor" | "cold-app")));
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let HostResponse::Output { replay } = second
-            .inner
-            .host
-            .request(
-                HostCommand::Read {
-                    process_id: "survivor".into(),
-                    cursor: None,
-                },
-                None,
-            )
-            .await
-            .unwrap()
-        else {
-            panic!("read");
-        };
-        if plain_text(&replay).unwrap().contains(literal) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "literal argv did not reach restored process"
+    for restored_id in ["survivor", "cold-app"] {
+        // Only fixture-created credentials are hashed; no installed credentials
+        // are inspected and no credential is included in argv or child output.
+        let saved = second.inner.startup_store.get(restored_id).unwrap();
+        let expected_digest = format!(
+            "{:x}",
+            sha2::Sha256::digest(saved.workload_credential.as_bytes())
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        loop {
+            let HostResponse::Output { replay } = second
+                .inner
+                .host
+                .request(
+                    HostCommand::Read {
+                        process_id: restored_id.into(),
+                        cursor: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("read");
+            };
+            let text = plain_text(&replay).unwrap();
+            if text.contains(literal)
+                && text.contains(&format!("identity-ok:{restored_id}"))
+                && text.contains(&expected_digest)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "literal argv did not reach restored process"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
     let previous = second
         .list()
@@ -734,7 +793,11 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
     assert_eq!(restarted.agent_id, previous.agent_id);
     assert!(restarted.run_generation > previous.run_generation);
     assert_ne!(restarted.pid, previous.pid);
-    let mut stale = processes[0].clone();
+    let mut stale = processes
+        .iter()
+        .find(|process| process.process_id == "survivor")
+        .unwrap()
+        .clone();
     stale.running = false;
     stale.exit_code = Some(0);
     second.apply_process(stale);
@@ -764,6 +827,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
     // Replacement Controller takes over the exact listener recorded by Host.
     second.inner.workload_proxies.remove("survivor");
     second.inner.workload_proxies.remove("stopped");
+    second.inner.workload_proxies.remove("cold-app");
     let hot = connect(&socket, &root).await;
     let attached = hot
         .list()
@@ -1119,15 +1183,32 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
                     assert_eq!(request.rows, 24);
                     assert_eq!(
                         request.env.get("TREER_MACHINE_TOKEN").map(String::as_str),
-                        Some("")
+                        None
                     );
+                    assert_eq!(
+                        request.env.get("TREER_AGENT_ID").map(String::as_str),
+                        Some("recover")
+                    );
+                    assert_eq!(
+                        request.env.get("TREER_WORKSPACE_ID").map(String::as_str),
+                        Some("workspace")
+                    );
+                    assert_eq!(
+                        request.env.get("TREER_SERVER_ID").map(String::as_str),
+                        Some("server")
+                    );
+                    assert!(request
+                        .env
+                        .get("TREER_WORKLOAD_CREDENTIAL")
+                        .is_some_and(|value| valid_workload_credential(value)));
                     assert_eq!(
                         request
                             .env
                             .get("TREER_OPERATOR_CREDENTIAL")
                             .map(String::as_str),
-                        Some("")
+                        None
                     );
+                    assert!(!request.env.contains_key("TREER_ENROLLMENT_KEY"));
                     host_spawn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let now = Utc::now();
                     let process = HostProcessInfo {
