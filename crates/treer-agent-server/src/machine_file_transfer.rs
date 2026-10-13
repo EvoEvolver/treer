@@ -93,6 +93,7 @@ pub struct Transfers {
     limit: u64,
     recovered: std::sync::atomic::AtomicBool,
     recovery_lease: Mutex<Option<std::fs::File>>,
+    generation: std::sync::atomic::AtomicU64,
     #[cfg(any(unix, windows))]
     pending: Mutex<HashMap<String, Pending>>,
 }
@@ -111,6 +112,7 @@ impl Transfers {
             limit: configured_limit.clamp(1, MACHINE_TRANSFER_HARD_LIMIT),
             recovered: std::sync::atomic::AtomicBool::new(false),
             recovery_lease: Mutex::new(None),
+            generation: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(unix, windows))]
             pending: Mutex::new(HashMap::new()),
         }
@@ -124,12 +126,14 @@ impl Transfers {
     pub fn clear(&self) {
         #[cfg(any(unix, windows))]
         if let Ok(mut pending) = self.pending.lock() {
+            self.generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             pending.clear();
         }
     }
     pub fn expire(&self) {
         #[cfg(any(unix, windows))]
-        if let Ok(mut pending) = self.pending.lock() {
+        if let Ok(mut pending) = self.pending.try_lock() {
             pending.retain(|_, entry| {
                 entry.touched.elapsed() < Duration::from_secs(MACHINE_TRANSFER_IDLE_SECONDS)
                     && entry.created.elapsed() < Duration::from_secs(MACHINE_TRANSFER_TOTAL_SECONDS)
@@ -150,9 +154,24 @@ impl Transfers {
         ))
     }
 
-    #[cfg(any(unix, windows))]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(test)]
     pub fn execute(
         &self,
+        actor: MachineTransferActor,
+        authorized_path: &str,
+        request: Request,
+    ) -> Result<Value, ProtocolError> {
+        self.execute_generation(self.generation(), actor, authorized_path, request)
+    }
+
+    #[cfg(any(unix, windows))]
+    pub fn execute_generation(
+        &self,
+        generation: u64,
         actor: MachineTransferActor,
         authorized_path: &str,
         request: Request,
@@ -174,6 +193,12 @@ impl Transfers {
             .pending
             .lock()
             .map_err(|_| failure("state_error", "transfer registry unavailable"))?;
+        if generation != self.generation() {
+            return Err(failure(
+                "machine_transfer_stale",
+                "Controller connection changed; start a new transfer",
+            ));
+        }
         self.recover_staging()?;
         match &request {
             Request::PutBegin { path, .. } | Request::GetBegin { path, .. } => {
@@ -880,5 +905,31 @@ mod tests {
         assert_eq!(f.visible_files(), 1); // Only the new transfer's temp remains.
         f.execute(Request::Abort { id, read: false }).unwrap();
         assert_eq!(f.visible_files(), 0);
+    }
+
+    #[test]
+    fn queued_old_connection_begin_is_fenced_after_disconnect() {
+        let f = Fixture::new(64);
+        let captured_generation = f.transfers.generation();
+        f.transfers.clear();
+        let error = f
+            .transfers
+            .execute_generation(
+                captured_generation,
+                f.actor.clone(),
+                "result",
+                Request::PutBegin {
+                    path: "result".into(),
+                    overwrite: false,
+                    mode: 0o600,
+                    size: Some(1),
+                    limit: 64,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "machine_transfer_stale");
+        assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+        let id = f.begin(false);
+        f.execute(Request::Abort { id, read: false }).unwrap();
     }
 }

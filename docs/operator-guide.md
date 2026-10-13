@@ -1159,6 +1159,46 @@ bounded chunks and the Controller stages it in the destination directory before
 renaming it into place. Replacing an existing file requires an explicit UI
 choice.
 
+Transfer single files from the CLI (directories and implicit parent creation are
+not supported):
+
+```bash
+treer machine show build-machine
+treer machine put --machine build-machine ./report.pdf research/report.pdf
+treer machine get --machine build-machine research/report.pdf ./download.pdf
+tar -cf - research | treer machine put --machine build-machine - research.tar
+treer machine get --machine build-machine research.tar - > download.tar
+```
+
+REMOTE paths use `/` and are relative to the `root` shown by `machine show`, not
+the Agent's cwd. LOCAL paths belong to the machine running the CLI. Both sides
+reject symlinks/reparse points and special files; use a physical path, for
+example `/private/tmp` rather than the macOS `/tmp` symlink. `--force` explicitly
+permits destination replacement for either direction. Files default to 0600;
+`--mode 640` selects ordinary Unix bits, excluding group/other writes and special
+bits. Windows supports private current-user/SYSTEM ACLs and only mode 600.
+The default per-file limit is 64 MiB; set `TREER_MACHINE_FILE_MAX_BYTES` in the
+Controller launch environment to change it (maximum 1 GiB). Transfers verify
+SHA-256 before publishing downloads or uploads; `get ... -` buffers on private
+local disk before writing stdout. The limit also bounds that spool.
+
+The Proxy, local CLI/Controller and target Controller must support
+`machine.file-transfer.v1`; an unsupported peer fails explicitly, without falling
+back to legacy upload. `machine.file.write` and `machine.file.read` are separate
+Policy actions. Existing machine identity targeting restrictions still apply;
+an Agent identity can address another workspace machine according to Policy,
+while a bare machine/operator route retains its own-machine restriction.
+An interruption discards staging on disconnect/expiry; after a crash, recorded
+staging is cleaned on the next transfer. If publication succeeded but its reply
+was lost, inspect the destination before retrying; retries never auto-force.
+
+Windows roots enrolled from `C:\\Windows\\System32` remain unchanged. For new
+machines explicitly enroll with `--root` pointing at a user-owned directory.
+Changing an existing root is an operator migration, not a side effect of transfer
+or binary installation. Treer root constraints do not make machine file access
+a sandbox: monitor/allow Policy can still permit ordinary sensitive files inside
+that root, and direct same-account OS access remains unrestricted.
+
 An Agent may register a `treer.agent-interface/v1` server on its private
 loopback. The Controller verifies its manifest and automatically sends semantic
 prompts to it when `prompt.submit` is declared; otherwise prompt continues to

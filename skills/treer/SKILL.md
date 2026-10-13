@@ -464,6 +464,23 @@ Core Message routes have an operator-controlled rollout gate and default off. A
 `core_messages_disabled` result means the deployment is not enabled for the
 workflow; report it instead of inventing another integration path.
 
+Use `treer machine show <machine>` to inspect its enrolled root before file
+transfer. `treer machine put --machine <machine> LOCAL REMOTE` uploads one file;
+`treer machine get --machine <machine> REMOTE LOCAL` downloads one file.
+REMOTE is root-relative, `/` separated, and its parent must already exist.
+LOCAL refers to the CLI machine; `-` reads stdin for put or writes verified
+stdout for get. `--force` permits replacement, otherwise existing destinations
+are preserved. Both directions verify SHA-256 and default to a 64 MiB limit and
+private permissions; optional Unix `--mode` excludes group/other write and
+special bits (Windows only supports 600). Symlinks/reparse points, special
+files, traversal, Core private state and reserved temporary names are refused.
+Use physical local paths rather than macOS `/tmp` or junction aliases.
+`file_transfer_unsupported` means upgrade the relevant CLI/Proxy/Controller;
+never substitute an unchecked upload. A lost completion reply is ambiguous:
+check the destination before retrying, and never automatically add `--force`.
+Policy actions are `machine.file.write` and `machine.file.read`; filesystem
+paths are not workspace Tree path selectors. These operations are not a sandbox.
+
 If a machine shows Offline while Agents still exist, do not re-enroll it.
 Recover on that host with the real workspace ID (`ws_…` from `treer status` or
 the copied web command). `service status` with no `--workspace` lists local

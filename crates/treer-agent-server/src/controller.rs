@@ -120,6 +120,7 @@ pub struct ControllerRuntime {
 }
 
 pub struct ControllerConfig {
+    pub protected_paths: Vec<PathBuf>,
     pub workspace_id: String,
     pub server_id: String,
     pub agent_server_url: String,
@@ -228,6 +229,7 @@ impl ControllerRuntime {
                     ]
                     .into_iter()
                     .flatten()
+                    .chain(config.protected_paths.clone())
                     .collect(),
                     std::env::var("TREER_MACHINE_FILE_MAX_BYTES")
                         .ok()
@@ -436,8 +438,12 @@ impl ControllerRuntime {
         request: treer_protocol::MachineFileTransferRequest,
     ) -> Result<serde_json::Value, ProtocolError> {
         let runtime = self.clone();
+        let generation = runtime.inner.file_transfers.generation();
         tokio::task::spawn_blocking(move || {
-            runtime.inner.file_transfers.execute(actor, &path, request)
+            runtime
+                .inner
+                .file_transfers
+                .execute_generation(generation, actor, &path, request)
         })
         .await
         .map_err(|_| ProtocolError::new("machine_file_io_failed", "file transfer task failed"))?

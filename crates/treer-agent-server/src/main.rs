@@ -153,6 +153,8 @@ struct ConnectArgs {
 
 #[derive(Debug, Clone, ClapArgs)]
 struct ServerArgs {
+    #[arg(skip)]
+    service_config_path: Option<PathBuf>,
     #[arg(long, env = "TREER_PROXY_URL", default_value = "http://127.0.0.1:8787")]
     proxy: Url,
     #[arg(long, env = "TREER_WORKSPACE_ID")]
@@ -223,11 +225,13 @@ async fn async_main() -> Result<()> {
         }
         Some(Command::Restore { workspace }) => service::restore(&workspace).await,
         Some(Command::Run { config }) => {
+            let service_config_path = Some(config.clone());
             let config = service::ServiceConfig::load(&config)?;
             service::require_install_hostname(&config)?;
             let supervision = Some(config.supervision());
             let network_mode = args.server.network_mode.or(config.network_mode);
             run_server(ServerArgs {
+                service_config_path,
                 proxy: Url::parse(&config.proxy).context("invalid proxy URL in service config")?,
                 workspace: Some(config.workspace),
                 server_id: Some(config.server_id),
@@ -302,6 +306,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
         sync,
         host_events,
         controller::ControllerConfig {
+            protected_paths: args.service_config_path.into_iter().collect(),
             workspace_id: workspace.clone(),
             server_id: server_id.clone(),
             agent_server_url,

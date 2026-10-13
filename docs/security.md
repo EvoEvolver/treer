@@ -52,6 +52,17 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
+- CLI file transfer uses separate `machine.file.read` and `machine.file.write`
+  actions on every chunk and commit, with caller/path/generation-bound handles.
+  Treer private state is hard-denied by reserved namespace and opened object
+  identity, independent of Policy. Temporary files remain private until digest
+  verification; no-replace publication is atomic and overwrite is explicit.
+  Portable paths reject Windows drive/UNC/device/ADS/short-name aliases too.
+  A streamed SHA-256 is not a snapshot or an authenticity signature. Audited
+  file hashes can reveal equality and permit guessing low-entropy content;
+  restrict audit access accordingly. File request attributes do not currently
+  provide filesystem alias-aware path selectors. Same-account OS access and
+  ancestor rename races are outside the isolation guarantee.
 - The original Agent startup register/read/clear interface remains self-only.
   The Proxy applies distinct `agent.startup.read` and `agent.startup.manage`
   actions, and a restored process is launched only while its durable Agent

@@ -78,16 +78,24 @@ pub(crate) async fn machine_file_transfer(
     } else {
         ACTION_MACHINE_FILE_WRITE
     };
-    authorize_control(
-        &policy,
-        &workspace_id,
-        subject.as_ref(),
-        action,
-        PolicyResource::new(RESOURCE_MACHINE, &server_id)
-            .with_attribute("file.path", &call.path)
-            .with_attribute("file.direction", if read { "get" } else { "put" }),
-    )
-    .await?;
+    let mut resource = PolicyResource::new(RESOURCE_MACHINE, &server_id)
+        .with_attribute("file.path", &call.path)
+        .with_attribute("file.direction", if read { "get" } else { "put" });
+    if let Transfer::PutBegin {
+        overwrite,
+        mode,
+        size,
+        ..
+    } = &call.request
+    {
+        resource = resource
+            .with_attribute("file.overwrite", overwrite.to_string())
+            .with_attribute("file.mode", format!("{mode:o}"));
+        if let Some(size) = size {
+            resource = resource.with_attribute("file.size", size.to_string());
+        }
+    }
+    authorize_control(&policy, &workspace_id, subject.as_ref(), action, resource).await?;
     let (kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
     let actor_id = actor_id.ok_or_else(|| {
         ApiFailure::unauthorized(
@@ -148,7 +156,14 @@ pub(crate) async fn machine_file_transfer(
     if finished || result.is_err() {
         let payload = match &result {
             Ok(data) => {
-                json!({"path":call.path,"size":data.get("size"),"sha256":data.get("sha256"),"outcome":"done"})
+                let size = data
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .filter(|size| *size <= treer_protocol::MACHINE_TRANSFER_HARD_LIMIT);
+                let hash = data.get("sha256").and_then(Value::as_str).filter(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                });
+                json!({"path":call.path,"size":size,"sha256":hash,"outcome":"done"})
             }
             Err(error) => json!({"path":call.path,"outcome":"failed","code":error.error.code}),
         };

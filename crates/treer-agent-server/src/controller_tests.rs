@@ -106,6 +106,7 @@ async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
     });
     let (host, events) = HostClient::connect(&socket).await.unwrap();
     let config = || ControllerConfig {
+        protected_paths: vec![],
         workspace_id: "workspace".into(),
         server_id: "server".into(),
         agent_server_url: "http://127.0.0.1:1".into(),
@@ -363,6 +364,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
         sync,
         events,
         ControllerConfig {
+            protected_paths: vec![],
             workspace_id: "workspace".into(),
             server_id: "server".into(),
             agent_server_url: "http://127.0.0.1:1".into(),
@@ -574,6 +576,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
             sync,
             events,
             ControllerConfig {
+                protected_paths: vec![],
                 workspace_id: "cold-workspace".into(),
                 server_id: "cold-server".into(),
                 agent_server_url: "http://127.0.0.1:1".into(),
@@ -1165,6 +1168,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
         sync,
         events,
         ControllerConfig {
+            protected_paths: vec![],
             workspace_id: "workspace".into(),
             server_id: "server".into(),
             agent_server_url: "http://127.0.0.1:1".into(),

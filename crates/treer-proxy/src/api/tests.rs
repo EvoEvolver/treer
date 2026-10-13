@@ -677,6 +677,239 @@ pub(super) async fn state_with_managed_agent() -> AppState {
     state
 }
 
+#[tokio::test]
+async fn machine_file_transfer_policy_denies_both_directions_before_dispatch() {
+    use treer_protocol::{MachineFileTransferCall, MachineFileTransferRequest as Transfer};
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let store = WorkspacePolicyStore::new(auth.pool());
+    store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([
+                    (ACTION_MACHINE_FILE_WRITE.into(), PolicyEffect::Deny),
+                    (
+                        crate::policy::ACTION_MACHINE_FILE_READ.into(),
+                        PolicyEffect::Deny,
+                    ),
+                ]),
+                groups: BTreeMap::new(),
+                rules: vec![],
+            },
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let policy = PolicyEngine::durable(store);
+    let mut headers = HeaderMap::new();
+    headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+    let machine = Some(Extension(MachineSession {
+        server_id: Some("machine-a".into()),
+        workspace_id: Some("default".into()),
+    }));
+    for request in [
+        Transfer::GetBegin {
+            path: "result".into(),
+            limit: 64,
+        },
+        Transfer::PutBegin {
+            path: "result".into(),
+            overwrite: false,
+            mode: 0o600,
+            size: Some(3),
+            limit: 64,
+        },
+    ] {
+        let error = machine_file_transfer(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            None,
+            machine.clone(),
+            headers.clone(),
+            Path(("default".into(), "machine-a".into())),
+            Json(MachineFileTransferCall {
+                path: "result".into(),
+                request,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.error.code, "policy_denied");
+    }
+}
+
+#[tokio::test]
+async fn machine_file_transfer_attests_actor_audits_only_metadata_and_rejects_old_controller() {
+    use treer_protocol::{MachineFileTransferCall, MachineFileTransferRequest as Transfer};
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let server = state.resolve_server("default", "machine-a").await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server,
+            Uuid::new_v4(),
+            "file-test".into(),
+            vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+    let machine = Some(Extension(MachineSession {
+        server_id: Some("machine-a".into()),
+        workspace_id: Some("default".into()),
+    }));
+    let task = tokio::spawn({
+        let (state, auth, headers, machine) = (
+            state.clone(),
+            auth.clone(),
+            headers.clone(),
+            machine.clone(),
+        );
+        async move {
+            machine_file_transfer(
+                State(state),
+                Extension(auth),
+                Extension(PolicyEngine::allow_all()),
+                None,
+                machine,
+                headers,
+                Path(("default".into(), "machine-a".into())),
+                Json(MachineFileTransferCall {
+                    path: "result".into(),
+                    request: Transfer::PutFinish {
+                        id: "fixture".into(),
+                        size: 3,
+                        sha256: "a".repeat(64),
+                    },
+                }),
+            )
+            .await
+        }
+    });
+    let envelope = next_lifecycle_command(&mut rx).await;
+    let AgentCommand::FileTransfer {
+        actor,
+        authorized_path,
+        request,
+    } = &envelope.command
+    else {
+        panic!("incorrect transfer command")
+    };
+    assert_eq!(actor.workspace_id, "default");
+    assert_eq!(actor.kind, "agent");
+    assert_eq!(actor.id, "agent-a");
+    assert_eq!(authorized_path, "result");
+    assert!(matches!(request, Transfer::PutFinish { .. }));
+    state.complete_command(CommandResult::success(envelope.command_id,json!({"path":"result","size":3,"sha256":"a".repeat(64),"untrusted_content":"never audit these bytes"}))).await;
+    let _ = task.await.unwrap().unwrap();
+    let payloads: Vec<Value> = sqlx::query_scalar("SELECT payload FROM organization_audit_events WHERE action LIKE 'machine.file.%' ORDER BY sequence").fetch_all(&auth.pool()).await.unwrap();
+    assert_eq!(payloads.len(), 2);
+    assert_eq!(payloads[0]["path"], "result");
+    assert_eq!(payloads[1]["sha256"], "a".repeat(64));
+    assert!(!serde_json::to_string(&payloads)
+        .unwrap()
+        .contains("never audit"));
+    let old = state_with_managed_agent().await;
+    let (tx, _old_receiver) = tokio::sync::mpsc::unbounded_channel();
+    old.register_server_instance_with_capabilities(
+        old.resolve_server("default", "machine-a").await.unwrap(),
+        Uuid::new_v4(),
+        "old-file-test".into(),
+        vec![],
+        tx,
+    )
+    .await
+    .unwrap();
+    let error = machine_file_transfer_info(
+        State(old),
+        machine,
+        headers,
+        Path(("default".into(), "machine-a".into())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "file_transfer_unsupported");
+}
+
+#[tokio::test]
+async fn machine_file_transfer_durable_intent_failure_prevents_reads_and_commits() {
+    use treer_protocol::{MachineFileTransferCall, MachineFileTransferRequest as Transfer};
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let server = state.resolve_server("default", "machine-a").await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server,
+            Uuid::new_v4(),
+            "audit-file-test".into(),
+            vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE organization_audit_events RENAME TO unavailable_audit_events")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+    let machine = Some(Extension(MachineSession {
+        server_id: Some("machine-a".into()),
+        workspace_id: Some("default".into()),
+    }));
+    for request in [
+        Transfer::GetBegin {
+            path: "result".into(),
+            limit: 64,
+        },
+        Transfer::PutBegin {
+            path: "result".into(),
+            overwrite: false,
+            mode: 0o600,
+            size: None,
+            limit: 64,
+        },
+        Transfer::PutFinish {
+            id: "fixture".into(),
+            size: 0,
+            sha256: "a".repeat(64),
+        },
+    ] {
+        let error = machine_file_transfer(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(PolicyEngine::allow_all()),
+            None,
+            machine.clone(),
+            headers.clone(),
+            Path(("default".into(), "machine-a".into())),
+            Json(MachineFileTransferCall {
+                path: "result".into(),
+                request,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.error.code, "audit_unavailable");
+        assert!(rx.try_recv().is_err());
+    }
+}
+
 fn workload_tree_agent_router(state: AppState, auth: AuthStore, policy: PolicyEngine) -> Router {
     Router::new()
         .route(

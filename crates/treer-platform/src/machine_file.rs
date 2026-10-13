@@ -59,10 +59,10 @@ pub fn validate_relative_path(path: &str) -> io::Result<Vec<&str>> {
 }
 
 pub fn validate_mode(mode: u32) -> io::Result<()> {
-    if mode & !0o777 != 0 {
+    if mode & !0o777 != 0 || mode & 0o022 != 0 {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "file mode must contain only ordinary permission bits",
+            "file mode must contain ordinary bits and must not permit group/other writes",
         ))
     } else {
         Ok(())
@@ -262,7 +262,11 @@ mod unix {
             let file: File = sys::openat(
                 &parent,
                 name.as_str(),
-                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                OFlags::RDONLY
+                    | OFlags::NOFOLLOW
+                    | OFlags::CLOEXEC
+                    | OFlags::NONBLOCK
+                    | OFlags::NOCTTY,
                 Mode::empty(),
             )?
             .into();
@@ -297,7 +301,7 @@ mod unix {
                 Mode::RUSR | Mode::WUSR,
             )?
             .into();
-            // Exact requested permissions, independent of the invoking umask.
+            // Staging stays private until digest verification and publication.
             let staged = StagedFile {
                 parent,
                 file: Some(file),
@@ -305,11 +309,13 @@ mod unix {
                 temporary_name: temporary_name.to_owned(),
                 installed: false,
                 protected: self.protected.clone(),
+                final_mode: mode,
+                root: self.file.try_clone()?,
+                root_device: self.device,
+                allow_mounts: self.allow_mounts,
+                path: path.to_owned(),
             };
-            sys::fchmod(
-                staged.file.as_ref().unwrap(),
-                Mode::from_bits_retain(mode as _),
-            )?;
+            sys::fchmod(staged.file.as_ref().unwrap(), Mode::RUSR | Mode::WUSR)?;
             Ok(staged)
         }
 
@@ -340,6 +346,11 @@ mod unix {
         temporary_name: String,
         installed: bool,
         protected: Vec<Identity>,
+        final_mode: u32,
+        root: File,
+        root_device: u64,
+        allow_mounts: bool,
+        path: String,
     }
 
     impl StagedFile {
@@ -347,9 +358,17 @@ mod unix {
             self.file.as_mut().expect("staged file is not committed")
         }
         pub fn commit(mut self, overwrite: bool) -> io::Result<()> {
-            if let Some(mut file) = self.file.take() {
-                file.flush()?;
-                file.sync_all()?;
+            // A same-UID actor can still race this check using direct OS
+            // operations; this boundary is not a sandbox against that actor.
+            let root = Root {
+                file: self.root.try_clone()?,
+                device: self.root_device,
+                protected: self.protected.clone(),
+                allow_mounts: self.allow_mounts,
+            };
+            let (current, _) = root.parent(&self.path)?;
+            if identity(&current)? != identity(&self.parent)? {
+                return Err(protected());
             }
             // Never truncate or follow an existing target. Replacing its directory
             // entry does not modify a hard-linked inode or a symlink referent.
@@ -367,6 +386,11 @@ mod unix {
                 }
                 Err(error) if error == rustix::io::Errno::NOENT => {}
                 Err(error) => return Err(error.into()),
+            }
+            if let Some(mut file) = self.file.take() {
+                file.flush()?;
+                sys::fchmod(&file, Mode::from_bits_retain(self.final_mode as _))?;
+                file.sync_all()?;
             }
             if overwrite {
                 sys::renameat(
@@ -558,10 +582,36 @@ mod tests {
         staged.file_mut().write_all(b"safe").unwrap();
         std::fs::rename(f.0.join("directory"), f.0.join("held")).unwrap();
         symlink(&outside.0, f.0.join("directory")).unwrap();
-        staged.commit(false).unwrap();
-        assert_eq!(std::fs::read(f.0.join("held/result")).unwrap(), b"safe");
+        assert!(staged.commit(false).is_err());
+        assert!(!f.0.join("held/result").exists());
         assert!(!outside.0.join("result").exists());
         assert!(root.read("directory/result").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn requested_public_mode_remains_private_until_verified_publication() {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+        let f = Fixture::new();
+        let root = f.root();
+        let mut staged = root
+            .stage("result", ".treer-transfer-public", 0o644)
+            .unwrap();
+        staged.file_mut().write_all(b"uncommitted").unwrap();
+        assert_eq!(
+            staged.file_mut().metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        staged.commit(false).unwrap();
+        assert_eq!(
+            std::fs::metadata(f.0.join("result"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert!(validate_mode(0o666).is_err());
     }
 
     #[cfg(unix)]

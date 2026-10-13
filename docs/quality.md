@@ -13,6 +13,17 @@ native Windows test covers argv, environment, input, resize, and process stop.
 
 ### Service environment and recovery validation
 
+Machine file-transfer coverage includes a bounded multi-chunk CLI round trip,
+checksum rejection without publication, destination preservation/explicit force,
+Controller caller/path/workspace binding, expiry/disconnect cleanup and a real
+subprocess exiting without destructors followed by journal recovery. Platform
+tests exercise hostile portable paths, symlinks/hard links and concurrent
+atomic no-replace publication. Proxy PostgreSQL tests cover separate read/write
+Policy denial and derived caller/body-free audit dispatch. These do not prove
+snapshot semantics, isolation from a same-OS-account attacker, or complete
+auditing across a filesystem/SQL failure. Native Windows execution is a separate
+release gate; a cross-compiled platform check is not a native test result.
+
 Updater executable staging closes and syncs the writable file before executing
 validation. Unix validation retries only transient `ETXTBSY` within the existing
 ten-second validation budget; permission and format errors fail immediately.

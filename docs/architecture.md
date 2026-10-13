@@ -311,6 +311,38 @@ arrives. Directories are canonicalized beneath the enrolled Host root and file
 names cannot contain path separators. These operations run in the Controller,
 so a Controller hot update enables them without replacing the stable Host.
 
+Single-file CLI transfer is a separate `machine.file-transfer.v1` capability;
+it does not change the legacy browser upload protocol. `machine put/get` use
+bounded 64 KiB chunks with one acknowledged chunk in flight. The Proxy holds no
+file or transfer registry: it authenticates and evaluates `machine.file.write`
+or `machine.file.read` on every call, and sends the derived caller/workspace and
+requested filesystem path to the target Controller. Handles bind that identity,
+direction, path and connection generation. Disconnect invalidates handles;
+queued blocking tasks from older generations cannot recreate them. Default size
+is 64 MiB, configurable by `TREER_MACHINE_FILE_MAX_BYTES` up to 1 GiB; active
+handles are capped at eight per machine and two per caller, with 30-second idle
+and 15-minute total deadlines. Retrying starts a new transfer, never implicitly
+overwrites or resumes a possibly committed operation.
+
+Paths are relative to the enrolled Host root. Handle traversal rejects symlinks,
+reparse points, mount crossings, special files and hard-link aliases; Treer
+private state and transfer temporary names are reserved. Same-directory private
+staging stays 0600 until the verified publication step. Writes use atomic
+no-replace unless explicit overwrite is requested. A private, bounded recovery
+journal and process lease clean recorded abandoned staging on next use after a
+Controller crash. Both ends compare SHA-256; downloads to stdout first spool to
+a private local file and emit bytes only after verification. A digest verifies
+the streamed bytes, not a filesystem snapshot. Direct OS access by the same
+account, including renaming open ancestors on Unix, remains outside isolation.
+
+Policy resource attributes `file.path`, `file.direction`, and upload
+`file.mode`/`file.overwrite`/known `file.size` are request facts, not Tree paths or
+resolved filesystem aliases. Existing Tree path selectors do not implement a
+filesystem containment policy. Durable body-free read/write intent precedes
+reads and publication; completion records contain only path, size, SHA-256 and
+caller/machine identity. SQL audit and filesystem commit are separate, so a
+failed completion audit leaves an intent, not a promise of complete auditing.
+
 Controller registration carries a legacy protocol value, an additive list of
 supported protocol versions, and explicit command capabilities. The Proxy
 selects the highest common version and rejects capability-gated commands before

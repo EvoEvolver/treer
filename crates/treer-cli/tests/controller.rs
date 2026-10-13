@@ -28,6 +28,271 @@ impl Drop for Processes {
     }
 }
 
+type TransferCommand = (
+    treer_protocol::AgentCommand,
+    tokio::sync::oneshot::Sender<treer_protocol::CommandResult>,
+);
+type TransferIncoming =
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<TransferCommand>>>;
+#[derive(Clone)]
+struct TransferProxy {
+    commands: tokio::sync::mpsc::Sender<TransferCommand>,
+    incoming: TransferIncoming,
+    server: std::sync::Arc<std::sync::Mutex<Option<treer_protocol::ServerInfo>>>,
+}
+impl TransferProxy {
+    async fn relay(&self, command: treer_protocol::AgentCommand) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.commands.send((command, sender)).await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some(error) = result.error {
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({"error":error})),
+            )
+                .into_response()
+        } else {
+            axum::Json(result.data.unwrap()).into_response()
+        }
+    }
+}
+
+async fn transfer_proxy_socket(
+    axum::extract::State(state): axum::extract::State<TransferProxy>,
+    ws: axum::extract::WebSocketUpgrade,
+) -> axum::response::Response {
+    ws.on_upgrade(move |mut socket| async move {
+        let Some(Ok(axum::extract::ws::Message::Text(text))) = socket.next().await else {return;};
+        let treer_protocol::AgentServerMessage::Register {server,capabilities,..} = serde_json::from_str(&text).unwrap() else {panic!("registration expected")};
+        assert!(capabilities.iter().any(|cap| cap==treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER));
+        *state.server.lock().unwrap() = Some(server);
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&treer_protocol::ProxyMessage::Registered {protocol:treer_protocol::PROTOCOL_VERSION,capabilities:vec![],workspace_revision:1}).unwrap().into())).await.unwrap();
+        let mut commands = state.incoming.lock().await;
+        loop {
+            tokio::select! {
+                command = commands.recv() => {
+                    let Some((command,response)) = command else {break;};
+                    let envelope = treer_protocol::CommandEnvelope {command_id:uuid::Uuid::new_v4().to_string(),workspace_id:"test".into(),command};
+                    socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&treer_protocol::ProxyMessage::Command {envelope}).unwrap().into())).await.unwrap();
+                    while let Some(Ok(message)) = socket.next().await {
+                        if let axum::extract::ws::Message::Text(text) = message {
+                            if let treer_protocol::AgentServerMessage::CommandResult {result} = serde_json::from_str(&text).unwrap() {let _ = response.send(result); break;}
+                        }
+                    }
+                },
+                message = socket.next() => { if message.is_none() {break;} },
+            }
+        }
+    })
+}
+async fn transfer_proxy_snapshot(
+    axum::extract::State(state): axum::extract::State<TransferProxy>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(
+        serde_json::json!({"revision":1,"workspace":{"workspace_id":"test","name":"test","created_at":"2026-01-01T00:00:00Z"},"servers":[state.server.lock().unwrap().clone().unwrap()],"agents":[]}),
+    )
+}
+async fn transfer_proxy_info(
+    axum::extract::State(state): axum::extract::State<TransferProxy>,
+) -> axum::response::Response {
+    state
+        .relay(treer_protocol::AgentCommand::FileTransferInfo {})
+        .await
+}
+async fn transfer_proxy_call(
+    axum::extract::State(state): axum::extract::State<TransferProxy>,
+    axum::Json(call): axum::Json<treer_protocol::MachineFileTransferCall>,
+) -> axum::response::Response {
+    state
+        .relay(treer_protocol::AgentCommand::FileTransfer {
+            actor: treer_protocol::MachineTransferActor {
+                workspace_id: "test".into(),
+                kind: "machine".into(),
+                id: "test-server".into(),
+            },
+            authorized_path: call.path,
+            request: call.request,
+        })
+        .await
+}
+
+#[tokio::test]
+#[ignore = "requires freshly built sibling Controller and Host binaries"]
+async fn machine_file_transfer_real_controller_cli_and_stdio_round_trip() {
+    use axum::{routing::get, Router};
+    let root = std::env::temp_dir().join(format!(
+        "tf-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..10]
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let binaries = std::path::PathBuf::from(env!("CARGO_BIN_EXE_treer"))
+        .parent()
+        .unwrap()
+        .to_owned();
+    let sibling = |name: &str| binaries.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let state = TransferProxy {
+        commands: sender,
+        incoming: std::sync::Arc::new(tokio::sync::Mutex::new(receiver)),
+        server: Default::default(),
+    };
+    let app = Router::new()
+        .route("/agent/connect", get(transfer_proxy_socket))
+        .route(
+            "/agent/workspaces/test/snapshot",
+            get(transfer_proxy_snapshot),
+        )
+        .route(
+            "/agent/workspaces/test/machines/test-server/file-transfer",
+            get(transfer_proxy_info).post(transfer_proxy_call),
+        )
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_address = listener.local_addr().unwrap();
+    let proxy = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = reserved.local_addr().unwrap();
+    drop(reserved);
+    #[cfg(unix)]
+    let socket = root.join("host.sock");
+    #[cfg(windows)]
+    let socket = treer_platform::endpoint_name(
+        &uuid::Uuid::new_v4().to_string(),
+        &treer_platform::current_user_sid().unwrap(),
+    );
+    let controller_config = root.join("controller.json");
+    let host_config = root.join("host.json");
+    let hostname = String::from_utf8(
+        std::process::Command::new("hostname")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    std::fs::write(&controller_config,serde_json::to_vec(&serde_json::json!({"proxy":format!("http://{proxy_address}"),"workspace":"test","server_id":"test-server","machine_token":"test-machine","operator_credential":"test-operator","root":root,"listen":address.to_string(),"host_socket":socket,"install_hostname":hostname.trim(),"network_mode":"plain"})).unwrap()).unwrap();
+    std::fs::write(&host_config,serde_json::to_vec(&serde_json::json!({"socket_path":socket,"controller_path":sibling("treer-agent-server"),"controller_config_path":controller_config,"root":root})).unwrap()).unwrap();
+    let mut host = tokio::process::Command::new(sibling("treer-agent-host"));
+    #[cfg(unix)]
+    host.process_group(0);
+    let _processes = Processes(vec![host
+        .args(["run", "--config"])
+        .arg(&host_config)
+        .envs(treer_platform::inherited_environment())
+        .env_remove("TREER_AGENT_ID")
+        .env_remove("TREER_WORKLOAD_CREDENTIAL")
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("LOCALAPPDATA", root.join("local"))
+        .env("TREER_STATE_DIR", root.join("state"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()]);
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if state.server.lock().unwrap().is_some()
+                && http
+                    .get(format!("http://{address}/api/health"))
+                    .send()
+                    .await
+                    .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let cli = |args: &[&str]| {
+        let mut command = tokio::process::Command::new(sibling("treer"));
+        command
+            .args(args)
+            .env_remove("TREER_AGENT_ID")
+            .env_remove("TREER_WORKLOAD_CREDENTIAL")
+            .env_remove("TREER_IDENTITY_MODE")
+            .env("TREER_OPERATOR_CREDENTIAL", "test-operator")
+            .env("TREER_AGENT_SERVER_URL", format!("http://{address}"))
+            .env("TREER_WORKSPACE_ID", "test")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    };
+    let bytes: Vec<u8> = (0..170000).map(|index| (index % 251) as u8).collect();
+    let mut child = cli(&["machine", "put", "--machine", "self", "-", "remote.bin"])
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&bytes).await.unwrap();
+    drop(stdin);
+    let result = child.wait_with_output().await.unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(std::fs::read(root.join("remote.bin")).unwrap(), bytes);
+    let result = cli(&[
+        "machine",
+        "get",
+        "--machine",
+        "test-server",
+        "remote.bin",
+        "-",
+    ])
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, bytes);
+    let result = cli(&[
+        "machine",
+        "get",
+        "--machine",
+        "test-server",
+        "remote.bin",
+        root.join("local.bin").to_str().unwrap(),
+    ])
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(std::fs::read(root.join("local.bin")).unwrap(), bytes);
+    let result = cli(&[
+        "machine",
+        "get",
+        "--machine",
+        "test-server",
+        "controller.json",
+        "-",
+    ])
+    .output()
+    .await
+    .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    proxy.abort();
+    drop(_processes);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 #[ignore = "requires freshly built sibling Controller and Host binaries"]
 async fn real_controller_auth_parser_stdin_and_cancel() {
