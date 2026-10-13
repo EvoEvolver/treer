@@ -1,11 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { readGoalState, writeGoalState } from "../goal-storage.js";
+import { randomUUID } from "node:crypto";
 
 import { JsonRpcClient } from "../jsonrpc.js";
 import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import type { Goal, GoalUpdate } from "../model.js";
-import { GoalError, mapGoal } from "../goals.js";
+import { GoalError, mapGoal, GoalGuard } from "../goals.js";
 import { SessionTransferError, type SessionBundle, type SessionImportOptions } from "../session-transfer.js";
 import { exportNativeSession, importNativeSession } from "./session-files.js";
 import {
@@ -33,6 +35,10 @@ interface LiveItem {
 export class CodexRuntime extends EventEmitter implements HarnessRuntime {
   readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false, goal: { pause: true, budget: true }, sessionTransfer: { export: true, import: true } } };
   private goal: Goal | null = null;
+  private goalExitRecord: Goal | null = null;
+  private goalGuard = new GoalGuard();
+  private goalBudgetExit = false;
+  private goalTurnsSeen = new Set<string>();
   private child: ChildProcessWithoutNullStreams | null = null;
   private client: JsonRpcClient | null = null;
   private ready = false;
@@ -160,6 +166,14 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     await this.refresh().catch((error) => this.emit("log", `initial refresh skipped: ${error}`));
     try {
       this.goal = mapGoal((await client.request<{ goal: unknown }>("thread/goal/get", { threadId: this.thread.id })).goal);
+      if (this.options.stateFile) {
+        const saved = readGoalState(this.options.stateFile + ".goal-exit.json") as { threadId?: string; goal?: Goal; guard?: { id?: string; objective?: string; roundBudget?: number; roundsUsed?: number } } | undefined;
+        if (saved?.threadId === this.thread.id) {
+          if (!this.goal) this.goal = this.goalExitRecord = saved.goal ?? null;
+          if (this.goal && saved.guard?.objective === this.goal.objective) { this.goal.id = saved.guard.id; this.goal.roundBudget = saved.guard.roundBudget; this.goal.roundsUsed = saved.guard.roundsUsed; }
+        }
+      }
+      if (this.goal) { this.goal.id ??= randomUUID(); this.goalGuard = new GoalGuard(undefined, this.goal.roundBudget, this.goal.tokenBudget ?? undefined); this.goalGuard.rounds = this.goal.roundsUsed ?? 0; }
     } catch (error) {
       if (!/method not found|unknown (?:method|variant)|not supported|unrecognized/i.test(String(error))) throw error;
       this.harness.capabilities.goal = null;
@@ -267,17 +281,48 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
   async updateGoal(input: GoalUpdate) {
     if (!this.harness.capabilities.goal) throw new GoalError("Codex does not support goals", 501);
     if (!this.client || !this.thread) throw new GoalError("Codex is not ready", 503);
-    const result = await this.client.request<{ goal: unknown }>("thread/goal/set", { threadId: this.thread.id, origin: "user", ...input });
+    if (["blocked", "stale", "done"].includes(input.status || "") && input.reason) {
+      if (!this.goal) throw new GoalError("No goal set", 409);
+      const goal = { ...this.goal, status: input.status!, reason: input.reason, requiredAction: input.requiredAction };
+      // Clear the native continuation condition for every formal exit. Preserve
+      // the richer launcher outcome separately; native has no stale status.
+      await this.client.request("thread/goal/clear", { threadId: this.thread.id, origin: "user" });
+      this.goal = this.goalExitRecord = goal;
+      this.saveGoalExit(); this.emit("state"); this.emit("goal-exit", goal); return;
+    }
+    const { reason: _reason, requiredAction: _action, roundBudget: _rounds, ...native } = input;
+    const changedObjective = input.objective && input.objective !== this.goal?.objective;
+    const goalId = changedObjective ? randomUUID() : this.goal?.id || randomUUID();
+    if (changedObjective) {
+      this.goalGuard = new GoalGuard(undefined, input.roundBudget, input.tokenBudget ?? undefined);
+      this.goalTurnsSeen.clear();
+      native.tokenBudget = this.goalGuard.tokenBudget;
+      native.status = input.status ?? "active";
+    } else if (input.roundBudget) {
+      const guard = new GoalGuard(undefined, input.roundBudget, this.goal?.tokenBudget ?? undefined);
+      guard.rounds = this.goalGuard.rounds; this.goalGuard = guard;
+    }
+    const result = await this.client.request<{ goal: unknown }>("thread/goal/set", { threadId: this.thread.id, origin: "user", ...native });
+    this.goalExitRecord = null;
     this.goal = mapGoal(result.goal);
+    if (this.goal) { this.goal.id = goalId; this.goal.roundBudget = this.goalGuard.roundBudget; this.goal.roundsUsed = this.goalGuard.rounds; }
+    this.saveGoalExit();
     this.emit("state");
   }
 
   async clearGoal() {
     if (!this.harness.capabilities.goal) throw new GoalError("Codex does not support goals", 501);
     if (!this.client || !this.thread) throw new GoalError("Codex is not ready", 503);
+    const previous = this.goal;
     await this.client.request("thread/goal/clear", { threadId: this.thread.id, origin: "user" });
-    this.goal = null;
+    this.goal = this.goalExitRecord = previous ? { ...previous, status: "cleared", reason: "Goal cleared by user" } : null;
+    this.saveGoalExit();
     this.emit("state");
+  }
+
+  private saveGoalExit() {
+    if (!this.options.stateFile) return;
+    writeGoalState(this.options.stateFile + ".goal-exit.json", { threadId: this.thread?.id, goal: this.goalExitRecord, guard: { id: this.goal?.id, objective: this.goal?.objective, roundBudget: this.goalGuard.roundBudget, roundsUsed: this.goalGuard.rounds } });
   }
 
   snapshot(historyLimit?: number) {
@@ -475,7 +520,13 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     const params = event.params ?? {};
     if (method === "thread/goal/updated" || method === "thread/goal/cleared") {
       if (params.threadId !== this.thread?.id) return;
-      this.goal = method === "thread/goal/cleared" ? null : mapGoal(params.goal);
+      const previous = this.goal;
+      this.goal = method === "thread/goal/cleared" ? this.goalExitRecord : mapGoal(params.goal);
+      if (this.goal) {
+        this.goal.id = previous?.objective === this.goal.objective ? previous.id : randomUUID();
+        this.goal.roundBudget = this.goalGuard.roundBudget; this.goal.roundsUsed = this.goalGuard.rounds;
+        if (["budgetLimited", "usageLimited"].includes(this.goal.status)) this.blockForBudget("Native Codex goal budget/usage limit reached");
+      }
       this.emit("state");
       return;
     }
@@ -522,6 +573,12 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     if (method === "turn/completed" && params.turn && typeof params.turn === "object") {
       const turn = params.turn as CodexTurn;
       const turnId = typeof turn.id === "string" ? turn.id : null;
+      if (turnId && this.goal?.status === "active" && !this.goalTurnsSeen.has(turnId)) {
+        this.goalTurnsSeen.add(turnId); this.goalGuard.rounds++;
+        this.goal.roundsUsed = this.goalGuard.rounds;
+        this.saveGoalExit();
+        if (this.goalGuard.rounds >= this.goalGuard.roundBudget) this.blockForBudget("Goal round budget reached");
+      }
       if (turnId && this.thread) {
         for (const item of turn.items ?? []) this.upsertLiveItem(turnId, item);
         this.thread.status = turn.status === "failed" ? "error" : "idle";
@@ -537,5 +594,13 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
         this.emit("log", `refresh failed: ${error}`);
       }
     }
+  }
+
+  private blockForBudget(reason: string) {
+    if (this.goalBudgetExit) return;
+    this.goalBudgetExit = true;
+    void this.updateGoal({ status: "blocked", reason, requiredAction: "User: review the goal before explicitly setting a new one" })
+      .catch((error) => this.emit("log", `Codex goal budget exit failed: ${String(error)}`))
+      .finally(() => { this.goalBudgetExit = false; });
   }
 }

@@ -10,6 +10,7 @@ const send = (event) => console.log(JSON.stringify({ session_id: sessionId, ...e
 const system = (subtype, rest = {}) => send({ type: "system", subtype, ...rest });
 let hold = false;
 let timer;
+let goalTimer;
 let sequence = 0;
 const resolved = process.env.FAKE_CLAUDE_RESOLVED_MODELS;
 const aliases = { default: "claude-sonnet-test", sonnet: "claude-sonnet-test", opus: "claude-opus-test", legacy: "claude-legacy-test" };
@@ -50,10 +51,22 @@ for await (const line of createInterface({ input: process.stdin })) {
   const goalCommand = /^\/goal(?:\s+([\s\S]*))?$/.exec(value);
   if (goalCommand) {
     const args = goalCommand[1] || "";
-    const output = args === "clear" ? "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
+    const output = args === "clear" ? process.env.FAKE_CLAUDE_OLD_GOAL ? "Goal cleared: old condition" : "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
     const uuid = `goal-${randomUUID()}`;
     persist({ type: "system", subtype: "local_command", uuid, content: `<local-command-stdout>${output}</local-command-stdout>`, commandRun: { command: "goal", args } });
     send({ type: "assistant", uuid, message: { model: "<synthetic>", id: uuid, content: [{ type: "text", text: output }] }, local_command_source: `<local-command-stdout>${output}</local-command-stdout>`, local_command_run: { command: "goal", args } });
+    if (args === "clear") clearInterval(goalTimer);
+    if (args.startsWith("reject-loop") || args.startsWith("progress-loop") || args.startsWith("token-loop") || args.startsWith("impossible-loop")) {
+      let count = 0;
+      goalTimer = setInterval(() => {
+        count++;
+        if (args.startsWith("progress-loop")) message("assistant", [{ type: "tool_use", id: `progress-${count}`, name: "Read", input: { file_path: `evidence-${count}` } }]);
+        if (args.startsWith("token-loop")) message("assistant", [{ type: "text", text: "still working" }], `usage-${count}`, { message: { id: `usage-${count}`, role: "assistant", model: currentModel, content: [{ type: "text", text: "still working" }], usage: { input_tokens: 100, output_tokens: 100 } } });
+        const event = { type: "system", subtype: "stop_hook_summary", uuid: `reject-${randomUUID()}`, hookInfos: [{ promptText: args, ...(args.startsWith("impossible-loop") ? { result: { ok: false, impossible: true, reason: "Owner must create environment" } } : {}) }], hookErrors: [], hasOutput: true, preventedContinuation: true };
+        persist(event); send(event);
+      }, 30);
+      continue;
+    }
     if (args && args !== "clear") {
       message("assistant", [{ type: "text", text: "GOAL_DONE" }], undefined, {});
       persist({ type: "system", subtype: "stop_hook_summary", uuid: `hook-${randomUUID()}`, hookInfos: [{ promptText: args }], hookErrors: [], hasOutput: args.includes("hold"), preventedContinuation: false });

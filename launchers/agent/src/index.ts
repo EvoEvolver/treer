@@ -20,6 +20,9 @@ import { MessageWatch, messageWatchEnabled } from "./message-watch.js";
 import { guardInterfaceRequest, verifyInterfaceCaller } from "./interface-identity.js";
 import { SessionTransferError } from "./session-transfer.js";
 import { HttpInputError, readJson } from "./http-input.js";
+import { GoalNotifications } from "./goal-notify.js";
+import { GoalExitRequests } from "./goal-exit.js";
+import { GoalEdits } from "./goal-edits.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -132,6 +135,7 @@ function statePayload(historyLimit = initialHistoryLimit) {
     backgroundTasks: snapshot.backgroundTasks,
     queue: prompts.entries,
     goal: snapshot.goal,
+    goalDelivery: goalEdits.state,
     history: { limit: historyLimit },
   };
 }
@@ -296,16 +300,33 @@ const server = createServer(async (request, response) => {
           });
       return;
     }
-    if (path === "/api/state" && method === "GET") {
+    if ((path === "/api/state" || path === "/v1/state") && method === "GET") {
       send(response, 200, statePayload());
       return;
+    }
+    if (path === "/v1/goal/exit" && method === "POST") {
+      if (process.env.AGENT_UI_GOAL_AGENT_EXIT === "0") throw new GoalError("Agent goal exits are disabled by AGENT_UI_GOAL_AGENT_EXIT=0", 403);
+      if (!runtime.harness.capabilities.goal || !goalExits) throw new GoalError("Goal exits require a managed supported harness", 501);
+      const update = goalUpdate(await readJson(request));
+      if (!["blocked", "stale", "done"].includes(update.status || "")) throw new GoalError("An exit requires blocked, stale or done status");
+      if (!runtime.snapshot().goal) throw new GoalError("No goal set", 409);
+      send(response, 202, goalExits.enqueue(update)); return;
     }
     if (path === "/api/goal" && (method === "PUT" || method === "DELETE")) {
       if (!runtime.harness.capabilities.goal || !runtime.updateGoal || !runtime.clearGoal) throw new GoalError(`${runtime.harness.name} does not support goals`, 501);
       if (method === "DELETE") await runtime.clearGoal();
-      else await runtime.updateGoal(goalUpdate(await readJson(request)));
+      else {
+        const body = await readJson(request);
+        const update = goalUpdate(body);
+        if (["blocked", "stale", "done"].includes(update.status || "") && process.env.AGENT_UI_GOAL_AGENT_EXIT === "0") throw new GoalError("Agent goal exits are disabled by AGENT_UI_GOAL_AGENT_EXIT=0", 403);
+        if (["blocked", "stale", "done"].includes(update.status || "")) await runtime.updateGoal(update);
+        else await goalEdits.apply(update, typeof body.operationId === "string" ? body.operationId : undefined);
+      }
       send(response, 200, statePayload());
       return;
+    }
+    if (path === "/api/goal/retry" && method === "POST") {
+      const body = await readJson(request); goalEdits.retry(String(body.id || "")); send(response, 202, statePayload()); return;
     }
     if (path.startsWith("/api/queue/") && method === "DELETE") {
       const removed = prompts.remove(decodeURIComponent(path.slice("/api/queue/".length)));
@@ -409,12 +430,19 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 const messageWatch = messageWatchEnabled(process.env) ? new MessageWatch(prompts, agentId, (message) => runtime.emit("log", message)) : undefined;
+const goalNotifications = agentId ? new GoalNotifications(threadStatePath(cwd, agentId) + ".goal-notifications.json", (message) => runtime.emit("log", message)) : undefined;
+const goalExits = agentId && process.env.AGENT_UI_GOAL_AGENT_EXIT !== "0" ? new GoalExitRequests(threadStatePath(cwd, agentId) + ".goal-exits.json", runtime, (message) => runtime.emit("log", message)) : undefined;
+const goalEdits = new GoalEdits(agentId ? threadStatePath(cwd, agentId) + ".goal-edits.json" : undefined, runtime, prompts, broadcast);
+runtime.on("goal-exit", (goal) => goalNotifications?.enqueue(goal));
+runtime.on("goal-exit-error", (goal) => goalNotifications?.enqueue(goal));
 runtime.on("exit", () => { void messageWatch?.stop(); prompts.close(); void runtime.stop().finally(() => process.exit(1)); });
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing listener address");
   const portFile = setting("PORT_FILE");
   if (portFile) writeFileSync(portFile, String(address.port), { mode: 0o600 });
+  process.env.AGENT_UI_URL = `http://127.0.0.1:${address.port}`;
+  process.env.AGENT_UI_GOAL_COMMAND = join(appRoot, "scripts/goal.mjs");
   console.log(`Treer Agent UI (${runtime.harness.id}) listening on http://127.0.0.1:${address.port}`);
   runtime.start().then(() => messageWatch?.start()).catch((error) => {
     console.error(`failed to start ${runtime.harness.name}`, error);
@@ -424,6 +452,9 @@ server.listen(port, "127.0.0.1", () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    goalNotifications?.close();
+    goalExits?.close();
+    goalEdits.close();
     void messageWatch?.stop();
     prompts.close();
     void runtime.stop().finally(() => process.exit(0));

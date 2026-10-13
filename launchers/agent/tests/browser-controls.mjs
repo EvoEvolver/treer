@@ -64,6 +64,9 @@ export async function testRuntimeControls(browser, screenshots) {
         res.writeHead(200, { "content-type": "text/plain" });
         return res.end(content);
       }
+      if (path === "api/goal/retry") {
+        state.goalDelivery = { ...state.goalDelivery, status: "sent", error: null }; broadcast(); return json({ goalDelivery: state.goalDelivery });
+      }
       if (path === "api/goal") {
         if (failGoal) return json({ error: { message: "Goal transport failed" } }, 503);
         if (req.method === "DELETE") { goalWrites.push({ method: "DELETE" }); state.goal = null; }
@@ -246,6 +249,16 @@ export async function testRuntimeControls(browser, screenshots) {
     broadcast();
     await expect(page.locator(".goal-completion")).toHaveCount(1);
     await page.screenshot({ path: join(screenshots, "controls-desktop-complete.png") });
+    setState({ goal: { ...state.goal, status: "blocked", reason: `External owner needed ${malicious}`, requiredAction: "Owner: create the deployment environment", rejectionCount: 3, consecutiveRejections: 3 }, goalDelivery: { id: "edit-visible", status: "sent" } });
+    await expect(page.locator(".goal-reason")).toContainText(`External owner needed ${malicious}`);
+    await expect(page.locator(".goal-required-action")).toContainText("Owner: create the deployment environment");
+    await expect(page.locator(".goal-rejections")).toContainText("3 (3 without new evidence)");
+    await expect(page.locator(".goal-delivery")).toHaveText("Sent to Agent");
+    setState({ goalDelivery: { id: "edit-visible", status: "failed", error: "Temporary send failure" } });
+    await expect(page.locator(".goal-delivery")).toContainText("Temporary send failure");
+    await page.getByRole("button", { name: "Retry goal delivery", exact: true }).click();
+    await expect(page.locator(".goal-delivery")).toHaveText("Sent to Agent");
+    await page.screenshot({ path: join(screenshots, "controls-desktop-blocked.png") });
     await page.getByRole("button", { name: "Clear goal", exact: true }).click();
     assert.notEqual(goalWrites.at(-1).method, "DELETE");
     await page.getByRole("button", { name: "Keep goal", exact: true }).click();
@@ -283,6 +296,12 @@ export async function testRuntimeControls(browser, screenshots) {
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
     await page.setViewportSize({ width: 390, height: 844 });
+    for (const [status, label] of [["stale", "Stale"], ["done", "Done"], ["cleared", "Cleared"], ["blocked", "Blocked"]]) {
+      setState({ goal: { ...state.goal, status, reason: "Waiting for owner action", requiredAction: "Owner: provision environment" } });
+      await expect(page.locator(".goal-status")).toContainText(label);
+    }
+    await expect(page.locator(".goal-reason")).toContainText("Waiting for owner action");
+    await page.screenshot({ path: join(screenshots, "controls-mobile-blocked.png") });
     await prompt.fill("touch queued");
     await page.getByRole("button", { name: "Queue message (steering unavailable)", exact: true }).click();
     await expect(page.locator("#prompt-queue")).toContainText("touch queued");

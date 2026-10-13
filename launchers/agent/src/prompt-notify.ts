@@ -7,8 +7,12 @@ export function notifySubmission(record: SubmissionRecord): Promise<void> {
   if (!recipient) return Promise.reject(new Error("Notification recipient is missing"));
   const submission = record.submission;
   const body = JSON.stringify({ type: "treer.prompt.completed", status: submission.state, submission_id: submission.id, turn_id: submission.turn_id, assistant_preview: submission.assistant_preview, error: submission.error });
+  return sendNotification(recipient, `prompt-submission/${submission.id}/terminal`, body);
+}
+
+export function sendNotification(recipient: string, key: string, body: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("treer", ["message", "send", "--to", recipient, "--idempotency-key", `prompt-submission/${submission.id}/terminal`], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("treer", ["message", "send", "--to", recipient, "--idempotency-key", key], { stdio: ["pipe", "pipe", "pipe"] });
     let outputBytes = 0;
     const fail = (error: Error) => { clearTimeout(timer); child.kill("SIGKILL"); reject(error); };
     const timer = setTimeout(() => fail(new Error("Treer completion notification timed out")), 15_000);

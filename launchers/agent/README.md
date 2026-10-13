@@ -386,37 +386,106 @@ to prevent notification loops; Agents can explicitly reply through Treer.
 
 ## Prompt queue and background-task contract
 
-State and WebSocket messages also include `goal` (a Goal or null), with
-`{objective, status, tokenBudget, tokensUsed, timeUsedSeconds}`. Status is
-`active|paused|blocked|usageLimited|budgetLimited|complete`; numeric metrics can
-be null. `harness.capabilities.goal` is null when unsupported, otherwise
-`{pause: boolean, budget: boolean}`. `PUT /api/goal` accepts optional
-`objective`, `status`, and `tokenBudget` (a positive integer or null); at least
-one field is required. `DELETE /api/goal` clears the goal. Both return updated
-state. Unsupported adapters return 501 and hide goal controls.
+`GET /v1/state`, `/api/state` and WebSocket state expose `goal`, including
+objective, status, usage/budgets, `reason`, `requiredAction`, `rejectionCount`,
+`consecutiveRejections` and `roundsUsed`. Lifecycle outcomes are
+`active|blocked|stale|done|cleared`; Codex also supports `paused` and native limit
+statuses. Native `complete` maps to `done`. Clearing retains a visible cleared
+record until replacement; a session that has never had a goal returns null.
+Unsupported adapters return 501 and hide goal controls.
 
-Codex uses native `thread/goal/set|get|clear`, with user provenance on mutations,
-and consumes `thread/goal/updated|cleared`. Resume fetches the native goal again.
-It supports pause/resume, explicit status, and token budgets. Older app-server
-versions without these methods disable the capability without blocking startup.
+The launcher wraps native goals, not a second evaluator. Claude uses `/goal
+<condition>` and `/goal clear`; successful matching Stop-hook summaries produce
+`done`. Native clear local-command output (including older `Goal cleared: ...`)
+produces `cleared`; explicit impossible goal-status/evaluator results produce
+`blocked`. Stream events are consumed immediately and the session JSONL is polled
+while a goal is active, so a rejection loop need not end in `result` to be caught.
+Ordinary assistant claims of success are not parsed as completion. Codex uses
+`thread/goal/set|get|clear` and its update notifications. Both retain formal exit
+reasons beside `agent-ui.json` across resume.
 
-Claude uses the native `/goal <condition>` and `/goal clear` local commands.
-Setting a goal starts work immediately. Plain chat `/goal ...` commands update
-the same state. Claude 2.1.296 has no pause/resume or token-budget controls:
-`/goal pause` and `/goal resume` set those literal words as new conditions,
-so the adapter rejects status/budget updates with 501 rather than simulating
-them. Goal commands sent during work may wait for the next native turn boundary.
-Acknowledgement comes from native synthetic local-command messages. Completion
-comes from a matching successful `stop_hook_summary` in the session JSONL
-(no output/errors and no prevented continuation), not from ordinary assistant
-prose or a successful result. A stop-hook block-cap override does not count as
-completion. Claude removes the native condition on success; the UI retains its
-completed record until clear or replacement. A bare `/goal` query does not erase
-that record. Resume rebuilds the record from native local-command and stop-hook
-history. Live usage sums per-result input/output/cache token counters and
-`duration_ms`, not cumulative `modelUsage`; a private usage checkpoint beside
-`agent-ui.json` preserves those totals across resume. Without that checkpoint,
-historical assistant usage is reconstructed and elapsed time is unknown (null).
+Managed Agents have a formal exit command, automatically described to Claude:
+
+```sh
+node "$AGENT_UI_GOAL_COMMAND" blocked --reason "Deployment environment is absent" \
+  --required-action "Owner: provision the environment and grant deployment access"
+node "$AGENT_UI_GOAL_COMMAND" stale --reason "The project was removed"
+node "$AGENT_UI_GOAL_COMMAND" done --reason 'The user explicitly asked to close as-is'
+```
+
+This submits `POST /v1/goal/exit` with `status`, required `reason`, and optional
+`requiredAction`. The request is durably accepted with 202 before the tool returns;
+native clearing runs afterward, avoiding a tool/turn-boundary deadlock. State
+changes only after native clear acknowledgement. Failed clear attempts remain
+pending and retry with logs; the launcher never reports that a hook was released
+when it was not. Replacing the objective invalidates an old pending exit.
+The command deliberately delegates user-equivalent native clear authority to
+the Agent, bypassing Claude's design that the model cannot itself clear `/goal`.
+It is enabled by default; `AGENT_UI_GOAL_AGENT_EXIT=0` disables the supplied
+command endpoint and pending exit processing. This is a convenience switch,
+not OS isolation from other locally authorized CLI/native inputs.
+
+Three consecutive rejected evaluations without new tool input/result evidence
+automatically request clear and record `blocked`. Distinct tool input, file edit
+or changed tool output resets the sequence; repeated identical tools/results and
+assistant prose do not. Defaults: `AGENT_UI_GOAL_NO_PROGRESS_LIMIT=3`,
+`AGENT_UI_GOAL_ROUND_BUDGET=20`, `AGENT_UI_GOAL_TOKEN_BUDGET=100000`.
+`PUT /api/goal` can set positive `roundBudget` and `tokenBudget`; null token budget
+uses the finite launcher default. Claude rounds count rejected Stop evaluations;
+Codex rounds count completed goal turns and use native token budgets. Limits
+clear the native condition, record `blocked`, and notify. Token counters include
+input/output/cache tokens; streaming assistant and result usage are reconciled
+without double counting. Limits apply when usage/events are reported, so a
+provider request can overshoot a token budget. If a CLI reports no rejection
+events or history, rejection detection cannot infer them from arbitrary prose.
+Claude still has no native pause/resume: `pause`/`resume` are literal objectives,
+not supported controls. Its advertised budget capability is launcher enforcement.
+
+Explicit user closure prose stays ordinary user input. We do not modify the
+native evaluator or regex-close goals based on conversation content. The Agent
+may cite the user's instruction in `done --reason`; rejection-loop protection
+provides the fallback when the evaluator keeps rejecting.
+
+Formal exits notify workspace owners via `treer member list` + `treer message
+send`, using the Agent's own identity. Set `AGENT_UI_GOAL_NOTIFY_TO` to a specific
+human ID or tree path instead. Notifications include status, reason and required
+action, use stable idempotency keys and a durable retry outbox. Policy must allow
+human discovery and message sending (or configure an explicit recipient); failure
+is logged and retained. Goals/requests/outbox are private 0600 atomic fsynced files.
+The UI displays reason, required action and rejection counts, including on mobile.
+
+UI edits (objective, pause/resume, budgets) have a separate durable context-delivery
+receipt `goalDelivery`. The native mutation is followed by an English prompt with
+the full new user-authored objective and previous objective. Busy Agents receive
+steer; unsupported steer falls back to the shared queue; idle Agents receive a
+queued prompt that triggers a turn. Each edit's `operationId` deduplicates native
+updates and prompt submissions. UI shows `Sent to Agent`, pending, or failure with
+a retry button; retries preserve the edit ID. Failed prompt delivery does not
+repeat the native mutation. These notices are user updates, not elevated system
+authority. Queued delivery means accepted by the launcher, not that the model
+has already acted on it.
+
+Native probes: current Codex in a temporary thread started one native turn after
+editing/resuming a paused goal, and the next observed reply knew the new objective.
+The fake app-server does not inject `goal/set` into prompts at all; explicit
+launcher delivery covers both behaviors. Claude UI objective edits already send
+native `/goal ...` user input, and now also receive the explicit context receipt.
+This change's evaluator/loop tests use fake stream-json only; no real evaluator
+was invoked. `tests/probe-goal-edit-codex.ts` is an explicit opt-in native probe.
+
+Old Claude compatibility: static inspection of Anthropic's official
+`@anthropic-ai/claude-code-darwin-arm64@2.1.204` package confirms `/goal`,
+`Goal set:`, `Goal cleared:`, Stop prompt hooks, `goal_status`, `goal_met`,
+`impossible`, and `stop_hook_summary` markers, but no `ProposeGoal` marker. This
+does not verify its runtime wire shapes or feature gating. The 2.1.296 command
+and evaluator behavior was verified earlier/by the leader. Capability discovery
+still hides goal controls if initialize does not advertise `goal`; missing fields
+are not treated as proof of completion. Mariana was not accessed or restarted.
+Existing Claude sessions acquire this exit only when their saved session is
+resumed by the updated launcher: leader should restart that Agent, preserving
+its session ID/startup command. This supplies `AGENT_UI_URL`,
+`AGENT_UI_GOAL_COMMAND`, system guidance and monitoring; it does not clear an
+existing active goal merely on restart. No live Agents were restarted here.
 
 `npm run test:goal:live` runs both installed native CLIs in disposable directories,
 uses the real browser to set/complete/clear goals, and saves desktop/mobile

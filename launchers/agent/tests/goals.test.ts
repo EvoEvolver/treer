@@ -32,16 +32,16 @@ test("Codex native goals set, patch, pause, complete, resume and clear", async (
     }
     await runtime.updateGoal({ objective: "Verify", status: "active", tokenBudget: null });
     await runtime.prompt("complete");
-    await until(() => runtime.snapshot().goal?.status === "complete");
+    await until(() => runtime.snapshot().goal?.status === "done");
     assert.equal(runtime.snapshot().goal!.tokensUsed, 42);
   } finally { await runtime.stop(); }
   const resumed = new CodexRuntime(fakeCodex, cwd, { stateFile, threadId: id });
   try {
     await resumed.start(); assert.equal(resumed.snapshot().goal!.objective, "Verify");
-    assert.equal(resumed.snapshot().goal!.status, "complete");
-    await resumed.clearGoal(); assert.equal(resumed.snapshot().goal, null);
+    assert.equal(resumed.snapshot().goal!.status, "done");
+    await resumed.clearGoal(); assert.equal(resumed.snapshot().goal?.status, "cleared");
     await resumed.prompt("/goal New objective"); assert.equal(resumed.snapshot().goal!.objective, "New objective");
-    await resumed.prompt("/goal clear"); assert.equal(resumed.snapshot().goal, null);
+    await resumed.prompt("/goal clear"); assert.equal(resumed.snapshot().goal?.status, "cleared");
   } finally { await resumed.stop(); }
 });
 
@@ -58,25 +58,25 @@ test("Claude native goal acknowledgements, JSONL completion, usage checkpoint, r
   const create = () => new ClaudeRuntime(process.execPath, cwd, { args: [fakeClaude], stateFile, configDir });
   const runtime = create();
   try {
-    await runtime.start(); assert.deepEqual(runtime.harness.capabilities.goal, { pause: false, budget: false });
+    await runtime.start(); assert.deepEqual(runtime.harness.capabilities.goal, { pause: false, budget: true });
     await runtime.updateGoal({ objective: "Finish" });
     await until(() => runtime.snapshot().thread?.status === "idle");
-    assert.equal(runtime.snapshot().goal!.status, "complete");
+    assert.equal(runtime.snapshot().goal!.status, "done");
     assert.equal(runtime.snapshot().goal!.tokensUsed, 17);
     assert.equal(runtime.snapshot().goal!.timeUsedSeconds, 1.5);
     await assert.rejects(runtime.updateGoal({ status: "paused" }), /do not support/);
-    await assert.rejects(runtime.updateGoal({ objective: "Finish", tokenBudget: 10 }), /do not support/);
+    await runtime.updateGoal({ tokenBudget: 1000 });
   } finally { await runtime.stop(); }
   const resumed = create();
   try {
     await resumed.start();
-    assert.equal(resumed.snapshot().goal!.status, "complete"); assert.equal(resumed.snapshot().goal!.tokensUsed, 17);
+    assert.equal(resumed.snapshot().goal!.status, "done"); assert.equal(resumed.snapshot().goal!.tokensUsed, 17);
     assert.equal(resumed.snapshot().goal!.timeUsedSeconds, 1.5);
-    await resumed.clearGoal(); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal, null);
+    await resumed.clearGoal(); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal?.status, "cleared");
     // A stop-hook block-cap override (hasOutput true) must not fake completion.
     await resumed.prompt("/goal hold condition"); await until(() => resumed.snapshot().thread?.status === "idle");
     assert.equal(resumed.snapshot().goal!.objective, "hold condition"); assert.equal(resumed.snapshot().goal!.status, "active");
-    await resumed.prompt("/goal clear"); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal, null);
+    await resumed.prompt("/goal clear"); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal?.status, "cleared");
   } finally { await resumed.stop(); delete process.env.FAKE_CLAUDE_CONFIG; }
 });
 

@@ -1,5 +1,6 @@
 const statuses = {
   active: ["●", "Active"], paused: ["Ⅱ", "Paused"], blocked: ["!", "Blocked"],
+  stale: ["!", "Stale"], done: ["✓", "Done"], cleared: ["○", "Cleared"],
   usageLimited: ["!", "Usage limit reached"], budgetLimited: ["!", "Token budget reached"], complete: ["✓", "Complete"],
 };
 function node(tag, className, text) {
@@ -27,6 +28,7 @@ export function setupGoal({ mutate, report, clearPrompt }) {
   let busy = false;
   let pendingClear = null;
   let previousGoal = null;
+  let failedMutation = null;
   const notices = [];
 
   function openEditor() {
@@ -44,7 +46,13 @@ export function setupGoal({ mutate, report, clearPrompt }) {
     save.disabled = true;
     render(state);
     try {
+      if (input && method === "PUT") {
+        const value = JSON.stringify(input);
+        input = { ...input, operationId: failedMutation?.value === value ? failedMutation.id : crypto.randomUUID() };
+        failedMutation = { value, id: input.operationId };
+      }
       await mutate("api/goal", { method, ...(input ? { body: JSON.stringify(input) } : {}) });
+      failedMutation = null;
       return true;
     } finally {
       busy = false;
@@ -73,7 +81,7 @@ export function setupGoal({ mutate, report, clearPrompt }) {
     bar.hidden = !capability;
     if (!capability) { if (editor.open) editor.close(); pendingClear = null; return; }
     const goal = state.goal;
-    if (goal?.status === "complete" && (previousGoal?.status !== "complete" || previousGoal?.objective !== goal.objective)) {
+    if (["complete", "done"].includes(goal?.status) && (!["complete", "done"].includes(previousGoal?.status) || previousGoal?.objective !== goal.objective)) {
       notices.push({ objective: goal.objective, afterTurn: state.thread?.turns?.at(-1)?.id });
       if (notices.length > 20) notices.shift();
     }
@@ -93,6 +101,17 @@ export function setupGoal({ mutate, report, clearPrompt }) {
       const time = seconds == null ? "Time unavailable" : `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s used`;
       const metrics = node("p", "goal-metrics", `${tokens} · ${time}`);
       bar.append(header, metrics);
+      if (goal.reason) bar.append(node("p", "goal-reason", goal.reason));
+      if (goal.requiredAction) bar.append(node("p", "goal-required-action", `Required action: ${goal.requiredAction}`));
+      if (goal.rejectionCount != null) bar.append(node("p", "goal-rejections", `Stop hook rejections: ${goal.rejectionCount} (${goal.consecutiveRejections ?? 0} without new evidence)`));
+      const delivery = state.goalDelivery;
+      if (delivery) {
+        bar.append(node("p", "goal-delivery", delivery.status === "sent" ? "Sent to Agent" : delivery.status === "failed" ? `Delivery failed: ${delivery.error || "unknown error"}` : "Sending goal update to Agent…"));
+        if (delivery.status === "failed") bar.append(button("Retry goal delivery", "retry-delivery", async () => {
+          try { await mutate("api/goal/retry", { method: "POST", body: JSON.stringify({ id: delivery.id }) }); }
+          catch (error) { report(error.message); }
+        }));
+      }
       if (Number.isFinite(goal.tokenBudget) && goal.tokenBudget > 0) {
         const progress = node("progress", "goal-progress");
         progress.max = goal.tokenBudget;
@@ -102,7 +121,7 @@ export function setupGoal({ mutate, report, clearPrompt }) {
       }
       const actions = node("div", "goal-actions");
       actions.append(button("Edit goal", "edit", openEditor));
-      if (capability.pause && goal.status !== "complete") {
+      if (capability.pause && ["active", "paused"].includes(goal.status)) {
         actions.append(button(goal.status === "paused" ? "Resume goal" : "Pause goal", "pause", async () => {
           try { await update("PUT", { status: goal.status === "paused" ? "active" : "paused" }); }
           catch (error) { report(error.message); }

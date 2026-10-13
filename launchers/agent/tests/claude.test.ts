@@ -34,7 +34,7 @@ test("native Claude starts, persists identity, streams shared items and maintain
   try {
     await claude.start();
     assert.equal(loadThreadId(stateFile), undefined); // No native session exists before the first prompt.
-    assert.deepEqual(claude.harness.capabilities, { steer: true, backgroundTasks: true, goal: { pause: false, budget: false }, sessionTransfer: { export: true, import: true } });
+    assert.deepEqual(claude.harness.capabilities, { steer: true, backgroundTasks: true, goal: { pause: false, budget: true }, sessionTransfer: { export: true, import: true } });
     await claude.prompt("work");
     await until(() => claude.snapshot().thread?.status === "idle");
     assert.equal(loadThreadId(stateFile), claude.snapshot().thread?.id);

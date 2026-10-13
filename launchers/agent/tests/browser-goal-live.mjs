@@ -41,7 +41,7 @@ try {
       // Codex can announce goal completion before final turn usage is accounted.
       await expect.poll(async () => (await fetch(base + "/api/state").then((response) => response.json())).thread.status, { timeout: 60000 }).toBe("idle");
       let state = await fetch(base + "/api/state").then((response) => response.json());
-      assert.equal(state.goal.status, "complete");
+      assert.equal(state.goal.status, "done");
       assert.ok(typeof state.goal.tokensUsed === "number" && state.goal.tokensUsed >= 0);
       assert.ok(typeof state.goal.timeUsedSeconds === "number" && state.goal.timeUsedSeconds >= 0);
       await page.screenshot({ path: join(shots, `${harness}-complete-desktop.png`) });
@@ -51,7 +51,7 @@ try {
       await page.getByRole("button", { name: "Confirm clear goal", exact: true }).click();
       await expect(page.getByRole("button", { name: "Set goal", exact: true })).toBeVisible({ timeout: 60000 });
       state = await fetch(base + "/api/state").then((response) => response.json());
-      assert.equal(state.goal, null);
+      assert.equal(state.goal.status, "cleared");
       await page.screenshot({ path: join(shots, `${harness}-cleared-mobile.png`) });
       console.log(JSON.stringify({ harness, result: "passed", cwd, threadId: state.thread.id }));
     } finally {

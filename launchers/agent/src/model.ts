@@ -22,17 +22,28 @@ export interface QueuedPrompt {
 }
 
 export interface Goal {
+  id?: string;
   objective: string;
-  status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+  status: "active" | "paused" | "blocked" | "stale" | "done" | "cleared" | "usageLimited" | "budgetLimited" | "complete";
   tokenBudget: number | null;
   tokensUsed: number | null;
   timeUsedSeconds: number | null;
+  reason?: string;
+  requiredAction?: string;
+  roundBudget?: number;
+  roundsUsed?: number;
+  rejectionCount?: number;
+  consecutiveRejections?: number;
+  notificationError?: string;
 }
 
 export interface GoalUpdate {
   objective?: string;
   status?: Goal["status"];
   tokenBudget?: number | null;
+  roundBudget?: number;
+  reason?: string;
+  requiredAction?: string;
 }
 
 export interface HistoryItem {
