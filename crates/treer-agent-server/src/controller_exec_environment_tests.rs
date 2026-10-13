@@ -238,6 +238,76 @@ async fn windows_powershell_exec_diagnostics() {
         "allowlisted names={:?}",
         baseline.keys().collect::<Vec<_>>()
     );
+    // Keep canonical root validation; vary only the synthetic cwd presented to
+    // the direct child. No path values are printed.
+    let plain_root = match root.components().next() {
+        Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
+            std::path::Prefix::VerbatimDisk(drive) => {
+                let mut plain = std::path::PathBuf::from(format!("{}:", char::from(drive)));
+                for component in root.components().skip(1) {
+                    plain.push(component.as_os_str());
+                }
+                assert_eq!(std::fs::canonicalize(&plain).unwrap(), root);
+                plain
+            }
+            _ => root.clone(),
+        },
+        _ => root.clone(),
+    };
+    for (kind, cwd) in [("verbatim", &root), ("plain-drive", &plain_root)] {
+        for (command, args) in [
+            (
+                "powershell.exe",
+                vec![
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Write-Output 'powershell-cwd-ok'; exit 0",
+                ],
+            ),
+            ("node", vec!["-e", "console.log('node-cwd-ok')"]),
+        ] {
+            let mut child = tokio::process::Command::new(command)
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .envs(&baseline)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            let wait = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+            let timed_out = wait.is_err();
+            let status = match wait {
+                Ok(status) => status.unwrap(),
+                Err(_) => {
+                    child.kill().await.unwrap();
+                    child.wait().await.unwrap()
+                }
+            };
+            use tokio::io::AsyncReadExt;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_end(&mut stdout)
+                .await
+                .unwrap();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_end(&mut stderr)
+                .await
+                .unwrap();
+            println!("cwd/{kind}/{command}: exit={:?} timed_out={} duration_ms={} stdout={:?} stderr={:?}", status.code(), timed_out, started.elapsed().as_millis(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+        }
+    }
     let extras = [
         "PSModulePath",
         "PUBLIC",
