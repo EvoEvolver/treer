@@ -9,8 +9,6 @@ jobs:
     name: Windows exec diagnostics only
     runs-on: windows-2022
     timeout-minutes: 25
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/treer-windows-exec-diagnostic-target
     defaults:
       run:
         shell: pwsh
@@ -24,6 +22,7 @@ jobs:
           $actual = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $actual -ne '${{ github.sha }}') { throw 'diagnostic source mismatch' }
           Write-Output "diagnostic_commit=$actual"
+          "CARGO_TARGET_DIR=$env:RUNNER_TEMP/treer-windows-exec-diagnostic-target" >> $env:GITHUB_ENV
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
