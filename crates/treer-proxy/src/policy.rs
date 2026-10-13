@@ -1180,10 +1180,13 @@ mod tests {
             )]),
             rules: vec![
                 WorkspacePolicyRule {
+                    bindings: Default::default(),
+                    conditions: Vec::new(),
                     id: "allow-reviewer".to_string(),
                     priority: 10,
                     effect: PolicyEffect::Allow,
                     subjects: vec![PolicySubjectSelector {
+                        tree: None,
                         kind: Some(PolicyPrincipalKind::Agent),
                         id: Some("source".to_string()),
                         machine_id: Some("machine-a".to_string()),
@@ -1192,16 +1195,20 @@ mod tests {
                     }],
                     actions: vec![ACTION_AGENT_PROMPT.to_string()],
                     resources: vec![PolicyResourceSelector {
+                        tree: None,
                         kind: Some(RESOURCE_AGENT.to_string()),
                         id: None,
                         principal_group: Some("reviewers".to_string()),
                     }],
                 },
                 WorkspacePolicyRule {
+                    bindings: Default::default(),
+                    conditions: Vec::new(),
                     id: "deny-tie".to_string(),
                     priority: 10,
                     effect: PolicyEffect::Deny,
                     subjects: vec![PolicySubjectSelector {
+                        tree: None,
                         kind: Some(PolicyPrincipalKind::Agent),
                         id: Some("source".to_string()),
                         machine_id: None,
@@ -1210,6 +1217,7 @@ mod tests {
                     }],
                     actions: vec![ACTION_AGENT_PROMPT.to_string()],
                     resources: vec![PolicyResourceSelector {
+                        tree: None,
                         kind: Some(RESOURCE_AGENT.to_string()),
                         id: Some("target".to_string()),
                         principal_group: None,

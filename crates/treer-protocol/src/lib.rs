@@ -8,6 +8,8 @@ mod targets;
 pub use targets::*;
 mod workload_tree;
 pub use workload_tree::*;
+mod policy_path;
+pub use policy_path::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -50,6 +52,9 @@ pub const POLICY_PROVIDER_PROTOCOL_V1: &str = "treer.policy-provider/v1";
 pub const POLICY_PROVIDER_BUNDLE_CAPABILITY_V1: &str = "policy.bundle.v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
+pub const POLICY_SCHEMA_VERSION_V2: u32 = 2;
+pub const POLICY_PROVIDER_BUNDLE_CAPABILITY_V2: &str = "policy.bundle.v2";
+pub const CAPABILITY_POLICY_PATH_RULES: &str = "policy.path-rules.v2";
 pub const MESSAGE_SCHEMA_VERSION: u32 = 1;
 fn default_start_missing() -> bool {
     true

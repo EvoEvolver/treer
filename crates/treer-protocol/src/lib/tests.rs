@@ -745,10 +745,13 @@ fn workspace_policy_document_has_a_stable_json_shape() {
         defaults: BTreeMap::from([("agent.prompt".to_string(), PolicyEffect::Deny)]),
         groups: BTreeMap::new(),
         rules: vec![WorkspacePolicyRule {
+            bindings: Default::default(),
+            conditions: Vec::new(),
             id: "self-read".to_string(),
             priority: 100,
             effect: PolicyEffect::Allow,
             subjects: vec![PolicySubjectSelector {
+                tree: None,
                 kind: Some(PolicyPrincipalKind::Agent),
                 id: None,
                 machine_id: None,
@@ -757,6 +760,7 @@ fn workspace_policy_document_has_a_stable_json_shape() {
             }],
             actions: vec!["agent.metadata.read".to_string()],
             resources: vec![PolicyResourceSelector {
+                tree: None,
                 kind: Some("agent".to_string()),
                 id: None,
                 principal_group: None,

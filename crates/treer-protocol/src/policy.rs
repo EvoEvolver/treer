@@ -61,6 +61,8 @@ pub struct PolicyPrincipalGroup {
 #[serde(deny_unknown_fields)]
 pub struct PolicySubjectSelector {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<PolicyTreeSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<PolicyPrincipalKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -76,6 +78,8 @@ pub struct PolicySubjectSelector {
 #[serde(deny_unknown_fields)]
 pub struct PolicyResourceSelector {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<PolicyTreeSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -86,6 +90,10 @@ pub struct PolicyResourceSelector {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspacePolicyRule {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, PolicyFolderRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<PolicyTreeCondition>,
     pub id: String,
     pub priority: i32,
     pub effect: PolicyEffect,
