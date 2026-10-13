@@ -59,8 +59,10 @@ only on an exact match. Get returns the Controller's digest/size and CLI compare
 before installing LOCAL. For `get ... -`, spool to a private bounded local
 temporary file and verify before writing stdout: bytes already emitted cannot be
 discarded on a later checksum failure. A get reads an opened regular-file handle;
-concurrent source changes that alter bytes/size cause failure, not a false
-snapshot guarantee. Hashes detect corruption, not a malicious trusted Proxy.
+compare opened-handle metadata before/after reading and fail on detected change.
+This does not detect every concurrent same-size modification or guarantee a
+consistent snapshot; callers must quiesce a changing source. Hashes detect
+corruption, not a malicious trusted Proxy.
 
 ## Filesystem and authorization boundary
 
@@ -88,6 +90,16 @@ clear unsupported-mode error. Local get uses equivalent atomic/no-overwrite
 semantics. Abort/error/drop removes staging files; exact-prefix stale staging
 cleanup on startup handles crashes without deleting arbitrary user files.
 
+Core private state is reserved regardless of Policy: reject `.treer` and known
+Controller credential/startup/interface/launcher state by opened file/ancestor
+identity, including filesystem aliases. Lexical checks alone cannot distinguish
+APFS normalization/case aliases or Windows short names. Policy attributes must
+distinguish requested and resolved disk paths and filesystem comparison semantics;
+workspace tree-path selectors do not currently govern these filesystem names.
+Handle retention prevents symlink redirection, not a same-account adversary
+moving the opened directory outside its previous path. Keep that OS authority
+boundary explicit; an enrolled root is not an implicit sandbox.
+
 Policy actions are `machine.file.write` and new `machine.file.read`, evaluated
 against the actual machine in the caller's current workspace. Resource attributes
 include normalized `file.path`, direction and requested mode/overwrite; these
@@ -97,6 +109,12 @@ and owner recovery behavior remain. Audit success/failure with caller, machine,
 path, size, digest and stable error code; never bytes, credential values or
 credential-bearing headers. Reading a root credential file is powerful: grant
 machine.file.read only to trusted operators and document that risk explicitly.
+SHA-256 audit fields can reveal guesses about low-entropy file contents; restrict
+audit access. This preserves the requested digest audit contract. Reauthorize
+finish before installation and serialize it with abort/expiry; revocation cannot
+retract bytes already returned by get. Reserve an audit intent before commit and
+fail closed if it cannot be durably written; reconcile completion after crashes
+rather than claiming atomicity across database and filesystem.
 
 ## Delivery and evidence
 

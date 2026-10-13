@@ -3699,6 +3699,7 @@ dependencies = [
 name = "treer-platform"
 version = "0.1.13"
 dependencies = [
+ "rustix",
  "tokio",
  "url",
  "windows-sys 0.61.2",
