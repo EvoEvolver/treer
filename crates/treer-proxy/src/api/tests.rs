@@ -6,8 +6,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tower::ServiceExt;
 use treer_protocol::{
-    CommandResult, MachineServiceProtocol, PolicyEffect, PolicyMode, PolicyPrincipalKind,
-    PolicyPrincipalRef, ProxyMessage, WorkspacePolicyDocument, POLICY_SCHEMA_VERSION,
+    CommandResult, CreateWorkloadFolderRequest, MachineServiceProtocol, PolicyEffect, PolicyMode,
+    PolicyPrincipalKind, PolicyPrincipalRef, ProxyMessage, UpdateWorkloadFolderRequest,
+    WorkspacePolicyDocument, POLICY_SCHEMA_VERSION,
 };
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
@@ -82,6 +83,17 @@ async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
     .unwrap();
     let serialized = directory.to_string();
     assert!(serialized.contains("agent-a"));
+    assert_eq!(
+        directory["capabilities"][0],
+        treer_protocol::APP_DIRECTORY_PATH_CAPABILITY
+    );
+    let caller = directory["principals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "agent-a")
+        .unwrap();
+    assert_eq!(caller["path"], "/agent-a");
     assert!(serialized.contains("owner"));
     assert!(!serialized.contains("reviewer"));
     assert!(!serialized.contains("other"));
@@ -99,6 +111,148 @@ async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
     .await
     .unwrap_err();
     assert!(!error.error.message.contains("agent-b"));
+}
+
+#[tokio::test]
+async fn app_directory_paths_follow_real_placement_and_folder_rename() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    sqlx::query("INSERT INTO users(id,email,email_verified,preferred_name,password_hash,created_at) VALUES('owner','owner@example.test',TRUE,'Owner','unused','test')").execute(&auth.pool()).await.unwrap();
+    sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_default','owner','owner','test')").execute(&auth.pool()).await.unwrap();
+    let app = auth
+        .create_app_deployment(
+            "default",
+            "owner",
+            "machine-a".into(),
+            CreateAppDeploymentRequest {
+                folder_id: None,
+                server_id: Some("machine-a".into()),
+                name: "Issues".into(),
+                command: "python3".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8888,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    let folder = auth
+        .create_workload_folder(
+            "default",
+            CreateWorkloadFolderRequest {
+                name: "research".into(),
+                parent_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    auth.create_named_agent_credential(
+        "default",
+        "machine-a",
+        "agent-a",
+        "reviewer",
+        Some(&folder.folder_id),
+    )
+    .await
+    .unwrap();
+    auth.create_named_agent_credential("default", "machine-a", "agent-b", "reviewer", None)
+        .await
+        .unwrap();
+    let state = state_with_managed_agent().await;
+    state
+        .rename_agent("default", "agent-a", "reviewer".into())
+        .await
+        .unwrap();
+    let policy = PolicyEngine::durable(WorkspacePolicyStore::new(auth.pool()));
+    let identity = IdentityIssuer::load(&auth, &Url::parse("https://proxy.example.test/").unwrap())
+        .await
+        .unwrap();
+    let token = identity
+        .issue_human_request("default", "owner", "Owner", "owner", &app.service_id)
+        .unwrap()
+        .access_token;
+    let headers = HeaderMap::from_iter([(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    )]);
+    for expected in ["/research/reviewer", "/experiments/reviewer"] {
+        let Json(directory) = workspace_app_directory(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(policy.clone()),
+            Extension(identity.clone()),
+            Path(app.service_id.clone()),
+            headers.clone(),
+        )
+        .await
+        .unwrap();
+        let principals = directory["principals"].as_array().unwrap();
+        assert_eq!(
+            principals.iter().find(|p| p["id"] == "agent-a").unwrap()["path"],
+            expected
+        );
+        assert_eq!(
+            principals.iter().find(|p| p["id"] == "agent-b").unwrap()["path"],
+            "/reviewer"
+        );
+        assert!(principals.iter().find(|p| p["id"] == "owner").unwrap()["path"].is_null());
+        auth.update_workload_folder(
+            "default",
+            &folder.folder_id,
+            UpdateWorkloadFolderRequest {
+                name: Some("experiments".into()),
+                parent_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // A second Proxy reading the same store observes canonical renames even
+    // while its machine inventory still contains the previous display name.
+    auth.set_agent_name("default", "agent-a", "critic")
+        .await
+        .unwrap();
+    let second_proxy = auth.clone();
+    let principals = workspace_app_principals(&state, &second_proxy, "default")
+        .await
+        .unwrap();
+    let renamed = principals.iter().find(|p| p.id == "agent-a").unwrap();
+    assert_eq!(renamed.name, "critic");
+    assert_eq!(renamed.path.as_deref(), Some("/experiments/critic"));
+    auth.seed_test_workspace("foreign").await;
+    auth.create_named_agent_credential("foreign", "machine-z", "foreign-agent", "secret", None)
+        .await
+        .unwrap();
+    assert!(!auth
+        .canonical_workload_paths("default")
+        .await
+        .unwrap()
+        .contains_key("foreign-agent"));
+    sqlx::query(
+        "DELETE FROM workload_placements WHERE workspace_id='default' AND agent_id='agent-a'",
+    )
+    .execute(&auth.pool())
+    .await
+    .unwrap();
+    let Json(directory) = workspace_app_directory(
+        State(state),
+        Extension(auth),
+        Extension(policy),
+        Extension(identity),
+        Path(app.service_id),
+        headers,
+    )
+    .await
+    .unwrap();
+    assert!(directory["principals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "agent-a")
+        .unwrap()["path"]
+        .is_null());
 }
 
 #[tokio::test]
@@ -3794,18 +3948,21 @@ fn app_recipients_share_one_agent_and_human_namespace() {
             kind: AppPrincipalKind::Agent,
             id: "agent-reviewer".to_string(),
             name: "reviewer".to_string(),
+            path: None,
             role: None,
         },
         AppPrincipal {
             kind: AppPrincipalKind::Human,
             id: "user-owner".to_string(),
             name: "Owner".to_string(),
+            path: None,
             role: Some("owner".to_string()),
         },
         AppPrincipal {
             kind: AppPrincipalKind::Human,
             id: "user-reviewer".to_string(),
             name: "reviewer".to_string(),
+            path: None,
             role: Some("member".to_string()),
         },
     ];

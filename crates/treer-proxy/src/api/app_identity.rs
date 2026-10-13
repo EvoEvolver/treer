@@ -196,7 +196,10 @@ pub(super) async fn workspace_app_directory(
 ) -> Result<Json<Value>, ApiFailure> {
     let claims = authenticate_workspace_app(&auth, &identity, &headers, &service_id).await?;
     let principals = visible_workspace_app_principals(&state, &auth, &policy, &claims).await?;
-    Ok(Json(json!({ "principals": principals })))
+    Ok(Json(json!({
+        "principals": principals,
+        "capabilities": [treer_protocol::APP_DIRECTORY_PATH_CAPABILITY],
+    })))
 }
 
 pub(super) async fn resolve_workspace_app_recipients(
@@ -224,6 +227,7 @@ pub(super) async fn resolve_workspace_app_recipients(
             kind: claims.principal_kind,
             id: claims.sub.clone(),
             name: claims.name.clone(),
+            path: None,
             role: claims.role.clone(),
         });
     let mut seen = HashSet::new();
@@ -346,19 +350,27 @@ pub(super) async fn workspace_app_principals(
 ) -> Result<Vec<AppPrincipal>, ApiFailure> {
     let snapshot = state.snapshot(workspace_id).await?;
     let humans = auth.list_workspace_humans(workspace_id).await?;
+    let paths = auth.canonical_workload_paths(workspace_id).await?;
     Ok(snapshot
         .agents
         .into_iter()
-        .map(|agent| AppPrincipal {
-            kind: AppPrincipalKind::Agent,
-            id: agent.agent_id,
-            name: agent.name,
-            role: None,
+        .map(|agent| {
+            let canonical = paths.get(&agent.agent_id);
+            AppPrincipal {
+                kind: AppPrincipalKind::Agent,
+                path: canonical.map(|(_, path)| path.clone()),
+                id: agent.agent_id,
+                name: canonical
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or(agent.name),
+                role: None,
+            }
         })
         .chain(humans.into_iter().map(|human| AppPrincipal {
             kind: AppPrincipalKind::Human,
             id: human.user_id,
             name: human.preferred_name,
+            path: None,
             role: Some(human.role),
         }))
         .collect())
@@ -586,24 +598,28 @@ mod tree_recipient_tests {
                 kind: AppPrincipalKind::Agent,
                 id: "ag_peer".into(),
                 name: "reviewer".into(),
+                path: None,
                 role: None,
             },
             AppPrincipal {
                 kind: AppPrincipalKind::Agent,
                 id: "ag_root".into(),
                 name: "reviewer".into(),
+                path: None,
                 role: None,
             },
             AppPrincipal {
                 kind: AppPrincipalKind::Agent,
                 id: "ag_other".into(),
                 name: "other".into(),
+                path: None,
                 role: None,
             },
             AppPrincipal {
                 kind: AppPrincipalKind::Human,
                 id: "usr_owner".into(),
                 name: "Owner".into(),
+                path: None,
                 role: Some("owner".into()),
             },
         ];

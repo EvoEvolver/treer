@@ -59,6 +59,30 @@ pub struct AppPrincipal {
     pub kind: AppPrincipalKind,
     pub id: String,
     pub name: String,
+    /// Current canonical Tree path, never a client-supplied or token-cached path.
+    /// None for humans and unplaced legacy workloads; absent on older Proxies.
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+}
+
+pub const APP_DIRECTORY_PATH_CAPABILITY: &str = "app.directory-paths.v1";
+
+#[cfg(test)]
+mod app_principal_tests {
+    use super::*;
+
+    #[test]
+    fn app_principal_path_round_trip_and_legacy_response() {
+        let value = serde_json::json!({"kind":"agent","id":"a","name":"reviewer","path":"/research/reviewer"});
+        let principal: AppPrincipal = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(principal).unwrap(), value);
+        let legacy: AppPrincipal =
+            serde_json::from_value(serde_json::json!({"kind":"agent","id":"a","name":"reviewer"}))
+                .unwrap();
+        assert!(legacy.path.is_none());
+        // A missing path never invents a canonical root from a display name.
+        assert!(serde_json::to_value(legacy).unwrap()["path"].is_null());
+    }
 }

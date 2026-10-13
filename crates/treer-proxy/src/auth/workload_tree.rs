@@ -4,6 +4,20 @@ use treer_protocol::{
     WorkloadFolder, WorkloadPlacement, WorkloadTree,
 };
 
+async fn load_workload_tree(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: &str,
+) -> Result<WorkloadTree, AuthFailure> {
+    let folders = sqlx::query("SELECT folder_id,name,parent_id FROM workload_folders WHERE workspace_id=$1 ORDER BY lower(name),folder_id")
+        .bind(workspace).fetch_all(&mut **tx).await.map_err(AuthFailure::database)?.into_iter().map(folder).collect();
+    let placements = sqlx::query("SELECT p.agent_id,p.folder_id,p.position FROM workload_placements p JOIN agent_credentials a ON a.agent_id=p.agent_id AND a.workspace_id=p.workspace_id WHERE p.workspace_id=$1 AND a.revoked_at IS NULL ORDER BY p.folder_id NULLS FIRST,p.position,p.agent_id")
+        .bind(workspace).fetch_all(&mut **tx).await.map_err(AuthFailure::database)?.into_iter().map(|r| WorkloadPlacement {agent_id:r.get("agent_id"),folder_id:r.get("folder_id"),position:r.get("position")}).collect();
+    Ok(WorkloadTree {
+        folders,
+        placements,
+    })
+}
+
 fn invalid(message: &str) -> AuthFailure {
     AuthFailure::bad_request("invalid_workload_tree", message)
 }
@@ -89,15 +103,33 @@ impl AuthStore {
 
     pub async fn workload_tree(&self, workspace: &str) -> Result<WorkloadTree, AuthFailure> {
         let mut tx = self.lock_workload_tree(workspace).await?;
-        let folders = sqlx::query("SELECT folder_id,name,parent_id FROM workload_folders WHERE workspace_id=$1 ORDER BY lower(name),folder_id")
-            .bind(workspace).fetch_all(&mut *tx).await.map_err(AuthFailure::database)?.into_iter().map(folder).collect();
-        let placements = sqlx::query("SELECT p.agent_id,p.folder_id,p.position FROM workload_placements p JOIN agent_credentials a ON a.agent_id=p.agent_id AND a.workspace_id=p.workspace_id WHERE p.workspace_id=$1 AND a.revoked_at IS NULL ORDER BY p.folder_id NULLS FIRST,p.position,p.agent_id")
-            .bind(workspace).fetch_all(&mut *tx).await.map_err(AuthFailure::database)?.into_iter().map(|r| WorkloadPlacement {agent_id:r.get("agent_id"),folder_id:r.get("folder_id"),position:r.get("position")}).collect();
+        let tree = load_workload_tree(&mut tx, workspace).await?;
         tx.commit().await.map_err(AuthFailure::database)?;
-        Ok(WorkloadTree {
-            folders,
-            placements,
-        })
+        Ok(tree)
+    }
+
+    /// Read current names and placement under the same cross-Proxy Tree lock.
+    /// Unplaced and revoked identities are deliberately absent.
+    pub async fn canonical_workload_paths(
+        &self,
+        workspace: &str,
+    ) -> Result<HashMap<String, (String, String)>, AuthFailure> {
+        let mut tx = self.lock_workload_tree(workspace).await?;
+        let tree = load_workload_tree(&mut tx, workspace).await?;
+        let rows = sqlx::query("SELECT p.agent_id,COALESCE(n.name,a.name) AS name FROM workload_placements p JOIN agent_credentials c ON c.agent_id=p.agent_id AND c.workspace_id=p.workspace_id LEFT JOIN agent_names n ON n.agent_id=p.agent_id AND n.workspace_id=p.workspace_id LEFT JOIN app_deployments a ON a.workspace_id=p.workspace_id AND COALESCE(a.runtime_agent_id,a.app_id)=p.agent_id WHERE p.workspace_id=$1 AND c.revoked_at IS NULL")
+            .bind(workspace).fetch_all(&mut *tx).await.map_err(AuthFailure::database)?;
+        let mut paths = HashMap::new();
+        for row in rows {
+            let id: String = row.get("agent_id");
+            if let Some(name) = row.get::<Option<String>, _>("name") {
+                let path = tree
+                    .workload_path(&id, &name)
+                    .map_err(|_| invalid("invalid canonical workload path"))?;
+                paths.insert(id, (name, path));
+            }
+        }
+        tx.commit().await.map_err(AuthFailure::database)?;
+        Ok(paths)
     }
 
     pub async fn create_workload_folder(

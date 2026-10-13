@@ -353,6 +353,13 @@ publication and verify App compatibility before rolling back to binaries without
 `policy.publish-authority.v1`; 404/missing capability must not trigger legacy
 fallback or an unvalidated App write.
 
+App directory capability `app.directory-paths.v1` advertises current canonical
+Agent `path` fields derived from the authenticated workspace's Tree. Paths are
+included only for principals passing the existing discovery/metadata checks;
+they grant no additional permissions. Humans and unplaced legacy workloads have
+`path: null`. Apps needing placement must explicitly report unavailable on older
+Proxies without this capability, rather than infer paths from names or IDs.
+
 Service-audience directory and recipient resolution apply Core Agent discovery/
 metadata and human-list rules too; a denied Agent cannot be discovered through
 an App directory instead. The currently verified human's own identity remains
