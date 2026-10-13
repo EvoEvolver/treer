@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+import stat
 import sqlite3
 import subprocess
 import time
@@ -708,7 +709,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                     raise PolicyError(409, "unsupported_policy_schema", "This bundle requires a schema v2 capable Proxy")
                 self._json(200, self.store.bundle())
             elif parsed.path == "/v1/session":
-                if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session') or ('Authorization' in self.headers and self.headers.get('Authorization') != 'Bearer ' + str(getattr(self.server, 'admin_token', None))):
+                if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session') or ('Authorization' in self.headers and self.headers.get('Authorization') != 'Bearer ' + str(self._operator_token())):
                     token, actor, _, _ = self._identity()
                     self._json(200, {'principal':actor, 'oauth_available':True})
                 else:
@@ -834,12 +835,24 @@ class PolicyHandler(BaseHTTPRequestHandler):
         except CookieError: return ''
         return cookie[name].value if name in cookie else ''
 
+    def _operator_bearer(self):
+        value = self.headers.get('Authorization', '')
+        token = self._operator_token()
+        if token and hmac.compare_digest(value.encode(), ('Bearer ' + token).encode()):
+            return True
+        return False
+
     def _identity(self, mutation=False):
         auth = self._auth()
         # Operator credential belongs to the App, not to Treer. Never pass it to
         # Core verification/diagnostics as a caller token.
         headers = copy.copy(self.headers)
-        if headers.get('Authorization') == 'Bearer ' + str(getattr(self.server, 'admin_token', None)):
+        file_capability = getattr(self.server, 'admin_token_file', None) is not None
+        browser_identity = 'X-Treer-Identity-Token' in headers or self._raw_cookie('policy_session')
+        env_capability = getattr(self.server, 'admin_token', None)
+        if getattr(self.server, 'admin_token_file', None) is not None or headers.get('Authorization') == 'Bearer ' + str(self._operator_token()):
+            # Includes stale/rotated capabilities. In file mode, human callers
+            # use injected identity or OAuth cookies, never this Bearer channel.
             del headers['Authorization']
         token, actor, directory, cookie_auth = auth.authenticate(headers, self._raw_cookie('policy_session'))
         if mutation: auth.check_browser_mutation(self.headers, actor, cookie_auth)
@@ -864,10 +877,16 @@ class PolicyHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', '0')
         self.end_headers()
 
+    def _operator_token(self):
+        source = getattr(self.server, 'admin_token_file', None)
+        if source is None: return getattr(self.server, 'admin_token', None)
+        try: return source.read()
+        except (OSError, ValueError): return None
+
     def _require_operator(self) -> None:
         if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session'):
             self._identity(mutation=self.command != 'GET')
-        token = getattr(self.server, "admin_token", None)
+        token = self._operator_token()
         if not token:
             raise PolicyError(503, "policy_edits_locked", "Policy editing is disabled until an operator configures an admin token")
         supplied = self.headers.get("Authorization", "")
@@ -960,10 +979,158 @@ def resource_matches(selector: dict[str, Any], resource: dict[str, Any], groups:
     return (selector.get("kind") in {None, resource.get("kind")} and selector.get("id") in {None, resource.get("id")} and (not selector.get("principal_group") or group_contains(groups, selector["principal_group"], principal.get("kind"), principal.get("id"))))
 
 
+class AdminTokenFile:
+    """Machine-local capability. No secret appears in errors, URLs or output."""
+    def __init__(self, path):
+        self.path = Path(os.path.abspath(path))
+        self.marker = self.path.name + '.initialized'
+
+    def parent_fd(self):
+        # Pin each directory and reject symlink ancestors as well as the leaf.
+        fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in self.path.parent.parts[1:]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def check_file(fd):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError('Admin token file must be a private regular file owned by this machine account')
+
+    def read(self):
+        parent = self.parent_fd()
+        try:
+            fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                self.check_file(fd)
+                raw = os.read(fd, 8193)
+                if len(raw) > 8192:
+                    raise ValueError('Invalid admin token file')
+                token = raw.decode('ascii').removesuffix('\n')
+                validate_admin_token(token)
+                return token
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent)
+
+    def write(self, parent, *, replace):
+        name = '.policy-admin-' + secrets.token_hex(16)
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write((secrets.token_urlsafe(32) + '\n').encode('ascii'))
+                handle.flush()
+                os.fsync(handle.fileno())
+            if replace:
+                os.replace(name, self.path.name, src_dir_fd=parent, dst_dir_fd=parent)
+            else:
+                # Publish a complete file exclusively; concurrent readers never
+                # see a partially written capability.
+                os.link(name, self.path.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                os.unlink(name, dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            try: os.unlink(name, dir_fd=parent)
+            except FileNotFoundError: pass
+
+    def initialize(self):
+        try:
+            self.read()
+        except FileNotFoundError:
+            pass
+        else:
+            self.record_initialized()
+            return
+        parent = self.parent_fd()
+        try:
+            try:
+                fd = os.open(self.marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            except FileExistsError:
+                # Startup flag persists across restarts: loss must lock edits,
+                # not silently provision a new capability.
+                return
+            with os.fdopen(fd, 'wb') as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(b'initialized\n');handle.flush();os.fsync(handle.fileno())
+            os.fsync(parent)
+            try: self.write(parent, replace=False)
+            except FileExistsError: self.read()
+        finally:
+            os.close(parent)
+
+    def record_initialized(self):
+        parent = self.parent_fd()
+        try:
+            try: fd = os.open(self.marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            except FileExistsError: return
+            with os.fdopen(fd, 'wb') as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(b'initialized\n');handle.flush();os.fsync(handle.fileno())
+            os.fsync(parent)
+        finally: os.close(parent)
+
+    def rotate(self):
+        # Validate an existing leaf; refuse to overwrite symlinks or loose files.
+        try: self.read()
+        except FileNotFoundError: pass
+        self.record_initialized()
+        parent = self.parent_fd()
+        try: self.write(parent, replace=True)
+        finally: os.close(parent)
+
+
+def validate_admin_token(token):
+    if not isinstance(token, str) or not 32 <= len(token) <= 8192 or any(not c.isascii() or c.isspace() or not c.isprintable() for c in token):
+        raise ValueError('Admin token must be 32–8192 printable non-whitespace ASCII characters')
+    return token
+
+
+def admin_token_source(*, initialize=False):
+    token = os.environ.get('POLICY_ADMIN_TOKEN')
+    if token:
+        return validate_admin_token(token), None
+    configured = os.environ.get('POLICY_ADMIN_TOKEN_FILE')
+    if not configured and not BUNDLED_INSTALL and not initialize:
+        return None, None
+    source = AdminTokenFile(configured or APP_ROOT / '.treer-policy-admin-token')
+    if initialize:
+        try: source.initialize()
+        except (OSError, ValueError):
+            # Provisioning failure must not take bundle reads/recovery offline.
+            # Every administration request still fails closed on this file.
+            pass
+    # Fail closed on unreadable/lost files, but keep bundle reads available.
+    return None, source
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Treer Policy Provider")
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument('--initialize-admin-token-file', action='store_true', help='Provision a private token once on the machine; never print it')
+    parser.add_argument('--rotate-admin-token-file', action='store_true', help='Locally rotate or recover the private token file, then exit without serving')
     args = parser.parse_args()
+    if args.rotate_admin_token_file:
+        if args.initialize_admin_token_file or os.environ.get('POLICY_ADMIN_TOKEN'):
+            raise SystemExit('File rotation cannot be combined with initialization or an environment token')
+        try:
+            AdminTokenFile(os.environ.get('POLICY_ADMIN_TOKEN_FILE') or APP_ROOT / '.treer-policy-admin-token').rotate()
+        except (OSError, ValueError):
+            raise SystemExit('Admin token file rotation failed; check the private file and parent directory')
+        print('Admin token file replaced locally; no token is returned')
+        return
+    try:
+        admin_token, admin_token_file = admin_token_source(initialize=args.initialize_admin_token_file)
+    except (OSError, ValueError):
+        raise SystemExit('Admin token configuration invalid; check the private file and parent directory')
     workspace_id = os.environ.get("TREER_WORKSPACE_ID", "").strip()
     if not workspace_id:
         raise SystemExit("TREER_WORKSPACE_ID is required")
@@ -979,9 +1146,8 @@ def main() -> None:
     data_file = Path(os.environ.get("POLICY_DATA_FILE", str(default_data_file))).resolve()
     PolicyHandler.store = PolicyStore(data_file, workspace_id)
     server = PolicyServer((host, int(raw_port)), PolicyHandler)
-    server.admin_token = os.environ.get("POLICY_ADMIN_TOKEN") or None
-    if server.admin_token and (len(server.admin_token) < 32 or any(c.isspace() for c in server.admin_token)):
-        raise SystemExit("POLICY_ADMIN_TOKEN must contain at least 32 non-whitespace characters")
+    server.admin_token = admin_token
+    server.admin_token_file = admin_token_file
     print(f"Treer Policy Provider listening on {listen} for {workspace_id}")
     server.serve_forever()
 

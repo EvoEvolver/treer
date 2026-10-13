@@ -108,6 +108,19 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':2,'revision':1})[0],200)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2},'human-member')[0],403)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2})[0],200)
+    def test_file_capability_rotation_loss_and_no_forwarding(self):
+        source=policy.AdminTokenFile(Path(self.temp.name).resolve()/'admin-token')
+        source.initialize();old=source.read();self.app.admin_token_file=source
+        self.assertEqual(self.request('POST','/v1/policy/invalidate',{},extra={'Authorization':'Bearer '+old})[0],200)
+        source.rotate();new=source.read()
+        self.assertEqual(self.request('POST','/v1/policy/invalidate',{},extra={'Authorization':'Bearer '+old})[0],401)
+        self.assertEqual(self.request('POST','/v1/policy/invalidate',{},extra={'Authorization':'Bearer '+new})[0],200)
+        source.path.unlink()
+        self.assertEqual(self.request('POST','/v1/policy/invalidate',{},extra={'Authorization':'Bearer '+new})[0],503)
+        self.assertEqual(self.request('GET','/v1/session',extra={'Authorization':'Bearer '+old})[0],200)
+        forwarded=json.dumps(self.proxy.calls)
+        self.assertNotIn(old,forwarded);self.assertNotIn(new,forwarded)
+
     def test_authenticated_proxy_requests_never_follow_redirects(self):
         with self.assertRaises(policy.AuthError) as caught:
             self.app.auth.request('GET','/redirect','human-owner')

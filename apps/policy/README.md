@@ -45,11 +45,12 @@ their stale window; fail-open is available as an explicit compatibility choice.
 
 ## Administration security
 
-Bundle reads remain available to the Controller. Publishing and invalidation
-are **disabled by default**. To enable them set `POLICY_ADMIN_TOKEN` to a
-cryptographically random, private operator secret of at least 32 non-whitespace
-characters (for example generate with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`
-in a private terminal). Supply `Authorization: Bearer TOKEN` and
+Bundle reads remain available to the Controller. Normal source-checkout runs
+have editing disabled until an operator configures a capability. Default bundled
+installations use a private machine-local token file, provisioned by the installer
+flag described below. Existing `POLICY_ADMIN_TOKEN` environments remain supported:
+the value must be 32–8192 printable, non-whitespace ASCII characters.
+Supply `Authorization: Bearer TOKEN` and
 `Content-Type: application/json`; the UI has a password field and retains its
 value only in page memory. Never put it in URLs, source control or shell history.
 Protect its environment/configuration and use workspace-only ingress. Existing
@@ -60,6 +61,71 @@ OAuth. Path-policy publications additionally require a verified current workspac
 owner through Core validation; OAuth alone never grants App editing. Same-UID processes are
 not isolated. State writes use exclusive private temporary files and atomic
 rename. Do not rely on this App for hostile-tenant isolation.
+
+## Private administration token file
+
+The default installer passes `--initialize-admin-token-file`. The **App on the
+machine**, not the Proxy, generates 32 cryptographically random bytes encoded as
+base64url and stores them in `.treer-policy-admin-token` beside the bundled
+`treer-policy.py` in the machine workspace root. No secret is uploaded, returned
+by HTTP, placed in argv, or written to logs/audit by provisioning. Reinstalling or
+upgrading does not overwrite it. Existing bundles/history are unchanged.
+
+Selection order is `POLICY_ADMIN_TOKEN` (compatibility), then
+`POLICY_ADMIN_TOKEN_FILE`, then the default adjacent file for a bundled install.
+An invalid environment token is an error, not a fallback. A selected file that
+is missing/unsafe/invalid locks edits with `policy_edits_locked`; bundle reads
+stay available and the App never falls back to an older cached token. Source
+checkouts do not create a token unless explicitly initialized; setting a file
+path alone never creates it. Relative paths use the process working directory;
+prefer a canonical absolute path.
+
+Files must be regular files, owned by the App's effective OS user and mode
+**0600**. Symlinks, including directory ancestors, are rejected. Creation uses
+exclusive no-follow opens, a private complete temporary file and exclusive
+publication; rotation uses an atomic replacement in the pinned parent directory.
+This facility requires a POSIX filesystem supporting these operations. Restrict
+the parent directory to trusted machine administrators. It does not protect
+against another process using the same OS account; use a dedicated user/container.
+
+The private, non-secret `.treer-policy-admin-token.initialized` marker is written
+before first provisioning. Because installer argv persists across restarts,
+this marker prevents a missing token from silently regenerating on restart.
+A crash after writing the marker but before the token leaves editing locked for
+explicit local recovery. Keep the marker during backups/upgrades. Losing both
+token and marker is indistinguishable from a fresh installation: restore the
+marker or disable initialization before starting a recovered installation.
+
+**Retrieve:** a workspace owner with authorized OS access opens a private local
+terminal or trusted SSH session as the machine account and reads
+`<workspace-root>/.treer-policy-admin-token`, then pastes it into the App's
+password field. Do not retrieve it through Proxy file APIs, `treer exec` output,
+Core Messages, terminal recording, screenshots or shared logs. A workspace-owner
+role does not itself grant OS-file access: without machine access, arrange
+controlled secret delivery with the machine administrator. This adds no secret
+broker or remote token-recovery endpoint.
+
+**Rotate or recover a lost file:** on that same machine in a private terminal,
+run the local command below with canonical absolute paths. It generates a new
+secret without printing it and exits without starting or restarting the App:
+
+```sh
+env -u POLICY_ADMIN_TOKEN POLICY_ADMIN_TOKEN_FILE=/absolute/workspace/.treer-policy-admin-token \
+  python3 /absolute/workspace/treer-policy.py --rotate-admin-token-file
+```
+
+The running file-backed App reads the file on every administration check; new
+requests reject the old token after replacement, with no restart. In-flight
+requests already authenticated may finish. If an existing file has unsafe
+permissions/type/contents, rotation refuses it: the machine administrator must
+repair or remove it locally before explicit recovery. Never remove the marker to
+trigger automatic recovery. An environment token takes precedence and requires
+changing that App configuration in a separately authorized operator workflow;
+rotating a shadowed file will not invalidate the environment capability.
+
+Back up the token only in encrypted, private credential backups, or omit it and
+perform explicit local recovery after restoration. Policy backups need not
+contain this secret. No file content appears in App errors or status responses.
 
 ## Revision history and rollback
 

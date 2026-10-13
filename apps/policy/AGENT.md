@@ -54,3 +54,14 @@ Publishing still requires the separate private operator Bearer. Human mutations
 also need X-Policy-Request: 1 and valid browser Origin/Fetch Metadata.
 Rollback preserves monotonic revisions and checks concurrent edits.
 See README for grammar, editable templates, migration, backups and limits.
+
+
+Default bundled installations provision `.treer-policy-admin-token` locally
+with `--initialize-admin-token-file`; they never return the secret through Treer.
+`POLICY_ADMIN_TOKEN` overrides `POLICY_ADMIN_TOKEN_FILE` and the bundled default.
+File-backed authorization reads the private 0600 current-user-owned file per
+request. Do not use Treer exec/file APIs or Messages to retrieve the secret.
+Only a machine administrator may retrieve it in a private local/SSH terminal or
+explicitly rotate/recover it with local `--rotate-admin-token-file` (no secret
+output, no server/restart). A lost/unsafe file locks editing; persisted
+initialization markers prevent silent regeneration on startup. See README.
