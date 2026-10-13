@@ -90,6 +90,32 @@ pub fn current_user_environment(
     }
 }
 
+/// System installation directory from Win32, independent of registry/user
+/// overrides of the SystemRoot environment variable.
+pub fn system_windows_directory() -> io::Result<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe { GetSystemWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length as usize >= buffer.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Windows installation directory length",
+        ));
+    }
+    let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Windows installation directory",
+        ));
+    }
+    Ok(path)
+}
+
 /// Metadata from an already-open, non-reparse-following handle.
 pub fn transfer_file_identity(file: &std::fs::File) -> io::Result<(u64, u64, u32, u32)> {
     use windows_sys::Win32::Storage::FileSystem::*;

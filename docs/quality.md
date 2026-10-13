@@ -286,3 +286,10 @@ baseline additions are compared without weakening the normal Windows gate.
 An exit code of 1 after 30 seconds can be the exec timeout's forced termination,
 not proof of a script or CLR error. Native Windows results, rather than Unix
 compilation or static guesses about missing variables, determine support.
+
+Native diagnosis run 38477160912 distinguished this failure: the initial
+`exit 0` probe completed, but commands needing PowerShell output/module loading
+timed out; supplying only PSModulePath restored version, presence and RNG probes
+with either NUL or a closed input pipe. The regular Windows exec gate now tests
+version/presence as well as RNG and Node; it rejects timeouts explicitly. A
+diagnostic passing does not substitute for that regression or full release gates.

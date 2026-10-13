@@ -129,7 +129,23 @@ does not load another user's profile. If the OS API fails, it falls back to the
 filtered caller baseline; this fallback still grants no Treer credentials.
 PATH retains explicitly configured absolute tool directories and appends the OS
 PATH with case-insensitive deduplication; empty and relative segments are removed.
-No workspace directory is appended implicitly. TEMP/TMP remain configurable.
+No workspace directory is appended implicitly. Explicit absolute UNC/verbatim
+tool PATH entries remain operator configuration; Treer does not audit their
+executables. An empty PATH falls back to the OS-resolved System32 directory.
+TEMP/TMP remain configurable; HOME derives from the token's USERPROFILE. OS API
+failure logs contain only an OS error code, not environment values or paths.
+
+Windows PowerShell 5.1 requires a module search path even with `-NoProfile`.
+Machine exec never inherits the caller's `PSModulePath`. An OS token block's
+candidate must resolve to the system Windows PowerShell module directory with
+no symlink/reparse indirection; other entries, including user Documents,
+temporary/workspace directories and UNC roots, are discarded. Otherwise Treer
+uses `System32/WindowsPowerShell/v1.0/Modules` under the Windows installation
+directory returned by Win32, not an inherited/registry `SystemRoot` override.
+Only that system directory is used; arbitrary extra module directories and
+PowerShell 7 module configuration are outside this behavior. Its protection
+depends on the OS protecting the Windows installation, not a Treer sandbox
+against an administrator or another process able to modify system modules.
 
 This reduces ambient environment exposure, not machine-account authority. Exec
 still runs as the machine's OS user and can read that user's accessible files,

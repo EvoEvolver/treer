@@ -105,6 +105,7 @@ pub fn machine_exec_variable_allowed(name: &str) -> bool {
                 | "NUMBER_OF_PROCESSORS"
                 | "PROCESSOR_LEVEL"
                 | "PROCESSOR_REVISION"
+                | "PSMODULEPATH"
         )
 }
 
@@ -113,7 +114,12 @@ pub fn machine_exec_environment() -> BTreeMap<OsString, OsString> {
         .filter(|(key, _)| machine_exec_variable_allowed(&key.to_string_lossy()))
         .collect();
     #[cfg(windows)]
-    return windows_exec_environment(inherited, super::windows::current_user_environment());
+    {
+        let system = super::windows::system_windows_directory();
+        let environment =
+            windows_exec_environment(inherited, super::windows::current_user_environment());
+        return add_windows_system_modules(environment, system);
+    }
     #[cfg(not(windows))]
     inherited
 }
@@ -133,12 +139,26 @@ fn windows_exec_environment(
             .collect::<BTreeMap<_, _>>()
     };
     let mut inherited = normalize(inherited);
-    let Ok(os_environment) = os_environment else {
-        // No credentials and no empty environment on API failure. Still remove
-        // empty/relative PATH entries before falling back to the legacy source.
-        let path = merge_exec_path(inherited.get(&OsString::from("PATH")), None);
-        inherited.insert("PATH".into(), path);
-        return inherited;
+    // Module search paths supplied by the invoking Agent/Controller are never
+    // configuration for privileged exec. Only an OS block candidate survives.
+    inherited.remove(&OsString::from("PSMODULEPATH"));
+    let os_environment = match os_environment {
+        Ok(environment) => environment,
+        Err(error) => {
+            // No credentials and no empty environment on API failure. Still remove
+            // empty/relative PATH entries before falling back to the legacy source.
+            let path = merge_exec_path(inherited.get(&OsString::from("PATH")), None);
+            if path.is_empty() {
+                inherited.remove(&OsString::from("PATH"));
+            } else {
+                inherited.insert("PATH".into(), path);
+            }
+            tracing::warn!(
+                os_error = error.raw_os_error(),
+                "Windows OS environment unavailable; using filtered fallback"
+            );
+            return inherited;
+        }
     };
     let os_environment = normalize(os_environment);
     let path = merge_exec_path(
@@ -170,8 +190,102 @@ fn windows_exec_environment(
         .collect();
     inherited.extend(os_environment);
     inherited.extend(temporary);
-    inherited.insert("PATH".into(), path);
+    if let Some(profile) = inherited.get(&OsString::from("USERPROFILE")).cloned() {
+        inherited.insert("HOME".into(), profile);
+    }
+    if path.is_empty() {
+        inherited.remove(&OsString::from("PATH"));
+    } else {
+        inherited.insert("PATH".into(), path);
+    }
     inherited
+}
+
+#[cfg(any(windows, test))]
+fn add_windows_system_modules(
+    mut environment: BTreeMap<OsString, OsString>,
+    system: std::io::Result<std::path::PathBuf>,
+) -> BTreeMap<OsString, OsString> {
+    let candidate = environment.remove(&OsString::from("PSMODULEPATH"));
+    let system = match system {
+        Ok(system) => system,
+        Err(error) => {
+            tracing::warn!(
+                os_error = error.raw_os_error(),
+                "Windows installation directory unavailable; module search path omitted"
+            );
+            return environment;
+        }
+    };
+    let modules = system
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("Modules");
+    // No user Documents/temporary/workspace path, UNC, relative path, or
+    // reparse indirection can enter PowerShell's default module search roots.
+    let trusted = canonical_module_directory(&modules);
+    let selected = candidate.as_ref().filter(|value| value.len() <= 32_767).and_then(|value| {
+        std::env::split_paths(value).take(16).find(|path| {
+            #[cfg(windows)]
+            if !matches!(path.components().next(), Some(std::path::Component::Prefix(prefix)) if matches!(prefix.kind(), std::path::Prefix::Disk(_))) { return false; }
+            path.is_absolute()
+                && trusted.as_ref().is_some_and(|trusted| {
+                    canonical_module_directory(path).as_ref() == Some(trusted)
+                })
+        }).map(|_| modules.clone())
+    });
+    if trusted.is_some() {
+        environment.insert(
+            "PSMODULEPATH".into(),
+            selected.unwrap_or(modules).into_os_string(),
+        );
+    } else {
+        tracing::warn!("Windows system module directory unavailable; module search path omitted");
+    }
+    environment.insert("SYSTEMROOT".into(), system.clone().into_os_string());
+    environment.insert("WINDIR".into(), system.clone().into_os_string());
+    // An OS-resolved fallback ensures Windows utilities remain discoverable
+    // even when the filtered caller and registry block have no useful PATH.
+    if environment
+        .get(&OsString::from("PATH"))
+        .is_none_or(|value| value.is_empty())
+    {
+        environment.insert("PATH".into(), system.join("System32").into_os_string());
+    }
+    environment
+}
+
+#[cfg(any(windows, test))]
+fn canonical_module_directory(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut prefix = std::path::PathBuf::new();
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return None;
+        }
+        prefix.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&prefix).ok()?;
+        if metadata.file_type().is_symlink() {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return None;
+            }
+        }
+    }
+    path.is_dir()
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten()
 }
 
 #[cfg(any(windows, test))]
@@ -306,6 +420,10 @@ mod tests {
             clean.get(&OsString::from("USERPROFILE")),
             Some(&OsString::from("synthetic-service-profile"))
         );
+        assert_eq!(
+            clean.get(&OsString::from("HOME")),
+            Some(&OsString::from("synthetic-service-profile"))
+        );
         assert!(
             !clean.contains_key(&OsString::from("APPDATA")),
             "an unloaded profile must not borrow caller appdata"
@@ -324,6 +442,76 @@ mod tests {
         assert!(!fallback.contains_key(&OsString::from("NODE_OPTIONS")));
         assert!(std::env::split_paths(&fallback[&OsString::from("PATH")])
             .all(|path| path.is_absolute()));
+    }
+
+    #[test]
+    fn windows_modules_drop_caller_and_user_paths_and_use_only_os_system_directory() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("trr-module-test-{}", std::process::id()));
+        let system = root.join("synthetic-system");
+        let modules = system.join("System32/WindowsPowerShell/v1.0/Modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        let inherited = BTreeMap::from([
+            (
+                "PSModulePath".into(),
+                root.join("synthetic-user-writable-modules")
+                    .into_os_string(),
+            ),
+            (
+                "SystemRoot".into(),
+                root.join("synthetic-false-systemroot").into_os_string(),
+            ),
+        ]);
+        let baseline = windows_exec_environment(inherited, Ok(BTreeMap::new()));
+        assert!(!baseline.contains_key(&OsString::from("PSMODULEPATH")));
+        let clean = add_windows_system_modules(baseline, Ok(system.clone()));
+        assert_eq!(
+            clean[&OsString::from("PSMODULEPATH")],
+            modules.clone().into_os_string()
+        );
+        assert_eq!(
+            clean[&OsString::from("PATH")],
+            system.join("System32").into_os_string()
+        );
+        assert_eq!(
+            clean[&OsString::from("SYSTEMROOT")],
+            system.clone().into_os_string()
+        );
+        let candidate = std::env::join_paths([root.join("user-modules"), modules.clone()]).unwrap();
+        let os = BTreeMap::from([("PSModulePath".into(), candidate)]);
+        let clean = add_windows_system_modules(
+            windows_exec_environment(BTreeMap::new(), Ok(os)),
+            Ok(system.clone()),
+        );
+        assert_eq!(
+            clean[&OsString::from("PSMODULEPATH")],
+            modules.clone().into_os_string()
+        );
+        let fallback = add_windows_system_modules(
+            windows_exec_environment(
+                BTreeMap::from([("PSModulePath".into(), "synthetic-caller-modules".into())]),
+                Err(std::io::Error::from_raw_os_error(5)),
+            ),
+            Ok(system),
+        );
+        assert_eq!(
+            fallback[&OsString::from("PSMODULEPATH")],
+            modules.into_os_string()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windows_module_validation_rejects_reparse_style_indirection() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("trr-module-link-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("user-writable")).unwrap();
+        std::os::unix::fs::symlink(root.join("user-writable"), root.join("alias")).unwrap();
+        assert!(canonical_module_directory(&root.join("alias")).is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -360,6 +548,7 @@ mod tests {
             .env("LOCALAPPDATA", "synthetic-caller-profile")
             .env("TREER_X", "synthetic-not-a-real-credential")
             .env("NODE_OPTIONS", "synthetic-not-a-real-hook")
+            .env("PSModulePath", "synthetic-caller-module-path")
             .output()
             .unwrap();
         assert!(
@@ -389,6 +578,18 @@ mod tests {
         assert!(environment
             .keys()
             .all(|key| machine_exec_variable_allowed(&key.to_string_lossy())));
+        let modules = environment
+            .get(&OsString::from("PSMODULEPATH"))
+            .expect("missing system PowerShell modules");
+        assert!(modules != &OsString::from("synthetic-caller-module-path"));
+        let expected = super::super::windows::system_windows_directory()
+            .unwrap()
+            .join("System32/WindowsPowerShell/v1.0/Modules");
+        assert!(
+            canonical_module_directory(std::path::Path::new(modules))
+                == canonical_module_directory(&expected),
+            "unexpected module search root"
+        );
     }
 
     #[test]
@@ -408,6 +609,7 @@ mod tests {
             "COMPUTERNAME",
             "ComSpec",
             "PATHEXT",
+            "PSModulePath",
             "PATH",
             "HOME",
             "LC_MESSAGES",

@@ -178,6 +178,8 @@ async fn windows_machine_exec_node_and_powershell_keep_os_baseline() {
     let (runtime, host) = runtime_for_exec(&root).await;
     for (command,args,expected) in [
         ("node",vec!["-e","const assert=require('node:assert'); for(const k of ['SystemRoot','windir','USERPROFILE','APPDATA','LOCALAPPDATA']) assert.ok(process.env[k],k); assert.ok(!Object.keys(process.env).some(k=>k.toUpperCase().startsWith('TREER_'))); console.log(1+1)"],"2"),
+        ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$PSVersionTable.PSVersion) { exit 2 }; Write-Output 'powershell-version-ok'; exit 0"],"powershell-version-ok"),
+        ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE -or !$env:PSModulePath) { exit 2 }; Write-Output 'powershell-baseline-ok'; exit 0"],"powershell-baseline-ok"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE) { exit 2 }; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); Write-Output 'powershell-ok'"],"powershell-ok"),
         ("tasklist.exe",vec!["/FI","PID eq 0","/NH"],""),
     ] {
