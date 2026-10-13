@@ -341,8 +341,34 @@ pub(super) async fn create_app_deployment(
         config.base_domain_if_configured()
     };
     let actor = app_mutation_actor(session.as_deref(), subject.as_ref());
+    if request.folder_id.is_some() {
+        authorize_control(
+            &policy,
+            &workspace_id,
+            subject.as_ref(),
+            crate::policy::ACTION_AGENT_TREE_MANAGE,
+            PolicyResource::new(crate::policy::RESOURCE_AGENT_TREE, &workspace_id),
+        )
+        .await?;
+    }
+    state
+        .send_command(
+            &workspace_id,
+            &server_id,
+            AgentCommand::CreationPlacementCheck {},
+        )
+        .await?;
     let mut app = auth
-        .create_app_deployment(&workspace_id, actor, server_id, request)
+        .create_app_deployment_for_caller(
+            &workspace_id,
+            actor,
+            server_id,
+            request,
+            match subject.as_ref() {
+                Some(PolicySubject::Agent { agent_id, .. }) => Some(agent_id.as_str()),
+                _ => None,
+            },
+        )
         .await?;
     if let Some(base_domain) = ingress_base_domain {
         if let Err(error) = auth

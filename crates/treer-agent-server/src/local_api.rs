@@ -236,7 +236,39 @@ pub struct LocalApiState {
     runtime: ControllerRuntime,
 }
 
+fn require_proxy_creation_placement(health: &Value) -> Result<(), LocalApiError> {
+    if !health["capabilities"].as_array().is_some_and(|caps| {
+        caps.iter()
+            .any(|cap| cap == treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT)
+    }) {
+        return Err(LocalApiError { status: StatusCode::CONFLICT,
+            error: ProtocolError::new("creation_placement_unsupported", "Proxy does not advertise workload.create-placement.v1; upgrade it before creation (no request was dispatched)") });
+    }
+    Ok(())
+}
+
 impl LocalApiState {
+    async fn require_creation_placement(&self) -> Result<(), LocalApiError> {
+        let url = self
+            .proxy_http
+            .join("/api/health")
+            .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
+        let response = self
+            .client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
+        let health: Value = response
+            .error_for_status()
+            .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?
+            .json()
+            .await
+            .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
+        require_proxy_creation_placement(&health)
+    }
+
     pub fn new(
         proxy_http: Url,
         workspace_id: String,

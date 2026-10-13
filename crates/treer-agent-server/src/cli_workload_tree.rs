@@ -136,19 +136,17 @@ pub(super) async fn create_in_folder(
     endpoint: &str,
     request: Value,
 ) -> anyhow::Result<Value> {
-    let destination = if requested.is_some() || client.source_agent_id.is_some() {
+    let destination = if requested.is_some() {
         let tree: WorkloadTree = client.request(Method::GET, TREE, None).await?;
-        resolve_folder(
-            &tree,
-            requested.unwrap_or("."),
-            current_folder(&tree, client),
-        )?
+        resolve_folder(&tree, requested.unwrap(), current_folder(&tree, client))?
     } else {
         None
     };
     let mut request = request;
-    if let Some(folder) = destination {
-        request["folder_id"] = json!(folder);
+    if requested.is_some() {
+        request["folder_id"] = json!(destination
+            .as_deref()
+            .unwrap_or(treer_protocol::WORKLOAD_CREATE_ROOT));
     }
     let created = client.value(Method::POST, endpoint, Some(request)).await?;
     Ok(created)
@@ -748,7 +746,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creation_inherits_tree_folder_or_resolves_explicit_destination_before_creation() {
+    async fn creation_leaves_inheritance_to_proxy_and_resolves_explicit_destination() {
         let tree = json!({"folders":[
             {"folder_id":"research","name":"research","parent_id":null},
             {"folder_id":"experiments","name":"experiments","parent_id":"research"},
@@ -779,15 +777,15 @@ mod tests {
             tree["placements"][0]["folder_id"] = json!(caller_folder);
             let invalid = requested == Some("missing");
             let mut requests = Vec::new();
-            if managed || requested.is_some() {
+            if requested.is_some() {
                 requests.push((Method::GET, "/api/workload-tree".into(), None, tree.clone()));
             }
             if !invalid {
                 requests.push((
                     Method::POST,
                     "/api/agents".into(),
-                    Some(if let Some(folder) = destination {
-                        json!({"name":"child","folder_id":folder})
+                    Some(if requested.is_some() {
+                        json!({"name":"child","folder_id":destination.unwrap_or(treer_protocol::WORKLOAD_CREATE_ROOT)})
                     } else {
                         json!({"name":"child"})
                     }),
@@ -840,31 +838,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_launch_reserves_inherited_folder_in_creation_request() {
-        let expected = Arc::new(Mutex::new(std::collections::VecDeque::from([
-            (
-                Method::GET,
-                "/api/workload-tree".into(),
-                None,
-                json!({"folders":[{"folder_id":"research","name":"research","parent_id":null}],"placements":[{"agent_id":"agent-caller","folder_id":"research","position":0}]}),
+    async fn profile_launch_leaves_inheritance_to_proxy() {
+        let expected = Arc::new(Mutex::new(std::collections::VecDeque::from([(
+            Method::POST,
+            "/api/launch-profiles/reviewer/launch".into(),
+            Some(
+                serde_json::to_value(LaunchAgentProfileRequest {
+                    folder_id: None,
+                    server_id: None,
+                    agent_name: None,
+                    cwd: None,
+                    cols: 120,
+                    rows: 36,
+                })
+                .unwrap(),
             ),
-            (
-                Method::POST,
-                "/api/launch-profiles/reviewer/launch".into(),
-                Some(
-                    serde_json::to_value(LaunchAgentProfileRequest {
-                        folder_id: Some("research".into()),
-                        server_id: None,
-                        agent_name: None,
-                        cwd: None,
-                        cols: 120,
-                        rows: 36,
-                    })
-                    .unwrap(),
-                ),
-                json!({"agent_id":"new-agent"}),
-            ),
-        ])));
+            json!({"agent_id":"new-agent"}),
+        )])));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn({

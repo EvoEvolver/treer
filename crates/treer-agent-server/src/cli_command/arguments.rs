@@ -156,6 +156,11 @@ pub(super) enum AppCommand {
         machine: Option<String>,
         #[arg(long)]
         name: String,
+        #[arg(
+            long,
+            help = "Destination folder; omit to inherit your folder, or use / for root"
+        )]
+        folder: Option<String>,
         #[arg(long, default_value = ".")]
         cwd: String,
         #[arg(long)]

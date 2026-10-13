@@ -739,6 +739,9 @@ impl ProxyClient {
                 .await
                 .map(|agent| CommandResult::success(command_id.clone(), agent))
                 .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
+            AgentCommand::CreationPlacementCheck {} => {
+                CommandResult::success(command_id.clone(), serde_json::json!({"supported":true}))
+            }
             AgentCommand::Create {
                 agent_id,
                 workload_credential,

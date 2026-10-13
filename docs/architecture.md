@@ -335,11 +335,30 @@ in that workspace. Deleting a folder promotes its children to its parent (or
 the workspace root); placement order is preserved. Organizing the tree does
 not change filesystem paths, machine ownership, process identity, or Policy.
 The Controller parses `treer agent mkdir/ls/mv/rmdir` and resolves tree paths.
-CLI Agent creation and profile launch resolve `--folder` before creation,
-defaulting to the calling Agent's placement (operators default to root).
-The Proxy reserves the Agent's name and placement under the workspace Tree
-lock before dispatching process creation, so concurrent creates cannot claim
-the same sibling name. Placement does not change the process `cwd`.
+CLI Agent creation, profile launch and `treer app create` resolve explicit
+`--folder` paths before creation. Omission is left to the Proxy: under the
+workspace Tree transaction lock it reads the authenticated Agent/App caller's
+current placement and inherits its direct folder; human/operator callers default
+to root. Creation wire `folder_id: "/"` selects root explicitly, while a normal
+folder ID selects that folder. Missing caller placement returns `caller_unplaced`
+rather than silently selecting root. Environment/cwd and self-reported paths
+are not authority. Explicit destinations retain `agent.tree.manage` checks.
+New Agent/App identities, names and placements are reserved in the same
+transaction before process dispatch; sibling uniqueness and inheritance are
+shared by all Proxies through PostgreSQL. App identity reservation stores only
+an undisclosed random credential hash; activation uses the existing missing-local-
+credential rotation path. Existing nodes are not backfilled or relocated.
+Placement does not change the process `cwd`.
+
+`workload.create-placement.v1` is advertised by Proxy health and Controllers.
+The thin CLI gates creation/profile launch before forwarding argv. Controller
+creation routes check Proxy health and use new `/agents/placed`, `/apps/placed`
+and `/launch-profiles/{id}/launch-placed` forwarding endpoints, so an old Proxy
+cannot silently ignore destination fields, even during a mixed-Proxy rollout.
+Proxy creation performs a side-effect-free `creation_placement_check` command
+before reserving identity; older Controllers return a capability error without
+disconnecting. Legacy client payloads remain accepted by upgraded endpoints
+with the new omission/inheritance default.
 The thin CLI remains argv/I/O transport. New or renamed folders reject `/`,
 `.` and `..` names and duplicate sibling names under the workspace lock.
 Legacy ambiguous names remain addressable by folder ID. CLI `rmdir` sends

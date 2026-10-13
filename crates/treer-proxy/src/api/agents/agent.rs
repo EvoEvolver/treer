@@ -355,14 +355,25 @@ pub(crate) async fn execute_agent_create(
         .await?;
     }
     let agent_id = format!("ag_{}", Uuid::new_v4().simple());
+    state
+        .send_command(
+            workspace_id,
+            &server_id,
+            AgentCommand::CreationPlacementCheck {},
+        )
+        .await?;
     let agent_name = request.name.clone();
     let workload_credential = auth
-        .create_named_agent_credential(
+        .create_named_agent_credential_for_caller(
             workspace_id,
             &server_id,
             &agent_id,
             &request.name,
             request.folder_id.as_deref(),
+            match subject {
+                Some(PolicySubject::Agent { agent_id, .. }) => Some(agent_id.as_str()),
+                _ => None,
+            },
         )
         .await?;
     let mut data = state

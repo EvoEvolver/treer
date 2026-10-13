@@ -331,6 +331,7 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
         .await?;
     ensure_path_target_capability(&health)?;
     ensure_prompt_delivery_capability(&health, &connection.argv)?;
+    ensure_creation_placement_capability(&health, &connection.argv)?;
     let mut url = connection.url.join("/api/cli/session")?;
     let scheme = match url.scheme() {
         "http" => "ws",
@@ -464,6 +465,28 @@ fn ensure_prompt_delivery_capability(
     Ok(())
 }
 
+fn ensure_creation_placement_capability(
+    health: &serde_json::Value,
+    argv: &[String],
+) -> anyhow::Result<()> {
+    let creating = matches!(argv.first().map(String::as_str), Some("agent" | "app"))
+        && (argv
+            .get(1)
+            .is_some_and(|s| matches!(s.as_str(), "create" | "new"))
+            || argv.get(1).is_some_and(|s| s == "admin")
+                && argv.get(2).is_some_and(|s| s == "create")
+            || argv.get(1).is_some_and(|s| s == "profile")
+                && argv.get(2).is_some_and(|s| s == "launch")
+            || argv.get(1).is_some_and(|s| s == "admin")
+                && argv.get(2).is_some_and(|s| s == "profile")
+                && argv.get(3).is_some_and(|s| s == "launch"));
+    if creating {
+        anyhow::ensure!(health["cli_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap == treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT)),
+            "creation_placement_unsupported: Controller does not advertise workload.create-placement.v1; upgrade before creation (no command was dispatched)");
+    }
+    Ok(())
+}
+
 fn ensure_path_target_capability(health: &serde_json::Value) -> anyhow::Result<()> {
     anyhow::ensure!(health["cli_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap == treer_protocol::CAPABILITY_AGENT_PATH_TARGETS)),
         "unsupported_command: Controller does not advertise agent.path-targets.v1; upgrade the Controller before using this CLI (no command was dispatched)");
@@ -472,6 +495,29 @@ fn ensure_path_target_capability(health: &serde_json::Value) -> anyhow::Result<(
 
 #[cfg(test)]
 mod path_capability_tests {
+    #[test]
+    fn old_controller_cannot_silently_place_new_workloads_at_root() {
+        for args in [
+            vec!["agent", "create"],
+            vec!["agent", "admin", "create"],
+            vec!["app", "create"],
+            vec!["agent", "profile", "launch"],
+        ] {
+            let argv = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(
+                super::ensure_creation_placement_capability(&serde_json::json!({}), &argv)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("creation_placement_unsupported")
+            );
+            assert!(super::ensure_creation_placement_capability(&serde_json::json!({"cli_capabilities":[treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT]}), &argv).is_ok());
+        }
+        assert!(super::ensure_creation_placement_capability(
+            &serde_json::json!({}),
+            &["app".into(), "list".into()]
+        )
+        .is_ok());
+    }
     #[test]
     fn old_interpreter_cannot_silently_steer_a_default_queue_prompt() {
         let old = serde_json::json!({"cli_capabilities":["agent.path-targets.v1"]});

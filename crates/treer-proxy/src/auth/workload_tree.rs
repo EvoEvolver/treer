@@ -30,6 +30,7 @@ impl AuthStore {
         Ok(tx)
     }
 
+    #[cfg(test)]
     pub async fn create_named_agent_credential(
         &self,
         workspace: &str,
@@ -38,9 +39,25 @@ impl AuthStore {
         name: &str,
         folder: Option<&str>,
     ) -> Result<String, AuthFailure> {
+        self.create_named_agent_credential_for_caller(workspace, server, agent, name, folder, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_named_agent_credential_for_caller(
+        &self,
+        workspace: &str,
+        server: &str,
+        agent: &str,
+        name: &str,
+        folder: Option<&str>,
+        caller: Option<&str>,
+    ) -> Result<String, AuthFailure> {
         treer_protocol::validate_workload_label(name)
             .map_err(|e| AuthFailure::bad_request("invalid_agent_name", &e.message))?;
         let mut tx = self.lock_workload_tree(workspace).await?;
+        let destination = creation_folder(&mut tx, workspace, folder, caller).await?;
+        let folder = destination.as_deref();
         validate_parent(&mut tx, workspace, folder, None).await?;
         validate_workload_name(&mut tx, workspace, folder, name, Some(agent)).await?;
         let credential = format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -247,6 +264,28 @@ impl AuthStore {
     }
 }
 
+/// Called under the workspace mutation lock: inheritance and placement are one
+/// transaction even when callers or folders move on another Proxy replica.
+pub(super) async fn creation_folder(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: &str,
+    requested: Option<&str>,
+    caller: Option<&str>,
+) -> Result<Option<String>, AuthFailure> {
+    let destination = match requested {
+        Some(treer_protocol::WORKLOAD_CREATE_ROOT) => None,
+        Some(folder) => Some(folder.to_owned()),
+        None => match caller {
+            None => None,
+            Some(caller) => sqlx::query_scalar::<_, Option<String>>("SELECT p.folder_id FROM workload_placements p JOIN agent_credentials a ON a.workspace_id=p.workspace_id AND a.agent_id=p.agent_id WHERE p.workspace_id=$1 AND p.agent_id=$2 AND a.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM deleted_agents d WHERE d.workspace_id=p.workspace_id AND d.agent_id=p.agent_id)")
+                .bind(workspace).bind(caller).fetch_optional(&mut **tx).await.map_err(AuthFailure::database)?
+                .ok_or_else(|| AuthFailure::bad_request("caller_unplaced", "caller has no active placement; request an explicitly authorized folder or ask the owner to place it"))?,
+        },
+    };
+    validate_parent(tx, workspace, destination.as_deref(), None).await?;
+    Ok(destination)
+}
+
 fn validate_folder_name(name: &str) -> Result<String, AuthFailure> {
     let name = validate_resource_name(name, "folder")?;
     if name.contains('/') || matches!(name.as_str(), "." | "..") {
@@ -324,6 +363,256 @@ async fn normalize(tx: &mut Transaction<'_, Postgres>, workspace: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_request(name: &str, folder: Option<&str>) -> treer_protocol::CreateAppDeploymentRequest {
+        treer_protocol::CreateAppDeploymentRequest {
+            folder_id: folder.map(str::to_owned),
+            server_id: None,
+            name: name.into(),
+            command: "/bin/true".into(),
+            args: vec![],
+            cwd: ".".into(),
+            port: 8888,
+            hostname: String::new(),
+            public: false,
+        }
+    }
+
+    async fn stored_folder(store: &AuthStore, id: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT folder_id FROM workload_placements WHERE workspace_id='one' AND agent_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&store.pool())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn trusted_creation_inherits_agent_and_app_folder_in_the_creation_transaction() {
+        let store = setup().await;
+        let folder = store
+            .create_workload_folder(
+                "one",
+                CreateWorkloadFolderRequest {
+                    name: "team".into(),
+                    parent_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .create_named_agent_credential(
+                "one",
+                "machine",
+                "caller",
+                "caller",
+                Some(&folder.folder_id),
+            )
+            .await
+            .unwrap();
+        store
+            .create_named_agent_credential_for_caller(
+                "one",
+                "machine",
+                "child",
+                "child",
+                None,
+                Some("caller"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_folder(&store, "child").await,
+            Some(folder.folder_id.clone())
+        );
+        let app = store
+            .create_app_deployment_for_caller(
+                "one",
+                "caller",
+                "machine".into(),
+                app_request("mail", None),
+                Some("caller"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_folder(&store, &app.app_id).await,
+            Some(folder.folder_id.clone())
+        );
+        // Explicit root is distinct from omission; App callers inherit as well.
+        store
+            .create_named_agent_credential("one", "machine", "root", "root", None)
+            .await
+            .unwrap();
+        let root_app = store
+            .create_app_deployment_for_caller(
+                "one",
+                "root",
+                "machine".into(),
+                app_request("root-app", None),
+                Some("root"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored_folder(&store, &root_app.app_id).await, None);
+        let explicit = store
+            .create_app_deployment_for_caller(
+                "one",
+                "caller",
+                "machine".into(),
+                app_request("explicit-root", Some("/")),
+                Some("caller"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored_folder(&store, &explicit.app_id).await, None);
+        store
+            .rotate_agent_credential("one", "machine", &app.app_id)
+            .await
+            .unwrap();
+        let child_app = store
+            .create_app_deployment_for_caller(
+                "one",
+                "app-caller",
+                "machine".into(),
+                app_request("child-app", None),
+                Some(&app.app_id),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_folder(&store, &child_app.app_id).await,
+            Some(folder.folder_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_or_cross_workspace_caller_cannot_silently_create_at_root() {
+        let store = setup().await;
+        store
+            .create_agent_credential("one", "machine", "unplaced")
+            .await
+            .unwrap();
+        store
+            .set_workload_placement(
+                "two",
+                "foreign",
+                SetWorkloadPlacementRequest {
+                    folder_id: None,
+                    position: 0,
+                },
+            )
+            .await
+            .unwrap();
+        for caller in ["unplaced", "foreign"] {
+            let error = store
+                .create_app_deployment_for_caller(
+                    "one",
+                    "caller",
+                    "machine".into(),
+                    app_request("unexpected", None),
+                    Some(caller),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), "caller_unplaced");
+            let error = store
+                .create_named_agent_credential_for_caller(
+                    "one",
+                    "machine",
+                    "unexpected",
+                    "unexpected",
+                    None,
+                    Some(caller),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), "caller_unplaced");
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workload_placements WHERE workspace_id='one'")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+        let human = store
+            .create_app_deployment("one", "owner", "machine".into(), app_request("human", None))
+            .await
+            .unwrap();
+        assert_eq!(stored_folder(&store, &human.app_id).await, None);
+        let absent: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS(SELECT 1 FROM workload_placements WHERE agent_id='unplaced')",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert!(absent, "existing unplaced identities must remain untouched");
+        store
+            .delete_app_deployment("one", &human.app_id)
+            .await
+            .unwrap();
+        let removed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM workload_placements WHERE agent_id=$1) AND NOT EXISTS(SELECT 1 FROM agent_credentials WHERE agent_id=$1 AND revoked_at IS NULL)").bind(&human.app_id).fetch_one(&store.pool()).await.unwrap();
+        assert!(
+            removed,
+            "deleting an unstarted App removes its placement and revokes its reserved identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_proxy_stores_share_inherited_placement_and_name_reservations() {
+        let store = setup().await;
+        let mut other = store.clone();
+        other.virtual_hosts_update = Arc::default();
+        let folder = store
+            .create_workload_folder(
+                "one",
+                CreateWorkloadFolderRequest {
+                    name: "team".into(),
+                    parent_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .create_named_agent_credential(
+                "one",
+                "machine",
+                "caller",
+                "caller",
+                Some(&folder.folder_id),
+            )
+            .await
+            .unwrap();
+        let (agent, app) = tokio::join!(
+            store.create_named_agent_credential_for_caller(
+                "one",
+                "machine",
+                "child",
+                "shared",
+                None,
+                Some("caller")
+            ),
+            other.create_app_deployment_for_caller(
+                "one",
+                "caller",
+                "machine".into(),
+                app_request("shared", None),
+                Some("caller")
+            )
+        );
+        assert_ne!(
+            agent.is_ok(),
+            app.is_ok(),
+            "exactly one same-folder name may commit across replicas"
+        );
+        let id = if let Ok(app) = app {
+            app.app_id
+        } else {
+            "child".into()
+        };
+        assert_eq!(stored_folder(&store, &id).await, Some(folder.folder_id));
+    }
 
     async fn setup() -> AuthStore {
         let store = AuthStore::for_test("password").await;
@@ -444,6 +733,7 @@ mod tests {
         let store = setup().await;
         let folder = create(&store, "one", "team", None).await;
         let request = || treer_protocol::CreateAppDeploymentRequest {
+            folder_id: None,
             server_id: Some("machine".into()),
             name: "docs".into(),
             command: "serve".into(),
@@ -466,7 +756,7 @@ mod tests {
             "agent_name_conflict"
         );
         store
-            .create_agent_credential("one", "machine", &app.app_id)
+            .rotate_agent_credential("one", "machine", &app.app_id)
             .await
             .unwrap();
         store
@@ -494,7 +784,7 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert_ne!(names[0], names[1]);
         store
-            .create_agent_credential("one", "machine", &second.app_id)
+            .rotate_agent_credential("one", "machine", &second.app_id)
             .await
             .unwrap();
         assert_eq!(

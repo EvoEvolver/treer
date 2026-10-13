@@ -365,6 +365,7 @@ pub(super) async fn install_default_policy_app(
             HeaderMap::new(),
             Path(workspace_id.clone()),
             Json(CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some(server_id),
                 name: DEFAULT_POLICY_APP_NAME.to_string(),
                 command: DEFAULT_POLICY_APP_COMMAND.to_string(),

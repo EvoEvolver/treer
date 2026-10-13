@@ -19,6 +19,7 @@ pub(super) async fn run_app_command(
         AppCommand::Create {
             machine,
             name,
+            folder,
             cwd,
             port,
             public,
@@ -26,22 +27,23 @@ pub(super) async fn run_app_command(
             args,
         } => {
             let server_id = resolve_service_machine(client, machine.as_deref()).await?;
-            client
-                .value(
-                    Method::POST,
-                    "api/apps",
-                    Some(serde_json::to_value(CreateAppDeploymentRequest {
-                        server_id: Some(server_id),
-                        name,
-                        command: executable,
-                        args,
-                        cwd,
-                        port,
-                        hostname: String::new(),
-                        public,
-                    })?),
-                )
-                .await
+            workload_tree::create_in_folder(
+                client,
+                folder.as_deref(),
+                "api/apps",
+                serde_json::to_value(CreateAppDeploymentRequest {
+                    folder_id: None,
+                    server_id: Some(server_id),
+                    name,
+                    command: executable,
+                    args,
+                    cwd,
+                    port,
+                    hostname: String::new(),
+                    public,
+                })?,
+            )
+            .await
         }
         AppCommand::Start { target } => app_action(client, &target, "start").await,
         AppCommand::Stop { target } => app_action(client, &target, "stop").await,

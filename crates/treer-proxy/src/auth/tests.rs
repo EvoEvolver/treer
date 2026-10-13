@@ -496,6 +496,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
             "owner",
             "machine-a".to_string(),
             CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some("machine-a".to_string()),
                 name: "Soul".to_string(),
                 command: "python3".to_string(),
@@ -551,6 +552,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
             "owner",
             "machine-a".to_string(),
             CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some("machine-a".to_string()),
                 name: "Public Docs".to_string(),
                 command: "python3".to_string(),

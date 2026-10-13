@@ -154,6 +154,7 @@ fn managed_app_public_access_is_explicit_and_backward_compatible() {
     }))
     .expect("deserialize legacy App request");
     assert!(!legacy.public);
+    assert!(legacy.folder_id.is_none());
     assert_eq!(
         serde_json::to_value(&legacy)
             .expect("serialize private App request")
@@ -170,6 +171,32 @@ fn managed_app_public_access_is_explicit_and_backward_compatible() {
     }))
     .expect("deserialize public App request");
     assert!(public.public);
+}
+
+#[test]
+fn creation_placement_round_trips_inherited_folder_and_explicit_root() {
+    for folder in [None, Some("/"), Some("folder_team")] {
+        let value =
+            serde_json::json!({"name":"mail","command":"/bin/true","port":8888,"folder_id":folder});
+        let request: CreateAppDeploymentRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.folder_id.as_deref(), folder);
+        assert_eq!(
+            serde_json::from_value::<CreateAppDeploymentRequest>(
+                serde_json::to_value(&request).unwrap()
+            )
+            .unwrap(),
+            request
+        );
+    }
+    let check = AgentCommand::CreationPlacementCheck {};
+    assert_eq!(
+        check.required_capability(),
+        Some(CAPABILITY_WORKLOAD_CREATE_PLACEMENT)
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentCommand>(serde_json::to_value(&check).unwrap()).unwrap(),
+        check
+    );
 }
 
 #[test]

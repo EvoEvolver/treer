@@ -68,6 +68,7 @@ mod unix {
                 };
                 traffic.lock().unwrap().push(encoded);
                 let value = match envelope.command {
+                    AgentCommand::CreationPlacementCheck {} => json!({"supported":true}),
                     AgentCommand::UploadBegin {
                         upload_id,
                         directory,

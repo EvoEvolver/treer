@@ -332,6 +332,7 @@ mod tests {
                 "owner",
                 "machine".into(),
                 CreateAppDeploymentRequest {
+                    folder_id: None,
                     server_id: Some("machine".into()),
                     name: "Policy".into(),
                     command: "python3".into(),
@@ -345,7 +346,7 @@ mod tests {
             .await
             .unwrap();
         let credential = auth
-            .create_agent_credential("diagnostic", "machine", &app.app_id)
+            .rotate_agent_credential("diagnostic", "machine", &app.app_id)
             .await
             .unwrap();
         PolicyProviderStore::new(auth.pool())

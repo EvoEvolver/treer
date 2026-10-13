@@ -14,6 +14,7 @@ async fn invalid_provider_contract_never_falls_back_to_stale_or_fail_open() {
             "owner",
             "machine".into(),
             treer_protocol::CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some("machine".into()),
                 name: "Policy".into(),
                 command: "python3".into(),

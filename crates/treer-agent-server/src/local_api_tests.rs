@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn old_proxy_cannot_silently_ignore_creation_placement() {
+    for health in [json!({"status":"ok"}), json!({"capabilities":["unknown"]})] {
+        assert_eq!(
+            require_proxy_creation_placement(&health)
+                .unwrap_err()
+                .error
+                .code,
+            "creation_placement_unsupported"
+        );
+    }
+    assert!(require_proxy_creation_placement(
+        &json!({"capabilities":[treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT]})
+    )
+    .is_ok());
+}
+
+#[test]
 fn source_agent_identity_is_required_and_validated() {
     let mut headers = HeaderMap::new();
     assert!(source_agent_id(&headers).is_err());

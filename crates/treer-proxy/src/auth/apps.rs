@@ -303,6 +303,7 @@ impl AuthStore {
         row.map(app_deployment_from_row).transpose()
     }
 
+    #[cfg(test)]
     pub async fn create_app_deployment(
         &self,
         workspace_id: &str,
@@ -310,13 +311,38 @@ impl AuthStore {
         server_id: String,
         request: CreateAppDeploymentRequest,
     ) -> Result<AppDeployment, AuthFailure> {
+        self.create_app_deployment_for_caller(workspace_id, actor, server_id, request, None)
+            .await
+    }
+
+    pub async fn create_app_deployment_for_caller(
+        &self,
+        workspace_id: &str,
+        actor: &str,
+        server_id: String,
+        request: CreateAppDeploymentRequest,
+        caller: Option<&str>,
+    ) -> Result<AppDeployment, AuthFailure> {
         let update_guard = self.virtual_hosts_update.lock().await;
         let name = validate_resource_name(&request.name, "App")?;
         treer_protocol::validate_workload_label(&name)
             .map_err(|e| AuthFailure::bad_request("invalid_agent_name", &e.message))?;
         let mut transaction = self.lock_workload_tree(workspace_id).await?;
-        workload_tree::validate_workload_name(&mut transaction, workspace_id, None, &name, None)
-            .await?;
+        let folder = workload_tree::creation_folder(
+            &mut transaction,
+            workspace_id,
+            request.folder_id.as_deref(),
+            caller,
+        )
+        .await?;
+        workload_tree::validate_workload_name(
+            &mut transaction,
+            workspace_id,
+            folder.as_deref(),
+            &name,
+            None,
+        )
+        .await?;
         let command = validate_launch_profile_command(&request.command)?;
         let args = validate_launch_profile_args(request.args)?;
         let cwd = validate_launch_profile_cwd(&request.cwd)?;
@@ -447,6 +473,19 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        // Reserve the workload identity with an undisclosed random credential
+        // hash. Lifecycle activation issues its credential separately; no secret
+        // leaves this transaction through the App record or audit.
+        let reserved_hash = fast_secret_hash(&format!(
+            "{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        ));
+        sqlx::query("INSERT INTO agent_credentials(agent_id,workspace_id,server_id,secret_hash,created_at) VALUES($1,$2,$3,$4,$5)")
+            .bind(&deployment.app_id).bind(workspace_id).bind(&deployment.server_id).bind(reserved_hash).bind(now.to_rfc3339())
+            .execute(&mut *transaction).await.map_err(AuthFailure::database)?;
+        sqlx::query("INSERT INTO workload_placements(workspace_id,agent_id,folder_id,position) SELECT $1,$2,$3,COALESCE(MAX(position)+1,0) FROM workload_placements WHERE workspace_id=$1 AND folder_id IS NOT DISTINCT FROM $3")
+            .bind(workspace_id).bind(&deployment.app_id).bind(folder).execute(&mut *transaction).await.map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
         drop(update_guard);
         self.refresh_virtual_network_hosts()
@@ -542,6 +581,19 @@ impl AuthStore {
         let _ingress_update = self.service_ingresses_update.lock().await;
         let deployment = self.resolve_app_deployment(workspace_id, target).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        // Include reservations whose runtime never received its first credential.
+        let runtime_id = deployment
+            .runtime_agent_id
+            .as_deref()
+            .unwrap_or(&deployment.app_id);
+        sqlx::query("UPDATE agent_credentials SET revoked_at=$3,recovery_enabled=FALSE WHERE workspace_id=$1 AND agent_id=$2 AND revoked_at IS NULL")
+            .bind(workspace_id).bind(runtime_id).bind(Utc::now().to_rfc3339()).execute(&mut *transaction).await.map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2")
+            .bind(workspace_id)
+            .bind(runtime_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM app_deployments WHERE workspace_id = $1 AND app_id = $2")
             .bind(workspace_id)
             .bind(&deployment.app_id)
@@ -555,6 +607,7 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         transaction.commit().await.map_err(AuthFailure::database)?;
+        self.agent_credentials.write().await.remove(runtime_id);
         self.service_ingresses
             .write()
             .await

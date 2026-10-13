@@ -151,7 +151,7 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "treer-agent-server",
-        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY],
+        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY, treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT],
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
         "controller_epoch": state.controller_epoch,
@@ -698,10 +698,11 @@ pub(super) async fn create_agent(
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
     let source_agent = validated_source_agent(&state, &headers)?;
+    state.require_creation_placement().await?;
     Ok(Json(
         state
             .post_as(
-                "agents",
+                "agents/placed",
                 &serde_json::to_value(request)
                     .map_err(|err| LocalApiError::bad_request(err.to_string()))?,
                 source_agent.as_ref(),
@@ -839,10 +840,11 @@ pub(super) async fn create_app_deployment(
     Json(request): Json<CreateAppDeploymentRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
     let source_agent = validated_source_agent(&state, &headers)?;
+    state.require_creation_placement().await?;
     Ok(Json(
         state
             .post_as(
-                "apps",
+                "apps/placed",
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
                 source_agent.as_ref(),
@@ -994,10 +996,11 @@ pub(super) async fn launch_agent_profile(
     Json(request): Json<LaunchAgentProfileRequest>,
 ) -> Result<Json<Value>, LocalApiError> {
     let source_agent = validated_source_agent(&state, &headers)?;
+    state.require_creation_placement().await?;
     Ok(Json(
         state
             .post_as(
-                &format!("launch-profiles/{profile_id}/launch"),
+                &format!("launch-profiles/{profile_id}/launch-placed"),
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
                 source_agent.as_ref(),

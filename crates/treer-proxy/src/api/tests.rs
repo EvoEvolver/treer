@@ -23,6 +23,7 @@ async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
             "owner",
             "machine-a".into(),
             CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some("machine-a".into()),
                 name: "Policy".into(),
                 command: "python3".into(),
@@ -976,6 +977,7 @@ async fn app_lifecycle_fixture() -> (
             "owner",
             "machine-a".into(),
             CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some("machine-a".into()),
                 name: "Docs".into(),
                 command: "python3".into(),
@@ -1133,7 +1135,7 @@ async fn app_lifecycle_stop_persists_intent_without_revoking_credential() {
         Some("process_not_found"),
     ] {
         let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
-        auth.create_agent_credential("default", "machine-a", &app.app_id)
+        auth.rotate_agent_credential("default", "machine-a", &app.app_id)
             .await
             .unwrap();
         let agent = app_workload_agent(&app);
@@ -1252,7 +1254,7 @@ async fn app_lifecycle_delete_accepts_already_exited_or_missing_processes() {
 
 async fn assert_app_deletion_after_stop(stop_error: Option<&str>) {
     let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
-    auth.create_agent_credential("default", "machine-a", &app.app_id)
+    auth.rotate_agent_credential("default", "machine-a", &app.app_id)
         .await
         .unwrap();
     let terminal = app_workload_agent(&app);
@@ -1308,7 +1310,7 @@ async fn assert_app_deletion_after_stop(stop_error: Option<&str>) {
 async fn app_lifecycle_delete_preserves_identity_when_stop_state_is_unknown() {
     for code in ["host_error", "terminal_error", "permission_denied"] {
         let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
-        auth.create_agent_credential("default", "machine-a", &app.app_id)
+        auth.rotate_agent_credential("default", "machine-a", &app.app_id)
             .await
             .unwrap();
         state.test_insert_agent(app_workload_agent(&app)).await;

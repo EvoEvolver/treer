@@ -739,6 +739,8 @@ fn managed_app_commands_parse() {
         "--port",
         "9420",
         "--public",
+        "--folder",
+        "/team",
         "python3",
         "--",
         "apps/soul/soul.py",
@@ -752,12 +754,14 @@ fn managed_app_commands_parse() {
                 name,
                 port: 9420,
                 public: true,
+                folder: Some(folder),
                 executable,
                 args,
                 ..
             }
         }) if machine == "builder"
             && name == "soul"
+            && folder == "/team"
             && executable == "python3"
             && args == ["apps/soul/soul.py"]
     ));

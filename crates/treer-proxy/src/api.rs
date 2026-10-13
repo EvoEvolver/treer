@@ -403,7 +403,9 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 }
 
 async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok", "service": "treer-proxy" }))
+    Json(
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT] }),
+    )
 }
 
 async fn workload_identity_jwks(Extension(identity): Extension<IdentityIssuer>) -> Response {

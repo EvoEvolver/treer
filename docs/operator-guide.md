@@ -767,12 +767,28 @@ without changing the profile. The directory is relative to the selected
 machine's Host root and must resolve inside that root. Omitting it uses the
 profile's saved `cwd`.
 
-For CLI creation, both `treer agent admin create` and `treer agent admin profile
-launch` accept `--folder PATH` for the workspace Tree destination. Omit it to
-inherit the calling Agent's Tree folder; non-Agent callers default to `/`.
+For CLI creation, `treer agent admin create`, `treer agent admin profile launch`
+and `treer app create` accept `--folder PATH` for the workspace Tree destination.
+Omit it to inherit the authenticated Agent/App caller's direct Tree folder at
+the Proxy transaction boundary; human/operator callers default to `/`.
 Relative paths, `.` and `..` resolve from that folder. Absolute paths and folder
 IDs work as with `agent ls`; `--folder /` explicitly selects root. This option
 does not change `--cwd` or the profile's process working directory.
+
+An unplaced workload caller gets `caller_unplaced` rather than accidental root
+creation; ask the owner to place it or use an explicitly authorized destination.
+New Agent/App identities have explicit placement before startup. Existing
+workspace nodes stay where they are, including legacy unplaced nodes. Creation
+requires `workload.create-placement.v1` on the CLI interpreter, Proxy and target
+Controller; unsupported versions fail clearly without silent root fallback.
+
+**Safety checklist:** Folder membership and path Deny are not a sandbox or a
+containment boundary. Review who has `agent.create` and `agent.tree.manage`:
+those callers can create elsewhere or move into paths with more permissions.
+Review monitor versus enforce and unmatched Allow defaults; inventory unplaced
+nodes (missing placement is not root for Policy); restrict high-risk machine
+exec/file actions and use external account/container isolation when required.
+Moving old unplaced nodes changes which path rules match, so preview first.
 
 ```bash
 treer agent admin profile launch reviewer --name review-42 --folder ../reviews

@@ -169,6 +169,25 @@ an enforcing Policy, the default permits authenticated workspace actions; monito
 mode does not enforce denials. Use explicit enforce-mode rules and treat workspace
 members and enrolled machines as trusted administrators until these are reviewed.
 
+Folders and path Deny rules are not a sandbox or a containment boundary. An
+authenticated caller allowed `agent.create` can create other workloads, and a
+caller allowed `agent.tree.manage` can reorganize identities into paths with
+different permissions. Grant both actions cautiously: a Deny on `/untrusted/**`
+alone does not prevent self-moves, explicit creation elsewhere, machine exec,
+same-user files or direct networking. Monitor mode does not block any Deny.
+
+New Agent/App creation inherits the authenticated workload caller's current
+direct folder unless an authorized explicit destination is requested. Identity,
+name and placement are reserved under the workspace transaction lock, not from
+environment variables or client-reported paths. Humans/operators default to
+root; an unplaced workload caller must request an authorized destination or be
+placed by the owner. This removes accidental root placement, not the need for
+Policy. Existing nodes are unchanged: legacy unplaced identities do not match
+path/relationship selectors, even if the UI displays them at root. Inventory
+them and use kind/ID rules or explicitly place them after reviewing the effect
+on current rules. Tree move/rename source/destination authorization and secure
+deny defaults remain separate migration work; they are not promised here.
+
 Bearer service tokens can be replayed until expiry. Agent tokens and per-request
 human forwarding tokens last 60 seconds; human App OAuth tokens last 12 hours.
 Membership and service checks are not session revocation: logging out or resetting

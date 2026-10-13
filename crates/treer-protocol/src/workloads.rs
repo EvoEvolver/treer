@@ -9,6 +9,7 @@ pub struct CreateWorkspaceRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateAgentRequest {
+    /// Omitted: inherit the authenticated workload caller's folder. "/": root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +133,9 @@ pub struct AppDeployment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateAppDeploymentRequest {
+    /// Omitted: inherit the authenticated workload caller's folder. "/": root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     pub name: String,
@@ -351,6 +355,8 @@ pub enum AgentCommand {
         workload_credential: String,
         request: CreateAgentRequest,
     },
+    /// Side-effect-free preflight before reserving a new workload identity.
+    CreationPlacementCheck {},
     Prompt {
         agent_id: String,
         text: String,
@@ -448,6 +454,9 @@ pub enum AgentCommand {
 impl AgentCommand {
     pub fn required_capability(&self) -> Option<&'static str> {
         match self {
+            Self::Create { .. } | Self::CreationPlacementCheck {} => {
+                Some(CAPABILITY_WORKLOAD_CREATE_PLACEMENT)
+            }
             Self::SubmitPrompt { .. }
             | Self::QueueRead { .. }
             | Self::InterfaceStatus { .. }
@@ -474,8 +483,7 @@ impl AgentCommand {
                 ..
             } => Some(CAPABILITY_POLICY_PATH_RULES),
             Self::FetchServiceHttp { .. } => Some(CAPABILITY_SERVICE_HTTP_FETCH),
-            Self::Create { .. }
-            | Self::Prompt { .. }
+            Self::Prompt { .. }
             | Self::Input { .. }
             | Self::Read { .. }
             | Self::Transcript { .. }

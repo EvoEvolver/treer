@@ -21,6 +21,9 @@ pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKIL
 /// Text control frame on a private service WebSocket; binary frames carry bytes.
 pub const SERVICE_STREAM_EOF: &str = "treer-service-eof-v1";
 pub const CAPABILITY_AGENT_PATH_TARGETS: &str = "agent.path-targets.v1";
+pub const CAPABILITY_WORKLOAD_CREATE_PLACEMENT: &str = "workload.create-placement.v1";
+/// Explicit root destination on creation; omission inherits the trusted caller.
+pub const WORKLOAD_CREATE_ROOT: &str = "/";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
 pub const CAPABILITY_AGENT_STARTUP_ADMIN: &str = "agent.startup-admin.v1";
@@ -31,6 +34,7 @@ pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
 pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
 pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
+    CAPABILITY_WORKLOAD_CREATE_PLACEMENT,
     CAPABILITY_AGENT_PATH_TARGETS,
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,

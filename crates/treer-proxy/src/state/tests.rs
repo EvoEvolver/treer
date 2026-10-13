@@ -1,6 +1,32 @@
 use super::*;
 
 #[tokio::test]
+async fn old_controller_refuses_creation_preflight_without_mutating_or_disconnect() {
+    let state = AppState::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            Uuid::new_v4(),
+            "old-creation".into(),
+            Vec::<String>::new(),
+            tx,
+        )
+        .await
+        .unwrap();
+    let error = state
+        .send_command("alpha", "server", AgentCommand::CreationPlacementCheck {})
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unsupported_command");
+    assert!(error
+        .message
+        .contains(treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(state.snapshot("alpha").await.unwrap().servers.len(), 1);
+}
+
+#[tokio::test]
 async fn old_controller_rejects_v2_policy_fetch_before_any_dispatch() {
     let state = AppState::new();
     let (tx, mut rx) = mpsc::unbounded_channel();

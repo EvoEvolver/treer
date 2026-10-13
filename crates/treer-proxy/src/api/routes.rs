@@ -61,6 +61,18 @@ pub fn router(
             get(list_agents).post(create_agent),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/agents/placed",
+            post(create_agent),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/apps/placed",
+            post(create_app_deployment),
+        )
+        .route(
+            "/agent/workspaces/{workspace_id}/launch-profiles/{profile_id}/launch-placed",
+            post(launch_agent_profile),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/apps",
             get(list_app_deployments).post(create_app_deployment),
         )

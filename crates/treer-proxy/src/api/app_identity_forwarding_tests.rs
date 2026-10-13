@@ -35,6 +35,7 @@ async fn fixture() -> (
             "alice",
             "machine-a".into(),
             CreateAppDeploymentRequest {
+                folder_id: None,
                 server_id: Some("machine-a".into()),
                 name: "Issues".into(),
                 command: "python3".into(),

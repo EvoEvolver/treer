@@ -75,6 +75,21 @@ Agent output includes `path`, and Tree **Copy path** can be pasted as a CLI targ
 New CLI clients require Controller capability `agent.path-targets.v1`; an older
 Controller returns an upgrade error before dispatch, without disconnecting.
 
+Agent creation, profile launch and `treer app create` omit `--folder` to inherit
+your authenticated identity's direct Tree folder. Human/operator callers start
+at root. Use `--folder /` for explicit root or `--folder PATH` for another
+authorized destination; `cwd` is unrelated. Proxy reserves identity/name/placement
+atomically before startup. An unplaced caller receives `caller_unplaced`; ask
+the owner to place it or request an authorized explicit destination. Existing
+nodes are not moved. Creation requires `workload.create-placement.v1`; older
+Controller/Proxy versions fail instead of silently placing at root.
+
+Folders and path Deny are not a sandbox or containment boundary. Be cautious
+granting `agent.create` and `agent.tree.manage`: explicit creation elsewhere or
+moving to an Allow path remains possible. Monitor mode never enforces Deny;
+unplaced legacy identities do not match path rules. Use reviewed Policy and
+external OS isolation when needed.
+
 Discover current topology before choosing a peer or server:
 
 ```bash
