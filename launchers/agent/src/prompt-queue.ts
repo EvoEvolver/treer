@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { HarnessRuntime } from "./runtime.js";
 import type { QueuedPrompt } from "./model.js";
 import { QueueStore } from "./queue-store.js";
-import { fingerprint, preview, QueueError, submissionOptions, type Outcome, type PromptNotify, type PromptSender, type SubmissionRecord } from "./prompt-submission.js";
+import { fingerprint, preview, QueueError, submissionOptions, messageCheckpoints, type Outcome, type PromptNotify, type PromptSender, type SubmissionRecord } from "./prompt-submission.js";
 
 export type PromptMode = "steer" | "queue";
 export class InvalidPromptMode extends Error {}
@@ -12,7 +12,7 @@ interface QueueOptions {
   notify?: (record: SubmissionRecord) => Promise<void>;
   retryMs?: number;
 }
-interface SubmitOptions { operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null; sourceMessage?: { messageId: string; deliveryId: string } }
+interface SubmitOptions { operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null; sourceMessage?: { messageId: string; deliveryId: string }; sourceMessages?: { messageId: string; deliveryId: string }[] }
 
 /** One server-owned journal and turn correlator, shared by every harness. */
 export class PromptQueue {
@@ -47,16 +47,17 @@ export class PromptQueue {
 
   pendingMessageAcks() {
     if (this.closed) throw new QueueError("Prompt queue is closed", 503);
-    return this.records.filter((record) => record.sourceMessage?.ackPending).map((record) => ({ operationId: record.operationId, ...record.sourceMessage! }));
+    return this.records.flatMap((record) => messageCheckpoints(record).filter((message) => message.ackPending).map((message) => ({ operationId: record.operationId, ...message })));
   }
   hasMessage(messageId: string) {
     if (this.closed) throw new QueueError("Prompt queue is closed", 503);
-    return this.records.some((record) => record.sourceMessage?.messageId === messageId);
+    return this.records.some((record) => messageCheckpoints(record).some((message) => message.messageId === messageId));
   }
   acknowledgeMessage(operationId: string, deliveryId: string) {
     const record = this.records.find((entry) => entry.operationId === operationId);
-    if (!record?.sourceMessage || record.sourceMessage.deliveryId !== deliveryId) throw new QueueError("Unknown message acknowledgment");
-    record.sourceMessage.ackPending = false; this.persist();
+    const message = record && messageCheckpoints(record).find((message) => message.deliveryId === deliveryId);
+    if (!message) throw new QueueError("Unknown message acknowledgment");
+    message.ackPending = false; this.persist();
   }
 
   private persist() {
@@ -64,7 +65,7 @@ export class PromptQueue {
     for (const record of this.records) record.submission.position = record.submission.state === "queued" ? ++position : null;
     let terminal = this.records.filter((record) => !["queued", "running"].includes(record.submission.state) && (!record.notification || record.notification.delivered)).length;
     this.records = this.records.filter((record) => {
-      if (terminal > 1024 && !record.sourceMessage?.ackPending && !["queued", "running"].includes(record.submission.state) && (!record.notification || record.notification.delivered)) { terminal--; return false; }
+      if (terminal > 1024 && !messageCheckpoints(record).some((message) => message.ackPending) && !["queued", "running"].includes(record.submission.state) && (!record.notification || record.notification.delivered)) { terminal--; return false; }
       return true;
     });
     try { this.store?.save(this.records); }
@@ -84,7 +85,7 @@ export class PromptQueue {
     }
     if (!this.runtime.snapshot().ready) throw new QueueError("Harness is not ready", 503);
     if (this.closed) throw new QueueError("Prompt queue is closed after shutdown or a journal failure", 503);
-    if (this.records.filter((record) => ["queued", "running"].includes(record.submission.state) || record.sourceMessage?.ackPending || record.notification && !record.notification.delivered).length >= this.limit) throw new QueueError(`Prompt queue is full (limit ${this.limit}, including pending notifications and acknowledgments)`, 429);
+    if (this.records.filter((record) => ["queued", "running"].includes(record.submission.state) || messageCheckpoints(record).some((message) => message.ackPending) || record.notification && !record.notification.delivered).length >= this.limit) throw new QueueError(`Prompt queue is full (limit ${this.limit}, including pending notifications and acknowledgments)`, 429);
     const busy = this.busy;
     const downgraded = mode === "steer" && !this.runtime.harness.capabilities.steer;
     const delivery = downgraded ? "queue" : mode;
@@ -95,6 +96,7 @@ export class PromptQueue {
       operationId, fingerprint: hash, text, delivery, notify: metadata.notify,
       receipt: { id, disposition: steering ? "steered" : busy || this.entries.length ? "queued" : "sent", position: null }, notification: null,
       ...(options.sourceMessage ? { sourceMessage: { ...options.sourceMessage, ackPending: true } } : {}),
+      ...(options.sourceMessages ? { sourceMessages: options.sourceMessages.map((message) => ({ ...message, ackPending: true })) } : {}),
     };
     this.records.push(record);
     this.persist(); record.receipt.position = record.receipt.disposition === "queued" ? record.submission.position : null; this.persist();

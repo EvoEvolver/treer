@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { submissionOptions, type SubmissionRecord } from "./prompt-submission.js";
+import { submissionOptions, messageCheckpoints, type SubmissionRecord } from "./prompt-submission.js";
 
 /** Small bounded journal; a commit completes before HTTP accepts a submission. */
 export class QueueStore {
@@ -34,7 +34,8 @@ export class QueueStore {
       const submission = record.submission, notification = record.notification;
       if (!/^[a-f0-9]{64}$/.test(record.fingerprint) || !["steer", "queue"].includes(record.delivery) || !Number.isFinite(Date.parse(submission.created_at)) || typeof submission.text_preview !== "string" || Buffer.byteLength(submission.text_preview) > 1024 || Buffer.byteLength(record.text) > 65536 || !(submission.turn_id === null || typeof submission.turn_id === "string") || !(submission.error === null || typeof submission.error === "string") || !(submission.assistant_preview === null || typeof submission.assistant_preview === "string" && Buffer.byteLength(submission.assistant_preview) <= 4096) || record.receipt.id !== submission.id || !["queued", "sent", "steered"].includes(record.receipt.disposition)) throw new Error("Invalid queue journal metadata");
       submissionOptions(submission.sender, record.notify);
-      if (record.sourceMessage && (typeof record.sourceMessage.ackPending !== "boolean" || [record.sourceMessage.messageId, record.sourceMessage.deliveryId].some((id) => typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,256}$/.test(id)))) throw new Error("Invalid message acknowledgment checkpoint");
+      if (record.sourceMessages !== undefined && (!Array.isArray(record.sourceMessages) || record.sourceMessages.length > 10)) throw new Error("Invalid message acknowledgment batch");
+      for (const message of messageCheckpoints(record)) if (!message || typeof message.ackPending !== "boolean" || [message.messageId, message.deliveryId].some((id) => typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,256}$/.test(id))) throw new Error("Invalid message acknowledgment checkpoint");
       if (notification !== null && (!notification || typeof notification.delivered !== "boolean" || !Number.isInteger(notification.attempts) || notification.attempts < 0 || !Number.isFinite(notification.nextAttempt) || !(notification.error === null || typeof notification.error === "string"))) throw new Error("Invalid queue notification outbox");
       ids.add(record.submission.id); operations.add(record.operationId);
     }

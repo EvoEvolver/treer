@@ -149,17 +149,18 @@ Cross-review of Core 2190182 and launcher changes is required before main merge.
 
 ### P2 — Message watcher labels untrusted content but cannot prevent prompt injection
 
-- **Phenomenon:** the approved watcher wraps all kinds, including completion
-  notices, with sender kind/path/message ID and an explicit non-system warning;
-  32 KiB body truncation keeps the warning/retrieval command. It always queues,
+- **Phenomenon (updated 2026-10-13):** the watcher queues only English message-ID
+  notices and retrieval commands, merging each receive batch. No sender, body,
+  subject, preview or send time enters the prompt; there is no truncation.
+  An explicit non-system warning accompanies the IDs. It always queues,
   disables automatic terminal notification feedback and validates own recipient.
-- **Local reproduction:** fake watcher tests cover wrapping, newline escaping,
-  Unicode truncation, FIFO/busy behavior, restart idempotence and durable ack.
+- **Local reproduction:** fake watcher tests cover ID-only English text,
+  field non-disclosure, batch merging, FIFO/busy behavior, restart idempotence and durable ack.
   Sender body is never interpreted as trusted launcher instructions.
 - **Impact:** a model can still follow adversarial message content. Queueing and
   identity attribution are not an LLM instruction-safety boundary. Permitted
   senders can fill the bounded queue; no sender-specific quotas here.
-- **Recommendation/size:** keep warning and source attribution, allow
+- **Recommendation/size:** keep the warning and explicit retrieval, allow
   `AGENT_UI_MESSAGE_WATCH=0`, constrain Core Message Policy and execution account.
   Reliable semantic filtering is unsupported and explicitly not introduced.
 

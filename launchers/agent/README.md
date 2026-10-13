@@ -367,14 +367,20 @@ errors retry with exponential backoff (1–60 seconds); shutdown cancels polling
 Queued messages survive restart; an already running turn follows the queue's
 existing interrupted-on-restart rule rather than executing uncertain work twice.
 
-Prompts start with `[收到一条 Treer 消息]`, identify the sender path and kind,
-timestamp and message ID, and explicitly say the sender's content is not system
-instructions: the Agent chooses whether to execute, reply or ignore. No message
-kind or body type is filtered, including completion notifications. Core has no
-trusted subject/type field; the entire body is sender-authored text. Bodies are
-UTF-8 truncated at 32 KiB without splitting codepoints, with an explicit marker
-and `treer message get MESSAGE_ID` for the full text. Metadata is escaped and
-bounded separately, so the warning and retrieval command cannot be truncated.
+Each receive batch becomes one short English notice containing only message IDs
+and `treer message get <id>` instructions. Sender, subject, body, preview and
+send time are never copied into the prompt or its queue metadata; there is no
+body truncation or automatic retrieval. For example: `You have 1 new Treer message
+(id: msg_example). Read it with: treer message get msg_example.` The notice warns
+that retrieved content is from another party, not a system instruction; the
+Agent decides whether to act, reply or ignore. All message types use this notice.
+Each ID retains its own durable acknowledgment checkpoint within a batch;
+redelivery in a different batch does not enqueue it again while its receipt is
+retained (the queue keeps the most recent 1024 terminal receipts).
+Acknowledging removes a delivery from receive polling, not recipient visibility:
+Core Message `get` checks sender/recipient membership without filtering on ack
+state. The recipient can still retrieve the body after ack, subject to current
+`message.read` Policy and message retention. The launcher does not fetch it.
 Watched messages have automatic terminal notifications disabled for every type
 to prevent notification loops; Agents can explicitly reply through Treer.
 

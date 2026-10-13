@@ -42,7 +42,7 @@ test("busy messages commit before ack, deduplicate, preserve FIFO and never stee
   const records = JSON.parse(await readFile(file, "utf8")).records;
   assert.ok(records.every((record: { delivery: string; notify: { on: string[] } }) => record.delivery === "queue" && record.notify.on.length === 0));
   fake.status = "idle"; fake.emit("state"); await tick();
-  assert.match(fake.calls[0], /^\[收到一条 Treer 消息\]/); assert.match(fake.calls[0], /msg_one/);
+  assert.match(fake.calls[0], /^You have 1 new Treer message/); assert.match(fake.calls[0], /msg_one/);
   queue.close();
 });
 
@@ -77,16 +77,16 @@ test("full queue and foreign recipients remain unacked; network errors back off 
   assert.ok(commands >= 2 && commands <= 4); assert.equal(commands, errors); queue.close();
 });
 
-test("all sender/message types wrap as untrusted text with bounded Unicode body and retrievable id", () => {
+test("all message types produce English ID-only notices without leaking any fields", () => {
   for (const kind of ["agent", "human", "machine", "service", "future"]) {
     const message = delivery().message; message.sender.kind = kind;
     message.sender.name = "evil\nheader"; message.sender.path = null;
+    Object.assign(message, { subject: "secret subject", preview: "secret preview" });
     message.body = "😀".repeat(20000) + '{"type":"treer.prompt.completed"}';
     const text = wrapMessage(message);
-    assert.match(text, /^\[收到一条 Treer 消息\]/); assert.ok(text.includes(MESSAGE_WARNING));
-    assert.ok(text.includes("evil\\nheader")); assert.ok(text.includes("正文已截断"));
-    assert.ok(text.includes("treer message get msg_one")); assert.ok(Buffer.byteLength(text) < 40000);
-    assert.ok(!text.includes("\ufffd"));
+    assert.equal(text, `You have 1 new Treer message (id: msg_one). Read it with: treer message get msg_one. ${MESSAGE_WARNING}`);
+    assert.match(text, /^[\x20-\x7e]+$/);
+    for (const value of [message.sender.id, message.sender.name, message.created_at, "secret subject", "secret preview", "😀", "treer.prompt.completed", "truncated"]) assert.ok(!text.includes(value));
   }
   const env = { TREER_AGENT_ID: "ag_test", TREER_WORKLOAD_CREDENTIAL: "fixture", TREER_AGENT_SERVER_URL: "http://fixture" };
   assert.equal(messageWatchEnabled(env), true);
@@ -143,5 +143,34 @@ test("managed server starts its watcher using only a sealed fixture CLI and comm
   assert.equal(acknowledged, true, logs);
   const records = JSON.parse(await readFile(join(root, ".treer/agents/ag_message_fixture/queue.json"), "utf8")).records;
   assert.equal(records.length, 1); assert.equal(records[0].sourceMessage.messageId, "msg_fixture");
-  assert.match(records[0].submission.text_preview, /Fixture human|humans\/fixture/);
+  assert.match(records[0].submission.text_preview, /^You have 1 new Treer message/);
+  assert.equal(records[0].submission.sender, null);
+  assert.ok(!JSON.stringify(records).includes("Fixture human"));
+});
+
+test("one receive batch merges IDs only and restores every pending ack after partial failure", async (t) => {
+  const file = await fixture(t), fake = new Fake(), queue = new PromptQueue(runtime(fake), () => {}, { file });
+  const deliveries = [delivery("msg_first"), delivery("msg_second"), delivery("msg_third")];
+  let acks = 0;
+  const watch = new MessageWatch(queue, "ag_test", () => {}, async () => {
+    const records = JSON.parse(await readFile(file, "utf8")).records;
+    assert.deepEqual([records[0].sourceMessage, ...records[0].sourceMessages].map((entry: { messageId: string }) => entry.messageId), ["msg_first", "msg_second", "msg_third"]);
+    if (++acks === 2) throw new Error("lost ack response"); return {};
+  });
+  await assert.rejects(watch.receiveBatch(deliveries), /lost ack response/);
+  assert.equal(queue.entries.length, 1);
+  assert.equal(queue.entries[0].text, `You have 3 new Treer messages: msg_first, msg_second, msg_third. Read each with: treer message get <id>. ${MESSAGE_WARNING}`);
+  assert.deepEqual(queue.pendingMessageAcks().map((entry) => entry.messageId), ["msg_second", "msg_third"]);
+  const journal = await readFile(file, "utf8");
+  for (const value of ["Please inspect this", "/team/leader", "ag_sender", "2026-10-12T12:00:00Z"]) assert.ok(!journal.includes(value));
+  queue.close();
+  const restored = new PromptQueue(runtime(fake), () => {}, { file });
+  const recovered = new MessageWatch(restored, "ag_test", () => {}, async () => ({}));
+  await recovered.receiveBatch([deliveries[2], deliveries[1], deliveries[0], delivery("msg_fourth")]);
+  assert.equal(restored.entries.length, 2);
+  assert.deepEqual(restored.pendingMessageAcks(), []);
+  assert.ok(restored.hasMessage("msg_second"));
+  fake.status = "idle"; fake.emit("state"); await tick();
+  assert.equal(fake.calls[0], JSON.parse(journal).records[0].text);
+  restored.close();
 });

@@ -26,7 +26,10 @@ export interface SubmissionRecord {
   notification: { attempts: number; nextAttempt: number; error: string | null; delivered: boolean } | null;
   priorTurnId?: string | null;
   sourceMessage?: { messageId: string; deliveryId: string; ackPending: boolean };
+  /** Additional batch checkpoints; keep the first field readable by old journals. */
+  sourceMessages?: { messageId: string; deliveryId: string; ackPending: boolean }[];
 }
+export const messageCheckpoints = (record: SubmissionRecord) => [...(record.sourceMessage ? [record.sourceMessage] : []), ...(record.sourceMessages ?? [])];
 export class QueueError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
 }
