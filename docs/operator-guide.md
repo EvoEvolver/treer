@@ -863,7 +863,14 @@ private Managed App as its Policy Provider from Workspace settings. Without a
 selected Provider, the UI shows the effective stored policy or the explicit
 `Treer Default` monitor/allow baseline. Owners can choose an online machine and
 install the bundled default Policy App without a source checkout or network
-download on that machine. The App provides mode, JSON rule editing, atomic
+download on that machine. New installations pass `--initialize-admin-token-file`:
+the App generates a private administration token on the target machine, never in
+the Proxy. Retrieve it only through an authorized private machine terminal, not
+Treer exec/file APIs or Messages; see the App's token-file instructions. Existing
+installations retain their startup command and credentials; if they lack a token,
+use the App's explicit local token-file recovery command. Upgrading assets does
+not automatically initialize or rotate a missing token.
+The App provides mode, JSON rule editing, atomic
 publication, cache sync status, and a decision simulator; deployment and state
 paths are documented in [`apps/policy`](../apps/policy/README.md). The Proxy
 validates and caches its versioned bundle, then evaluates

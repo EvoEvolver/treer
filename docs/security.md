@@ -433,7 +433,14 @@ the visible `Treer Default` monitor/allow baseline. The owner-only default App
 installer is a recovery path: it uses bounded machine uploads, private Managed
 App creation, protocol validation, and automatic Provider binding without
 consulting delegated Policy. It never downloads executable content on the
-machine. Monitor mode computes denials without enforcing them; decision audit
+machine. New default Policy Apps initialize an administration token locally via
+a flag in their startup command. The Proxy uploads only bundled source/assets;
+it neither generates nor reads the token, and no token is returned by the
+installer or included in startup arguments or provisioning audit records. The
+App owns its private token file, rotation and recovery. This does not isolate the
+token from other processes with the same OS account or grant workspace owners
+automatic OS access. Existing App startup commands are not silently migrated.
+Monitor mode computes denials without enforcing them; decision audit
 is still absent. The Core Message feature flag is deployment sequencing, not a
 security control.
 

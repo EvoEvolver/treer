@@ -355,11 +355,7 @@ pub(super) async fn install_default_policy_app(
                 server_id: Some(server_id),
                 name: DEFAULT_POLICY_APP_NAME.to_string(),
                 command: DEFAULT_POLICY_APP_COMMAND.to_string(),
-                args: vec![
-                    DEFAULT_POLICY_APP_SCRIPT.to_string(),
-                    "--port".to_string(),
-                    port.to_string(),
-                ],
+                args: default_policy_app_args(port),
                 cwd: String::new(),
                 port,
                 hostname: String::new(),
@@ -399,6 +395,17 @@ pub(super) async fn install_default_policy_app(
             "default Policy App did not become ready",
         )
     }))
+}
+
+/// Only a provisioning instruction crosses Core; the App creates and keeps
+/// the capability locally. Never generate or read its admin token here.
+fn default_policy_app_args(port: u16) -> Vec<String> {
+    vec![
+        DEFAULT_POLICY_APP_SCRIPT.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--initialize-admin-token-file".to_string(),
+    ]
 }
 
 fn is_default_policy_app(app: &AppDeployment) -> bool {
@@ -527,7 +534,7 @@ async fn record_policy_provider_audit(
     if let Err(error) = auth
         .record_workspace_audit(NewWorkspaceAuditEvent {
             workspace_id,
-            actor_kind: "human",
+            actor_kind: "user",
             actor_id: Some(&session.user_id),
             action,
             resource_kind: "policy_provider",
@@ -542,8 +549,28 @@ async fn record_policy_provider_audit(
 }
 
 #[cfg(test)]
+#[path = "policy_provider_install_tests.rs"]
+mod install_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_policy_app_provisions_on_the_machine_without_a_capability_in_argv() {
+        assert_eq!(
+            default_policy_app_args(8787),
+            vec![
+                "treer-policy.py",
+                "--port",
+                "8787",
+                "--initialize-admin-token-file"
+            ]
+        );
+        assert!(DEFAULT_POLICY_APP_FILES
+            .iter()
+            .all(|(name, _)| !name.contains("admin-token")));
+    }
 
     #[test]
     fn default_policy_app_bundle_is_complete_and_script_is_installed_last() {

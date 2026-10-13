@@ -612,7 +612,7 @@ async fn admin_startup_human_and_operator_routes_dispatch_canonical_id_and_rejec
     assert!(rx.try_recv().is_err());
 }
 
-async fn state_with_managed_agent() -> AppState {
+pub(super) async fn state_with_managed_agent() -> AppState {
     let state = AppState::new();
     let now = chrono::Utc::now();
     let server = treer_protocol::ServerInfo {
@@ -1460,7 +1460,7 @@ fn browser_tunnels_accept_app_and_proxy_origins_only() {
     assert!(access.validate_tunnel_if_present(&denied).is_err());
 }
 
-fn test_ingress_config() -> IngressConfig {
+pub(super) fn test_ingress_config() -> IngressConfig {
     IngressConfig::new(
         Some(Url::parse("https://apps.treer.ai/").expect("ingress URL")),
         &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
