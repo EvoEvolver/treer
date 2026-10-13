@@ -41,7 +41,7 @@ for(const width of [1280,390]) test(`Policy guarded writes and literal rendering
   await page.locator('#header-revision').filter({hasText:'rev 2'}).waitFor();
   assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
   assert.equal(await page.locator('#admin-token').getAttribute('type'),'password');
-  await page.route('**/v1/policy/test',route=>route.fulfill({json:{decision:'allow',revision:2,effect:'allow',mode:'enforce',matched_rule_id:'<img src=x onerror=alert(1)>'}}));
+  await page.route('**/v1/policy/explain',route=>route.fulfill({json:{explanation:{effective_decision:'allow',policy_revision:2,computed_effect:'allow',mode:'enforce',matched_rule_id:'<img src=x onerror=alert(1)>'}}}));
   await page.locator('[data-view="simulator"]').click();await page.locator('#test-button').click();
   await page.locator('#decision p').filter({hasText:'<img src=x onerror=alert(1)>'}).waitFor();
   assert.equal(await page.locator('#decision img').count(),0);

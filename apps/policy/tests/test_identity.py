@@ -31,13 +31,16 @@ class FakeProxy(BaseHTTPRequestHandler):
             result={'active':valid,'claims':{'service_id':'other' if token=='wrong-audience' else 'svc_policy',
                 'workspace_id':'ws_test','principal_kind':'human','sub':'owner' if token!='human-member' else 'member',
                 'exp':time.time()+(-60 if token=='expired' else 60)}}
+        elif self.path == '/api/apps/oauth/token':
+            from datetime import datetime, timezone
+            result={'access_token':'human-owner','expires_at':datetime.fromtimestamp(time.time()+300,timezone.utc).isoformat()}
         elif self.path.endswith('/directory'):
             result={'principals':[] if token=='revoked' else [{'id':'owner','kind':'human','name':'Owner'},{'id':'member','kind':'human','name':'Member'}]}
         elif '/policy/' in self.path:
             if token!='human-owner': status=403;result={'error':{'code':'workspace_owner_required'}}
-            elif self.path.endswith('/validate'): result={'valid':True,'schema_version':body['schema_version']}
+            elif self.path.endswith('/validate'): result={'valid':True,'schema_version':body['schema_version'],'recovery_guaranteed':getattr(self.server,'recovery',True),'capabilities':['policy.path-rules.v2']}
             elif self.path.endswith('/explain'): result={'explanation':{'computed_effect':'deny','effective_decision':'allow','mode':'monitor','matched_rule_id':'test-rule','policy_revision':2}}
-            else: result={'decisions':[{'computed_effect':'deny','effective_decision':'allow','action':'agent.prompt'}], 'scope':'this_proxy'}
+            else: result={'decisions':[{'action':'agent.prompt','explanation':{'computed_effect':'deny','effective_decision':'allow'}}], 'scope':'this_proxy'}
         else: status=404;result={'error':{'code':'not_found'}}
         encoded=json.dumps(result).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(encoded)));self.end_headers();self.wfile.write(encoded)
     def log_message(self,*args): pass
@@ -100,6 +103,18 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':2,'revision':1})[0],200)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2},'human-member')[0],403)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2})[0],200)
+    def test_unconfirmed_recovery_cannot_publish_or_restore_path_policy(self):
+        document=policy.template_document('team-isolation',{})['document']
+        self.proxy.recovery=False
+        self.assertEqual(self.request('POST','/v1/policy/publish',{'expected_revision':1,'mode':'enforce','document':document})[0],409)
+        self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],1)
+        self.proxy.recovery=True
+        self.assertEqual(self.request('POST','/v1/policy/publish',{'expected_revision':1,'mode':'monitor','document':document})[0],200)
+        self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':2,'revision':1})[0],200)
+        self.proxy.recovery=False
+        self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2})[0],409)
+        self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],3)
+
     def test_oauth_pkce_browser_binding_consumed_once_and_private_storage(self):
         auth=self.app.auth
         url,browser=auth.start();query=parse_qs(urlsplit(url).query)
@@ -111,6 +126,11 @@ class IdentityTests(unittest.TestCase):
             db.execute('UPDATE oauth SET expires=?',(time.time()-1,))
         with self.assertRaises(policy.AuthError): auth.finish('code',query['state'][0],browser)
         with auth.store.connect() as db: self.assertEqual(db.execute('SELECT COUNT(*) FROM oauth').fetchone()[0],0)
+        url,browser=auth.start();query=parse_qs(urlsplit(url).query)
+        raw,age=auth.finish('synthetic-code',query['state'][0],browser)
+        self.assertGreater(age,0);self.assertEqual(auth.session_token(raw),'human-owner')
+        with self.assertRaises(policy.AuthError): auth.finish('synthetic-code',query['state'][0],browser)
+        auth.logout(raw);self.assertIsNone(auth.session_token(raw))
         self.assertEqual(auth.store.path.stat().st_mode & 0o777,0o600)
     def test_schema_errors_are_bounded_client_errors(self):
         for field in ('effect','priority'):

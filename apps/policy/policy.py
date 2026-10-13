@@ -712,7 +712,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 self._redirect(auth.public_url)
             elif parsed.path == "/v1/policy/decisions":
                 token, _, _, _ = self._identity()
-                self._json(200, self._auth().request('GET', f'/api/workspaces/{self.store.workspace_id}/policy/decisions', token))
+                self._json(200, self._auth().request('GET', f'/api/apps/{self._auth().service_id}/policy/decisions', token))
             elif parsed.path == "/v1/templates":
                 self._json(200, {"templates":TEMPLATES})
             elif parsed.path == "/v1/state":
@@ -757,12 +757,12 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 result = {'valid':True, 'warnings':warnings, 'core_validated':False}
                 if document['schema_version'] == 2:
                     token, _, _, _ = self._identity(mutation=True)
-                    result['core'] = self._auth().request('POST', f'/api/workspaces/{self.store.workspace_id}/policy/validate', token, document)
+                    result['core'] = self._core_validate(token, document)
                     result['core_validated'] = True
                 self._json(200, result)
             elif urlsplit(self.path).path == "/v1/policy/explain":
                 token, _, _, _ = self._identity(mutation=True)
-                self._json(200, self._auth().request('POST', f'/api/workspaces/{self.store.workspace_id}/policy/explain', token, body))
+                self._json(200, self._auth().request('POST', f'/api/apps/{self._auth().service_id}/policy/explain', token, body))
             elif urlsplit(self.path).path == "/v1/policy/publish":
                 self._validate_publish(body)
                 bundle = self.store.publish(body)
@@ -797,7 +797,13 @@ class PolicyHandler(BaseHTTPRequestHandler):
         # an unavailable/old Core cannot silently accept an unenforceable draft.
         if document['schema_version'] == 2:
             token, _, _, _ = self._identity(mutation=True)
-            self._auth().request('POST', f'/api/workspaces/{self.store.workspace_id}/policy/validate', token, document)
+            self._core_validate(token, document)
+
+    def _core_validate(self, token, document):
+        result = self._auth().request('POST', f'/api/apps/{self._auth().service_id}/policy/validate', token, document)
+        if result.get('valid') is not True or result.get('recovery_guaranteed') is not True or 'policy.path-rules.v2' not in result.get('capabilities', []):
+            raise PolicyError(409, 'policy_recovery_unconfirmed', 'Core must confirm path-policy support and owner recovery before publishing')
+        return result
 
     def _auth(self):
         if getattr(self.server, 'auth', None) is not None:

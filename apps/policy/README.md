@@ -145,9 +145,9 @@ OAuth/identity cannot replace that administration capability. Use workspace-only
 ingress; all policy/bundle reads are visible to workspace callers and direct
 local-machine access must be separately protected.
 
-The UI delegates simulation and bounded decision logs to Core using the
-verified **human caller** token, never the App's workload token. Core must
-recognize that App-scoped owner token on its diagnostic routes. Core rejects
+The UI delegates simulation and bounded decision logs through Core
+`/api/apps/{service_id}/policy/explain`, `/validate`, and `/decisions` using the
+verified **human caller** token, never the App's workload token. Core recognizes that App-scoped owner token on its diagnostic routes. Core rejects
 non-owners and stale membership. A Core without diagnostics returns an error;
 the App never substitutes a local path evaluator with different security rules.
 `/v1/policy/test` is retained only as a legacy v1 local dry-run endpoint.
@@ -164,7 +164,8 @@ complete or tamperproof auditing. No prompt/file bodies are logged by this App.
   draft only.
 - `POST /v1/policy/validate` with `{document:...}` validates a draft (operator
   capability required; schema 2 additionally requires owner Core validation).
-- `POST /v1/policy/explain` proxies the owner Core explain request;
+- `POST /v1/policy/explain` proxies the owner Core explain request (`subject:{kind,id}` / `resource:{kind,id}`,
+  or `path` instead of `id`; optional draft `document` and `mode`);
   `GET /v1/policy/decisions` reads the owner Core diagnostic log.
 - `POST /v1/policy/publish` with `{expected_revision:N,mode:"monitor",document:...}`;
   `POST /v1/policy/invalidate` with `{}` retries cache notification.
@@ -196,3 +197,5 @@ put secrets in policy strings. State is immutable per revision but integrity
 against the machine account/admin is not guaranteed. App-local action checks
 (`app.use`, `email.send`, network restrictions) depend on separate Core/App
 integration; naming an action in a rule does not invent an enforcement hook.
+The simulator resolves existing current Tree paths; it cannot invent nonexistent
+nodes or spoof placement. Draft simulations are not persisted decisions.

@@ -115,9 +115,10 @@ document.getElementById("test-button").addEventListener("click", async () => {
       action: value("action"), resource: {kind:value("resource-kind"), id:value("resource-id")},
     }
     if(value("actor-path") || value("target-path")) {
-      body.subject.path = value("actor-path") || undefined
-      body.resource.path = value("target-path") || undefined
+      if(value("actor-path")) {delete body.subject.id;body.subject.path=value("actor-path")}
+      if(value("target-path")) {delete body.resource.id;body.resource.path=value("target-path")}
     }
+    if(document.getElementById("test-draft").checked) {body.document=draft();body.mode=state.mode}
     const response = await request("v1/policy/explain", {method:"POST", body:JSON.stringify(body)})
     const detail = response.explanation
     const result = {decision:detail.effective_decision, effect:detail.computed_effect, mode:detail.mode,
@@ -287,7 +288,7 @@ async function loadLogs() {
 function renderLogs() {
   const list=document.getElementById("logs-list");list.replaceChildren()
   for(const record of state.decisions) {
-    if(document.getElementById("logs-denials").checked && record.computed_effect!=="deny") continue
+    if(document.getElementById("logs-denials").checked && record.explanation.computed_effect!=="deny") continue
     const card=document.createElement("article"),content=document.createElement("pre");content.textContent=JSON.stringify(record,null,2);card.append(content);list.append(card)
   }
   if(!list.childNodes.length) {const p=document.createElement("p");p.textContent="No matching records in this Proxy's bounded log";list.append(p)}

@@ -72,6 +72,7 @@
 
       <section class="view" id="view-simulator">
         <div class="page-heading"><div><p class="eyebrow">Core evaluator</p><h1>Decision simulator</h1></div><button class="primary" id="test-button">Evaluate</button></div>
+        <label class="check-label"><input id="test-draft" type="checkbox" checked> Simulate the unpublished draft and selected mode</label><p>Use an existing canonical Tree path or a stable ID. A path takes precedence over the corresponding ID; Core resolves placement. New, nonexistent nodes cannot be simulated.</p>
         <form id="test-form" class="test-grid">
           <label>Subject kind<select id="subject-kind"><option>agent</option><option>human</option><option>machine</option><option>service</option></select></label>
           <label>Subject ID<input id="subject-id" value="agent_example" required></label>
@@ -81,7 +82,7 @@
           <label>Resource kind<input id="resource-kind" value="agent" required></label>
           <label>Resource ID<input id="resource-id" value="agent_target" required></label>
         </form>
-        <div class="decision empty" id="decision"><span class="decision-mark">-</span><div><small>Decision</small><strong>Not evaluated</strong><p>Run the current published bundle against this request.</p></div></div>
+        <div class="decision empty" id="decision"><span class="decision-mark">-</span><div><small>Decision</small><strong>Not evaluated</strong><p>Run Core against the selected draft or published bundle.</p></div></div>
         <div class="notice hidden" id="test-error"></div>
       </section>
       <section class="view" id="view-templates">

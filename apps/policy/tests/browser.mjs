@@ -11,8 +11,9 @@ for(const width of [1280,390]) for(const tunnel of [false,true]) test(`Policy v2
  const child=spawn('python3',['-u',fixture],{env:{PATH:process.env.PATH,HOME:'/nonexistent',PYTHONUTF8:'1'},stdio:['ignore','pipe','pipe']});
  let errors='';child.stderr.on('data',b=>errors+=b);
  const {url}=await new Promise((resolve,reject)=>{createInterface({input:child.stdout}).once('line',line=>resolve(JSON.parse(line)));child.once('exit',()=>reject(new Error(errors)));});
- const browser=await chromium.launch({env:{PATH:process.env.PATH,HOME:'/tmp'}});
+ let browser;
  try {
+  browser=await chromium.launch({env:{PATH:process.env.PATH,HOME:'/tmp'}});
   const page=await browser.newPage({viewport:{width,height:900},colorScheme:width===390?'dark':'light'});
   const failures=[];page.on('pageerror',e=>failures.push(e.message));
   page.on('dialog',dialog=>dialog.accept());
@@ -32,6 +33,7 @@ for(const width of [1280,390]) for(const tunnel of [false,true]) test(`Policy v2
   assert.equal(await ui.locator('#rule-list img').count(),0);
   await ui.locator('#publish-button').click();await ui.locator('#header-revision').filter({hasText:'rev 2'}).waitFor();
   await ui.locator('[data-view="simulator"]').click();
+  await ui.locator('#actor-path').fill('/team/agent');await ui.locator('#target-path').fill('/team/reviewer');
   await ui.locator('#test-button').click();await ui.locator('#decision p').filter({hasText:'computed deny'}).waitFor();
   await ui.locator('[data-view="logs"]').click();await ui.locator('#logs-list').filter({hasText:'agent.prompt'}).waitFor();
   await ui.locator('[data-view="history"]').click();
@@ -45,5 +47,5 @@ for(const width of [1280,390]) for(const tunnel of [false,true]) test(`Policy v2
   await ui.locator('[data-view="editor"]').click();
   await page.screenshot({path:`/tmp/policy-path-browser/editor-${width}-${tunnel?'tunnel':'ingress'}.png`,fullPage:true});
   await page.goto(url+'fallback/');await page.locator('#login-link').waitFor({state:'visible'});
- } finally {await browser.close();child.kill();}
+ } finally {await browser?.close();child.kill();}
 });
