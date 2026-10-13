@@ -2,6 +2,26 @@
 //! belongs here: Controller must authorize before exposing handles or bytes.
 use std::{fs::File, io};
 
+#[derive(Debug)]
+struct PublishedButUnconfirmed;
+impl std::fmt::Display for PublishedButUnconfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "destination published but durability/cleanup is unconfirmed; inspect before retrying",
+        )
+    }
+}
+impl std::error::Error for PublishedButUnconfirmed {}
+#[cfg(unix)]
+fn publication_uncertain() -> io::Error {
+    io::Error::other(PublishedButUnconfirmed)
+}
+pub fn is_publication_uncertain(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<PublishedButUnconfirmed>())
+}
+
 pub fn open_protected(path: &std::path::Path) -> io::Result<File> {
     #[cfg(unix)]
     {
@@ -205,7 +225,6 @@ mod unix {
             match sys::statat(&parent, temporary_name, AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => {
                     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
-                        || stat.st_nlink != 1
                         || self.protected.contains(&stat_identity(&stat))
                     {
                         return Err(protected());
@@ -408,10 +427,13 @@ mod unix {
                     self.name.as_str(),
                     AtFlags::empty(),
                 )?;
-                sys::unlinkat(&self.parent, self.temporary_name.as_str(), AtFlags::empty())?;
+                sys::unlinkat(&self.parent, self.temporary_name.as_str(), AtFlags::empty())
+                    .map_err(|_| publication_uncertain())?;
             }
             self.installed = true;
-            self.parent.sync_all()?;
+            self.parent
+                .sync_all()
+                .map_err(|_| publication_uncertain())?;
             Ok(())
         }
     }

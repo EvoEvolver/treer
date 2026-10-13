@@ -2,6 +2,7 @@ use super::*;
 use treer_protocol::{
     MachineFileTransferCall, MachineFileTransferRequest as Transfer, MachineTransferActor,
 };
+static TRANSFER_CALLS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
 
 fn transfer_error(error: ProtocolError) -> ApiFailure {
     if error.code == "unsupported_command" {
@@ -16,6 +17,13 @@ pub(crate) async fn machine_file_transfer_info(
     headers: HeaderMap,
     Path((workspace_id, server_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
+    let _permit = TRANSFER_CALLS.try_acquire().map_err(|_| ApiFailure {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        error: ProtocolError::new(
+            "machine_transfer_limit",
+            "too many in-flight transfer calls on this Proxy",
+        ),
+    })?;
     state.resolve_server(&workspace_id, &server_id).await?;
     let subject =
         control_policy_subject(&state, machine.as_deref(), &headers, &workspace_id).await?;
@@ -39,6 +47,13 @@ pub(crate) async fn machine_file_transfer(
     Path((workspace_id, server_id)): Path<(String, String)>,
     Json(call): Json<MachineFileTransferCall>,
 ) -> Result<Json<Value>, ApiFailure> {
+    let _permit = TRANSFER_CALLS.try_acquire().map_err(|_| ApiFailure {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        error: ProtocolError::new(
+            "machine_transfer_limit",
+            "too many in-flight transfer calls on this Proxy",
+        ),
+    })?;
     state.resolve_server(&workspace_id, &server_id).await?;
     // These are filesystem request facts, never workspace Tree selectors. The
     // Controller checks the actual object and immutable handle path before I/O.

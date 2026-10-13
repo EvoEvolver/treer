@@ -319,6 +319,9 @@ or `machine.file.read` on every call, and sends the derived caller/workspace and
 requested filesystem path to the target Controller. Handles bind that identity,
 direction, path and connection generation. Disconnect invalidates handles;
 queued blocking tasks from older generations cannot recreate them. Default size
+is capped independently of other machine commands. Proxy reconnect never
+replays pending file-transfer commands into a new Controller connection.
+The default per-file size
 is 64 MiB, configurable by `TREER_MACHINE_FILE_MAX_BYTES` up to 1 GiB; active
 handles are capped at eight per machine and two per caller, with 30-second idle
 and 15-minute total deadlines. Retrying starts a new transfer, never implicitly

@@ -38,6 +38,9 @@ fn source_metadata_changed(original: &std::fs::Metadata, current: &std::fs::Meta
 }
 
 fn io_failure(error: std::io::Error) -> ProtocolError {
+    if treer_platform::machine_file::is_publication_uncertain(&error) {
+        return failure("machine_file_commit_uncertain", "destination was published but durability/cleanup is unconfirmed; inspect before retrying");
+    }
     use std::io::ErrorKind::*;
     let (code, message) = match error.kind() {
         AlreadyExists => (
@@ -848,7 +851,7 @@ mod tests {
         let Some(root) = std::env::var_os("TREER_TEST_TRANSFER_CRASH_ROOT") else {
             return;
         };
-        let transfers = Transfers::new(root.into(), "ws_fixture".into(), vec![], 64);
+        let transfers = Transfers::new(root.clone().into(), "ws_fixture".into(), vec![], 64);
         let actor = MachineTransferActor {
             workspace_id: "ws_fixture".into(),
             kind: "agent".into(),
@@ -878,6 +881,15 @@ mod tests {
                 },
             )
             .unwrap();
+        #[cfg(unix)]
+        if std::env::var_os("TREER_TEST_TRANSFER_CRASH_AFTER_PUBLISH").is_some() {
+            let id = begin["id"].as_str().unwrap();
+            std::fs::hard_link(
+                PathBuf::from(&root).join(format!(".treer-transfer-{id}")),
+                PathBuf::from(&root).join("result"),
+            )
+            .unwrap();
+        }
         // Exit without Rust destructors, just as an OS-killed Controller would.
         std::process::exit(0);
     }
@@ -931,5 +943,29 @@ mod tests {
         assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
         let id = f.begin(false);
         f.execute(Request::Abort { id, read: false }).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_after_atomic_no_replace_preserves_published_file_and_recovers_temporary_link() {
+        let f = Fixture::new(64);
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "machine_file_transfer::tests::crashed_transfer_child",
+                "--nocapture",
+            ])
+            .env("TREER_TEST_TRANSFER_CRASH_ROOT", &f.root)
+            .env("TREER_TEST_TRANSFER_CRASH_AFTER_PUBLISH", "1")
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(f.visible_files(), 2);
+        let id = f.begin(true);
+        f.execute(Request::Abort { id, read: false }).unwrap();
+        assert_eq!(f.visible_files(), 1);
+        assert_eq!(std::fs::read(f.root.join("result")).unwrap(), b"partial");
+        let root = f.transfers.open_root().unwrap();
+        assert!(root.read("result").is_ok());
     }
 }

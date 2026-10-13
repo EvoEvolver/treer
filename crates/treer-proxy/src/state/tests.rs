@@ -841,6 +841,79 @@ async fn pending_command_is_resent_after_controller_snapshot() {
 }
 
 #[tokio::test]
+async fn machine_file_transfer_is_never_replayed_into_a_new_connection_generation() {
+    let state = AppState::new();
+    let server = test_server();
+    let first = Uuid::new_v4();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server.clone(),
+            first,
+            "file-controller".into(),
+            vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        async move {
+            state
+                .send_command(
+                    "alpha",
+                    "server",
+                    AgentCommand::FileTransfer {
+                        actor: treer_protocol::MachineTransferActor {
+                            workspace_id: "alpha".into(),
+                            kind: "machine".into(),
+                            id: "server".into(),
+                        },
+                        authorized_path: "result".into(),
+                        request: treer_protocol::MachineFileTransferRequest::PutBegin {
+                            path: "result".into(),
+                            overwrite: false,
+                            mode: 0o600,
+                            size: Some(3),
+                            limit: 64,
+                        },
+                    },
+                )
+                .await
+        }
+    });
+    let _ = rx.recv().await.unwrap();
+    state.disconnect_server("alpha", "server", first).await;
+    let second = Uuid::new_v4();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server.clone(),
+            second,
+            "file-controller".into(),
+            vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    state
+        .apply_snapshot(
+            second,
+            AgentServerSnapshot {
+                server,
+                agents: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        waiting.await.unwrap().unwrap_err().code,
+        "machine_transfer_stale"
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn pending_command_is_rejected_when_replacement_lacks_its_capability() {
     let state = AppState::new();
     let server = test_server();

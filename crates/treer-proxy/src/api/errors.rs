@@ -82,7 +82,10 @@ impl From<ProtocolError> for ApiFailure {
             "machine_transfer_not_found" | "machine_file_not_found" => StatusCode::NOT_FOUND,
             "machine_file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
             "machine_transfer_limit" | "machine_transfer_busy" => StatusCode::TOO_MANY_REQUESTS,
-            "machine_file_checksum_mismatch" | "machine_file_changed" => StatusCode::CONFLICT,
+            "machine_file_checksum_mismatch"
+            | "machine_file_changed"
+            | "machine_file_commit_uncertain"
+            | "machine_transfer_stale" => StatusCode::CONFLICT,
             "agent_startup_not_found" => StatusCode::NOT_FOUND,
             "policy_denied" | "policy_subject_mismatch" | "agent_identity_mismatch" => {
                 StatusCode::FORBIDDEN

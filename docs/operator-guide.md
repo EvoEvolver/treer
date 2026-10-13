@@ -1191,6 +1191,8 @@ while a bare machine/operator route retains its own-machine restriction.
 An interruption discards staging on disconnect/expiry; after a crash, recorded
 staging is cleaned on the next transfer. If publication succeeded but its reply
 was lost, inspect the destination before retrying; retries never auto-force.
+`machine_file_commit_uncertain` likewise means publication happened but cleanup
+or directory durability could not be confirmed; inspect rather than retrying.
 
 Windows roots enrolled from `C:\\Windows\\System32` remain unchanged. For new
 machines explicitly enroll with `--root` pointing at a user-owned directory.

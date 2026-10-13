@@ -190,9 +190,10 @@ impl AppState {
                 .iter()
                 .filter(|(_, pending)| {
                     pending.server == key
-                        && pending
-                            .required_capability
-                            .is_some_and(|required| !capabilities.contains(required))
+                        && pending.required_capability.is_some_and(|required| {
+                            required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER
+                                || !capabilities.contains(required)
+                        })
                 })
                 .map(|(command_id, _)| command_id.clone())
                 .collect::<Vec<_>>();
@@ -213,13 +214,17 @@ impl AppState {
         };
         for (command_id, pending) in rejected {
             let required = pending.required_capability.unwrap_or("unknown");
-            let _ = pending.result.send(CommandResult::failure(
-                command_id,
+            let error = if required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER {
+                ProtocolError::new("machine_transfer_stale", "Controller connection changed; transfer commands are not replayed, inspect the destination before retrying")
+            } else {
                 ProtocolError::new(
                     "unsupported_command",
                     format!("machine {server_id} does not advertise capability {required}"),
-                ),
-            ));
+                )
+            };
+            let _ = pending
+                .result
+                .send(CommandResult::failure(command_id, error));
         }
         for command in commands {
             let _ = outgoing.send(SocketFrame::Text(command));
