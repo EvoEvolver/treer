@@ -707,6 +707,7 @@ pub fn host_socket_path(server_id: &str) -> Result<PathBuf> {
 
 pub fn start(workspace: &str) -> Result<()> {
     let (paths, config) = installed_service(workspace)?;
+    #[cfg(windows)]
     require_root_alignment(&paths, &config)?;
     platform::start(&paths, &config)
 }
@@ -720,6 +721,7 @@ async fn start_service_and_wait(
     paths: &ServicePaths,
     config: &ServiceConfig,
 ) -> Result<ServiceActivation> {
+    #[cfg(windows)]
     require_root_alignment(paths, config)?;
     let mut activation = if config.service_manager == ServiceManager::Foreground {
         eprintln!(
@@ -845,6 +847,7 @@ pub fn stop_remotely(workspace: &str) -> Result<()> {
 pub fn restart(workspace: &str) -> Result<()> {
     warn_managed_agent_service_stop();
     let (paths, config) = installed_service(workspace)?;
+    #[cfg(windows)]
     require_root_alignment(&paths, &config)?;
     platform::restart(&paths, &config)
 }
@@ -907,6 +910,7 @@ fn relocate_root_at(paths: &ServicePaths, config: &ServiceConfig, root: &Path) -
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn require_root_alignment(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
     let host: HostDaemonConfig = serde_json::from_slice(&fs::read(&paths.host_config)?)?;
     if fs::canonicalize(&host.root)? != fs::canonicalize(&config.root)? {
