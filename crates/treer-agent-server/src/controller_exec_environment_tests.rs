@@ -190,7 +190,22 @@ fn machine_exec_child_fixture() {
 async fn windows_machine_exec_node_and_powershell_keep_os_baseline() {
     let root = test_root();
     let (runtime, host) = runtime_for_exec(&root).await;
-    for (command,args,expected) in [
+    let environment = runtime.machine_exec_environment();
+    let system = PathBuf::from(environment.get(std::ffi::OsStr::new("SystemRoot")).unwrap());
+    let modules = system
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("Modules");
+    assert!(
+        environment.get(std::ffi::OsStr::new("PSModulePath")) == Some(&modules.into_os_string()),
+        "initial PSModulePath must equal the fixed system directory"
+    );
+    eprintln!(
+        "windows-exec child-variable-names={:?}",
+        environment.keys().collect::<Vec<_>>()
+    );
+    for (index, (command,args,expected)) in [
         ("node",vec!["-e","const assert=require('node:assert'); for(const k of ['SystemRoot','windir','USERPROFILE','APPDATA','LOCALAPPDATA']) assert.ok(process.env[k],k); assert.ok(!Object.keys(process.env).some(k=>k.toUpperCase().startsWith('TREER_'))); console.log(1+1)"],"2"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$PSVersionTable.PSVersion) { exit 2 }; Write-Output 'powershell-version-ok'; exit 0"],"powershell-version-ok"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE -or !$env:PSModulePath) { exit 2 }; Write-Output 'powershell-baseline-ok'; exit 0"],"powershell-baseline-ok"),
@@ -198,11 +213,59 @@ async fn windows_machine_exec_node_and_powershell_keep_os_baseline() {
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","$expected=[IO.Path]::Combine($env:SystemRoot,'System32\\WindowsPowerShell\\v1.0\\Modules'); $contains=@($env:PSModulePath -split ';' | Where-Object { [string]::Equals($_,$expected,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0; Write-Output ('powershell-system-module-present=' + $contains); if (!$contains) { exit 3 }; exit 0"],"powershell-system-module-present=True"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE) { exit 2 }; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); Write-Output 'powershell-ok'"],"powershell-ok"),
         ("tasklist.exe",vec!["/FI","PID eq 0","/NH"],""),
-    ] {
+    ].into_iter().enumerate() {
         let response = runtime.exec_machine(MachineExecRequest { cwd:".".into(),command:command.into(),args:args.into_iter().map(str::to_owned).collect(),timeout_ms:30_000 }).await.unwrap();
-        assert!(!response.timed_out, "{command} timed out after {}ms: exit={:?} stdout={:?} stderr={:?}",response.duration_ms,response.exit_code,response.stdout,response.stderr);
+        eprintln!("windows-exec probe={index} marker={expected} duration_ms={} timeout={} exit={:?}", response.duration_ms, response.timed_out, response.exit_code);
+        assert!(!response.timed_out, "probe={index} marker={expected} {command} timed out after {}ms: exit={:?} stdout={:?} stderr={:?}",response.duration_ms,response.exit_code,response.stdout,response.stderr);
         assert_eq!(response.exit_code,Some(0),"{command} failed after {}ms: stdout={:?} stderr={:?}",response.duration_ms,response.stdout,response.stderr);
         assert!(response.stdout.contains(expected),"{command} did not complete its smoke check");
+    }
+    host.abort();
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Diagnostic only: run on a fresh native runner with the artifact job's exact
+/// preparation steps. Never substitutes for the unchanged strict 30s gate.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "read-only native artifact environment diagnosis; not a release gate"]
+async fn windows_artifact_powershell_diagnostics() {
+    let root = test_root();
+    let (runtime, host) = runtime_for_exec(&root).await;
+    let names = |environment: BTreeMap<std::ffi::OsString, std::ffi::OsString>| {
+        environment.into_keys().collect::<Vec<_>>()
+    };
+    eprintln!(
+        "artifact-diagnostic parent-variable-names={:?}",
+        names(std::env::vars_os().collect())
+    );
+    eprintln!(
+        "artifact-diagnostic child-variable-names={:?}",
+        names(runtime.machine_exec_environment())
+    );
+    let environment = runtime.machine_exec_environment();
+    let system = PathBuf::from(environment.get(std::ffi::OsStr::new("SystemRoot")).unwrap());
+    let absolute = system
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    // Only synthetic flags/markers and numeric PS version are printed. Do not
+    // print environment values, paths, $Error or exception messages.
+    for (label, command, args) in [
+        ("initial-environment", "node".to_string(), vec!["-e".into(), "const p=require('node:path'); console.log('child-variable-names='+JSON.stringify(Object.keys(process.env).sort())); console.log('fixed-module-equal='+(process.env.PSModulePath===p.win32.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','Modules')));".into()]),
+        ("utility-version", "powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "Write-Output 'utility-version-ok'; exit 0".into()]),
+        ("startup-exit", "powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "exit 0".into()]),
+        ("console-version", "powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "[Console]::WriteLine($PSVersionTable.PSVersion.ToString()); exit 0".into()]),
+        ("autoload-disabled", "powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "$PSModuleAutoLoadingPreference='None'; [Console]::WriteLine($PSVersionTable.PSVersion.ToString()); exit 0".into()]),
+        ("absolute-console-version", absolute.to_string_lossy().into_owned(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "[Console]::WriteLine($PSVersionTable.PSVersion.ToString()); exit 0".into()]),
+        ("rng", "powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "try { [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); [Console]::WriteLine('rng-ok'); exit 0 } catch { [Console]::WriteLine($_.Exception.GetType().Name); exit 2 }".into()]),
+    ] {
+        let response = runtime.exec_machine(MachineExecRequest { cwd: ".".into(), command, args, timeout_ms: 5_000 }).await.unwrap();
+        // stderr is intentionally not printed: native errors can include real
+        // profile paths. Probe stdout is restricted to the synthetic output above.
+        eprintln!("artifact-diagnostic probe={label} duration_ms={} timeout={} exit={:?} stdout={:?} stderr_present={}", response.duration_ms, response.timed_out, response.exit_code, response.stdout, !response.stderr.is_empty());
     }
     host.abort();
     drop(runtime);
