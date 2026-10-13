@@ -82,9 +82,16 @@ pub(super) async fn bootstrap_info(
     let enrollment = auth
         .create_machine_enrollment(&workspace_id, &session.user_id)
         .await?;
-    let (install_command, connect_command) = bootstrap_commands(&config.public_url, &enrollment);
-    let (windows_install_command, windows_connect_command) =
+    let (mut install_command, connect_command) =
+        bootstrap_commands(&config.public_url, &enrollment);
+    let (mut windows_install_command, windows_connect_command) =
         windows_bootstrap_commands(&config.public_url, &enrollment);
+    if is_cleartext_remote(&config.public_url) {
+        // Installer checksums come from the same origin, so a copyable cleartext
+        // download-and-run command would let a network attacker replace both.
+        install_command = CLEARTEXT_INSTALL_NOTICE.to_string();
+        windows_install_command = CLEARTEXT_INSTALL_NOTICE.to_string();
+    }
     let script_url = install_script_url(&config.public_url);
     Ok(Json(treer_protocol::MachineBootstrapResponse {
         install_command,
@@ -95,6 +102,19 @@ pub(super) async fn bootstrap_info(
         script_url: script_url.to_string(),
         workspace_id,
     }))
+}
+
+const CLEARTEXT_INSTALL_NOTICE: &str = "Install command withheld: this Proxy's public URL uses cleartext HTTP. Configure an HTTPS TREER_PROXY_PUBLIC_URL (HTTP is allowed only on loopback), then request the command again.";
+
+/// Cleartext HTTP to anything other than the local machine.
+pub(super) fn is_cleartext_remote(url: &Url) -> bool {
+    url.scheme() == "http"
+        && !match url.host() {
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        }
 }
 
 fn windows_bootstrap_commands(public_url: &Url, key: &str) -> (String, String) {
@@ -383,5 +403,30 @@ mod windows_installer_tests {
         assert!(script.contains("$ArtifactBase -eq '__TREER_ARTIFACT_BASE__'"));
         assert!(!script.contains("token=hidden"));
         assert!(!script.contains("#fragment"));
+    }
+}
+
+#[cfg(test)]
+mod cleartext_tests {
+    use super::*;
+
+    #[test]
+    fn only_loopback_may_use_cleartext_install_origins() {
+        for (url, remote) in [
+            ("https://treer.example/", false),
+            ("http://127.0.0.1:8787/", false),
+            ("http://localhost:8787/", false),
+            ("http://[::1]:8787/", false),
+            ("http://treer.example/", true),
+            ("http://10.0.0.5:8787/", true),
+            ("http://127.0.0.1.evil.example/", true),
+            ("http://[2001:db8::1]/", true),
+        ] {
+            assert_eq!(
+                is_cleartext_remote(&Url::parse(url).unwrap()),
+                remote,
+                "{url}"
+            );
+        }
     }
 }

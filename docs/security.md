@@ -137,6 +137,14 @@ user tools, but are not a control-plane transport configuration.
   especially with public access, exposes that host, so treat service creation as
   a network-reach permission and restrict it with Policy.
 
+- The Proxy withholds the copyable Unix and Windows install commands when its
+  configured public URL is cleartext HTTP on a non-loopback host (the commands
+  download and run a script whose checksums come from the same origin, so a
+  network attacker could replace both). Configure an HTTPS public URL. The
+  `/install.sh` and `/install.ps1` endpoints and the connect command (which
+  carries the enrollment key) are separate capabilities and are not blocked;
+  `install.ps1` itself refuses cleartext non-loopback artifact origins.
+
 ## Unsupported Claims
 
 Public Unix and Windows bootstrap installers check SHA256 hashes from the same
