@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ChevronDown, ChevronRight, Folder, MoreVertical, Plus } from "lucide-react"
 import { agentPath, folderPath as resolveFolderPath } from "@/lib/workload-path"
+import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from "@/lib/folder-expansion"
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
 export interface NewAgentFolder { folderId: string; path: string }
@@ -19,7 +20,14 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<FolderExpansion>(() => readFolderExpansion(workspaceId))
+  const expansion = useRef(expanded)
+  const [treeLoaded, setTreeLoaded] = useState(false)
+  const previousSelection = useRef<string | null>(null)
+  const pendingReveal = useRef<string | null>(null)
+  function saveExpansion(next: FolderExpansion) {
+    expansion.current = next; setExpanded(next); writeFolderExpansion(workspaceId, next)
+  }
   const [dragged, setDragged] = useState<Item | null>(null)
   const [dropTarget, setDropTarget] = useState<{ id: string; after: boolean } | null>(null)
   const [editor, setEditor] = useState<{ mode: "create" | "rename" | "move"; item?: Item; parent: string | null } | null>(null)
@@ -34,7 +42,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   const readGeneration = useRef(0)
   const base = `/api/workspaces/${encodeURIComponent(workspaceId ?? "")}/workload-tree`
   useEffect(() => {
-    setTree({ folders: [], placements: [] }); setError(""); setEditor(null); setCollapsed(new Set()); setCopyNotice(""); setManualCopyPath(null)
+    setTree({ folders: [], placements: [] }); setError(""); setEditor(null); setTreeLoaded(false); expansion.current = readFolderExpansion(workspaceId); setExpanded(expansion.current); previousSelection.current = null; pendingReveal.current = null; setCopyNotice(""); setManualCopyPath(null)
   }, [workspaceId, preview])
   useEffect(() => {
     let active = true
@@ -48,7 +56,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       const generation = ++readGeneration.current
       try {
         const data = await api<Tree>(base)
-        if (active && generation === readGeneration.current) setTree(data)
+        if (active && generation === readGeneration.current) { setTree(data); setTreeLoaded(true) }
       } catch (reason) {
         if (active && generation === readGeneration.current) setError(reason instanceof Error ? reason.message : "Unable to update workload tree")
       } finally { reading = false; if (active) setLoading(false) }
@@ -59,6 +67,38 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     window.addEventListener("focus", focus)
     return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", focus) }
   }, [base, workspaceId, preview, reload, placementRevision])
+  // Reconcile only an authoritative successful tree read, never the empty loading state.
+  useEffect(() => {
+    if (!treeLoaded) return
+    const valid = new Set(tree.folders.map((folder) => folder.folder_id))
+    const next = Object.fromEntries(Object.entries(expansion.current).filter(([id]) => valid.has(id)))
+    if (Object.keys(next).length !== Object.keys(expansion.current).length) saveExpansion(next)
+  }, [tree, treeLoaded])
+  const selectedAncestors: string[] = []
+  let selectedFolder = tree.placements.find((entry) => entry.agent_id === selectedId)?.folder_id
+  const visited = new Set<string>()
+  while (selectedFolder && !visited.has(selectedFolder)) {
+    visited.add(selectedFolder)
+    const folder = tree.folders.find((entry) => entry.folder_id === selectedFolder)
+    if (!folder) break
+    selectedAncestors.push(folder.folder_id); selectedFolder = folder.parent_id
+  }
+  const selectionChain = JSON.stringify(selectedAncestors)
+  useEffect(() => {
+    if (!treeLoaded) return
+    const changedSelection = previousSelection.current !== null && previousSelection.current !== selectedId
+    if (changedSelection) pendingReveal.current = selectedId
+    const next = { ...expansion.current }
+    let changed = false
+    const chain = JSON.parse(selectionChain) as string[]
+    for (const id of chain) {
+      // Initial/default selection preserves collapsed preferences; changing Agent reveals only its chain.
+      if (next[id] !== true && pendingReveal.current === selectedId && selectedId !== null) { next[id] = true; changed = true }
+    }
+    if (chain.length) pendingReveal.current = null
+    previousSelection.current = selectedId
+    if (changed) saveExpansion(next)
+  }, [selectedId, selectionChain, treeLoaded])
   const workloads = [...agents]
   for (const app of apps) {
     const id = app.runtime_agent_id ?? app.app_id
@@ -113,7 +153,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     try {
       await api(`${base}${path}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
       const updated = await api<Tree>(base)
-      setTree(updated); setEditor(null)
+      setTree(updated); setTreeLoaded(true); setEditor(null)
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") } finally { mutation.current = false; setBusy(false) }
   }
   function move(item: Item, folderId: string | null) {
@@ -149,7 +189,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") }
     finally {
       // Also read after a partial failure: initialization may have succeeded.
-      try { setTree(await api<Tree>(base)) } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") }
+      try { setTree(await api<Tree>(base)); setTreeLoaded(true) } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") }
       mutation.current = false; setBusy(false)
     }
   }
@@ -174,10 +214,10 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   function render(parent: string | null, ancestors: Set<string> = new Set()): React.ReactNode {
     const folders = tree.folders.filter((folder) => folder.parent_id === parent && !ancestors.has(folder.folder_id)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.folder_id.localeCompare(b.folder_id))
     const rows = orderedRows(parent)
-    return <>{folders.map((folder) => { const item: Item = { kind: "folder", id: folder.folder_id, name: folder.name }; return <div key={folder.folder_id} role="treeitem" aria-expanded={!collapsed.has(folder.folder_id)} aria-label={folder.name}>
+    return <>{folders.map((folder) => { const item: Item = { kind: "folder", id: folder.folder_id, name: folder.name }; return <div key={folder.folder_id} role="treeitem" aria-expanded={expanded[folder.folder_id] === true} aria-label={folder.name}>
       <div title={folderPath(folder)} className="flex min-h-10 items-center rounded px-1 hover:bg-accent" draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => setDragged(null)} onDragOver={(event) => { event.preventDefault(); event.stopPropagation() }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (dragged) move(dragged, folder.folder_id); setDragged(null) }}>
-        <button className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs" onClick={() => setCollapsed((current) => { const next = new Set(current); if (next.has(folder.folder_id)) next.delete(folder.folder_id); else next.add(folder.folder_id); return next })}>{collapsed.has(folder.folder_id) ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}<Folder className="size-3.5" /><span className="truncate">{folder.name}</span></button>{menu(item, parent)}
-      </div>{!collapsed.has(folder.folder_id) && <div role="group" className="ml-3 border-l pl-1">{render(folder.folder_id, new Set([...ancestors, folder.folder_id]))}</div>}
+        <button className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs" onClick={() => { pendingReveal.current = null; saveExpansion({ ...expansion.current, [folder.folder_id]: expansion.current[folder.folder_id] !== true }) }}>{expanded[folder.folder_id] !== true ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}<Folder className="size-3.5" /><span className="truncate">{folder.name}</span></button>{menu(item, parent)}
+      </div>{expanded[folder.folder_id] === true && <div role="group" className="ml-3 border-l pl-1">{render(folder.folder_id, new Set([...ancestors, folder.folder_id]))}</div>}
     </div> })}{rows.map((agent) => { const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }; return <div role="treeitem" aria-label={agent.name} title={agentPath(agent, tree)} data-agent-id={agent.agent_id} aria-selected={selectedId === agent.agent_id} key={agent.agent_id} draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => { setDragged(null); setDropTarget(null) }} onDragOver={(event) => {
       if (busy || dragged?.kind !== "agent" || dragged.id === agent.agent_id) return
       event.preventDefault(); event.stopPropagation()

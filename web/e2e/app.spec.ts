@@ -397,6 +397,12 @@ async function openWorkspaceSettings(page: Page) {
   await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
 }
 
+async function expandFolder(page: Page, name: string) {
+  const row = page.getByRole("treeitem", { name, exact: true })
+  await expect(row).toBeVisible()
+  if (await row.getAttribute("aria-expanded") !== "true") await row.getByRole("button", { name, exact: true }).click()
+}
+
 async function createResearchTree(page: Page) {
   await page.goto("/")
   await page.getByRole("button", { name: "New folder", exact: true }).click()
@@ -406,6 +412,8 @@ async function createResearchTree(page: Page) {
   await page.getByRole("menuitem", { name: "New folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("experiments")
   await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expandFolder(page, "research")
+  await expandFolder(page, "experiments")
   await expect(page.getByRole("treeitem", { name: "experiments", exact: true })).toBeVisible()
   await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
   await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
@@ -587,6 +595,7 @@ test("external folder changes refresh without resetting an open editor", async (
   await expect(page.getByRole("treeitem", { name: "From CLI", exact: true, includeHidden: true })).toBeAttached()
   await expect(page.getByRole("textbox", { name: "Folder name" })).toHaveValue("Unsaved folder")
   await page.getByRole("button", { name: "Cancel", exact: true }).click()
+  await expandFolder(page, "From CLI")
   await expect(page.getByRole("treeitem", { name: "From CLI", exact: true }).getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
 })
 
@@ -731,6 +740,7 @@ test("dragging into a folder inserts at the chosen sibling and preserves that or
   await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
   await page.getByRole("button", { name: "Save", exact: true }).click()
   const folder = page.getByRole("treeitem", { name: "Research", exact: true })
+  await expandFolder(page, "Research")
   for (const name of ["worker", "Soul Archive"]) {
     await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
     await page.getByRole("menuitem", { name: "Move to folder", exact: true }).click()
@@ -751,6 +761,7 @@ test("folders support persistent drag and keyboard moves, nesting, rename and de
   await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
   await page.getByRole("button", { name: "Save", exact: true }).click()
   const folder = page.getByRole("treeitem", { name: "Research", exact: true })
+  await expandFolder(page, "Research")
   await expect(folder).toBeVisible()
   const moved = page.waitForRequest((request) => request.url().endsWith("/workload-tree/placements/ag-1") && request.method() === "PUT")
   await page.getByRole("treeitem", { name: "api-server", exact: true }).dragTo(folder.locator(":scope > div").first())
@@ -1476,6 +1487,8 @@ for (const mobile of [false, true]) {
         return ok(route, agents[0])
       })
       await page.goto("/")
+      await expandFolder(page, "research")
+      await expandFolder(page, "delivery")
       const first = page.locator('[data-agent-id="ag-1"]')
       const second = page.locator('[data-agent-id="ag-2"]')
       await expect(first).toHaveAttribute("title", "/research/reviewer")
@@ -1571,3 +1584,107 @@ test('authorization return rejects external, credential and fragment destination
   expect(results.slice(0, 4)).toEqual([null, null, null, null])
   expect(results[4]).toContain('/api/apps/oauth/authorize?state=synthetic')
 })
+
+for (const mobile of [false, true]) {
+  test.describe(`folder expansion on ${mobile ? '390px' : 'desktop'}`, () => {
+    test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 } })
+    const key = 'treer:folder-expansion:v1:ws-1'
+    const folder = (page: Page) => page.getByRole('treeitem', { name: 'Cached folder', exact: true })
+    const toggle = (page: Page) => folder(page).getByRole('button', { name: 'Cached folder', exact: true }).click()
+    test.beforeEach(async ({ page }) => {
+      await page.route('**/api/workspaces/ws-1/workload-tree', (route) => ok(route, {
+        folders: [{ folder_id: 'cached-id', name: 'Cached folder', parent_id: null }, { folder_id: 'other-id', name: 'Other folder', parent_id: null }],
+        placements: [{ agent_id: 'ag-2', folder_id: 'cached-id', position: 0 }],
+      }))
+    })
+    test('defaults collapsed and persists both toggles immediately across reload and workspace switch', async ({ page }, testInfo) => {
+      await page.goto('/')
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
+      await expect(page.getByRole('treeitem', { name: 'Other folder', exact: true })).toHaveAttribute('aria-expanded', 'false')
+      await toggle(page)
+      expect(await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!)['cached-id'], key)).toBe(true)
+      await page.reload()
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
+      await page.getByRole('combobox', { name: 'Organization' }).click()
+      await page.getByRole('option', { name: 'Research', exact: true }).click()
+      await expect(folder(page)).toHaveCount(0)
+      await page.getByRole('combobox', { name: 'Organization' }).click()
+      await page.getByRole('option', { name: 'Acme', exact: true }).click()
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
+      await page.screenshot({ path: testInfo.outputPath('expanded.png') })
+      await toggle(page)
+      expect(await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!)['cached-id'], key)).toBe(false)
+      await page.reload()
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+      await page.screenshot({ path: testInfo.outputPath('collapsed.png') })
+    })
+    test('deleted IDs are pruned only after a successful tree response', async ({ page }) => {
+      await page.addInitScript(({ key }) => localStorage.setItem(key, JSON.stringify({ 'deleted-id': true, 'cached-id': true, 'other-id': false })), { key })
+      await page.goto('/')
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
+      await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), key)).toEqual({ 'cached-id': true, 'other-id': false })
+    })
+    test('rename and move retain ID preferences; deletion clears them; new folders collapse', async ({ page }) => {
+      let folders = [{ folder_id: 'cached-id', name: 'Cached folder', parent_id: null as string | null }]
+      await page.route('**/api/workspaces/ws-1/workload-tree', (route) => ok(route, { folders, placements: [] }))
+      await page.goto('/')
+      await toggle(page)
+      folders = [{ folder_id: 'parent', name: 'Parent', parent_id: null }, { folder_id: 'cached-id', name: 'Renamed', parent_id: 'parent' }]
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+      await expect(page.getByRole('treeitem', { name: 'Parent', exact: true })).toHaveAttribute('aria-expanded', 'false')
+      await expandFolder(page, 'Parent')
+      await expect(page.getByRole('treeitem', { name: 'Renamed', exact: true })).toHaveAttribute('aria-expanded', 'true')
+      folders = [{ folder_id: 'parent', name: 'Parent', parent_id: null }]
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+      await expect(page.getByRole('treeitem', { name: 'Renamed', exact: true })).toHaveCount(0)
+      await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), key)).toEqual({ parent: true })
+    })
+    test('failed tree reads leave cached preferences intact', async ({ page }) => {
+      await page.addInitScript(({ key }) => localStorage.setItem(key, JSON.stringify({ 'cached-id': true })), { key })
+      let fail = true
+      await page.route('**/api/workspaces/ws-1/workload-tree', (route) => fail
+        ? route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }) : route.fallback())
+      await page.goto('/')
+      await expect(page.getByRole('button', { name: 'Reload folders', exact: true })).toBeVisible()
+      expect(await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), key)).toEqual({ 'cached-id': true })
+      fail = false
+      await page.getByRole('button', { name: 'Reload folders', exact: true }).click()
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
+    })
+    test('selecting another Agent from machine overview reveals only its ancestor chain', async ({ page }) => {
+      await page.route('**/api/workspaces/ws-1/workload-tree', (route) => ok(route, {
+        folders: [{ folder_id: 'parent', name: 'Parent', parent_id: null }, { folder_id: 'cached-id', name: 'Cached folder', parent_id: 'parent' }, { folder_id: 'other-id', name: 'Other folder', parent_id: null }],
+        placements: [{ agent_id: 'ag-2', folder_id: 'cached-id', position: 0 }],
+      }))
+      await page.goto('/')
+      await expect(page.getByRole('treeitem', { name: 'Parent', exact: true })).toHaveAttribute('aria-expanded', 'false')
+      await openWorkspaceSettings(page)
+      await cloudboxRow(page).click()
+      await page.locator('main section', { has: page.getByRole('heading', { name: 'Agents on this machine' }) }).getByRole('button', { name: 'Terminal', exact: true }).click()
+      if (mobile) await page.getByRole('button', { name: 'Close full-screen terminal', exact: true }).click()
+      await expect(page.getByRole('treeitem', { name: 'Parent', exact: true })).toHaveAttribute('aria-expanded', 'true')
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
+      await expect(page.getByRole('treeitem', { name: 'Other folder', exact: true })).toHaveAttribute('aria-expanded', 'false')
+      await toggle(page)
+      await page.reload()
+      await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
+    })
+    for (const failure of ['getter', 'read', 'write']) {
+      test(`storage ${failure} throws without breaking in-memory toggles`, async ({ page }) => {
+        await page.addInitScript((failure) => {
+          if (failure === 'getter') Object.defineProperty(window, 'localStorage', { get() { throw new Error('disabled') } })
+          else Object.defineProperty(Storage.prototype, failure === 'read' ? 'getItem' : 'setItem', { value() { throw new Error('disabled') } })
+        }, failure)
+        await page.goto('/')
+        await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
+        await toggle(page)
+        await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
+        await toggle(page)
+        await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
+        await page.reload()
+        await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
+      })
+    }
+  })
+}
