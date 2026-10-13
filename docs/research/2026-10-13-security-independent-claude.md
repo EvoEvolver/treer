@@ -23,8 +23,8 @@
 | N13 下划线头 | 已合并（ee8e41b，端到端回归 db197ea） |
 | N14 链路本地/元数据目标 | 已合并（9d0572e） |
 | Proxy 不返回明文远程安装命令（N15 的 Unix/Proxy 部分） | 已合并（e3b3ef1） |
-| N15 Windows 安装器 HTTPS | 源码已批准，待 release-eng 合并；原生 Windows 执行待门禁 |
-| P1-04 路径规则包含性 | core-dev 评审“创建继承”设计中（未合并）；operator-guide 已有说明 |
+| N15 Windows 安装器 HTTPS | 已合并（c40bb99），输入边界测试 d7e313e、双 PowerShell CI aa3a635；原生 Windows 执行待门禁 |
+| P1-04 路径规则包含性 | “创建继承”已实现，workload-create-placement 等待 release-eng 交叉评审（未合并）；operator-guide 已有说明 |
 | N12 防回滚、W1 nginx CSP、N10/N11 | 仅方案，等待 owner 分配 |
 
 ## 结论
