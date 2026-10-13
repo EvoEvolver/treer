@@ -53,7 +53,7 @@ pub(super) async fn explain_policy_in_workspace(
             "invalid policy action",
         ));
     }
-    let snapshot = crate::policy_tree::TreeSnapshot::load(&auth.pool(), &workspace).await?;
+    let snapshot = crate::policy_tree::TreeSnapshot::load(&auth.pool(), workspace).await?;
     let subject_id = diagnostic_id(
         &snapshot,
         match request.subject.kind {
@@ -89,7 +89,7 @@ pub(super) async fn explain_policy_in_workspace(
             }
         }
         PolicyPrincipalKind::Human => {
-            auth.require_workspace_member(&workspace, &subject_id)
+            auth.require_workspace_member(workspace, &subject_id)
                 .await?;
             PolicySubject::Human {
                 user_id: subject_id,
@@ -131,7 +131,7 @@ pub(super) async fn explain_policy_in_workspace(
         crate::policy::ACTION_AGENT_TREE_MANAGE | crate::policy::ACTION_AGENT_TREE_READ
     ) {
         if let PolicySubject::Human { user_id } = &request.subject {
-            auth.require_workspace_owner(&workspace, user_id)
+            auth.require_workspace_owner(workspace, user_id)
                 .await
                 .is_ok()
         } else {
