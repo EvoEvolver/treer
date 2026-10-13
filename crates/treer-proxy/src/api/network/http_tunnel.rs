@@ -272,79 +272,6 @@ pub(in crate::api) fn sanitize_tunnel_request_headers(
     Ok(())
 }
 
-#[cfg(test)]
-mod provenance_tests {
-    use super::*;
-
-    #[test]
-    fn agent_ui_replaces_spoofed_provenance_for_http_and_websocket() {
-        let interface = treer_protocol::AgentInterfaceDescriptor {
-            protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
-            instance_id: "registered-instance".into(),
-            port: 12345,
-            capabilities: vec![],
-            ui_path: Some("/".into()),
-            registered_at: Utc::now(),
-        };
-        for upgraded in [false, true] {
-            let mut headers = HeaderMap::new();
-            for (name, value) in [
-                ("x-treer-interface-source", "controller-api"),
-                ("x-treer-interface-instance", "forged"),
-                ("x-treer-agent-id", "victim"),
-                ("host", "evil.example"),
-                ("origin", "https://proxy.example.test"),
-                ("cookie", "synthetic-session"),
-                ("authorization", "Bearer synthetic"),
-                ("upgrade", "websocket"),
-                ("connection", "upgrade"),
-            ] {
-                headers.insert(name, HeaderValue::from_static(value));
-            }
-            sanitize_agent_interface_headers(&mut headers, upgraded, "target", &interface).unwrap();
-            assert_eq!(headers["x-treer-interface-source"], "proxy-ui");
-            assert_eq!(headers["x-treer-interface-instance"], "registered-instance");
-            assert_eq!(headers["x-treer-agent-id"], "target");
-            assert_eq!(headers["host"], "127.0.0.1:12345");
-            assert_eq!(headers["origin"], "https://proxy.example.test");
-            assert!(!headers.contains_key("cookie"));
-            assert!(!headers.contains_key("authorization"));
-            assert_eq!(headers.contains_key("upgrade"), upgraded);
-        }
-    }
-
-    #[test]
-    fn ordinary_and_public_tunnels_never_preserve_interface_provenance() {
-        for public in [false, true] {
-            let mut headers = HeaderMap::new();
-            for name in [
-                "x-treer-interface-source",
-                "x-treer-interface-instance",
-                "x-treer-agent-id",
-            ] {
-                headers.insert(name, HeaderValue::from_static("forged"));
-            }
-            if public {
-                sanitize_ingress_request_headers(
-                    &mut headers,
-                    true,
-                    "public.example.test",
-                    "https",
-                    "ingress",
-                    None,
-                )
-                .unwrap();
-            } else {
-                sanitize_tunnel_request_headers(&mut headers, true, "service.example.test")
-                    .unwrap();
-            }
-            assert!(!headers
-                .keys()
-                .any(|name| name.as_str().starts_with("x-treer-")));
-        }
-    }
-}
-
 pub(in crate::api) fn sanitize_ingress_request_headers(
     headers: &mut HeaderMap,
     upgraded: bool,
@@ -446,4 +373,77 @@ pub(in crate::api) fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
     }
     headers.remove("keep-alive");
     headers.remove("proxy-connection");
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn agent_ui_replaces_spoofed_provenance_for_http_and_websocket() {
+        let interface = treer_protocol::AgentInterfaceDescriptor {
+            protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
+            instance_id: "registered-instance".into(),
+            port: 12345,
+            capabilities: vec![],
+            ui_path: Some("/".into()),
+            registered_at: Utc::now(),
+        };
+        for upgraded in [false, true] {
+            let mut headers = HeaderMap::new();
+            for (name, value) in [
+                ("x-treer-interface-source", "controller-api"),
+                ("x-treer-interface-instance", "forged"),
+                ("x-treer-agent-id", "victim"),
+                ("host", "evil.example"),
+                ("origin", "https://proxy.example.test"),
+                ("cookie", "synthetic-session"),
+                ("authorization", "Bearer synthetic"),
+                ("upgrade", "websocket"),
+                ("connection", "upgrade"),
+            ] {
+                headers.insert(name, HeaderValue::from_static(value));
+            }
+            sanitize_agent_interface_headers(&mut headers, upgraded, "target", &interface).unwrap();
+            assert_eq!(headers["x-treer-interface-source"], "proxy-ui");
+            assert_eq!(headers["x-treer-interface-instance"], "registered-instance");
+            assert_eq!(headers["x-treer-agent-id"], "target");
+            assert_eq!(headers["host"], "127.0.0.1:12345");
+            assert_eq!(headers["origin"], "https://proxy.example.test");
+            assert!(!headers.contains_key("cookie"));
+            assert!(!headers.contains_key("authorization"));
+            assert_eq!(headers.contains_key("upgrade"), upgraded);
+        }
+    }
+
+    #[test]
+    fn ordinary_and_public_tunnels_never_preserve_interface_provenance() {
+        for public in [false, true] {
+            let mut headers = HeaderMap::new();
+            for name in [
+                "x-treer-interface-source",
+                "x-treer-interface-instance",
+                "x-treer-agent-id",
+            ] {
+                headers.insert(name, HeaderValue::from_static("forged"));
+            }
+            if public {
+                sanitize_ingress_request_headers(
+                    &mut headers,
+                    true,
+                    "public.example.test",
+                    "https",
+                    "ingress",
+                    None,
+                )
+                .unwrap();
+            } else {
+                sanitize_tunnel_request_headers(&mut headers, true, "service.example.test")
+                    .unwrap();
+            }
+            assert!(!headers
+                .keys()
+                .any(|name| name.as_str().starts_with("x-treer-")));
+        }
+    }
 }
