@@ -31,10 +31,19 @@ pub(super) async fn explain_policy(
     Extension(policy): Extension<PolicyEngine>,
     Extension(session): Extension<CurrentSession>,
     Path(workspace): Path<String>,
-    Json(mut request): Json<ExplainRequest>,
+    Json(request): Json<ExplainRequest>,
 ) -> Result<Response, ApiFailure> {
     auth.require_workspace_owner(&workspace, &session.user_id)
         .await?;
+    explain_policy_in_workspace(&auth, &policy, &workspace, request).await
+}
+
+pub(super) async fn explain_policy_in_workspace(
+    auth: &AuthStore,
+    policy: &PolicyEngine,
+    workspace: &str,
+    mut request: ExplainRequest,
+) -> Result<Response, ApiFailure> {
     if request.action.len() > 128
         || request.action.is_empty()
         || request.action.chars().any(char::is_control)
@@ -112,7 +121,7 @@ pub(super) async fn explain_policy(
     }
     let mode = request.mode.unwrap_or(treer_protocol::PolicyMode::Monitor);
     let request = snapshot.enrich(&PolicyRequest::new(
-        &workspace,
+        workspace,
         subject,
         request.action,
         PolicyResource::new(request.resource.kind, resource_id),
@@ -149,7 +158,7 @@ pub(super) async fn explain_policy(
     };
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(json!({"explanation":explanation,"capabilities":[CAPABILITY_POLICY_PATH_RULES],"recovery_guaranteed":true})),
+        Json(json!({"explanation":explanation,"capabilities":[CAPABILITY_POLICY_PATH_RULES,treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY],"recovery_guaranteed":true})),
     )
         .into_response())
 }
@@ -199,7 +208,7 @@ fn diagnostic_id(
     }
 }
 
-async fn app_owner_session(
+pub(super) async fn app_owner_session(
     auth: &AuthStore,
     identity: &IdentityIssuer,
     headers: &HeaderMap,
@@ -315,13 +324,13 @@ pub(super) async fn app_validate_policy_document(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::policy_provider_store::PolicyProviderStore;
     use treer_protocol::{CreateAppDeploymentRequest, PolicyProviderFailureMode};
     use treer_proxy::policy_store::WorkspacePolicyStore;
 
-    async fn fixture() -> (AuthStore, IdentityIssuer, AppDeployment, HeaderMap) {
+    pub(in crate::api) async fn fixture() -> (AuthStore, IdentityIssuer, AppDeployment, HeaderMap) {
         let auth = AuthStore::for_test("test").await;
         auth.seed_test_workspace("diagnostic").await;
         sqlx::query("INSERT INTO users(id,email,email_verified,preferred_name,password_hash,created_at) VALUES('owner','owner@example.test',TRUE,'Owner','unused','test'),('member','member@example.test',TRUE,'Member','unused','test')").execute(&auth.pool()).await.unwrap();

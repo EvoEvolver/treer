@@ -83,6 +83,36 @@ installation does not download code from the internet or require a Treer source
 checkout on the machine. A partial prior installation can be retried; Treer
 updates and restarts the matching official App while preserving its policy data.
 
+## Publication Authority
+
+The selected binding includes `publish_authority`, default `owner_session`.
+Only the current workspace owner may change it through the dedicated
+`PUT /api/workspaces/{workspace}/policy-provider/publish-authority`, supplying
+`expected_app_id` and the explicit choice `owner_session` or `provider_operator`.
+An App UI bridge requires both the selected runtime credential and a current
+service-audience owner identity token. A local App admin token cannot change
+this switch or select a Provider.
+
+`provider_operator` deliberately lets the App authenticate its management-token
+holders locally and use its runtime credential for the separate Core operator
+validate/explain endpoints, without forwarding a human owner token per edit.
+The App must validate before committing v2 writes and require
+`policy.publish-authority.v1`; 404, a missing capability, a withdrawn switch or
+any validation error must fail without fallback. Existing owner diagnostic
+endpoints retain their dual-proof requirements. No management token is sent to
+Core. The selected Provider is trusted; Core does not constrain operator rule
+scope or prevent a malicious Provider from serving other bundles.
+
+Switching and audit persistence are atomic. Changing App/service resets the
+choice to owner-only, including old Proxy writers. `expected_app_id` prevents
+updating a different currently selected App; it is not a binding revision and
+does not detect switching away and back to the same App. Previously validated
+in-flight writes can finish after a switch back. Upgrade every Proxy replica
+before enabling this feature; one capability response is not a fleet fence.
+Disable operator mode and restore a compatible v1 bundle before an old-Proxy
+rollback. See the [API contract](research/2026-10-13-policy-publish-authority.md)
+for paths and simulation inputs.
+
 ## Cache And Failure
 
 The Proxy compiles each immutable bundle and evaluates it locally. It checks

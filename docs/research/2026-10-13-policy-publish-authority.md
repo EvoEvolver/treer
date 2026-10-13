@@ -17,7 +17,8 @@ explicit upgrade error, never permission to publish.
 - `PUT /api/workspaces/{workspace}/policy-provider/publish-authority`: current
   owner session only. JSON: `{"expected_app_id":"app_...",
   "publish_authority":"provider_operator"}`. The expected App must still be the
-  selected Provider; selection races fail. Response contains `provider` and
+  selected Provider; a different selected App fails. This is not a revision CAS
+  and does not detect switching away and back to the same App. Response contains `provider` and
   `capabilities:["policy.publish-authority.v1"]`.
 - `GET /api/apps/{service}/policy/publish-authority`: selected Provider runtime
   workload identity, returning `provider`, `publish_authority`, capabilities and

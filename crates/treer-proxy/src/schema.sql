@@ -494,6 +494,23 @@ CREATE TABLE IF NOT EXISTS workspace_policy_providers (
     FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
 );
 
+ALTER TABLE workspace_policy_providers ADD COLUMN IF NOT EXISTS publish_authority TEXT
+    NOT NULL DEFAULT 'owner_session'
+    CHECK(publish_authority IN ('owner_session', 'provider_operator'));
+
+-- Old Proxy writers must not transfer an explicit authority to another Provider.
+CREATE OR REPLACE FUNCTION reset_policy_publish_authority() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.app_id IS DISTINCT FROM OLD.app_id OR NEW.service_id IS DISTINCT FROM OLD.service_id THEN
+        NEW.publish_authority := 'owner_session';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS policy_publish_authority_binding ON workspace_policy_providers;
+CREATE TRIGGER policy_publish_authority_binding BEFORE UPDATE OF app_id, service_id
+    ON workspace_policy_providers FOR EACH ROW EXECUTE FUNCTION reset_policy_publish_authority();
+
 CREATE TABLE IF NOT EXISTS service_ingresses (
     ingress_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

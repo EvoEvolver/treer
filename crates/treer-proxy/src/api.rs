@@ -70,6 +70,8 @@ use crate::voice::{VoiceAsrConfig, VoiceServices};
 use crate::voice_llm::{self, VoiceCommandError, VoiceLlmConfig};
 mod policy_diagnostics;
 use policy_diagnostics::*;
+mod policy_publish_authority;
+use policy_publish_authority::*;
 
 const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;
 const MAX_MACHINE_FILE_BYTES: usize = 16 * 1024 * 1024;
@@ -404,7 +406,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT] }),
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY] }),
     )
 }
 

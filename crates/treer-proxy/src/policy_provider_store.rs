@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
-use treer_protocol::{PolicyProviderFailureMode, WorkspacePolicyProvider};
+use treer_protocol::{PolicyProviderFailureMode, PolicyPublishAuthority, WorkspacePolicyProvider};
 
 #[derive(Clone)]
 pub struct PolicyProviderStore {
@@ -18,7 +18,7 @@ impl PolicyProviderStore {
     ) -> Result<Option<WorkspacePolicyProvider>, sqlx::Error> {
         sqlx::query(
             "SELECT workspace_id, app_id, service_id, failure_mode, max_stale_seconds, \
-                    revision_hint, updated_at, updated_by \
+                    revision_hint, updated_at, updated_by, publish_authority \
              FROM workspace_policy_providers WHERE workspace_id = $1",
         )
         .bind(workspace_id)
@@ -58,7 +58,7 @@ impl PolicyProviderStore {
                     ELSE excluded.revision_hint END, \
                 updated_at = excluded.updated_at, updated_by = excluded.updated_by \
              RETURNING workspace_id, app_id, service_id, failure_mode, max_stale_seconds, \
-                       revision_hint, updated_at, updated_by",
+                       revision_hint, updated_at, updated_by, publish_authority",
         )
         .bind(workspace_id)
         .bind(app_id)
@@ -82,6 +82,65 @@ impl PolicyProviderStore {
                 .rows_affected()
                 > 0,
         )
+    }
+
+    /// The caller must authenticate a current workspace owner first. Persist the
+    /// choice and its audit atomically, fencing against a changed Provider.
+    pub async fn set_publish_authority(
+        &self,
+        workspace: &str,
+        expected_app: &str,
+        authority: PolicyPublishAuthority,
+        actor: &str,
+    ) -> Result<Option<WorkspacePolicyProvider>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT publish_authority FROM workspace_policy_providers \
+             WHERE workspace_id=$1 AND app_id=$2 FOR UPDATE",
+        )
+        .bind(workspace)
+        .bind(expected_app)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        let row = sqlx::query(
+            "UPDATE workspace_policy_providers SET publish_authority=$3, updated_at=$4, updated_by=$5 \
+             WHERE workspace_id=$1 AND app_id=$2 RETURNING workspace_id, app_id, service_id, \
+             failure_mode, max_stale_seconds, revision_hint, updated_at, updated_by, publish_authority",
+        )
+        .bind(workspace)
+        .bind(expected_app)
+        .bind(authority.as_str())
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .fetch_one(&mut *tx)
+        .await?;
+        let organization: String =
+            sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id=$1")
+                .bind(workspace)
+                .fetch_one(&mut *tx)
+                .await?;
+        crate::audit::insert(
+            &mut tx,
+            crate::audit::NewAuditEvent {
+                organization_id: &organization,
+                workspace_id: Some(workspace),
+                actor_kind: "user",
+                actor_id: Some(actor),
+                source: "proxy",
+                action: "policy_provider.publish_authority.set",
+                resource_kind: "policy_provider",
+                resource_id: expected_app,
+                resource_name: None,
+                payload: serde_json::json!({"previous":previous,"publish_authority":authority}),
+            },
+        )
+        .await?;
+        let provider = provider_from_row(row).map_err(sqlx::Error::Decode)?;
+        tx.commit().await?;
+        Ok(Some(provider))
     }
 
     pub async fn advance_revision(
@@ -127,6 +186,11 @@ fn provider_from_row(
         revision_hint: u64::try_from(row.get::<i64, _>("revision_hint"))?,
         updated_at,
         updated_by: row.get("updated_by"),
+        publish_authority: match row.get::<String, _>("publish_authority").as_str() {
+            "owner_session" => PolicyPublishAuthority::OwnerSession,
+            "provider_operator" => PolicyPublishAuthority::ProviderOperator,
+            value => return Err(format!("invalid policy publication authority {value}").into()),
+        },
     })
 }
 

@@ -447,6 +447,10 @@ pub fn router(
             post(explain_policy),
         )
         .route(
+            "/api/workspaces/{workspace_id}/policy-provider/publish-authority",
+            axum::routing::put(set_policy_publish_authority),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/policy/decisions",
             get(policy_decisions),
         )
@@ -685,6 +689,18 @@ pub fn router(
         .route(
             "/api/apps/{service_id}/policy/validate",
             post(app_validate_policy_document),
+        )
+        .route(
+            "/api/apps/{service_id}/policy/publish-authority",
+            get(app_get_policy_publish_authority).put(app_set_policy_publish_authority),
+        )
+        .route(
+            "/api/apps/{service_id}/policy/operator/validate",
+            post(app_operator_validate_policy),
+        )
+        .route(
+            "/api/apps/{service_id}/policy/operator/explain",
+            post(app_operator_explain_policy),
         )
         .route(
             "/api/apps/{service_id}/directory",

@@ -204,21 +204,41 @@ monitor/allow; schema v2 does not make an unconfigured workspace deny-by-default
 
 Owner Tree read/manage and Provider configuration recovery cannot be denied by
 delegated Policy; current membership, workspace scoping and structural invariants
-still apply. Explain and monitor logs require current owner membership. The
+still apply. Monitor logs require current owner membership. The original
 configured Provider's App diagnostics bridge additionally checks its current
 runtime credential, the human token's exact service audience and current service
-binding. This bridge only reads/simulates: it cannot install rules or delegate
-Owner mutations. A Provider can inspect workspace diagnostics only with a valid
-Owner token; malicious Provider code can misuse that token during its lifetime,
+binding. Its explain/validate/log endpoints retain that owner requirement.
+Malicious Provider code can misuse a forwarded Owner token during its lifetime,
 so selecting a Provider remains a trust decision. No token or caller attributes
 are stored in decision diagnostics. These logs are per-Proxy, bounded and
 volatile, and are not tamper-proof or complete durable audit records.
+
+Publication authority defaults to `owner_session`. Only a current owner can
+explicitly choose `provider_operator` on the selected Provider binding. This
+trusts that App and its management-token holders to edit arbitrary rules,
+including their own access. The App checks its private management token; Core
+does not receive that token and cannot independently prove that the App checked
+it. The separate operator validate/explain endpoints require fresh current
+Provider runtime credentials and the database switch on every request; they do
+not expose decision logs. Provider selection and owner recovery remain
+owner-only. The switch and its audit are atomic, and changing the bound App or
+service resets authority to the default, including old Proxy SQL writes.
+Dedicated capability-gated APIs prevent old Proxies from silently ignoring the
+choice. This is not bounded delegation or protection against a compromised
+Provider. Previously validated in-flight App writes are not instantly cancelled
+when an owner switches back. A 0600 management-token file does not isolate
+Agents sharing one OS user; use separate OS users/containers and enforced
+network/Policy restrictions for that boundary. See the
+[publication contract](research/2026-10-13-policy-publish-authority.md).
 
 Schema v2 deployment is not safe with a mixed fleet of old/new Proxy binaries:
 old Proxies can convert unsupported bundle errors into configured stale/fail-open
 decisions. Upgrade and drain all Proxy replicas before publishing v2; one
 replica's capability reply does not certify cluster compatibility. Reverting
-Proxy software requires a compatible v1 Provider bundle first.
+Proxy software requires a compatible v1 Provider bundle first. Disable operator
+publication and verify App compatibility before rolling back to binaries without
+`policy.publish-authority.v1`; 404/missing capability must not trigger legacy
+fallback or an unvalidated App write.
 
 Service-audience directory and recipient resolution apply Core Agent discovery/
 metadata and human-list rules too; a denied Agent cannot be discovered through

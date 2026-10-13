@@ -85,7 +85,7 @@ pub(super) async fn get_policy_provider(
         None
     };
     Ok(Json(
-        json!({ "provider": provider, "app": app, "cache": cache, "fallback": fallback,"supported_schema_versions":[1,2],"capabilities":[treer_protocol::CAPABILITY_POLICY_PATH_RULES] }),
+        json!({ "provider": provider, "app": app, "cache": cache, "fallback": fallback,"supported_schema_versions":[1,2],"capabilities":[treer_protocol::CAPABILITY_POLICY_PATH_RULES, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY] }),
     ))
 }
 

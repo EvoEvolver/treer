@@ -203,6 +203,36 @@ pub struct SetPolicyPublishAuthorityRequest {
     pub publish_authority: PolicyPublishAuthority,
 }
 
+#[cfg(test)]
+mod publish_authority_tests {
+    use super::*;
+
+    #[test]
+    fn authority_defaults_safely_and_new_requests_are_strict() {
+        let legacy = serde_json::json!({"workspace_id":"w","app_id":"a","service_id":"s",
+            "failure_mode":"fail_closed","max_stale_seconds":0,"revision_hint":0,
+            "updated_at":"2026-10-13T00:00:00Z","updated_by":"owner"});
+        let mut provider: WorkspacePolicyProvider = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            provider.publish_authority,
+            PolicyPublishAuthority::OwnerSession
+        );
+        provider.publish_authority = PolicyPublishAuthority::ProviderOperator;
+        assert_eq!(
+            serde_json::from_str::<WorkspacePolicyProvider>(
+                &serde_json::to_string(&provider).unwrap()
+            )
+            .unwrap(),
+            provider
+        );
+        assert!(serde_json::from_value::<SetPolicyPublishAuthorityRequest>(
+            serde_json::json!({"expected_app_id":"a","publish_authority":"allow_all"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<SetPolicyPublishAuthorityRequest>(serde_json::json!({"expected_app_id":"a","publish_authority":"provider_operator","owner":true})).is_err());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetWorkspacePolicyProviderRequest {
     pub app_id: String,

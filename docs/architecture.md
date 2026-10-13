@@ -242,6 +242,19 @@ the Managed App's machine-local loopback port. Revision invalidation is a typed
 App-to-Controller-to-Proxy route with runtime binding checks. Details and failure
 semantics are in the [Policy Provider protocol](policy-provider.md).
 
+Provider bindings default to `publish_authority=owner_session`. A current owner
+may explicitly select `provider_operator`, trusting the App's locally checked
+management token for schema v2 edits. Core's dedicated operator validate/explain
+routes verify the selected App's current runtime credential and read this choice
+from Postgres per request. Core never receives the App management token. The
+owner-only switch and audit commit together; a database trigger resets authority
+when the App/service binding changes, including old Proxy writers. New clients
+require `policy.publish-authority.v1` and never fall back from unavailable new
+routes to unvalidated writes. Provider selection and owner recovery remain
+owner-only. There are no grant/scope/expiry semantics; isolation is user-configured
+Policy and OS/network isolation. The [publication contract](research/2026-10-13-policy-publish-authority.md)
+describes compatibility and in-flight write limits.
+
 Without a Provider, the legacy versioned JSONB Policy document remains the next
 evaluator. Multi-recipient sends and multi-delivery acknowledgements evaluate
 one pinned revision.
