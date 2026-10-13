@@ -55,7 +55,7 @@ jobs:
         run: |
           cargo test --locked -p treer-platform -p treer-agent-runtime -p treer-agent-host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_
+          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_ -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test native file-transfer Controller and CLI boundaries
         run: |
