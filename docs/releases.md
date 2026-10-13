@@ -76,9 +76,9 @@ deploy the Railway Proxy, Core Message code, or Mail/Telegram App processes.
 
 ## Machine artifacts
 
-Official native builds use Node 22 and lockfile-pinned `npm ci` in the trusted
-CI checkout to prepare the launcher's portable runtime and UI. Dependencies may
-run lifecycle scripts in that build job; target installation stays offline and
+Official native builds use Node 22 and lockfile-pinned `npm ci --ignore-scripts` in the trusted
+CI checkout to prepare the launcher's portable runtime and UI. Dependency
+lifecycle scripts are disabled; target installation stays offline and
 does not require npm or Git. The bundle manifest records the exact source commit
 and every file's size/SHA256. Preparation independently verifies those bytes and
 sets `TREER_LAUNCHER_PAYLOAD_DIR` plus `TREER_REQUIRE_LAUNCHER_BUNDLE=1` before

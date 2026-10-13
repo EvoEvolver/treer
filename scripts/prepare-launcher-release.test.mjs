@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -38,4 +38,13 @@ test('payload links cannot substitute bytes', { skip: process.platform === 'win3
   writeFileSync(join(f.directory, 'target'), 'console.log("fixture")');
   symlinkSync(join(f.directory, 'target'), join(f.directory, 'runtime.mjs'));
   assert.throws(() => verifyBundle(f.directory, commit));
+});
+
+test('launcher build dependency installs disable lifecycle scripts in every build path', () => {
+  for (const path of ['../Dockerfile', '../.github/workflows/ci.yml', '../.github/workflows/build-release-artifacts.yml', './stage-local-artifacts.sh']) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    const installs = source.split('\n').filter(line => /npm --prefix launchers\/agent ci(?: |$)/.test(line));
+    assert.ok(installs.length > 0, path);
+    for (const line of installs) assert.match(line, /--ignore-scripts(?: |$)/, path);
+  }
 });

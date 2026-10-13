@@ -91,7 +91,7 @@ jobs:
           cache: npm
           cache-dependency-path: launchers/agent/package-lock.json
       - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci
+        run: npm --prefix launchers/agent ci --ignore-scripts
       - name: Install isolated browser runtime
         run: cd launchers/agent && npx playwright install --with-deps chromium
       - name: Check launcher and browser sources

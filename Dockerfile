@@ -3,7 +3,7 @@ ARG TREER_BUILD_COMMIT
 WORKDIR /app
 COPY launchers/agent ./launchers/agent
 COPY scripts/prepare-launcher-release.mjs ./scripts/prepare-launcher-release.mjs
-RUN npm --prefix launchers/agent ci \
+RUN npm --prefix launchers/agent ci --ignore-scripts \
     && node scripts/prepare-launcher-release.mjs --output /launcher-payload --source-commit "$TREER_BUILD_COMMIT"
 
 FROM rust:1-bookworm AS builder

@@ -12,7 +12,7 @@ esac
 payload=$(mktemp -d "${TMPDIR:-/tmp}/treer-launcher-payload.XXXXXX")
 trap 'rm -rf "$payload"' EXIT HUP INT TERM
 commit=$(git rev-parse HEAD)
-npm --prefix launchers/agent ci
+npm --prefix launchers/agent ci --ignore-scripts
 node scripts/prepare-launcher-release.mjs --output "$payload" --source-commit "$commit"
 export TREER_LAUNCHER_PAYLOAD_DIR="$payload"
 export TREER_REQUIRE_LAUNCHER_BUNDLE=1

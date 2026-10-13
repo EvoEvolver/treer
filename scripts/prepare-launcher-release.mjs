@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Run only after lockfile-pinned npm ci in the trusted build checkout.
+// Run only after lockfile-pinned npm ci --ignore-scripts in the trusted build checkout.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { appendFileSync, lstatSync, readFileSync, readdirSync } from 'node:fs';

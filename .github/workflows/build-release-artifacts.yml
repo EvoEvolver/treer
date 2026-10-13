@@ -41,7 +41,7 @@ jobs:
           node-version: '22'
       - name: Prepare verified launcher payload
         run: |
-          npm --prefix launchers/agent ci
+          npm --prefix launchers/agent ci --ignore-scripts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/prepare-launcher-release.mjs --output "$env:RUNNER_TEMP/treer-launcher-payload" --source-commit "$env:TREER_BUILD_COMMIT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -129,7 +129,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm --prefix launchers/agent ci
+          npm --prefix launchers/agent ci --ignore-scripts
           node scripts/prepare-launcher-release.mjs --output "$RUNNER_TEMP/treer-launcher-payload" --source-commit "$TREER_BUILD_COMMIT"
 
       - name: Cache Rust build
