@@ -17,6 +17,7 @@
       <button class="nav-item active" data-view="overview">Overview</button>
       <button class="nav-item" data-view="editor">Policy</button>
       <button class="nav-item" data-view="simulator">Simulator</button>
+      <button class="nav-item" data-view="history">History</button>
     </nav>
     <main>
       <section class="view active" id="view-overview">
@@ -54,6 +55,12 @@
         </form>
         <div class="decision empty" id="decision"><span class="decision-mark">-</span><div><small>Decision</small><strong>Not evaluated</strong><p>Run the current published bundle against this request.</p></div></div>
         <div class="notice hidden" id="test-error"></div>
+      </section>
+      <section class="view" id="view-history">
+        <div class="page-heading"><div><p class="eyebrow">Versioned policy</p><h1>Revision history</h1></div><button class="secondary" id="history-refresh">Refresh</button></div>
+        <p>Rollback creates a new revision. The latest 100 revisions are retained. Enter the operator token under Policy before loading history.</p>
+        <div class="notice hidden" id="history-error"></div><div id="history-list"></div>
+        <pre id="history-document" aria-label="Historical policy document"></pre>
       </section>
     </main>
   </div>

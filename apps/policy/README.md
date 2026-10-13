@@ -49,3 +49,24 @@ do not grant policy administration. This capability is separate from Treer
 OAuth; human-role authorization is a future integration. Same-UID processes are
 not isolated. State writes use exclusive private temporary files and atomic
 rename. Do not rely on this App for hostile-tenant isolation.
+
+## Revision history and rollback
+
+Every publication retains an immutable snapshot in the private atomic state
+file, including mode and timestamp. `GET /v1/policy/history` lists the latest
+100 retained revisions; `GET /v1/policy/revisions/N` reads a snapshot. Both require
+operator Bearer authentication. `POST /v1/policy/rollback` accepts
+`{"expected_revision":CURRENT,"revision":OLD}` and publishes the old document
+and mode as a **new, higher revision**, then invalidates the Proxy. It cannot
+rewind the revision counter or silently override a concurrent publication.
+The UI confirms permission/mode changes before restoration. Keep external
+backups if older history is needed. Use one writer process per data file.
+
+Existing single-document state is imported without changing rules, schema or
+mode. Before the first history-aware write it is backed up exclusively to
+`POLICY_DATA_FILE.pre-history.bak` with mode 0600. Keep a separate private backup
+before upgrading. To roll back the storage software, stop only this App through
+your operator workflow and restore that backup using the previous App version;
+this is an operator procedure, never an automatic deployment action. A recovery
+that lowers the persisted revision may require clearing/rebinding the Provider
+through the workspace-owner recovery API, so prefer normal in-App rollback.

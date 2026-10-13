@@ -8,7 +8,7 @@ function applicationUrl(path) {
 async function request(path, options = {}) {
   const response = await fetch(applicationUrl(path), {
     ...options,
-    headers: { "content-type": "application/json", ...(["v1/policy/publish","v1/policy/invalidate"].includes(path) ? {Authorization: "Bearer " + document.getElementById("admin-token").value} : {}), ...(options.headers || {}) },
+    headers: { "content-type": "application/json", ...((["v1/policy/publish","v1/policy/invalidate","v1/policy/rollback","v1/policy/history"].includes(path) || path.startsWith("v1/policy/revisions/")) ? {Authorization: "Bearer " + document.getElementById("admin-token").value} : {}), ...(options.headers || {}) },
   })
   const body = await response.json()
   if (!response.ok) throw new Error(body.error?.message || `HTTP ${response.status}`)
@@ -51,6 +51,7 @@ async function load() {
 document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item === button))
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${button.dataset.view}`))
+  if (button.dataset.view === "history") void loadHistory()
 }))
 
 document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => {
@@ -120,3 +121,34 @@ document.getElementById("test-button").addEventListener("click", async () => {
 })
 
 load()
+
+async function loadHistory() {
+  clearError("history-error")
+  try {
+    const result = await request("v1/policy/history")
+    const list = document.getElementById("history-list")
+    list.replaceChildren()
+    for (const revision of result.revisions) {
+      const row = document.createElement("article"), label = document.createElement("p")
+      label.textContent = `Revision ${revision.revision} · ${revision.mode} · ${revision.published_at}` + (revision.restored_from ? ` · restored from ${revision.restored_from}` : "")
+      const inspect = document.createElement("button"), rollback = document.createElement("button")
+      inspect.textContent = "View document"; inspect.className = "secondary"
+      inspect.addEventListener("click", async () => {
+        try { document.getElementById("history-document").textContent = JSON.stringify(await request(`v1/policy/revisions/${revision.revision}`), null, 2) }
+        catch (error) { showError("history-error", error) }
+      })
+      rollback.textContent = `Restore revision ${revision.revision}`
+      rollback.disabled = revision.revision === state.bundle.revision
+      rollback.addEventListener("click", async () => {
+        if (!window.confirm(`Restore revision ${revision.revision} (${revision.mode}) as a new policy revision? This changes active permissions.`)) return
+        rollback.disabled = true
+        try {
+          render(await request("v1/policy/rollback", {method:"POST", body:JSON.stringify({expected_revision:state.bundle.revision, revision:revision.revision})}))
+          await loadHistory();toast("Historical policy restored as a new revision")
+        } catch (error) { showError("history-error", error);rollback.disabled = false }
+      })
+      row.append(label,inspect,rollback);list.append(row)
+    }
+  } catch (error) { showError("history-error", error) }
+}
+document.getElementById("history-refresh").addEventListener("click",loadHistory)

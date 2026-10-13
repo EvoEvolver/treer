@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import hmac
 import os
@@ -22,6 +23,7 @@ APP_ROOT = Path(__file__).resolve().parent
 PROTOCOL = "treer.policy-provider/v1"
 CAPABILITY = "policy.bundle.v1"
 MAX_BODY_BYTES = 300 * 1024
+MAX_HISTORY = 100
 BUNDLED_INSTALL = (APP_ROOT / "treer-policy-index.html").is_file()
 
 
@@ -158,6 +160,7 @@ def _validate_selector(selector: object, fields: set[str], groups: dict[str, Any
 
 class PolicyStore:
     def __init__(self, path: Path, workspace_id: str) -> None:
+        os.umask(0o077)
         self.path = path
         self.workspace_id = workspace_id
         self.lock = threading.RLock()
@@ -166,18 +169,44 @@ class PolicyStore:
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {
+            initial = {
                 "revision": 1,
                 "mode": "monitor",
                 "document": {"schema_version": 1, "defaults": {}, "groups": {}, "rules": []},
                 "published_at": utc_now(),
             }
+            return {**initial, "history": [copy.deepcopy(initial)]}
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
             document = validate_document(value.get("document"))
             if value.get("mode") not in {"monitor", "enforce"} or not isinstance(value.get("revision"), int) or value["revision"] < 1:
                 raise ValueError("invalid persisted mode or revision")
-            return {**value, "document": document}
+            current = {key: value[key] for key in ("revision", "mode", "published_at")}
+            current["document"] = document
+            history = value.get("history", [copy.deepcopy(current)])
+            if not isinstance(history, list) or not history or len(history) > MAX_HISTORY:
+                raise ValueError("invalid revision history")
+            previous = 0
+            for item in history:
+                if not isinstance(item, dict) or type(item.get("revision")) is not int or item["revision"] <= previous:
+                    raise ValueError("revision history must increase")
+                previous = item["revision"]
+                validate_document(item.get("document"))
+                if item.get("mode") not in {"monitor", "enforce"}:
+                    raise ValueError("invalid historical mode")
+            if history[-1]["revision"] != current["revision"] or any(history[-1].get(k) != current[k] for k in current):
+                raise ValueError("current revision differs from history")
+            if "history" not in value:
+                # Exclusive private backup before the first v2 storage write. No
+                # policy-language/mode change is made by this storage migration.
+                backup = self.path.with_name(self.path.name + ".pre-history.bak")
+                try:
+                    with backup.open("xb") as handle:
+                        os.chmod(backup, 0o600)
+                        handle.write(self.path.read_bytes())
+                except FileExistsError:
+                    pass
+            return {**current, "history": history}
         except (OSError, ValueError, json.JSONDecodeError, PolicyError) as error:
             raise RuntimeError(f"invalid Policy App state: {error}") from error
 
@@ -188,7 +217,7 @@ class PolicyStore:
                 "workspace_id": self.workspace_id,
                 "revision": self.state["revision"],
                 "mode": self.state["mode"],
-                "document": self.state["document"],
+                "document": copy.deepcopy(self.state["document"]),
                 "generated_at": self.state["published_at"],
             }
 
@@ -196,11 +225,30 @@ class PolicyStore:
         with self.lock:
             return {"bundle": self.bundle(), "proxy_sync": dict(self.last_sync)}
 
-    def publish(self, body: object) -> dict[str, Any]:
+    def history(self) -> dict[str, Any]:
+        with self.lock:
+            return {"revisions": [{key: copy.deepcopy(item.get(key)) for key in
+                    ("revision", "mode", "published_at", "restored_from")}
+                    for item in reversed(self.state["history"])], "retention": MAX_HISTORY}
+
+    def revision(self, revision: int) -> dict[str, Any]:
+        with self.lock:
+            item = next((item for item in self.state["history"] if item["revision"] == revision), None)
+            if item is None:
+                raise PolicyError(404, "revision_not_found", "Revision is not retained")
+            return copy.deepcopy(item)
+
+    def rollback(self, expected_revision: int, revision: int) -> dict[str, Any]:
+        with self.lock:
+            item = self.revision(revision)
+            return self.publish({"expected_revision": expected_revision,
+                                 "mode": item["mode"], "document": item["document"]}, restored_from=revision)
+
+    def publish(self, body: object, *, restored_from: int | None = None) -> dict[str, Any]:
         if not isinstance(body, dict) or set(body) != {"expected_revision", "mode", "document"}:
             raise PolicyError(400, "invalid_publish_request", "publish request fields are invalid")
         with self.lock:
-            if body["expected_revision"] != self.state["revision"]:
+            if type(body["expected_revision"]) is not int or body["expected_revision"] != self.state["revision"]:
                 raise PolicyError(409, "policy_revision_conflict", "policy revision changed; reload before publishing")
             if body["mode"] not in {"monitor", "enforce"}:
                 raise PolicyError(400, "invalid_policy_mode", "policy mode must be monitor or enforce")
@@ -208,15 +256,20 @@ class PolicyStore:
             next_state = {
                 "revision": self.state["revision"] + 1,
                 "mode": body["mode"],
-                "document": document,
+                "document": copy.deepcopy(document),
                 "published_at": utc_now(),
             }
+            if restored_from is not None:
+                next_state["restored_from"] = restored_from
+            next_state["history"] = (copy.deepcopy(self.state["history"]) + [copy.deepcopy(next_state)])[-MAX_HISTORY:]
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             descriptor, name = tempfile.mkstemp(prefix=".policy-", dir=self.path.parent)
             temporary = Path(name)
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                     handle.write(json.dumps(next_state, indent=2) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 temporary.replace(self.path)
             finally:
                 temporary.unlink(missing_ok=True)
@@ -277,6 +330,16 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 self._json(200, self.store.bundle())
             elif parsed.path == "/v1/state":
                 self._json(200, self.store.status())
+            elif parsed.path == "/v1/policy/history":
+                self._require_operator()
+                self._json(200, self.store.history())
+            elif parsed.path.startswith("/v1/policy/revisions/"):
+                self._require_operator()
+                try:
+                    revision = int(parsed.path.rsplit("/", 1)[1])
+                except ValueError as error:
+                    raise PolicyError(400, "invalid_revision", "Revision must be an integer") from error
+                self._json(200, self.store.revision(revision))
             else:
                 raise PolicyError(404, "not_found", "route not found")
         except PolicyError as error:
@@ -286,13 +349,8 @@ class PolicyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
-            if urlsplit(self.path).path in ("/v1/policy/publish", "/v1/policy/invalidate"):
-                token = getattr(self.server, "admin_token", None)
-                if not token:
-                    raise PolicyError(503, "policy_edits_locked", "Policy editing is disabled until an operator configures an admin token")
-                supplied = self.headers.get("Authorization", "")
-                if not hmac.compare_digest(supplied.encode(), ("Bearer " + token).encode()):
-                    raise PolicyError(401, "policy_admin_required", "Operator policy administration credential required")
+            if urlsplit(self.path).path in ("/v1/policy/publish", "/v1/policy/invalidate", "/v1/policy/rollback"):
+                self._require_operator()
                 if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin"):
                     raise PolicyError(403, "csrf_denied", "Cross-origin policy writes rejected")
                 if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
@@ -306,12 +364,25 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 if body != {}:
                     raise PolicyError(400, "invalid_invalidation_request", "invalidation request must be empty")
                 self._json(200, {"proxy_sync": self.store.notify_proxy()})
+            elif urlsplit(self.path).path == "/v1/policy/rollback":
+                if not isinstance(body, dict) or set(body) != {"expected_revision", "revision"} or type(body["revision"]) is not int:
+                    raise PolicyError(400, "invalid_rollback", "Rollback requires expected_revision and revision")
+                bundle = self.store.rollback(body["expected_revision"], body["revision"])
+                self._json(200, {"bundle": bundle, "proxy_sync": self.store.notify_proxy()})
             elif urlsplit(self.path).path == "/v1/policy/test":
                 self._json(200, evaluate_request(body, self.store.bundle()))
             else:
                 raise PolicyError(404, "not_found", "route not found")
         except PolicyError as error:
             self._error(error)
+
+    def _require_operator(self) -> None:
+        token = getattr(self.server, "admin_token", None)
+        if not token:
+            raise PolicyError(503, "policy_edits_locked", "Policy editing is disabled until an operator configures an admin token")
+        supplied = self.headers.get("Authorization", "")
+        if not hmac.compare_digest(supplied.encode(), ("Bearer " + token).encode()):
+            raise PolicyError(401, "policy_admin_required", "Operator policy administration credential required")
 
     def _read_json(self) -> Any:
         try:
