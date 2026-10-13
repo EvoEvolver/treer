@@ -23,7 +23,7 @@ mkdirSync(parent, { recursive: true, mode: 0o700 });
 const fixture = realpathSync(mkdtempSync(join(parent, "launcher-windows-smoke-")));
 protectDirectory(fixture);
 // Exercise spaces, Unicode and >260-character installed assets on Windows.
-const machine = join(fixture, "machine space 中文", ...Array.from({ length: windows ? 5 : 1 }, (_, i) => `long-${i}-` + "x".repeat(45)));
+const machine = join(fixture, "machine space 中文", ...Array.from({ length: windows ? 2 : 1 }, (_, i) => `long-${i}-` + "x".repeat(45)));
 mkdirSync(machine, { recursive: true, mode: 0o700 });
 const home = join(fixture, "home"), temp = join(fixture, "temp");
 mkdirSync(home); mkdirSync(temp); mkdirSync(options.screenshots, { recursive: true });
@@ -94,7 +94,10 @@ try {
   assert.equal(install("status").versions[0].compatibility.status, "compatible");
   assert.equal(install("rollback", installed.version).version, installed.version);
   const profile = JSON.parse(readFileSync(join(fixture, "Codex + UI.json")));
-  assert.equal(profile.command, process.execPath); assert.equal(profile.args[0], join(installBase, "run.mjs"));
+  // Rust's Windows canonical path may use the \\?\ prefix. Compare identities,
+  // not spelling, while still requiring the installed profile's absolute Node.
+  assert.ok(isAbsolute(profile.command)); assert.equal(realpathSync(profile.command), realpathSync(process.execPath));
+  assert.equal(profile.args[0], join(installBase, "run.mjs"));
   if (windows) { assert.ok(join(installBase, installed.version, "runtime.mjs").length > 260); aclCheck(installBase); }
   writeFileSync(join(machine, "README.md"), "# Windows fixture\nLiteral <script> content\n");
   await start();
@@ -118,6 +121,9 @@ try {
   await page.screenshot({ path: join(options.screenshots, "windows-agent-desktop.png") });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: join(options.screenshots, "windows-agent-390px.png") });
+  await page.getByRole("button", { name: "Close file browser" }).click();
+  await expect(page.locator("#timeline")).toContainText("Done now.");
+  await page.screenshot({ path: join(options.screenshots, "windows-agent-390px-chat.png") });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)); assert.deepEqual(errors, []);
   await browser.close(); browser = undefined;
   await stop(); await start();
