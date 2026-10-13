@@ -53,6 +53,15 @@ async function fixture(harness: "codex" | "claude") {
 }
 
 for (const harness of ["codex", "claude"] as const) {
+  test(`${harness} session allowlist is not content redaction: synthetic conversation/memory secrets remain`, async (t) => {
+    const f = await fixture(harness); t.after(() => rm(f.root, { recursive: true, force: true }));
+    const marker = "SYNTHETIC_CONVERSATION_SECRET";
+    await writeFile(f.source, (await readFile(f.source, "utf8")).replace("remember this", marker));
+    await writeFile(join(f.cwd, "MEMORY.md"), marker);
+    const bundle = await exportNativeSession(harness, f.id, f.cwd, f.home);
+    assert.ok(bundle.files.some((file) => file.scope === "session" && Buffer.from(file.content, "base64").includes(Buffer.from(marker))));
+    assert.ok(bundle.files.some((file) => file.path === "MEMORY.md" && Buffer.from(file.content, "base64").includes(Buffer.from(marker))));
+  });
   test(`${harness} exports only explicit session/project memory and imports a fresh native identity without changing the source`, async (t) => {
     const f = await fixture(harness); t.after(() => rm(f.root, { recursive: true, force: true }));
     const original = await readFile(f.source, "utf8");

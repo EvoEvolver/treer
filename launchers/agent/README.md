@@ -17,6 +17,12 @@ shared history model (`src/model.ts`):
 | `acp` | `src/harness/acp.ts` | any [Agent Client Protocol](https://agentclientprotocol.com) agent, such as `claude-agent-acp`, Gemini, Grok, Cursor, or OpenCode |
 
 Add a harness by implementing `HarnessRuntime`; do not copy the UI or server.
+All three adapters are unattended, full-authority launch modes: Codex uses
+`approvalPolicy: never` and `danger-full-access`, Claude uses
+`--dangerously-skip-permissions`, and ACP approves permission requests and
+selects a full-access mode where offered. These are deliberate defaults, not
+a filesystem or execution sandbox. Use a separate OS account/container/VM for
+untrusted tasks; no browser confirmation gate protects the machine here.
 ACP agents run their own file and terminal tools. The adapter advertises no
 client `fs`/`terminal` capabilities, approves permission requests, switches the
 session to the agent's no-prompt mode (for example `bypassPermissions`), and
@@ -27,6 +33,29 @@ The private HTTP listener exposes the browser page plus prompt, transcript,
 state, and abort operations. `GET /v1/transcript` pages by turn (`page`/`cursor`,
 `limit` default 1). Treer reaches it through the Agent network bridge; no
 service record or published port is required.
+
+### Local security boundary
+
+The listener binds only `127.0.0.1`, but loopback alone is not authentication.
+Current UI/transcript/file routes and WebSocket upgrades lack a general
+Host/Origin gate; do not expose or port-forward this listener. The Controller's
+external Policy checks do not protect direct loopback access or cross-origin
+browser access. AIS Agent/instance headers are routing identifiers, not a
+secret capability. A coordinated Controller/launcher forwarding-auth contract
+is required before claiming browser CSRF or DNS-rebinding protection.
+
+The harness inherits its Agent environment, including its own Treer workload
+credential so agent tools can use Treer. This is intentional delegation, not
+credential hiding. Transcript, provider stderr, queue previews, task output,
+completion notifications and session/memory archives can contain secrets from
+commands or conversations; no general content redaction is provided. Session
+export excludes known credential/configuration files, not secrets embedded in
+allowed conversation or memory files. Never publish an archive as public data.
+
+HTTP JSON bodies are capped at 128 KiB while streaming, WebSocket client
+payloads at 16 KiB. Malformed JSON returns a generic 400 without echoing its
+contents; ordinary request-error logs retain only the error class. These bounds
+do not limit concurrent requests, accumulated transcripts or model tool output.
 
 ## Installation and updates
 

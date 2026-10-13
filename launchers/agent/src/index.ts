@@ -1,5 +1,5 @@
 import { createReadStream, existsSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +19,7 @@ import { notifySubmission } from "./prompt-notify.js";
 import { MessageWatch, messageWatchEnabled } from "./message-watch.js";
 import { verifyInterfaceCaller } from "./interface-identity.js";
 import { SessionTransferError } from "./session-transfer.js";
+import { HttpInputError, readJson } from "./http-input.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -109,15 +110,6 @@ function historyLimitFrom(body: Record<string, unknown>) {
   return typeof body.history_limit === "number" && Number.isFinite(body.history_limit)
     ? Math.min(10_000, Math.max(initialHistoryLimit, Math.floor(body.history_limit)))
     : initialHistoryLimit;
-}
-
-async function readJson(request: IncomingMessage) {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  if (!chunks.length) return {} as Record<string, unknown>;
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
 function statePayload(historyLimit = initialHistoryLimit) {
@@ -369,12 +361,13 @@ const server = createServer(async (request, response) => {
     if (method === "GET" && serveFile(response, join(publicDir, "index.html"))) return;
     send(response, 404, { error: "not found" });
   } catch (error) {
-    console.error(error);
-    send(response, error instanceof GoalError || error instanceof QueueError ? error.status : error instanceof InvalidPromptMode ? 400 : error instanceof SessionTransferError ? error.code === "unsupported" ? 501 : error.code === "not_ready" ? 409 : error.code === "too_large" ? 413 : 400 : 500, { error: error instanceof Error ? error.message : String(error) });
+    // Never log parser exceptions (which can quote the request body).
+    console.error(`Agent UI request failed: ${error instanceof Error ? error.name : "Error"}`);
+    send(response, error instanceof HttpInputError || error instanceof GoalError || error instanceof QueueError ? error.status : error instanceof InvalidPromptMode ? 400 : error instanceof SessionTransferError ? error.code === "unsupported" ? 501 : error.code === "not_ready" ? 409 : error.code === "too_large" ? 413 : 400 : 500, { error: error instanceof Error ? error.message : "Request failed" });
   }
 });
 
-const socketsServer = new WebSocketServer({ noServer: true });
+const socketsServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
 server.on("upgrade", (request, socket, head) => {
   const path = requestPath(new URL(request.url ?? "/", "http://127.0.0.1"));
   if (path !== "/ws") {
@@ -399,6 +392,7 @@ server.on("upgrade", (request, socket, head) => {
       }
     });
     webSocket.on("close", () => sockets.delete(client));
+    webSocket.on("error", () => sockets.delete(client));
   });
 });
 

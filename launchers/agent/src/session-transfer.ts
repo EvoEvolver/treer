@@ -1,4 +1,4 @@
-/** Portable, secret-file-free snapshot consumed by Soul and other clients. */
+/** Portable allowlisted snapshot; conversation/memory contents are not redacted. */
 export interface SessionFile {
   scope: "session" | "memory" | "project";
   /** Relative POSIX path within scope; no traversal, absolute paths or symlinks. */
