@@ -62,6 +62,12 @@ the plan identifies every maintained document that must change at completion.
 - [Web security review, 2026-10-12](research/2026-10-12-security-web.md):
   local browser/header and native cookie checks, remaining interface trust
   boundaries, dependency advisories and explicit verification limits.
+
+- [Core security review, 2026-10-12](research/2026-10-12-security-core.md):
+  severity-ranked authentication/authorization audit, local identity-routing and
+  diagnostic-secret fixes, and explicit limits on defaults, revocation, backends,
+  resource budgets, audit, and filesystem isolation.
+
 - [Architecture review, 2026-10-12](research/2026-10-12-architecture-review.md):
   severity-ranked source audit of ownership, delivery, environment inheritance,
   recovery, release compatibility, App deployment, and tree semantics; records

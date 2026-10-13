@@ -97,6 +97,21 @@ user tools, but are not a control-plane transport configuration.
 
 ## Unsupported Claims
 
+Public Unix bootstrap installers currently download and install binaries without
+hash/signature verification. Windows bootstrap uses hashes from the same artifact
+origin and matching build identities, without independent signature verification.
+Compose image updates do not verify release signatures or enforce an anti-rollback
+floor. Signed Controller updates do not yet enforce release freshness or a
+persistent highest accepted version. Treer makes no end-to-end supply-chain proof,
+SBOM completeness, or reproducible-build guarantee. Actual hosted platform-token
+permissions and rotation were not verified by this source review.
+
+Workspace Apps do not uniformly enforce per-principal data ACLs, resource/rate
+isolation, or encryption at rest. Secret scanning is heuristic and cannot promise
+to detect encoded or unknown secrets. Deploy critical Apps under separate accounts
+or externally managed containers with minimal mounts and resource limits; the
+shared machine account is not a sandbox.
+
 Treer does not currently provide deny-by-default workspace permissions. Absent
 an enforcing Policy, the default permits authenticated workspace actions; monitor
 mode does not enforce denials. Use explicit enforce-mode rules and treat workspace
