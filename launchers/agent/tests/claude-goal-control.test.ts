@@ -184,3 +184,58 @@ test("resume preserves active budgets and an unconfirmed exit without retrying i
   await resumed.updateGoal({ tokenBudget: 20000 }); // no sticky pending mutation after resume
   assert.equal(resumed.snapshot().goal!.tokenBudget, 20000);
 });
+
+test("a second edit during deferred native delivery is applied without manual reconcile (Core regression)", async t => {
+  const f = await fixture(t, [], 100);
+  await f.runtime.prompt("hold");
+  await f.runtime.updateGoal({ objective: "first edited objective" });
+  let secondEdit: Promise<void> | undefined;
+  f.runtime.on("state", () => {
+    if (!secondEdit && (f.runtime as any).applyingDeferred && f.runtime.snapshot().thread?.status === "running") {
+      secondEdit = f.runtime.updateGoal({ objective: "second edited objective" });
+    }
+  });
+  await f.runtime.interrupt(); await until(() => Boolean(secondEdit)); await secondEdit;
+  await until(() => f.runtime.snapshot().goal?.syncStatus === "synced", 400);
+  assert.equal(f.runtime.snapshot().goal!.objective, "second edited objective");
+  assert.equal(f.runtime.snapshot().goal!.nativeObjective, "second edited objective");
+  assert.equal(f.calls().filter(call => call.message?.content?.[0]?.text === "/goal second edited objective").length, 1);
+});
+
+test("upgrade resets polluted legacy usage and aligns the saved desired goal instead of silently adopting the old native goal", async t => {
+  const f = await fixture(t); await f.runtime.updateGoal({ objective: "hold old native condition", tokenBudget: 100000, roundBudget: 20 }); await f.idle();
+  await f.runtime.stop();
+  const checkpoint = join(f.cwd, "state.goal-usage.json"), saved = JSON.parse(readFileSync(checkpoint, "utf8"));
+  saved.goal.objective = "hold newer user objective"; saved.goal.tokensUsed = saved.tokensUsed = 9090000;
+  delete saved.goal.syncStatus; delete saved.goal.nativeObjective; delete saved.resultTokens;
+  writeFileSync(checkpoint, JSON.stringify(saved));
+  const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir,
+    args: [fake, "--fixture-config", f.configDir, "--zero-goal-usage"] });
+  t.after(() => resumed.stop()); await resumed.start();
+  await until(() => resumed.snapshot().goal?.syncStatus === "synced");
+  const goal = resumed.snapshot().goal!;
+  assert.equal(goal.objective, "hold newer user objective"); assert.equal(goal.nativeObjective, goal.objective);
+  assert.equal(goal.tokensUsed, 0); assert.equal(goal.roundsUsed, 0);
+  assert.equal(goal.tokenBudget, 100000); assert.equal(goal.roundBudget, 20);
+  assert.match(goal.reason!, /counters restarted during launcher upgrade/);
+});
+
+test("cancelled exit cannot resurrect after user-clear timeout and late native clear (Core regression)", async t => {
+  const f = await fixture(t, ["--no-clear-ack"], 150);
+  await f.runtime.updateGoal({ objective: "hold external condition" }); await f.idle();
+  const journal = join(f.cwd, "exits.json"), exits = new GoalExitRequests(journal, f.runtime, () => {}); t.after(() => exits.close());
+  exits.enqueue({ status: "done", reason: "Cancelled Agent conclusion" });
+  await until(() => f.calls().some(call => call.message?.content?.[0]?.text === "/goal clear"));
+  // An idle native query must not be relied on to emit another result that
+  // happens to checkpoint cancellation before a crash.
+  (f.runtime as any).finish(false, "Waiting for native clear acknowledgement");
+  await assert.rejects(f.runtime.clearGoal(), /timed out/);
+  assert.deepEqual(JSON.parse(readFileSync(journal, "utf8")), []);
+  assert.equal(JSON.parse(readFileSync(join(f.cwd, "state.goal-usage.json"), "utf8")).pendingExit, null);
+  exits.close(); await f.runtime.stop();
+  const path = join(f.configDir, "projects", f.cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${f.runtime.snapshot().thread!.id}.jsonl`);
+  appendFileSync(path, JSON.stringify({ type: "system", subtype: "local_command", uuid: "late-user-clear", content: "<local-command-stdout>Goal cleared</local-command-stdout>", commandRun: { command: "goal", args: "clear" } }) + "\n");
+  const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir, args: [fake, "--fixture-config", f.configDir] });
+  t.after(() => resumed.stop()); await resumed.start();
+  assert.equal(resumed.snapshot().goal?.status, "cleared");
+});

@@ -560,6 +560,10 @@ acknowledgement, the UI explicitly shows `desynced` and the previous
 native goal** (`POST /api/goal/reconcile`) retries alignment, deferring again if
 busy. User clear and safety exits deliberately interrupt; objective edits do not.
 Incremental JSONL reads cannot replay an older objective over the desired edit.
+If another edit arrives while native alignment is in flight, the old command is
+acknowledged without replacing the new objective, then the latest edit gets one
+attempt after a short delay at idle. The same failed alignment is not retried in
+a loop; its visible error and Re-align button provide explicit recovery.
 This change's evaluator/loop tests use fake stream-json only; no real evaluator
 was invoked. `tests/probe-goal-edit-codex.ts` is an explicit opt-in native probe.
 
@@ -571,6 +575,12 @@ does not verify its runtime wire shapes or feature gating. The 2.1.296 command
 and evaluator behavior was verified earlier/by the leader. Capability discovery
 still hides goal controls if initialize does not advertise `goal`; missing fields
 are not treated as proof of completion. Mariana was not accessed or restarted.
+On first upgrade from a legacy checkpoint without a cumulative-usage baseline,
+active usage/round/rejection counters restart (budgets are retained), with a
+visible reason explaining that old per-goal usage could not be verified. We do
+not relabel old session-wide totals as accurate goal usage. If its saved desired
+objective differs from the native goal, the UI marks desync and alignment runs
+at idle. Subsequent restarts retain the new counters and baseline normally.
 Existing Claude sessions acquire this exit only when their saved session is
 resumed by the updated launcher: leader should restart that Agent, preserving
 its session ID/startup command. This supplies `AGENT_UI_URL`,

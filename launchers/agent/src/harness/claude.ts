@@ -88,6 +88,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private goalMutationVersion = 0;
   private deferredGoal: string | null = null;
   private applyingDeferred = false;
+  private deferredRetry?: ReturnType<typeof setTimeout>;
   readonly taskOutputRoots: string[];
   private child: ChildProcessWithoutNullStreams | null = null;
   private ready = false;
@@ -138,7 +139,15 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       if (resumed && this.options.stateFile) {
         const saved = record(readGoalState(this.options.stateFile + ".goal-usage.json"));
         if (saved.sessionId === this.sessionId && saved.goalKey === this.goalKey) {
-          if (saved.goal && record(saved.goal).status === "active" && (record(saved.goal).syncStatus === "desynced" || this.goal?.status === "active" && record(saved.goal).objective === this.goal.objective)) this.goal = saved.goal as unknown as Goal;
+          const legacyUsage = typeof saved.resultTokens !== "number";
+          const nativeObjective = this.goal?.objective;
+          if (saved.goal && record(saved.goal).status === "active" && (record(saved.goal).syncStatus === "desynced" || this.goal?.status === "active" && (legacyUsage || record(saved.goal).objective === this.goal.objective))) {
+            this.goal = { ...saved.goal as unknown as Goal };
+            if (legacyUsage && nativeObjective !== this.goal.objective) {
+              this.goal.syncStatus = "desynced"; this.goal.nativeObjective = nativeObjective;
+              this.goal.syncError = "Legacy launcher record differs from the native goal; realigning at idle";
+            }
+          }
           else if (saved.pendingExit && this.goal?.status === "cleared") this.goal = saved.pendingExit as unknown as Goal;
           else if (saved.goal && ["blocked", "stale", "done", "cleared"].includes(text(record(saved.goal).status))) this.goal = saved.goal as unknown as Goal;
           if (this.goal) {
@@ -152,6 +161,13 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
             this.goalClock = Date.now() - (this.goal.timeUsedSeconds ?? 0) * 1000;
             this.resultTokens = Math.max(this.resultTokens, typeof saved.resultTokens === "number" ? saved.resultTokens : 0);
             this.goalResultBaseline = this.resultTokens;
+            if (legacyUsage && this.goal.status === "active") {
+              // Old counters could contain millions of pre-goal session tokens.
+              // Their epoch cannot be reconstructed reliably after a UI edit.
+              this.resetGoalGuard({ tokenBudget: this.goal.tokenBudget, roundBudget: this.goal.roundBudget });
+              this.goal.reason = "Legacy per-goal usage could not be verified; counters restarted during launcher upgrade.";
+              await this.saveGoalUsage();
+            }
             if (this.goal.syncStatus === "desynced" && this.goal.status === "active") this.deferredGoal = this.goal.objective;
           }
         }
@@ -355,6 +371,9 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     this.goalCommandRunning = false; this.goalMutating = false; this.goalExit = undefined;
     this.pendingGoalExit = null; this.deferredGoal = null;
     this.emit("user-goal-clear");
+    const version = this.goalMutationVersion;
+    await this.saveGoalUsage(); // cancellation must survive a crash before ACK
+    if (version !== this.goalMutationVersion) return;
     return this.mutateGoal(() => this.applyClearGoal());
   }
 
@@ -415,11 +434,23 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     this.applyingDeferred = true;
     try { await this.goalCommand(objective); if (version === this.goalMutationVersion && (this.goal === goal || this.goal?.objective === objective)) { this.deferredGoal = null; if (this.goal) { this.goal.syncStatus = "synced"; this.goal.nativeObjective = objective; this.goal.syncError = undefined; } } }
     catch (error) { if (version === this.goalMutationVersion && this.goal && this.goal === goal) { this.goal.syncStatus = "desynced"; this.goal.syncError = String(error); } }
-    finally { this.applyingDeferred = false; await this.saveGoalUsage(); this.publish(); }
+    finally {
+      this.applyingDeferred = false; await this.saveGoalUsage(); this.publish();
+      // A newer accepted edit may arrive during native delivery. Result can
+      // already have passed while applyingDeferred was true, so arrange one
+      // delayed attempt for that newer value. Never retry the same failed
+      // command automatically: manual reconcile remains explicit and bounded.
+      if (!this.stopping && this.deferredGoal && this.deferredGoal !== objective && this.snapshot().thread?.status !== "running") {
+        if (this.deferredRetry) clearTimeout(this.deferredRetry);
+        this.deferredRetry = setTimeout(() => { void this.flushDeferredGoal(); }, 25);
+        this.deferredRetry.unref();
+      }
+    }
   }
 
   async stop() {
     if (this.goalPoll) clearInterval(this.goalPoll);
+    if (this.deferredRetry) clearTimeout(this.deferredRetry);
     this.stopping = true;
     this.emit("goal-command-error", new Error("Claude stopped"));
     this.ready = false;
@@ -694,6 +725,9 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       const set = /^Goal set: ([\s\S]+)$/.exec(value.trim());
       if (set && this.deferredGoal && set[1] !== this.deferredGoal && this.goal) {
         this.goal.nativeObjective = set[1]; this.goal.syncStatus = "desynced";
+        // Acknowledge the old command without replacing the newer desired
+        // objective. Otherwise it holds the native-command slot until timeout.
+        if (!historical) this.emit("goal-command", text(command.args).trim());
         return;
       }
       if (set) {
