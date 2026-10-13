@@ -80,6 +80,8 @@ class AdminFileTests(unittest.TestCase):
             token,source=policy.admin_token_source();self.assertIsNone(token);self.assertEqual(source.path,self.source.path)
             os.environ['POLICY_ADMIN_TOKEN']='synthetic-environment-token-32-chars'
             self.assertEqual(policy.admin_token_source(initialize=True),(os.environ['POLICY_ADMIN_TOKEN'],None))
+            os.environ['POLICY_ADMIN_TOKEN']=''
+            with self.assertRaises(ValueError): policy.admin_token_source()
             self.assertFalse(self.source.path.exists())
             del os.environ['POLICY_ADMIN_TOKEN'];del os.environ['POLICY_ADMIN_TOKEN_FILE']
             with patch.object(policy,'BUNDLED_INSTALL',True):

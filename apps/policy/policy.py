@@ -835,21 +835,12 @@ class PolicyHandler(BaseHTTPRequestHandler):
         except CookieError: return ''
         return cookie[name].value if name in cookie else ''
 
-    def _operator_bearer(self):
-        value = self.headers.get('Authorization', '')
-        token = self._operator_token()
-        if token and hmac.compare_digest(value.encode(), ('Bearer ' + token).encode()):
-            return True
-        return False
-
     def _identity(self, mutation=False):
         auth = self._auth()
         # Operator credential belongs to the App, not to Treer. Never pass it to
         # Core verification/diagnostics as a caller token.
         headers = copy.copy(self.headers)
         file_capability = getattr(self.server, 'admin_token_file', None) is not None
-        browser_identity = 'X-Treer-Identity-Token' in headers or self._raw_cookie('policy_session')
-        env_capability = getattr(self.server, 'admin_token', None)
         if getattr(self.server, 'admin_token_file', None) is not None or headers.get('Authorization') == 'Bearer ' + str(self._operator_token()):
             # Includes stale/rotated capabilities. In file mode, human callers
             # use injected identity or OAuth cookies, never this Bearer channel.
@@ -1095,8 +1086,8 @@ def validate_admin_token(token):
 
 
 def admin_token_source(*, initialize=False):
-    token = os.environ.get('POLICY_ADMIN_TOKEN')
-    if token:
+    if 'POLICY_ADMIN_TOKEN' in os.environ:
+        token = os.environ['POLICY_ADMIN_TOKEN']
         return validate_admin_token(token), None
     configured = os.environ.get('POLICY_ADMIN_TOKEN_FILE')
     if not configured and not BUNDLED_INSTALL and not initialize:
