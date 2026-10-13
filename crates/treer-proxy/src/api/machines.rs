@@ -338,9 +338,11 @@ tmp_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/treer-install.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
 echo "treer: downloading $platform binaries"
+fetch "$artifact_base/$platform/SHA256SUMS" "$tmp_dir/SHA256SUMS"
 fetch "$artifact_base/$platform/treer" "$tmp_dir/treer"
 fetch "$artifact_base/$platform/treer-agent-host" "$tmp_dir/treer-agent-host"
 fetch "$artifact_base/$platform/treer-agent-server" "$tmp_dir/treer-agent-server"
+{checksum_setup}
 chmod 755 "$tmp_dir/treer" "$tmp_dir/treer-agent-host" "$tmp_dir/treer-agent-server"
 mv "$tmp_dir/treer" "$install_dir/treer"
 mv "$tmp_dir/treer-agent-host" "$server_dir/treer-agent-host"
@@ -352,6 +354,7 @@ echo "treer: binaries installed"
 echo "treer: run the workspace connection command from the Proxy UI next"
 "#,
         artifact_base = shell_quote(artifact_base.as_str().trim_end_matches('/')),
+        checksum_setup = include_str!("../install-checksums.sh"),
         path_setup = include_str!("../install-path.sh"),
     )
 }

@@ -8,6 +8,25 @@ release is not a branch name, a mutable `latest` label, or the contents of an
 operator's current directory. The ignored `.treer/releases/` directory stores
 the local release manifest and the exact frontend artifact that passed Canary.
 
+## Security release upgrade notes — 2026-10-12
+
+- Policy Provider editing is now denied until an operator configures its
+  `POLICY_ADMIN_TOKEN`; existing editing clients must supply the corresponding
+  Bearer token. This token is a separate operator capability, not a Treer OAuth
+  administrator role. Do not expose it to workspace Agents or browser code.
+- Upgrade Core before switching Agents to the strict launcher. An old Controller
+  cannot provide the required forwarding provenance and the new launcher returns
+  HTTP 403. Machine rollout order is **Proxy → Controller → CLI → coordinated
+  Agent restart onto the new launcher**. A Canary deployment does not update
+  enrolled machines or restart their Agents automatically.
+- Unix bootstrap now verifies every binary against same-origin `SHA256SUMS`
+  before installing any of them. Missing, invalid or mismatched checksums abort;
+  this is not independent publisher authentication or rollback protection.
+- Workspace Policy still defaults to allow without an enforcing Policy. The
+  shared machine account is not a sandbox; token revocation windows, legacy
+  identity limitations and other [unsupported security claims](security.md#unsupported-claims)
+  remain. Do not present this release as a security certification.
+
 ## Platform boundary
 
 Railway runs the Proxy replicas, PostgreSQL, NATS, and the two-machine Canary

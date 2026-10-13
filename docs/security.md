@@ -97,9 +97,11 @@ user tools, but are not a control-plane transport configuration.
 
 ## Unsupported Claims
 
-Public Unix bootstrap installers currently download and install binaries without
-hash/signature verification. Windows bootstrap uses hashes from the same artifact
-origin and matching build identities, without independent signature verification.
+Public Unix and Windows bootstrap installers check SHA256 hashes from the same
+artifact origin before installation; Windows also checks matching build identities.
+These same-origin checks do not independently authenticate the publisher or the
+downloaded bootstrap script. Bootstrap signature verification and rollback/freshness
+protection are not supported.
 Compose image updates do not verify release signatures or enforce an anti-rollback
 floor. Signed Controller updates do not yet enforce release freshness or a
 persistent highest accepted version. Treer makes no end-to-end supply-chain proof,
