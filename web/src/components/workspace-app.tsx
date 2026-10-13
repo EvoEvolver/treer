@@ -56,6 +56,15 @@ import { useLocation, useNavigate, useParams } from "react-router"
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
+  const location = useLocation()
+  // A trusted settings deep link is a new scope, including SPA back/forward.
+  // Unmount the old workspace and any confirmation before loading its target.
+  const scope = location.hash === "#policy-provider" ? `policy:${route.organizationId ?? ""}/${route.workspaceId ?? ""}` : "workspace"
+  return <WorkspaceAppContent key={scope} />
+}
+
+function WorkspaceAppContent() {
+  const route = useParams<{ organizationId?: string; workspaceId?: string }>()
   const navigate = useNavigate()
   const location = useLocation()
   const routeSelectionRef = useRef({ organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null })
@@ -184,6 +193,9 @@ export function WorkspaceApp() {
     const data = await api<{ organizations: Organization[] }>("/api/organizations")
     setOrganizations(data.organizations)
     const routeSelection = routeSelectionRef.current
+    if (routingRef.current.hash === "#policy-provider" && routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
+      throw new Error("Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.")
+    }
     const selected = preferred && data.organizations.some((item) => item.organization_id === preferred)
       ? preferred
       : routeSelection.organizationId && data.organizations.some((item) => item.organization_id === routeSelection.organizationId)
@@ -208,6 +220,9 @@ export function WorkspaceApp() {
     if (organizationIdRef.current !== organizationId) return
     setWorkspaces(data.workspaces)
     const routeSelection = routeSelectionRef.current
+    if (routingRef.current.hash === "#policy-provider" && routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
+      throw new Error("Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.")
+    }
     const selected = routeSelection.organizationId === organizationId
       && routeSelection.workspaceId
       && data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)
@@ -714,6 +729,13 @@ export function WorkspaceApp() {
     setMobileTerminalOpen(false)
   }
 
+  useEffect(() => {
+    if (location.hash !== "#policy-provider" || !workspace || route.workspaceId !== workspace.workspace_id || route.organizationId !== organizationId) return
+    setWorkspaceName(workspace.name)
+    setMainView("workspace")
+    setMobileTerminalOpen(false)
+  }, [location.hash, workspace?.workspace_id, route.workspaceId, route.organizationId, organizationId])
+
   function openWorkspaceSettings() {
     if (!workspace) {
       setCreateWorkspaceName("")
@@ -1207,7 +1229,7 @@ export function WorkspaceApp() {
               </div>
             </div>}
           </div>
-        </div> : mainView === "workspace" ? <WorkspaceSettingsView workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
+        </div> : mainView === "workspace" ? <WorkspaceSettingsView key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
       </section>
     </main>
 

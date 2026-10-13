@@ -1688,3 +1688,155 @@ for (const mobile of [false, true]) {
     }
   })
 }
+
+for (const mobile of [false, true]) {
+  test.describe(`trusted publication authority on ${mobile ? '390px' : 'desktop'}`, () => {
+    test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 } })
+    const capability = 'policy.publish-authority.v1'
+    const landing = '/orgs/org-1/workspaces/ws-1#policy-provider'
+    const block = (page: Page) => page.getByLabel('Policy publication authority', { exact: true })
+    const provider = (authority = 'owner_session') => ({ workspace_id: 'ws-1', app_id: 'policy-app', service_id: 'policy-service', failure_mode: 'fail_closed', max_stale_seconds: 300, revision_hint: 1, updated_at: NOW, updated_by: 'u1', publish_authority: authority })
+    async function installFixture(page: Page, options: { owner?: boolean; capability?: boolean; authority?: string; failure?: number; malformed?: boolean } = {}) {
+      let current = provider(options.authority)
+      const requests: unknown[] = []
+      await page.route('**/api/workspaces/ws-1/access', (route) => ok(route, { access: { ...workspaceAccess, current_role: options.owner === false ? 'member' : 'owner' } }))
+      await page.route('**/api/workspaces/ws-1/policy-provider', (route) => {
+        expect(route.request().method()).toBe('GET')
+        return ok(route, { provider: current, capabilities: options.capability === false ? [] : [capability], cache: {} })
+      })
+      await page.route('**/api/workspaces/ws-1/policy-provider/publish-authority', (route) => {
+        expect(route.request().method()).toBe('PUT')
+        expect(route.request().headers().authorization).toBeUndefined()
+        expect(route.request().headers()['x-treer-identity-token']).toBeUndefined()
+        const body = route.request().postDataJSON()
+        expect(body.expected_app_id).toBe('policy-app')
+        expect(Object.keys(body).sort()).toEqual(['expected_app_id', 'publish_authority'])
+        requests.push(body)
+        if (options.failure) return route.fulfill({ status: options.failure, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Core denied this owner session' } }) })
+        current = provider(body.publish_authority)
+        return ok(route, { provider: current, publish_authority: current.publish_authority, capabilities: options.malformed ? [] : [capability] })
+      })
+      return requests
+    }
+    test('owner confirms operator delegation then restores owner session; displays audit receipt', async ({ page, context, baseURL }, testInfo) => {
+      const requests = await installFixture(page)
+      await context.addCookies([{ name: 'treer_session', value: 'synthetic-owner-session', url: baseURL!, httpOnly: true, sameSite: 'Strict' }])
+      await page.route('**/api/workspaces/ws-1/policy-provider/publish-authority', async (route) => {
+        expect((await route.request().allHeaders()).cookie).toContain('treer_session=synthetic-owner-session')
+        return route.fallback()
+      })
+      await page.goto(landing)
+      await expect(block(page)).toContainText('owner_session')
+      await block(page).getByRole('button', { name: 'Enable provider operator…', exact: true }).click()
+      const dialog = page.getByRole('dialog')
+      await expect(dialog).toContainText('publish v2 rules and switch to enforce without an owner approving each publication')
+      await expect(dialog).toContainText('isolate the Agent that administers Policy')
+      await expect(dialog.getByRole('link', { name: /Operator guide/ })).toHaveAttribute('href', /docs\/operator-guide.md#workspace-network$/)
+      await page.screenshot({ path: testInfo.outputPath('operator-warning.png') })
+      expect(requests).toHaveLength(0)
+      await dialog.getByRole('button', { name: 'Enable provider operator', exact: true }).click()
+      await expect(dialog).not.toBeVisible()
+      await expect(block(page)).toContainText('Current: Provider operator')
+      await expect(block(page).getByRole('status')).toContainText('policy_provider.publish_authority.set')
+      await block(page).getByRole('button', { name: 'Require owner session', exact: true }).click()
+      await expect(block(page)).toContainText('Current: Owner session')
+      expect(requests).toEqual([{ expected_app_id: 'policy-app', publish_authority: 'provider_operator' }, { expected_app_id: 'policy-app', publish_authority: 'owner_session' }])
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+      await page.screenshot({ path: testInfo.outputPath('trusted-settings.png') })
+    })
+    test('trusted deep link selects the named workspace in another organization', async ({ page }) => {
+      await page.route('**/api/workspaces/ws-2/policy-provider', (route) => ok(route, {
+        provider: { ...provider('provider_operator'), workspace_id: 'ws-2' }, capabilities: [capability], cache: {},
+      }))
+      await page.goto('/orgs/org-2/workspaces/ws-2#policy-provider')
+      await expect(page.getByRole('heading', { name: 'Experiments', exact: true })).toBeVisible()
+      await expect(block(page)).toContainText('Current: Provider operator')
+      await expect(block(page)).toContainText('Read only')
+      await expect(page.locator('#policy-provider')).toBeInViewport()
+      await expect(block(page).getByRole('button')).toHaveCount(0)
+    })
+    for (const target of ['/orgs/org-1/workspaces/missing#policy-provider', '/orgs/missing/workspaces/ws-1#policy-provider']) {
+      test(`unavailable deep link never opens a different workspace: ${target}`, async ({ page }) => {
+        await page.goto(target)
+        await expect(page.getByText('Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.')).toBeVisible()
+        await expect(block(page)).toHaveCount(0)
+      })
+    }
+    test('canceling confirmation never writes', async ({ page }) => {
+      const requests = await installFixture(page)
+      await page.goto(landing)
+      await block(page).getByRole('button', { name: 'Enable provider operator…', exact: true }).click()
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+      await expect(page.getByRole('dialog')).not.toBeVisible()
+      await expect(block(page)).toContainText('Current: Owner session')
+      expect(requests).toHaveLength(0)
+    })
+    for (const target of ['/orgs/org-1/workspaces/missing#policy-provider', '/orgs/missing/workspaces/ws-1#policy-provider', '/orgs/org-2/workspaces/ws-2#policy-provider']) {
+      test(`live history navigation removes the previous writable settings: ${target}`, async ({ page }) => {
+        const requests = await installFixture(page)
+        await page.route('**/api/workspaces/ws-2/policy-provider', (route) => ok(route, {
+          provider: { ...provider('provider_operator'), workspace_id: 'ws-2' }, capabilities: [capability], cache: {},
+        }))
+        await page.goto(landing)
+        await block(page).getByRole('button', { name: 'Enable provider operator…', exact: true }).click()
+        await expect(page.getByRole('dialog')).toBeVisible()
+        await page.evaluate((target) => { history.pushState(null, '', target); dispatchEvent(new PopStateEvent('popstate')) }, target)
+        await expect(page.getByRole('dialog')).not.toBeVisible()
+        if (target.includes('missing')) {
+          await expect(page.getByText('Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.')).toBeVisible()
+          await expect(block(page)).toHaveCount(0)
+        } else {
+          await expect(block(page)).toContainText('Read only')
+          await expect(block(page)).toContainText('Current: Provider operator')
+          await expect(block(page).getByRole('button')).toHaveCount(0)
+        }
+        await page.goBack()
+        await expect(block(page)).toContainText('Current: Owner session')
+        await expect(block(page).getByRole('button', { name: 'Enable provider operator…', exact: true })).toBeVisible()
+        expect(requests).toHaveLength(0)
+      })
+    }
+    test('non-owner sees the current operator authority read only', async ({ page }) => {
+      const requests = await installFixture(page, { owner: false, authority: 'provider_operator' })
+      await page.goto(landing)
+      await expect(block(page)).toContainText('Read only')
+      await expect(block(page)).toContainText('Current: Provider operator')
+      await expect(block(page).getByRole('button')).toHaveCount(0)
+      expect(requests).toHaveLength(0)
+    })
+    for (const unsupported of ['missing capability', 'unknown authority']) {
+      test(`old Proxy ${unsupported} is unavailable without a fallback`, async ({ page }) => {
+        const requests = await installFixture(page, unsupported === 'missing capability' ? { capability: false } : { authority: 'unknown_future_value' })
+        await page.goto(landing)
+        await expect(block(page)).toContainText('Publication authority unavailable')
+        await expect(block(page).getByRole('button')).toHaveCount(0)
+        expect(requests).toHaveLength(0)
+      })
+    }
+    test('Core rejection remains visible without changing the confirmed authority', async ({ page }) => {
+      const requests = await installFixture(page, { failure: 403 })
+      await page.goto(landing)
+      await block(page).getByRole('button', { name: 'Enable provider operator…', exact: true }).click()
+      await page.getByRole('dialog').getByRole('button', { name: 'Enable provider operator', exact: true }).click()
+      await expect(page.getByRole('dialog').getByRole('alert')).toHaveText('Core denied this owner session')
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+      await expect(block(page)).toContainText('Current: Owner session')
+      await expect(block(page).getByRole('alert')).toHaveText('Core denied this owner session')
+      expect(requests).toHaveLength(1)
+    })
+    for (const response of ['missing PUT route', 'missing response capability']) {
+      test(`${response} disables writes and never falls back`, async ({ page }) => {
+        const requests = await installFixture(page, response === 'missing PUT route' ? { failure: 404 } : { malformed: true })
+        await page.goto(landing)
+        await block(page).getByRole('button', { name: 'Enable provider operator…', exact: true }).click()
+        await page.getByRole('dialog').getByRole('button', { name: 'Enable provider operator', exact: true }).click()
+        await expect(page.getByRole('dialog').getByRole('alert')).toContainText('no fallback was attempted')
+        await expect(page.getByRole('dialog').getByRole('button', { name: 'Enable provider operator', exact: true })).toBeDisabled()
+        await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+        await expect(block(page)).toContainText('Publication authority unavailable')
+        await expect(block(page)).not.toContainText('Publication authority changed')
+        expect(requests).toHaveLength(1)
+      })
+    }
+  })
+}
