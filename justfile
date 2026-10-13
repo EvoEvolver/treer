@@ -21,7 +21,7 @@ service-canary:
 check:
     node scripts/check-docs.mjs
     python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
-    node --test scripts/release-r2.test.mjs scripts/machine-artifacts.test.mjs
+    node --test scripts/release-r2.test.mjs scripts/machine-artifacts.test.mjs scripts/release-security.test.mjs
     node --test scripts/install-path.test.mjs scripts/ais-e2e.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
