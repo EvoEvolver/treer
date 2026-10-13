@@ -51,6 +51,14 @@ treer token --help
 Control commands print JSON. Read IDs and state from the response instead of
 predicting them.
 
+Default launcher installation is a separate local Controller-binary operation:
+`treer-agent-server launcher install|update|status|rollback`. It needs trusted
+Node.js 22+, installs the binary's verified matching payload and saves profiles;
+it never creates/restarts Agents or restarts the Host/Controller. Run
+`treer interface contract` for the authenticated enrolled machine/root and actual
+Controller compatibility. Missing support means update is needed, not permission
+to fall back silently. See the operator guide before legacy/source installation.
+
 ## Understand identity and scope
 
 Treer injects these values into every managed agent:

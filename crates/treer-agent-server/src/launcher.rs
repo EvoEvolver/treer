@@ -4,13 +4,18 @@ use std::{
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Output, Stdio},
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 
 struct EmbeddedFile {
     path: &'static str,
@@ -23,6 +28,7 @@ include!(concat!(env!("OUT_DIR"), "/launcher_payload.rs"));
 pub(crate) fn controller_contract() -> treer_protocol::LauncherControllerContract {
     treer_protocol::LauncherControllerContract {
         machine: None,
+        minimum_launcher_security_epoch: Some(treer_protocol::MINIMUM_LAUNCHER_SECURITY_EPOCH),
         git_commit: treer_build_info::GIT_COMMIT.to_owned(),
         protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.to_owned(),
         capabilities: treer_protocol::CONTROLLER_INTERFACE_CAPABILITIES
@@ -174,6 +180,43 @@ impl Drop for Stage {
     }
 }
 
+fn cleanup_stale_payloads(parent: &Path) -> Result<()> {
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(".controller-payload-"))
+        else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(id).is_err() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if reject_link(&entry.path(), &metadata).is_err() || !metadata.is_dir() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.uid() != nix::unistd::geteuid().as_raw() {
+                continue;
+            }
+        }
+        // Every installer child is bounded to six minutes; one day cannot be an
+        // active extraction. Private parent and UUID naming bound the cleanup.
+        if metadata
+            .modified()?
+            .elapsed()
+            .is_ok_and(|age| age > Duration::from_secs(86400))
+        {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn extract(root: &Path) -> Result<Stage> {
     verify_payload(FILES, PAYLOAD_DIGEST)?;
     let metadata = fs::symlink_metadata(root).context("enrolled machine root is unavailable")?;
@@ -195,6 +238,7 @@ fn extract(root: &Path) -> Result<Stage> {
         parent.push(name);
         private_directory(&parent)?;
     }
+    cleanup_stale_payloads(&parent)?;
     let stage = Stage(parent.join(format!(".controller-payload-{}", uuid::Uuid::new_v4())));
     // create_dir (not create_dir_all) prevents accepting a pre-existing staging entry.
     fs::create_dir(&stage.0)?;
@@ -304,18 +348,72 @@ fn node_executable(explicit: Option<PathBuf>) -> Result<PathBuf> {
 fn command(path: &Path) -> Command {
     let mut command = Command::new(path);
     // Node hooks can execute code before the verified installer or version check.
-    for name in ["NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE"] {
-        command.env_remove(name);
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("NODE_")
+        {
+            command.env_remove(name);
+        }
     }
-    command.stdin(Stdio::null()).stderr(Stdio::null());
+    command
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     command
 }
 
-fn run_json(treer: &Path, args: &[&str]) -> Result<Value> {
-    let output = command(treer)
-        .args(args)
-        .output()
-        .context("cannot run the trusted treer CLI")?;
+async fn bounded_output(mut cmd: Command, input: Option<Vec<u8>>, seconds: u64) -> Result<Output> {
+    cmd.stdout(Stdio::piped());
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd
+        .spawn()
+        .context("cannot run trusted launcher dependency")?;
+    let mut stdout = child.stdout.take().context("child stdout unavailable")?;
+    let stdin = child.stdin.take();
+    let result = tokio::time::timeout(Duration::from_secs(seconds), async {
+        let write = async move {
+            if let (Some(mut stdin), Some(input)) = (stdin, input) {
+                stdin.write_all(&input).await?;
+                stdin.shutdown().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let read = async {
+            let mut bytes = Vec::new();
+            (&mut stdout)
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .await?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                bail!("launcher dependency response exceeds limit");
+            }
+            Ok::<_, anyhow::Error>(bytes)
+        };
+        let (_, bytes) = tokio::try_join!(write, read)?;
+        Ok::<_, anyhow::Error>(Output {
+            status: child.wait().await?,
+            stdout: bytes,
+            stderr: Vec::new(),
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        error => {
+            let _ = child.kill().await;
+            match error { Ok(Err(error)) => Err(error), _ => bail!("launcher dependency timed out; inspect private installer state before retrying") }
+        }
+    }
+}
+
+async fn run_json(treer: &Path, args: &[&str]) -> Result<Value> {
+    let mut cmd = command(treer);
+    cmd.args(args);
+    let output = bounded_output(cmd, None, 30).await?;
     if !output.status.success() {
         bail!(
             "Treer command failed ({}); check enrollment, permissions and Controller compatibility",
@@ -345,6 +443,7 @@ fn validate_controller(value: &Value) -> Result<()> {
             .context("launcher_controller_unsupported: missing or invalid Controller contract")?;
     let required = controller_contract();
     if reported.protocol != required.protocol
+        || reported.minimum_launcher_security_epoch.is_none()
         || required
             .features
             .iter()
@@ -362,10 +461,9 @@ fn validate_controller(value: &Value) -> Result<()> {
 pub async fn run(args: LauncherArgs) -> Result<()> {
     verify_payload(FILES, PAYLOAD_DIGEST)?;
     let node = node_executable(args.node)?;
-    let version_output = command(&node)
-        .arg("--version")
-        .output()
-        .context("cannot execute trusted Node")?;
+    let mut version_cmd = command(&node);
+    version_cmd.arg("--version");
+    let version_output = bounded_output(version_cmd, None, 10).await?;
     if !version_output.status.success()
         || node_major(&version_output.stdout).is_none_or(|major| major < 22)
     {
@@ -373,7 +471,7 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
     }
     let treer = args.treer.or_else(crate::sibling_treer_binary).context("trusted treer CLI missing; install the matching CLI or pass --treer /absolute/path/to/treer")?;
     let treer = trusted_executable(&treer)?;
-    let controller_raw = run_json(&treer, &["interface", "contract"]);
+    let controller_raw = run_json(&treer, &["interface", "contract"]).await;
     let context = controller_raw.as_ref().ok().and_then(|value| {
         serde_json::from_value::<treer_protocol::LauncherMachineContext>(value["machine"].clone())
             .ok()
@@ -419,19 +517,11 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         "npm_cli":npm_cli,
         "allow_network":install.is_some_and(|options| options.allow_network),"controller":controller.unwrap_or(Value::Null),
         "payload_manifest":manifest, "rollback_version":rollback});
-    let mut child = command(&node)
+    let mut install_cmd = command(&node);
+    install_cmd
         .arg(stage.0.join("scripts/install.mjs"))
-        .arg("--controller-request")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .context("cannot execute verified launcher installer")?;
-    child
-        .stdin
-        .take()
-        .context("installer stdin unavailable")?
-        .write_all(&serde_json::to_vec(&request)?)?;
-    let output = child.wait_with_output()?;
+        .arg("--controller-request");
+    let output = bounded_output(install_cmd, Some(serde_json::to_vec(&request)?), 360).await?;
     if !output.status.success() {
         let code = serde_json::from_slice::<Value>(&output.stdout)
             .ok()
@@ -451,26 +541,35 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
     let mut result: Value =
         serde_json::from_slice(&output.stdout).context("installer returned invalid status JSON")?;
     if operation == "status" {
-        result["agent_startups"] = startup_references(&treer, &context.server_id, &root);
+        result["agent_startups"] = startup_references(&treer, &context.server_id, &root).await;
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
-fn startup_references(treer: &Path, server_id: &str, root: &Path) -> Value {
-    let Ok(agents) = run_json(treer, &["status"]) else {
+async fn startup_references(treer: &Path, server_id: &str, root: &Path) -> Value {
+    let Ok(agents) = run_json(treer, &["status"]).await else {
         return json!({"available":false});
     };
     let records = agents.as_array().or_else(|| agents["agents"].as_array());
     let Some(records) = records else {
         return json!({"available":false});
     };
-    let entries: Vec<_> = records.iter().filter(|agent| agent["server_id"].as_str() == Some(server_id)).filter_map(|agent| {
-        let id = agent["agent_id"].as_str()?;
-        let saved = run_json(treer, &["agent", "admin", "startup", "show", id]);
-        let version = saved.as_ref().ok().and_then(|saved| startup_version(saved, root));
-        Some(json!({"agent_id":id,"path":agent["path"],"startup_available":saved.is_ok(),"launcher_version":version}))
-    }).collect();
+    let mut entries = Vec::new();
+    for agent in records
+        .iter()
+        .filter(|agent| agent["server_id"].as_str() == Some(server_id))
+    {
+        let Some(id) = agent["agent_id"].as_str() else {
+            continue;
+        };
+        let saved = run_json(treer, &["agent", "admin", "startup", "show", id]).await;
+        let version = saved
+            .as_ref()
+            .ok()
+            .and_then(|saved| startup_version(saved, root));
+        entries.push(json!({"agent_id":id,"path":agent["path"],"startup_available":saved.is_ok(),"launcher_version":version}));
+    }
     json!({"available":true,"agents":entries})
 }
 
@@ -551,6 +650,12 @@ mod tests {
             old[field] = json!([]);
             assert!(validate_controller(&old).is_err());
         }
+        let mut legacy = contract.clone();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("minimum_launcher_security_epoch");
+        assert!(validate_controller(&legacy).is_err());
         let mut unknown = contract.clone();
         unknown["protocol"] = json!("treer.agent-interface/v2");
         assert!(validate_controller(&unknown).is_err());
@@ -658,5 +763,45 @@ mod tests {
             fs::remove_file(root.join(".treer")).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_only_removes_old_uuid_payload_directories() {
+        let root =
+            std::env::temp_dir().join(format!("treer-launcher-cleanup-{}", uuid::Uuid::new_v4()));
+        treer_platform::secure_directory(&root).unwrap();
+        let stale = root.join(format!(".controller-payload-{}", uuid::Uuid::new_v4()));
+        let recent = root.join(format!(".controller-payload-{}", uuid::Uuid::new_v4()));
+        let version = root.join(format!("sha256-{}", "a".repeat(64)));
+        let arbitrary = root.join(".controller-payload-user-data");
+        for path in [&stale, &recent, &version, &arbitrary] {
+            fs::create_dir(path).unwrap();
+        }
+        let old = std::time::SystemTime::now() - Duration::from_secs(172800);
+        for path in [&stale, &version, &arbitrary] {
+            fs::File::open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        cleanup_stale_payloads(&root).unwrap();
+        assert!(!stale.exists());
+        for path in [&recent, &version, &arbitrary] {
+            assert!(path.exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dependency_output_is_bounded_and_hangs_time_out() {
+        let mut cmd = command(Path::new("/bin/sh"));
+        cmd.args(["-c", "while :; do printf '01234567890123456789012345678901234567890123456789012345678901234567890123456789'; done"]);
+        let error = bounded_output(cmd, None, 10).await.unwrap_err();
+        assert!(error.to_string().contains("response exceeds limit"));
+        let mut cmd = command(Path::new("/bin/sh"));
+        cmd.args(["-c", "exec sleep 10"]);
+        let error = bounded_output(cmd, None, 1).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"));
     }
 }

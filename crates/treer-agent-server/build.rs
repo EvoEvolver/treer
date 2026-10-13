@@ -71,7 +71,17 @@ fn main() {
         "cargo:rerun-if-changed={}",
         repository.join(".git").display()
     );
-    for suffix in ["HEAD", "refs/heads/launcher-subcommand"] {
+    let mut refs = vec!["HEAD".to_owned(), "packed-refs".to_owned()];
+    if let Ok(output) = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(&repository)
+        .output()
+    {
+        if output.status.success() {
+            refs.push(String::from_utf8(output.stdout).unwrap().trim().to_owned());
+        }
+    }
+    for suffix in &refs {
         if let Ok(output) = Command::new("git")
             .args(["rev-parse", "--git-path", suffix])
             .current_dir(&repository)
@@ -163,13 +173,24 @@ fn main() {
                     .expect("payload executable flag"),
             ));
         }
-        assert!(
-            entries.iter().any(|(name, _)| name == "runtime.mjs"),
-            "missing bundled runtime"
-        );
+        for required in [
+            "runtime.mjs",
+            "interface-contract.json",
+            "profiles.json",
+            "scripts/install.mjs",
+            "scripts/installed-runner.mjs",
+            "scripts/treer-agent.mjs",
+        ] {
+            assert!(
+                entries.iter().any(|(name, _)| name == required),
+                "missing required bundled file: {required}"
+            );
+        }
         manifest_bytes = Some(bytes);
         true
     } else {
+        assert_ne!(env::var("PROFILE").ok().as_deref(), Some("release"),
+            "release builds require a verified TREER_LAUNCHER_PAYLOAD_DIR; source-only builds are development-only");
         assert_ne!(
             env::var("TREER_REQUIRE_LAUNCHER_BUNDLE").ok().as_deref(),
             Some("1"),
@@ -180,6 +201,11 @@ fn main() {
         }
         for file in ["package.json", "package-lock.json", "profiles.json"] {
             entries.push((file.to_owned(), false));
+        }
+        // Transitional development checkouts can precede the launcher-owner commit.
+        // Release payloads above always require the shared contract.
+        if root.join("interface-contract.json").exists() {
+            entries.push(("interface-contract.json".to_owned(), false));
         }
         false
     };

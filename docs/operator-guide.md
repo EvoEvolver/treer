@@ -745,10 +745,39 @@ treer agent admin profile launch reviewer --machine build-machine \
 Optional repository launchers package more involved runtimes behind the same
 profile contract. The [Agent launcher](../launchers/agent/README.md) provides one
 shared browser UI/AIS server with native Codex/Claude and generic ACP adapters
-for Gemini, Grok, Cursor and OpenCode. Install or update it explicitly with
-`launchers/agent/install.sh`; it saves and verifies reusable profiles without
-creating or restarting Agents. Treer's binary installer,
-updater, and release artifacts do not fetch or install repository launchers.
+for Gemini, Grok, Cursor and OpenCode. Matching release Controllers embed its
+verified portable runtime. Install it without cloning a repository or running
+npm on the target:
+
+```bash
+treer-agent-server launcher install
+treer-agent-server launcher status
+treer-agent-server launcher update
+treer-agent-server launcher rollback
+```
+
+These local commands save/read back launch profiles but never create or restart
+Agents, the Host or Controller. Node.js 22+ and the selected harness executable
+must already be installed. Select a trusted absolute executable with `--node`
+and, if needed, `--treer`; automatic Node discovery uses known installation paths,
+not arbitrary PATH entries. On Windows, the operator must ensure these paths and
+their ancestors have trusted ownership/ACLs; the command does not authenticate
+the Node publisher or audit every Windows executable ACL. Installation uses the
+authenticated enrolled root reported by `treer interface contract`, with a
+relative `--cwd` (default `.`). Update the running Controller first if it reports
+`launcher_controller_unsupported`. Status against older Controllers reports
+unknown rather than certifying compatibility.
+
+Versions remain in the enrolled root's private `.treer/launchers/agent` directory;
+running launchers keep their resolved physical assets. Rollback verifies the
+retained bundle and the running Controller's compatibility/security floor.
+Keep versions used by running Agents. Interrupted installation can leave a
+private `.install-lock`: inspect state and ensure no installer is running before
+manually removing that exact lock; do not delete the whole launcher directory.
+Source-only debug builds require explicit `--allow-network --npm-cli` with a
+trusted absolute npm CLI JavaScript path. Repository `install.sh`/`bootstrap.sh`
+remain legacy/development entry points; they are separate from the signed
+embedded release path. Binary updates do not automatically activate a launcher.
 
 The web Create Agent dialog includes a built-in Terminal option. It starts the
 machine user's interactive shell without injecting a command and is not stored

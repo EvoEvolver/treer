@@ -353,6 +353,21 @@ upgrade. Do not claim mutually untrusted local-process isolation. Export's
 no-Origin heuristic is not independent archive authentication. See the
 [local launcher audit](research/2026-10-12-security-launcher.md).
 
+Release Controllers embed a same-commit launcher manifest and payload. The local
+`launcher install/update/rollback` path verifies embedded/extracted bytes before
+executing the installer, checks the actual Controller contract, and refuses
+retained versions below its minimum launcher security epoch. Release builds
+require a prepared portable runtime; debug source installs need explicit network
+opt-in. This authenticates assets through the Controller release, not the local
+Node publisher: operators must trust the selected Node/CLI and their paths.
+Unix executable ancestors are checked for trusted ownership/write permissions;
+Windows executable ACL auditing is not implemented. Private state uses the
+existing current-user ACL/0700 boundary, which does not isolate same-user code.
+Subprocess output is bounded, stderr is discarded, and Node environment hooks
+are removed; trusted CLI children still need the caller's authenticated identity.
+Hashes do not prevent an equal-privilege account from replacing installed code
+after verification. No launcher installation restarts an existing workload.
+
 Native Codex/Claude and ACP launch modes default to unattended full authority
 and inherit the Agent's own Treer credential for tools. Session export excludes
 known credential/configuration files, but it does not redact secrets embedded

@@ -706,6 +706,18 @@ thread/session; the UI has no thread list or session switcher. Provider choices,
 session persistence, and presentation remain launcher concerns, without adding
 provider routes, Agent kinds, or Host-wide UI state to Core.
 
+Release Controllers distribute a same-commit portable launcher payload via local
+`treer-agent-server launcher install|update|status|rollback`. Core verifies and
+extracts embedded manifest bytes into private staging, then calls the launcher's
+shared installer transaction with structured stdin. The launcher owns profile
+save/readback/rollback and version activation; Core does not duplicate those
+transactions or start Agents. Authenticated `GET /api/interface/contract`, also
+exposed as `treer interface contract`, reports the actual Controller's AIS and
+feature sets, minimum launcher security epoch, and enrolled machine/root context.
+Missing fields are unknown, not compatible. Immutable versions and a private
+atomic current pointer separate asset installation from explicit Agent restart.
+See the [installation design](research/2026-10-13-launcher-subcommand-design.md).
+
 Harness-specific behavior lives in `launchers/agent/src/harness/{codex,claude,acp}`.
 Codex uses its native `codex app-server`; Claude Code uses its native stream-JSON
 interface. Cursor, Grok Build, OpenCode, and Gemini use the shared ACP adapter

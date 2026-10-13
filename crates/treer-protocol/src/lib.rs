@@ -63,6 +63,8 @@ pub const CONTROLLER_INTERFACE_CAPABILITIES: &[&str] = &[
     "state.observe",
     "transcript.read",
 ];
+/// Retained launchers below this floor cannot be installed or rolled back to.
+pub const MINIMUM_LAUNCHER_SECURITY_EPOCH: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LauncherControllerContract {
@@ -70,6 +72,8 @@ pub struct LauncherControllerContract {
     pub protocol: String,
     pub capabilities: Vec<String>,
     pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_launcher_security_epoch: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<LauncherMachineContext>,
 }

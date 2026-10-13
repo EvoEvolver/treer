@@ -47,7 +47,11 @@ Core invokes the embedded `scripts/install.mjs --controller-request` with JSON
 on stdin: `schema: treer.launcher-install/v1`, `operation`, `bundle_dir`, `version`
 (`sha256-<64hex>`), `source_commit`, enrolled `root`, relative `cwd`, selected
 `agents`, absolute `node`, `treer`, optional `npm_cli`, `allow_network`, and
-`controller: {git_commit, protocol, capabilities, features}`. Status/rollback
+`controller: {git_commit, protocol, capabilities, features,
+minimum_launcher_security_epoch, machine: {root, server_id, workspace_id}}`.
+Authenticated `treer interface contract` supplies root context for operators and
+Agents; managed-only `whoami` is not used as an operator installation dependency.
+Status/rollback
 do not need a candidate; rollback can supply `rollback_version`. Output is JSON;
 errors are sanitized rather than echoing subprocess output/identity responses.
 The launcher owner maintains this transaction engine; Core owns extraction,
@@ -72,10 +76,21 @@ supported AIS/provenance/queue features. Installation and runtime registration
 check the actual selected Controller, not just the installer binary's version;
 missing features, unknown contract or protocol disagreement fail explicitly.
 Status distinguishes compatible, incompatible and unknown, never treats missing
-metadata as compatible. Rollback cannot bypass these checks. Existing running
+metadata as compatible. Launcher contract `launcher_security_epoch` must meet
+Controller `minimum_launcher_security_epoch` (initially 1); missing epoch is
+unknown, rollback below the floor is refused with no downgrade override.
+Rollback cannot bypass these checks. Existing running
 launchers are untouched; a new Controller may continue supporting an older
 declared contract. Old Controller/new launcher fails closed before registration.
 An old binary lacking this subcommand reports an ordinary unknown command.
+
+All Node-prefixed environment hooks are removed for installer dependencies;
+stdout is capped at 4 MiB, CLI/version calls have deadlines and installer execution
+is capped at six minutes. Expired UUID-named payload stages older than one day
+are removed beneath the private managed parent, never immutable version assets.
+On Windows, private state uses the existing user ACL adapter, but executable
+ancestor ACL auditing is not implemented; operators must trust the explicit
+Node/CLI installation paths. Same-account modification remains out of scope.
 
 `install.sh`/`install.mjs`/`bootstrap.sh` remain documented legacy/development
 entry points delegating to the same transaction engine where applicable;
