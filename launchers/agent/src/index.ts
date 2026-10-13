@@ -17,7 +17,7 @@ import { GoalError, goalUpdate } from "./goals.js";
 import { QueueError, submissionOptions } from "./prompt-submission.js";
 import { notifySubmission } from "./prompt-notify.js";
 import { MessageWatch, messageWatchEnabled } from "./message-watch.js";
-import { verifyInterfaceCaller } from "./interface-identity.js";
+import { guardInterfaceRequest, verifyInterfaceCaller } from "./interface-identity.js";
 import { SessionTransferError } from "./session-transfer.js";
 import { HttpInputError, readJson } from "./http-input.js";
 
@@ -184,6 +184,8 @@ const server = createServer(async (request, response) => {
     try { url = new URL(request.url ?? "/", "http://127.0.0.1"); }
     catch { throw new HttpInputError("Invalid request URL", 400); }
     const path = requestPath(url);
+    const address = server.address();
+    guardInterfaceRequest(request.headers, agentId, interfaceInstanceId, typeof address === "object" && address ? address.port : port);
     const queueRoute = path === "/v1/prompts" || path === "/v1/queue" || path.startsWith("/v1/queue/") || path.startsWith("/v1/submissions/");
     const attested = queueRoute ? verifyInterfaceCaller(request.headers, agentId, interfaceInstanceId) : false;
     if (path === "/api/session/export" && method === "GET") {
@@ -371,6 +373,12 @@ const server = createServer(async (request, response) => {
 
 const socketsServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
 server.on("upgrade", (request, socket, head) => {
+  try {
+    const address = server.address();
+    guardInterfaceRequest(request.headers, agentId, interfaceInstanceId, typeof address === "object" && address ? address.port : port);
+  } catch {
+    socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return;
+  }
   let path: string;
   try { path = requestPath(new URL(request.url ?? "/", "http://127.0.0.1")); }
   catch { socket.destroy(); return; }

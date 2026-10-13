@@ -203,6 +203,10 @@ UI provenance is not sender attestation or per-command Policy authorization;
 only Controller semantic calls may attest queue senders. Old Core lacks provenance
 and must be updated before strict launchers are enabled. See the
 [forwarding contract](architecture.md#browser-defense-forwarding-provenance).
+The launcher checks the actual listener port on every HTTP request and WebSocket
+upgrade. Do not claim mutually untrusted local-process isolation. Export's
+no-Origin heuristic is not independent archive authentication. See the
+[local launcher audit](research/2026-10-12-security-launcher.md).
 
 Native Codex/Claude and ACP launch modes default to unattended full authority
 and inherit the Agent's own Treer credential for tools. Session export excludes

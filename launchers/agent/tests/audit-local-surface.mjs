@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "@playwright/test";
-import { hermeticEnv } from "./hermetic.mjs";
+import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 
 const root = resolve(import.meta.dirname, ".."), cwd = await mkdtemp(join(tmpdir(), "launcher-audit-"));
 const portFile = join(cwd, "port");
@@ -33,7 +33,7 @@ try {
       socket.onmessage = (event) => { clearTimeout(timeout); socket.close(); done(JSON.parse(event.data).type === "state"); };
       socket.onerror = () => { clearTimeout(timeout); done(false); };
     });
-    await fetch(base + "/api/prompt", { method: "POST", mode: "no-cors", headers: { "content-type": "text/plain" }, body: JSON.stringify({ prompt: "LOCAL_AUDIT_PROMPT_ONLY" }) });
+    await fetch(base + "/api/prompt", { method: "POST", mode: "no-cors", headers: { "content-type": "text/plain" }, body: JSON.stringify({ prompt: "LOCAL_AUDIT_PROMPT_ONLY" }) }).catch(() => {});
     return { crossOriginWebSocketStateRead: wsRead };
   }, base);
   const calls = (await readFile(join(cwd, "calls"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
@@ -41,7 +41,7 @@ try {
   const rebinding = await fetch(base + "/v1/files?path=.env", { headers: { host: "rebinding.invalid" } });
   evidence.foreignHostReadSyntheticProjectFile = rebinding.status === 200 && (await rebinding.json()).content === "SYNTHETIC_SECRET_NOT_A_CREDENTIAL";
   await page.goto(base);
-  evidence.sameOriginBrowserPassesArchiveHostOriginGuard = await page.evaluate(async () => (await fetch("/api/session/export")).status === 400);
+  evidence.sameOriginBrowserPassesArchiveHostOriginGuard = await page.evaluate(async (base) => (await fetch(base + "/api/session/export")).status === 400, base);
   // Fake Codex has no valid native UUID: adapter validation returns 400 after the guard.
   console.log(JSON.stringify(evidence)); // Booleans only; never emit transcript/file contents.
 } finally {

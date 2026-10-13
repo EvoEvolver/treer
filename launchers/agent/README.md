@@ -36,13 +36,25 @@ service record or published port is required.
 
 ### Local security boundary
 
-The listener binds only `127.0.0.1`, but loopback alone is not authentication.
-Current UI/transcript/file routes and WebSocket upgrades lack a general
-Host/Origin gate; do not expose or port-forward this listener. The Controller's
-external Policy checks do not protect direct loopback access or cross-origin
-browser access. AIS Agent/instance headers are routing identifiers, not a
-secret capability. A coordinated Controller/launcher forwarding-auth contract
-is required before claiming browser CSRF or DNS-rebinding protection.
+The listener binds only `127.0.0.1`. All HTTP routes and WebSocket upgrades
+require Host `127.0.0.1:<actual-port>`, `localhost:<actual-port>` or
+`[::1]:<actual-port>`; `agent-interface` is accepted only for Controller calls.
+Any Origin (including `null`) or Sec-Fetch-* header requires matching protected
+`X-Treer-Interface-Source` (`proxy-ui` or `controller-api`), `X-Treer-Agent-Id`
+and current `X-Treer-Interface-Instance`. Proxy strips client markers and inserts
+`proxy-ui` after authenticating its UI tunnel; Controller semantic calls insert
+`controller-api` with no Origin. Only the latter may attest queue senders.
+X-Forwarded-* is never trusted. Preflights receive no permissive CORS response.
+Update Proxy/Controller to the forwarding contract before this strict launcher;
+old Controller calls fail with an explicit 403, without browser fallback.
+
+The markers are public browser-defense provenance, not secret credentials or
+local-process authentication. Native clients without browser headers remain
+trusted on loopback; same-account programs can forge markers. The UI tunnel
+authorizes the interface as a whole, not each arbitrary UI command through
+semantic Core Policy. Do not expose or port-forward the listener; use external
+OS/network isolation for mutually untrusted processes. Direct browser access
+is intentionally refused; use the authenticated Treer UI tunnel.
 
 The harness inherits its Agent environment, including its own Treer workload
 credential so agent tools can use Treer. This is intentional delegation, not

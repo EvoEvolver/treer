@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { CodexRuntime } from "../src/harness/codex.js";
 import { loadThreadId, saveThreadId, threadStatePath } from "../src/thread-state.js";
-import { hermeticEnv } from "./hermetic.mjs";
+import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const fake = join(root, "tests/fake-codex.mjs");
@@ -305,7 +305,7 @@ test("only the newest in-progress turn is live, and a stale steer target is corr
 test("/v1/prompts accepts the body Treer's Controller sends, and delivery selects steer or queue", async () => {
   const server = await launchServer(temp(), { CODEX_UI_THREAD_ID: "original" });
   const instance = await fetch(server.base + "/v1/status").then((response) => response.json());
-  const post = (body: unknown) => fetch(server.base + "/v1/prompts", { method: "POST", headers: { "content-type": "application/json", host: "agent-interface", "x-treer-agent-id": "ag_test", "x-treer-interface-instance": instance.interface_instance_id }, body: JSON.stringify(body) });
+  const post = (body: unknown) => fetch(server.base + "/v1/prompts", { method: "POST", headers: { "content-type": "application/json", host: "agent-interface", "x-treer-interface-source": "controller-api", "x-treer-agent-id": "ag_test", "x-treer-interface-instance": instance.interface_instance_id }, body: JSON.stringify(body) });
   try {
     // Exactly what crates/treer-agent-server/src/agent_interface.rs submits.
     const controller = await post({ operation_id: "op-controller", text: "hello", mode: "prompt" });

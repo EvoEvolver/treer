@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { WebSocket } from "ws";
-import { hermeticEnv } from "./hermetic.mjs";
+import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 const root = resolve(import.meta.dirname, "..");
 const fake = join(root, "tests/fake-claude.mjs");
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), "agent-ui-claude-http-")));

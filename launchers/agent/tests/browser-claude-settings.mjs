@@ -5,7 +5,7 @@ import { mkdtemp, readFile, realpath } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, expect } from "@playwright/test";
-import { hermeticEnv } from "./hermetic.mjs";
+import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 const fake = process.argv.includes("--fake");
 const root = resolve(import.meta.dirname, "..");
 const shots = await mkdtemp(join(tmpdir(), "claude-settings-shots-"));
@@ -14,11 +14,11 @@ try {
   for (const unsupported of fake ? [false, true] : [false]) {
     const cwd = await realpath(await mkdtemp(join(tmpdir(), "agent-ui-claude-settings-")));
     const portFile = join(cwd, "port");
-    const env = hermeticEnv({ AGENT_UI_HARNESS: "claude", AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: portFile, TREER_AGENT_ID: "ag_settings_test", CLAUDE_MODEL: "sonnet",
+    const env = hermeticEnv({ AGENT_UI_INSTANCE_ID: "settings-fixture", AGENT_UI_HARNESS: "claude", AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: portFile, TREER_AGENT_ID: "ag_settings_test", CLAUDE_MODEL: "sonnet",
       ...(fake ? { CLAUDE_BIN: join(root, "tests/fake-claude.mjs"), FAKE_CLAUDE_RESOLVED_MODELS: "1", FAKE_CLAUDE_SLOW_SETTINGS: "1", ...(unsupported ? { FAKE_CLAUDE_NO_EFFORT: "1" } : {}) } : {}) });
     const server = spawn(join(root, "node_modules/.bin/tsx"), [join(root, "src/index.ts")], { cwd, env, stdio: "pipe" });
     let logs = ""; server.stderr.on("data", (chunk) => { logs += chunk; });
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, extraHTTPHeaders: { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_settings_test", "x-treer-interface-instance": "settings-fixture" } });
     try {
       let base = "";
       for (let attempt = 0; attempt < 150; attempt++) {

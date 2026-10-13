@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, expect } from "@playwright/test";
-import { hermeticEnv } from "./hermetic.mjs";
+import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 import { testRuntimeControls } from "./browser-controls.mjs";
 
 // An isolated listener and fake Codex: no inference, Treer mutations or Agent restart.
@@ -16,7 +16,7 @@ await mkdir(join(cwd, "src"));
 await writeFile(join(cwd, "src/greeting.ts"), "export const greeting = 'Hello, Treer';\n// <script>window.fileXSS = true</script>\n");
 await writeFile(join(cwd, "README.md"), "# Workspace\nSmall tools, thoughtful interfaces.\n");
 await writeFile(join(cwd, "large.txt"), "x".repeat(65537));
-const env = hermeticEnv({ CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
+const env = hermeticEnv({ TREER_AGENT_ID: "ag_browser_fixture", AGENT_UI_INSTANCE_ID: "browser-fixture", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
   CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1" });
 const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "pipe" });
 let logs = "";
@@ -35,7 +35,8 @@ try {
   }
   assert.ok(base, logs);
   browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, colorScheme: "dark" });
+  // Model Proxy's stripped/reinjected provenance, including WebSocket upgrade.
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, colorScheme: "dark", extraHTTPHeaders: { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_browser_fixture", "x-treer-interface-instance": "browser-fixture" } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => { errors.push(error.message); console.error(error.message); });

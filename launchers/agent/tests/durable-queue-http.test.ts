@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, unlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { hermeticEnv } from "./hermetic.mjs";
+import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 const launcher = resolve(import.meta.dirname, "..");
 async function until<T>(read: () => Promise<T>, matches: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + 8000;
@@ -40,7 +40,7 @@ test("AIS queue persists across launcher restart, exposes correlated results and
     children.push(child);
     const base = await until(async () => `http://127.0.0.1:${Number(await readFile(portFile, "utf8"))}`, () => true);
     await until(() => fetch(base + "/api/state").then((response) => response.json()), (state) => state.ready === true);
-    const headers = { "content-type": "application/json", host: "agent-interface", "x-treer-agent-id": "ag_fixture", "x-treer-interface-instance": "fixture-instance" };
+    const headers = { "content-type": "application/json", host: "agent-interface", "x-treer-interface-source": "controller-api", "x-treer-agent-id": "ag_fixture", "x-treer-interface-instance": "fixture-instance" };
     return { child, base, headers, post: (body: unknown) => fetch(base + "/v1/prompts", { method: "POST", headers, body: JSON.stringify(body) }) };
   };
   const first = await launch();

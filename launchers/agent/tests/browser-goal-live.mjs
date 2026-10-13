@@ -5,7 +5,7 @@ import { mkdtemp, readFile, realpath, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, expect } from "@playwright/test";
-import { hermeticEnv } from "./hermetic.mjs";
+import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 const root = resolve(import.meta.dirname, "..");
 const shots = process.env.AGENT_UI_GOAL_SCREENSHOTS || await mkdtemp(join(tmpdir(), "agent-ui-goal-live-shots-"));
 await mkdir(shots, { recursive: true });
@@ -15,10 +15,10 @@ try {
     const cwd = await realpath(await mkdtemp(join(tmpdir(), `agent-ui-${harness}-goal-live-`)));
     const portFile = join(cwd, "port");
     const child = spawn(join(root, "node_modules/.bin/tsx"), [join(root, "src/index.ts")], {
-      cwd, env: hermeticEnv({ AGENT_UI_HARNESS: harness, AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: portFile, TREER_AGENT_ID: "ag_goal_live", ...(process.env.CODEX_BIN ? { CODEX_BIN: process.env.CODEX_BIN } : {}) }), stdio: "pipe",
+      cwd, env: hermeticEnv({ AGENT_UI_INSTANCE_ID: "goal-fixture", AGENT_UI_HARNESS: harness, AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: portFile, TREER_AGENT_ID: "ag_goal_live", ...(process.env.CODEX_BIN ? { CODEX_BIN: process.env.CODEX_BIN } : {}) }), stdio: "pipe",
     });
     let logs = ""; child.stderr.on("data", (chunk) => { logs += chunk; });
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, extraHTTPHeaders: { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_goal_live", "x-treer-interface-instance": "goal-fixture" } });
     try {
       let base = "";
       for (let attempt = 0; attempt < 150; attempt++) {

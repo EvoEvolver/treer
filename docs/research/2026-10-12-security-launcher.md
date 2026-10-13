@@ -12,6 +12,27 @@ machine sandbox claim is made.
 
 ## Findings, ordered by severity
 
+## Coordinated resolution (updated after Core candidate 2190182)
+
+The following P0 descriptions preserve the baseline findings. Launcher now
+implements the fixed `proxy-ui` / `controller-api` + target/current-instance
+contract, exact actual-port Host allowlist and rejection of all unmarked
+Origin/Fetch Metadata requests on **every HTTP route and WS upgrade**. Controller
+source must have no Origin; UI provenance never attests queue sender. Old Core
+calls fail with explicit upgrade guidance. Core's candidate strips client
+markers before injecting provenance only on authenticated UI routes; normal/
+public service forwarding never injects it. Source markers are public: this
+closes ordinary browser/rebinding entry points, **not native local clients**.
+
+After guards, the same sealed-browser repro prints all four attack booleans
+false. HTTP/WS regression cases include hostile/null Origins, navigation Fetch
+Metadata, foreign/mismatched-port Hosts, stale instance, wrong target/source,
+old Controller, allowed UI/Controller and rejected UI sender spoofing. Real UI
+browser fixtures emulate Proxy-injected headers; native test HTTP clients use
+node:http because Node fetch automatically emits Sec-Fetch-Mode. No guard is
+weakened for tests. Release must ship Proxy/Controller producers before launcher.
+Cross-review of Core 2190182 and launcher changes is required before main merge.
+
 ### P0 — Cross-origin prompt injection and WebSocket transcript disclosure (open)
 
 - **Phenomenon:** `/api/prompt`, interrupt/settings/goal, `/v1/abort` and `/ws`
@@ -168,8 +189,8 @@ argv/session/file assertions. No push, deployment or Agent/Host/Controller resta
 
 This audit does **not** approve deployment on a critical service with mutually
 untrusted users or an exposed listener. Loopback binding, external Proxy Policy,
-file allowlists and message provenance are useful basics, but do not establish
-authenticated local UI access, browser CSRF/rebinding protection, secret-free
+file allowlists, browser forwarding guards and message provenance are useful
+basics, but do not establish authenticated native local access, secret-free
 archives/logs, provider credential isolation or an execution sandbox. Update
 `docs/security.md` Unsupported Claims with these exact limitations; its owner
 core-dev was asked to synchronize this cross-component wording.
