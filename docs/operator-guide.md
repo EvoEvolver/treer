@@ -57,7 +57,9 @@ pnpm dev
 uses a synthetic local user, and every caller (including machine and
 administrator routes) is trusted. The Proxy refuses it on a non-loopback
 address unless `--allow-unauthenticated-listen` (`TREER_ALLOW_UNAUTHENTICATED_LISTEN`)
-is also given; use that only on an isolated network. Omit it and set `ADMIN_PASSWORD` for shared or
+is also given; use that only on an isolated network. A loopback listener can still be
+exposed by a reverse proxy or port forward, so this guard is not complete remote isolation.
+Omit it and set `ADMIN_PASSWORD` for shared or
 deployed servers.
 
 Core Message routes are rollout-gated and default off. Enable the Proxy gate
@@ -905,6 +907,14 @@ before organizing a protected subtree. No Tree placement means no path match,
 not implicit root membership. New CLI/Controller/Proxy capability checks reject
 unsupported v2 Providers explicitly; update the Proxy and Provider's Controller
 before selecting a v2-only Provider. Existing v1 Providers remain compatible.
+
+Path rules authorize by a node's current Tree position; they are not containment.
+An unplaced node matches no path selector, a new Agent created without a folder
+is placed at the root rather than inheriting its creator's path, and a subject
+allowed `agent.tree.manage` can move or rename nodes into an Allow-covered
+subtree. To make a path Deny meaningful, use enforce mode with explicit default
+Deny and restrict `agent.create`, App creation and `agent.tree.manage` for the
+same subjects; verify with `/policy/explain` after each Tree change.
 
 Owners can call `/api/workspaces/{id}/policy/explain`, `/policy/decisions` and
 `/policy/validate` using their authenticated user/operator session. Explain can
