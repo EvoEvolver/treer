@@ -472,8 +472,10 @@ writing a `SessionBundle` JSON to stdout, and `scripts/session.sh import
 --directory NEW_DIR [--session-id NEW_UUID]`, reading that JSON on stdin and
 writing `ImportedSession` JSON to stdout. `--input FILE` may replace stdin.
 Diagnostics go to stderr; nonzero exit means failure. Current-session HTTP
-export is `GET /api/session/export` for local non-browser clients (loopback Host,
-no Origin header); browser/tunnel access is rejected. Unsupported adapters return 501. Export
+export is `GET /api/session/export` with loopback Host and no Origin header.
+This rejects external Hosts and supplied Origins, not all browsers: same-origin
+browser GETs may omit Origin, and native clients can forge these headers. The
+guard is not authentication. Unsupported adapters return 501. Export
 requires a confirmed native session file; a newly allocated Claude UUID without
 any persisted messages is not yet exportable. Export while idle; a file changing
 during the snapshot produces a retryable error.

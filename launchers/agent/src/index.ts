@@ -187,11 +187,11 @@ const server = createServer(async (request, response) => {
     const queueRoute = path === "/v1/prompts" || path === "/v1/queue" || path.startsWith("/v1/queue/") || path.startsWith("/v1/submissions/");
     const attested = queueRoute ? verifyInterfaceCaller(request.headers, agentId, interfaceInstanceId) : false;
     if (path === "/api/session/export" && method === "GET") {
-      // Session archives are an offline/local-client boundary, not an embeddable
-      // browser resource. Do not widen the legacy UI's Origin trust surface.
+      // A restrictive Host/Origin heuristic, not client authentication: same-
+      // origin browser GETs can omit Origin, and native clients can forge Host.
       const host = request.headers.host ?? "";
       if (request.headers.origin !== undefined || !/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(host)) {
-        send(response, 403, { error: "Session export requires a local non-browser client; use session.sh for offline export" });
+        send(response, 403, { error: "Session export requires loopback Host and no Origin; use session.sh for offline export" });
         return;
       }
       if (!runtime.exportSession) throw new SessionTransferError("unsupported", "This harness does not support session export");

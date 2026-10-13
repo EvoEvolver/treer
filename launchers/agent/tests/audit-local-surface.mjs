@@ -40,6 +40,9 @@ try {
   evidence.crossOriginSimplePostReachedTurn = calls.some((call) => call.method === "turn/start" && JSON.stringify(call.params).includes("LOCAL_AUDIT_PROMPT_ONLY"));
   const rebinding = await fetch(base + "/v1/files?path=.env", { headers: { host: "rebinding.invalid" } });
   evidence.foreignHostReadSyntheticProjectFile = rebinding.status === 200 && (await rebinding.json()).content === "SYNTHETIC_SECRET_NOT_A_CREDENTIAL";
+  await page.goto(base);
+  evidence.sameOriginBrowserPassesArchiveHostOriginGuard = await page.evaluate(async () => (await fetch("/api/session/export")).status === 400);
+  // Fake Codex has no valid native UUID: adapter validation returns 400 after the guard.
   console.log(JSON.stringify(evidence)); // Booleans only; never emit transcript/file contents.
 } finally {
   await browser?.close(); await new Promise((done) => attacker.close(done));

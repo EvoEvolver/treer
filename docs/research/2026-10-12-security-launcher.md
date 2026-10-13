@@ -81,6 +81,10 @@ machine sandbox claim is made.
 - **Impact:** other local users/processes able to reach loopback have Agent
   read/control authority. Same-account access is explicitly unsupported, but
   loopback is also shared across accounts absent external network isolation.
+  Export's loopback-Host/no-Origin heuristic is not a non-browser guarantee:
+  the sealed browser also confirms a same-origin GET passes the guard (fake
+  native UUID validation then returns 400). README/error wording is corrected;
+  it must not be presented as independent archive authentication.
 - **Recommendation:** private per-registration forwarding secret, checked on
   all sensitive routes; authenticated explicit direct-local mode if required.
   Public manifest/health may remain minimal discovery routes. Never expose the
