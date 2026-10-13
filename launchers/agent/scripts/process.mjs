@@ -30,9 +30,15 @@ export function providerCommand(command, args = [], options = {}) {
   return { command: file, args };
 }
 
+const isolatedGroups = new WeakSet();
 export function spawnProvider(command, args, options = {}) {
   const resolved = providerCommand(command, args, options);
-  return spawn(resolved.command, resolved.args, { ...options, shell: false, detached: process.platform !== "win32", windowsHide: true });
+  // Keep production children in Host's PTY process group / Windows Job. Only
+  // sealed POSIX test fixtures explicitly request their own cleanup group.
+  const detached = process.platform !== "win32" && options.detached === true;
+  const child = spawn(resolved.command, resolved.args, { ...options, shell: false, detached, windowsHide: true });
+  if (detached) isolatedGroups.add(child);
+  return child;
 }
 export function runProviderSync(command, args, options = {}) {
   const resolved = providerCommand(command, args, options);
@@ -51,7 +57,7 @@ export function stopProcessTree(child, signal = "SIGTERM") {
       throw new Error("Windows provider process-tree cleanup failed");
     }
   } else {
-    try { process.kill(-child.pid, signal); }
+    try { if (isolatedGroups.has(child)) process.kill(-child.pid, signal); else child.kill(signal); }
     catch (error) { if (error.code !== "ESRCH") throw error; }
   }
 }

@@ -59,9 +59,9 @@ async function until(check, label, milliseconds = 90000) {
 }
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (error) { if (error.code === "ESRCH") return false; throw error; } }
 let child, browser, base, logs = "", providerPids = [];
-async function stop() {
+async function stop(signal = "SIGTERM") {
   if (!child) return;
-  stopProcessTree(child);
+  stopProcessTree(child, signal);
   await until(() => child.exitCode !== null || child.signalCode !== null, "fixture wrapper exit", 15000);
   await until(() => providerPids.every(pid => !alive(pid)), "provider/grandchild cleanup", 15000);
   child = undefined;
@@ -78,7 +78,7 @@ async function start() {
   // Standard npm shim; never invokes cmd.exe. Keep fake fixture relative imports absent.
   writeFileSync(entry, readFileSync(join(launcher, "tests/fake-acp.mjs")));
   writeFileSync(shim, '@echo off\r\n"%dp0%\\node_modules\\fake-acp\\cli.mjs" %*\r\n');
-  child = spawnProvider(process.execPath, [join(installBase, "run.mjs"), "--harness", "acp", "--acp-command", windows ? shim : entry, "--cwd", machine], { cwd: machine, env, stdio: "pipe" });
+  child = spawnProvider(process.execPath, [join(installBase, "run.mjs"), "--harness", "acp", "--acp-command", windows ? shim : entry, "--cwd", machine], { cwd: machine, env, stdio: "pipe", detached: !windows });
   child.stdout.on("data", data => logs += data); child.stderr.on("data", data => logs += data);
   await until(() => {
     if (child.exitCode !== null) throw new Error(`Fixture launcher exited: ${logs}`);
@@ -134,7 +134,7 @@ try {
   assert.equal(calls.filter(call => call.method === "session/new").length, 1);
   assert.ok(calls.some(call => call.method === "session/load" && call.params.sessionId === "sess-new"));
   assert.equal(JSON.parse(readFileSync(stateFile)).threadId, "sess-new");
-  await stop();
+  await stop(windows ? "SIGTERM" : "SIGHUP");
   const report = { platform: process.platform, embedded_controller: Boolean(options.controller), portable_install: true, profiles: 6,
     registration: "exact manifest/CLI contract", prompt: "passed", transcript: "passed", session_save_resume: "passed", process_tree_cleanup: "passed",
     windows_acl_and_long_paths: windows ? "passed" : "not tested on macOS/Linux", provider: windows ? "npm .cmd via absolute Node" : "explicit JS via absolute Node",

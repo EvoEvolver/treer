@@ -48,7 +48,7 @@ function cleanup() {
 }
 child.on("error", () => { ended = true; process.exitCode = 1; cleanup(); });
 child.on("exit", (code, signal) => { ended = true; process.exitCode = code ?? (signal ? 1 : 0); cleanup(); });
-for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => { cleanup(); });
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => { cleanup(); });
 try {
   let port;
   const deadline = Date.now() + 90000;

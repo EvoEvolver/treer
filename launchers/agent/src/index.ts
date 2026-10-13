@@ -456,7 +456,7 @@ server.listen(port, "127.0.0.1", () => {
   });
 });
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, () => {
     goalNotifications?.close();
     goalExits?.close();

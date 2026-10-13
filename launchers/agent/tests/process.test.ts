@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -48,7 +49,7 @@ test("stopping a provider removes its child process tree", async t => {
   const root = mkdtempSync(join(tmpdir(), "provider-tree-")); t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = join(root, "pids.json"), script = join(root, "tree.mjs");
   writeFileSync(script, "import {spawn} from 'node:child_process';import{writeFileSync}from'node:fs';const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});writeFileSync(process.argv[2],JSON.stringify([process.pid,child.pid]));setInterval(()=>{},1000)");
-  const child = spawnProvider(process.execPath, [script, file], { env: hermeticEnv(), stdio: "pipe" });
+  const child = spawnProvider(process.execPath, [script, file], { env: hermeticEnv(), stdio: "pipe", detached: process.platform !== "win32" });
   t.after(() => stopProcessTree(child, "SIGKILL"));
   const deadline = Date.now() + 10000;
   let pids: number[] = [];
@@ -59,4 +60,12 @@ test("stopping a provider removes its child process tree", async t => {
     while (Date.now() < deadline) { try { process.kill(pid, 0); } catch { break; } await new Promise(done => setTimeout(done, 20)); }
     assert.throws(() => process.kill(pid, 0), /ESRCH|no such process/i);
   }
+});
+
+test("POSIX production providers stay in the parent PTY group", { skip: process.platform === "win32" }, async t => {
+  const child = spawnProvider(process.execPath, ["-e", "setInterval(()=>{},1000)"], { env: hermeticEnv(), stdio: "pipe" });
+  t.after(() => stopProcessTree(child));
+  const group = (pid: number) => execFileSync("/bin/ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8", env: hermeticEnv() }).trim();
+  assert.equal(group(child.pid!), group(process.pid), "production spawn must not setsid away from Host's PTY");
+  const closed = once(child, "close"); stopProcessTree(child); await closed;
 });
