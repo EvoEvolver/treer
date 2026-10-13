@@ -105,6 +105,13 @@ export function setupGoal({ mutate, report, clearPrompt }) {
       if (goal.requiredAction) bar.append(node("p", "goal-required-action", `Required action: ${goal.requiredAction}`));
       if (goal.rejectionCount != null) bar.append(node("p", "goal-rejections", `Stop hook rejections: ${goal.rejectionCount} (${goal.consecutiveRejections ?? 0} without new evidence)`));
       const delivery = state.goalDelivery;
+      if (goal.syncStatus && goal.syncStatus !== "synced") {
+        bar.append(node("p", "goal-sync", `${goal.syncStatus}: ${goal.syncError || "Native goal is not aligned"}`));
+        if (goal.syncStatus === "desynced") bar.append(button("Re-align native goal", "reconcile-goal", async () => {
+          try { await mutate("api/goal/reconcile", { method: "POST" }); }
+          catch (error) { report(error.message); }
+        }));
+      }
       if (delivery) {
         bar.append(node("p", "goal-delivery", delivery.status === "sent" ? "Sent to Agent" : delivery.status === "failed" ? `Delivery failed: ${delivery.error || "unknown error"}` : "Sending goal update to Agent…"));
         if (delivery.status === "failed") bar.append(button("Retry goal delivery", "retry-delivery", async () => {

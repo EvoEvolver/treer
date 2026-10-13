@@ -327,6 +327,10 @@ const server = createServer(async (request, response) => {
       send(response, 200, statePayload());
       return;
     }
+    if (path === "/api/goal/reconcile" && method === "POST") {
+      if (!runtime.reconcileGoal) throw new GoalError("Native goal reconciliation unsupported", 501);
+      await runtime.reconcileGoal(); send(response, 200, statePayload()); return;
+    }
     if (path === "/api/goal/retry" && method === "POST") {
       const body = await readJson(request); goalEdits.retry(String(body.id || "")); send(response, 202, statePayload()); return;
     }

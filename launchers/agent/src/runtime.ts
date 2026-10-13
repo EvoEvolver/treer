@@ -46,6 +46,7 @@ export interface RuntimeSnapshot {
 }
 
 export interface HarnessRuntime extends EventEmitter {
+  reconcileGoal?(): Promise<void>;
   readonly harness: HarnessInfo;
   /** Trusted roots for registered background-task output files; never supplied by HTTP clients. */
   readonly taskOutputRoots?: readonly string[];

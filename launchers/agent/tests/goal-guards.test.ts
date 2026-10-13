@@ -126,15 +126,21 @@ for (const harness of ["codex", "claude"] as const) for (const replacement of [f
   } finally { await runtime.stop(); if (oldConfig === undefined) delete process.env.FAKE_CLAUDE_CONFIG; else process.env.FAKE_CLAUDE_CONFIG = oldConfig; }
 });
 
-for (const harness of ["codex", "claude"] as const) test(`${harness} refuses overlapping goal edits while an exit is pending`, async () => {
+for (const harness of ["codex", "claude"] as const) test(`${harness} serializes edits while user clear has harness-specific precedence`, async () => {
   const cwd = temp();
   const runtime = harness === "codex" ? new CodexRuntime(join(root, "tests/fake-codex.mjs"), cwd) : new ClaudeRuntime(join(root, "tests/fake-claude.mjs"), cwd);
   try {
     await runtime.start(); await runtime.updateGoal({ objective: "hold external condition" });
     const exit = runtime.updateGoal({ status: "blocked", reason: "No external environment" });
+    void exit.catch(() => {});
     await assert.rejects(runtime.updateGoal({ objective: "Replacement" }), /already pending/);
-    await assert.rejects(runtime.clearGoal(), /already pending/);
-    await exit; assert.equal(runtime.snapshot().goal?.status, "blocked");
+    if (harness === "claude") {
+      await runtime.clearGoal(); await exit.catch(() => {});
+      assert.equal(runtime.snapshot().goal?.status, "cleared");
+    } else {
+      await assert.rejects(runtime.clearGoal(), /already pending/);
+      await exit; assert.equal(runtime.snapshot().goal?.status, "blocked");
+    }
   } finally { await runtime.stop(); }
 });
 
@@ -150,6 +156,8 @@ test("Claude budget edits still release the goal after the mutation lock complet
     await until(() => runtime.snapshot().thread?.turns.some((turn) => turn.id === turnId && turn.status === "completed") === true && (runtime.snapshot().goal?.tokensUsed ?? 0) === 21);
     assert.equal(runtime.snapshot().goal?.tokensUsed, 21);
     await runtime.updateGoal({ tokenBudget: 1 });
+    assert.equal(runtime.snapshot().goal?.tokensUsed, 0, "budget edit starts a fresh usage epoch");
+    await runtime.prompt("Report current state with usage");
     await until(() => runtime.snapshot().goal?.status === "blocked");
     assert.match(runtime.snapshot().goal!.reason!, /token budget/);
   } finally { await runtime.stop(); }

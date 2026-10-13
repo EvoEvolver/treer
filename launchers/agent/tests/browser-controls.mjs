@@ -64,6 +64,9 @@ export async function testRuntimeControls(browser, screenshots) {
         res.writeHead(200, { "content-type": "text/plain" });
         return res.end(content);
       }
+      if (path === "api/goal/reconcile") {
+        state.goal = { ...state.goal, syncStatus: "synced", nativeObjective: state.goal.objective, syncError: undefined }; broadcast(); return json({ goal: state.goal });
+      }
       if (path === "api/goal/retry") {
         state.goalDelivery = { ...state.goalDelivery, status: "sent", error: null }; broadcast(); return json({ goalDelivery: state.goalDelivery });
       }
@@ -259,6 +262,17 @@ export async function testRuntimeControls(browser, screenshots) {
     await page.getByRole("button", { name: "Retry goal delivery", exact: true }).click();
     await expect(page.locator(".goal-delivery")).toHaveText("Sent to Agent");
     await page.screenshot({ path: join(screenshots, "controls-desktop-blocked.png") });
+    setState({ goal: { ...state.goal, status: "active", syncStatus: "desynced", nativeObjective: "Previous condition", syncError: `Waiting for idle ${malicious}` } });
+    await expect(page.locator(".goal-sync")).toContainText(`Waiting for idle ${malicious}`);
+    await page.screenshot({ path: join(screenshots, "controls-desktop-desynced.png") });
+    await page.getByRole("button", { name: "Re-align native goal", exact: true }).click();
+    await expect(page.locator(".goal-sync")).toHaveCount(0);
+    setState({ goal: { ...state.goal, syncStatus: "exit_unconfirmed", syncError: "Native clear was not acknowledged. Please manually enter /goal clear." } });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator(".goal-sync")).toContainText("manually enter /goal clear");
+    await expect(page.getByRole("button", { name: "Clear goal", exact: true })).toBeEnabled();
+    await page.screenshot({ path: join(screenshots, "controls-mobile-unconfirmed.png") });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole("button", { name: "Clear goal", exact: true }).click();
     assert.notEqual(goalWrites.at(-1).method, "DELETE");
     await page.getByRole("button", { name: "Keep goal", exact: true }).click();

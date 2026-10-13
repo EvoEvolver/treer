@@ -456,7 +456,9 @@ to prevent notification loops; Agents can explicitly reply through Treer.
 
 `GET /v1/state`, `/api/state` and WebSocket state expose `goal`, including
 objective, status, usage/budgets, `reason`, `requiredAction`, `rejectionCount`,
-`consecutiveRejections` and `roundsUsed`. Lifecycle outcomes are
+`consecutiveRejections` and `roundsUsed`. Claude also exposes `syncStatus`
+(`synced|desynced|exit_unconfirmed`), `nativeObjective` and `syncError`.
+Lifecycle outcomes are
 `active|blocked|stale|done|cleared`; Codex also supports `paused` and native limit
 statuses. Native `complete` maps to `done`. Clearing retains a visible cleared
 record until replacement; a session that has never had a goal returns null.
@@ -484,9 +486,15 @@ node "$AGENT_UI_GOAL_COMMAND" done --reason 'The user explicitly asked to close 
 This submits `POST /v1/goal/exit` with `status`, required `reason`, and optional
 `requiredAction`. The request is durably accepted with 202 before the tool returns;
 native clearing runs afterward, avoiding a tool/turn-boundary deadlock. State
-changes only after native clear acknowledgement. Failed clear attempts remain
-pending and retry with logs; the launcher never reports that a hook was released
-when it was not. Replacing the objective invalidates an old pending exit.
+changes only after native clear acknowledgement. Claude clear interrupts the
+running query before sending the local command: waiting for idle would deadlock
+when the Stop hook refuses to end the turn. Native acknowledgement has a 30-second
+deadline. On timeout, the goal remains active with `syncStatus=exit_unconfirmed`,
+the mutation lock and exit journal are released, and the user is notified to
+manually enter `/goal clear`. The launcher never claims a hook was released
+without acknowledgement. User clear always supersedes a pending Agent exit,
+cancels its journal, and sends a fresh native clear; it never returns 409 because
+that exit is pending. Replacing the objective invalidates an old pending exit.
 The command deliberately delegates user-equivalent native clear authority to
 the Agent, bypassing Claude's design that the model cannot itself clear `/goal`.
 It is enabled by default; `AGENT_UI_GOAL_AGENT_EXIT=0` disables the supplied
@@ -503,7 +511,11 @@ uses the finite launcher default. Claude rounds count rejected Stop evaluations;
 Codex rounds count completed goal turns and use native token budgets. Limits
 clear the native condition, record `blocked`, and notify. Token counters include
 input/output/cache tokens; streaming assistant and result usage are reconciled
-without double counting. Limits apply when usage/events are reported, so a
+without double counting. Claude SDK result usage is session cumulative; a saved
+baseline subtracts usage preceding the goal. Creating or editing an active goal
+(including its budget) resets token/time/round/rejection counters. Elapsed time
+advances while the goal is active, even without a result event. Completed goals
+retain their measured usage when only their budget is edited. Limits apply when usage/events are reported, so a
 provider request can overshoot a token budget. If a CLI reports no rejection
 events or history, rejection detection cannot infer them from arbitrary prose.
 Claude still has no native pause/resume: `pause`/`resume` are literal objectives,
@@ -537,7 +549,15 @@ Native probes: current Codex in a temporary thread started one native turn after
 editing/resuming a paused goal, and the next observed reply knew the new objective.
 The fake app-server does not inject `goal/set` into prompts at all; explicit
 launcher delivery covers both behaviors. Claude UI objective edits already send
-native `/goal ...` user input, and now also receive the explicit context receipt.
+native `/goal ...` user input, and also receive the explicit context receipt.
+For a running Claude turn, an objective edit sends the ordinary English steer
+immediately, without interrupting. The native local command is deferred until
+idle because Claude slash commands otherwise interrupt the query. Until its
+acknowledgement, the UI explicitly shows `desynced` and the previous
+`nativeObjective`; it does not pretend the Stop hook has changed. **Re-align
+native goal** (`POST /api/goal/reconcile`) retries alignment, deferring again if
+busy. User clear and safety exits deliberately interrupt; objective edits do not.
+Incremental JSONL reads cannot replay an older objective over the desired edit.
 This change's evaluator/loop tests use fake stream-json only; no real evaluator
 was invoked. `tests/probe-goal-edit-codex.ts` is an explicit opt-in native probe.
 
@@ -558,8 +578,14 @@ existing active goal merely on restart. No live Agents were restarted here.
 Before native clear, the adapter checkpoints the requested outcome and its
 thread/session generation. Resume reconciles a cleared native goal with that
 intent, retaining the reason/action and retrying its notification; a replacement
-goal invalidates the old intent. Overlapping mutations return 409 for retry
-rather than letting an old clear race a new objective.
+goal invalidates the old intent. Overlapping ordinary mutations return 409 for
+retry; user clear preempts them. Claude wire summaries use `hook_infos`,
+`prompt_text`, and `prevented_continuation`, whereas JSONL can use camelCase.
+Both shapes are normalized and deduplicated; decorated native checker prompts
+are matched to the native objective. These wire-shape/deadlock regressions use
+fake stream-json and a fake checker, not real inference. Install the updated
+launcher and resume/restart the affected Agent with its existing session ID to
+acquire the fix; this change does not restart any live session itself.
 
 `npm run test:goal:live` runs both installed native CLIs in disposable directories,
 uses the real browser to set/complete/clear goals, and saves desktop/mobile

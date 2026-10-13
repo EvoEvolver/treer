@@ -35,6 +35,9 @@ export interface Goal {
   rejectionCount?: number;
   consecutiveRejections?: number;
   notificationError?: string;
+  syncStatus?: "synced" | "desynced" | "exit_unconfirmed";
+  syncError?: string;
+  nativeObjective?: string;
 }
 
 export interface GoalUpdate {

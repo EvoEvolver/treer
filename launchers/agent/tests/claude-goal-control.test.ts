@@ -1,0 +1,156 @@
+import assert from "node:assert/strict";
+import { test, type TestContext } from "node:test";
+import { mkdtempSync, realpathSync, readFileSync, rmSync, appendFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { ClaudeRuntime } from "../src/harness/claude.js";
+import { GoalExitRequests } from "../src/goal-exit.js";
+import { GoalNotifications } from "../src/goal-notify.js";
+import { GoalEdits } from "../src/goal-edits.js";
+import { PromptQueue } from "../src/prompt-queue.js";
+import { hermeticEnv, localFetch } from "./hermetic.mjs";
+
+const fake = resolve(import.meta.dirname, "fake-claude.mjs");
+async function until(check: () => boolean, timeout = 5000) {
+  const end = Date.now() + timeout;
+  while (!check() && Date.now() < end) await new Promise(done => setTimeout(done, 10));
+  assert.ok(check(), "condition timed out");
+}
+async function fixture(t: TestContext, args: string[] = [], deadline = 1000) {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-goal-control-"))), calls = join(cwd, "calls.jsonl"), configDir = join(cwd, "claude");
+  const runtime = new ClaudeRuntime(process.execPath, cwd, { stateFile: join(cwd, "state"), configDir, goalCommandTimeoutMs: deadline,
+    args: [fake, "--real-goal-wire", "--zero-goal-usage", "--fixture-config", configDir, "--calls-file", calls, ...args] });
+  t.after(async () => { await runtime.stop(); rmSync(cwd, { recursive: true, force: true }); });
+  await runtime.start();
+  return { runtime, cwd, configDir, calls: () => readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line)),
+    idle: () => until(() => runtime.snapshot().thread?.status === "idle") };
+}
+
+test("user clear preempts the Agent's unacknowledged exit and clears its durable journal", async t => {
+  const f = await fixture(t, ["--drop-first-clear"]);
+  await f.runtime.updateGoal({ objective: "hold external condition" }); await f.idle();
+  await f.runtime.prompt("hold");
+  const journal = join(f.cwd, "exits.json"), exits = new GoalExitRequests(journal, f.runtime, () => {});
+  t.after(() => exits.close());
+  const receipt = exits.enqueue({ status: "done", reason: "Work complete" }); assert.equal(receipt.status, "pending");
+  await until(() => f.calls().filter(call => call.message?.content?.[0]?.text === "/goal clear").length === 1);
+  await f.runtime.clearGoal();
+  assert.equal(f.runtime.snapshot().goal?.status, "cleared");
+  assert.deepEqual(JSON.parse(readFileSync(journal, "utf8")), []);
+  assert.ok(f.calls().some(call => call.request?.subtype === "interrupt"), "clear must not wait for an impossible Stop hook to finish");
+});
+
+test("unconfirmed exit times out, releases locks, stops retries and durably notifies manual recovery", async t => {
+  const f = await fixture(t, ["--no-clear-ack"], 100);
+  await f.runtime.updateGoal({ objective: "hold external condition" }); await f.idle();
+  const sent: any[] = [], outbox = new GoalNotifications(join(f.cwd, "notices.json"), () => {}, async (_to, _key, body) => { sent.push(JSON.parse(body)); }, async () => ["user_fixture"]);
+  f.runtime.on("goal-exit-error", goal => outbox.enqueue(goal)); t.after(() => outbox.close());
+  const journal = join(f.cwd, "exits.json"), exits = new GoalExitRequests(journal, f.runtime, () => {}); t.after(() => exits.close());
+  exits.enqueue({ status: "blocked", reason: "Owner action needed" });
+  await until(() => f.runtime.snapshot().goal?.syncStatus === "exit_unconfirmed" && sent.length === 1);
+  await until(() => JSON.parse(readFileSync(journal, "utf8")).length === 0);
+  assert.match(sent[0].required_action, /manually enter \/goal clear/);
+  assert.equal(f.runtime.snapshot().goal?.status, "active", "unconfirmed clear must never claim the hook was removed");
+  await f.runtime.updateGoal({ tokenBudget: 200 }); // lock was released
+});
+
+test("busy objective edit steers without interruption, exposes desync and applies native goal at idle", async t => {
+  const f = await fixture(t);
+  await f.runtime.updateGoal({ objective: "hold old condition" }); await f.idle(); await f.runtime.prompt("hold");
+  const queue = new PromptQueue(f.runtime, () => {}); t.after(() => queue.close());
+  const edits = new GoalEdits(join(f.cwd, "edits.json"), f.runtime, queue, () => {}); t.after(() => edits.close());
+  await edits.apply({ objective: "hold revised condition", tokenBudget: 100000, roundBudget: 20 }, "edit-one");
+  await edits.apply({ objective: "hold revised condition", tokenBudget: 100000, roundBudget: 20 }, "edit-one");
+  await until(() => f.runtime.snapshot().goal?.nativeObjective === "hold revised condition" && f.runtime.snapshot().goal?.syncStatus === "synced");
+  const calls = f.calls();
+  assert.equal(calls.filter(call => call.request?.subtype === "interrupt").length, 0);
+  assert.equal(calls.filter(call => call.message?.content?.[0]?.text === "/goal hold revised condition").length, 1);
+  assert.equal(calls.filter(call => call.message?.content?.[0]?.text?.startsWith("The user changed the goal.")).length, 1);
+  assert.equal(f.runtime.snapshot().goal?.tokenBudget, 100000);
+  assert.ok(!JSON.stringify(f.runtime.snapshot()).includes("Request interrupted by user"));
+});
+
+test("native hook's snake_case decorated condition rejects three times then interrupt-clears and notifies", async t => {
+  const f = await fixture(t);
+  const notices: any[] = []; f.runtime.on("goal-exit", goal => notices.push(goal));
+  await f.runtime.updateGoal({ objective: "reject-loop native shape" });
+  await until(() => f.runtime.snapshot().goal?.status === "blocked");
+  assert.equal(f.runtime.snapshot().goal?.rejectionCount, 3);
+  assert.equal(f.runtime.snapshot().goal?.consecutiveRejections, 3);
+  assert.match(f.runtime.snapshot().goal!.reason!, /without new/);
+  assert.equal(notices.length, 1);
+  assert.ok(f.calls().some(call => call.request?.subtype === "interrupt"));
+});
+
+test("session-cumulative usage baseline is excluded; edit resets epoch and reaching 100k clears", async t => {
+  const f = await fixture(t, ["--session-usage-baseline", "4000000"]);
+  await f.runtime.prompt("Read session baseline"); await f.idle();
+  await f.runtime.updateGoal({ objective: "hold condition", tokenBudget: 100000 }); await f.idle();
+  assert.equal(f.runtime.snapshot().goal?.tokensUsed, 0);
+  await f.runtime.prompt("usage 50"); await f.idle(); assert.equal(f.runtime.snapshot().goal?.tokensUsed, 50);
+  await f.runtime.updateGoal({ objective: "hold edited condition", tokenBudget: 100000 }); await f.idle();
+  assert.equal(f.runtime.snapshot().goal?.tokensUsed, 0);
+  await f.runtime.prompt("usage 100001"); await until(() => f.runtime.snapshot().goal?.status === "blocked");
+  assert.equal(f.runtime.snapshot().goal?.tokensUsed, 100001);
+  assert.match(f.runtime.snapshot().goal!.reason!, /token budget/);
+  assert.ok(f.runtime.snapshot().goal!.timeUsedSeconds! > 0);
+});
+
+test("JSONL old goal acknowledgement cannot overwrite a newer deferred edit", async t => {
+  const f = await fixture(t);
+  await f.runtime.updateGoal({ objective: "hold original" }); await f.idle(); await f.runtime.prompt("hold");
+  await f.runtime.updateGoal({ objective: "hold replacement" });
+  const path = join(f.configDir, "projects", f.cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${f.runtime.snapshot().thread!.id}.jsonl`);
+  appendFileSync(path, JSON.stringify({ type: "system", subtype: "local_command", uuid: "old-copy-envelope", content: "<local-command-stdout>Goal set: hold original</local-command-stdout>", commandRun: { command: "goal", args: "hold original" } }) + "\n");
+  await (f.runtime as any).refreshGoalHistory();
+  assert.equal(f.runtime.snapshot().goal?.objective, "hold replacement");
+  assert.equal(f.runtime.snapshot().goal?.nativeObjective, "hold original");
+  assert.equal(f.runtime.snapshot().goal?.syncStatus, "desynced");
+  await f.runtime.interrupt(); await f.idle(); await f.runtime.reconcileGoal();
+  await until(() => f.runtime.snapshot().goal?.syncStatus === "synced");
+});
+
+test("resume migrates an old checkpoint without session usage baseline from native history", async t => {
+  const f = await fixture(t, ["--session-usage-baseline", "4000000"]);
+  await f.runtime.prompt("Read session baseline"); await f.idle();
+  await f.runtime.updateGoal({ objective: "hold retained condition" }); await f.idle();
+  const sessionId = f.runtime.snapshot().thread!.id;
+  await f.runtime.stop();
+  const history = join(f.configDir, "projects", f.cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
+  const beforeGoal = { type: "assistant", uuid: "prior-query", message: { id: "prior-query", model: "sonnet", content: [{ type: "text", text: "Earlier work" }], usage: { input_tokens: 4000000 } } };
+  writeFileSync(history, JSON.stringify(beforeGoal) + "\n" + readFileSync(history, "utf8"));
+  const checkpoint = join(f.cwd, "state.goal-usage.json"), saved = JSON.parse(readFileSync(checkpoint, "utf8"));
+  delete saved.resultTokens; writeFileSync(checkpoint, JSON.stringify(saved));
+  const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir,
+    args: [fake, "--fixture-config", f.configDir, "--session-usage-baseline", "4000000", "--zero-goal-usage"] });
+  t.after(() => resumed.stop()); await resumed.start();
+  await resumed.prompt("usage 50"); await until(() => resumed.snapshot().thread?.status === "idle");
+  assert.equal(resumed.snapshot().goal?.tokensUsed, 50, "resuming must not charge four million old session tokens");
+});
+
+test("HTTP user DELETE preempts an accepted Agent exit instead of returning mutation conflict", async t => {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-goal-http-"))), root = resolve(import.meta.dirname, ".."), calls = join(cwd, "calls"), portFile = join(cwd, "port");
+  const provider = join(cwd, "provider.mjs");
+  writeFileSync(provider, `process.argv.push(...${JSON.stringify(["--real-goal-wire", "--zero-goal-usage", "--drop-first-clear", "--calls-file", calls])}); await import(${JSON.stringify(pathToFileURL(fake).href)});\n`);
+  const server = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], { cwd: root, stdio: "pipe", env: hermeticEnv({
+    HOME: cwd, AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: portFile, AGENT_UI_HARNESS: "claude", CLAUDE_BIN: provider,
+    TREER_AGENT_ID: "ag_goal_http_fixture", AGENT_UI_MESSAGE_WATCH: "0", AGENT_UI_GOAL_AGENT_EXIT: "1",
+  }) });
+  let logs = ""; server.stderr.on("data", chunk => { logs += chunk; });
+  t.after(async () => { if (server.exitCode === null) { const exit = once(server, "exit"); server.kill("SIGTERM"); await exit; } rmSync(cwd, { recursive: true, force: true }); });
+  await until(() => { try { return Boolean(readFileSync(portFile, "utf8")); } catch { return false; } });
+  const base = `http://127.0.0.1:${readFileSync(portFile, "utf8")}`;
+  const deadline = Date.now() + 5000;
+  while ((await localFetch(base + "/api/health")).status !== 200 && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+  const request = (path: string, method: string, body?: unknown) => localFetch(base + path, { method, body: body === undefined ? undefined : JSON.stringify(body) });
+  let response = await request("/api/goal", "PUT", { objective: "hold external condition" }); assert.equal(response.status, 200, logs);
+  response = await request("/v1/goal/exit", "POST", { status: "done", reason: "Completed except owner action" }); assert.equal(response.status, 202, logs);
+  assert.equal((await response.json()).status, "pending");
+  await until(() => readFileSync(calls, "utf8").includes('"text":"/goal clear"'));
+  response = await request("/api/goal", "DELETE"); assert.equal(response.status, 200, logs);
+  const state = await (await request("/v1/state", "GET")).json();
+  assert.equal(state.goal.status, "cleared"); assert.equal(state.goal.syncStatus, "synced");
+});

@@ -63,7 +63,7 @@ test("Claude native goal acknowledgements, JSONL completion, usage checkpoint, r
     await until(() => runtime.snapshot().thread?.status === "idle");
     assert.equal(runtime.snapshot().goal!.status, "done");
     assert.equal(runtime.snapshot().goal!.tokensUsed, 17);
-    assert.equal(runtime.snapshot().goal!.timeUsedSeconds, 1.5);
+    assert.ok(runtime.snapshot().goal!.timeUsedSeconds! > 0);
     await assert.rejects(runtime.updateGoal({ status: "paused" }), /do not support/);
     await runtime.updateGoal({ tokenBudget: 1000 });
   } finally { await runtime.stop(); }
@@ -71,7 +71,7 @@ test("Claude native goal acknowledgements, JSONL completion, usage checkpoint, r
   try {
     await resumed.start();
     assert.equal(resumed.snapshot().goal!.status, "done"); assert.equal(resumed.snapshot().goal!.tokensUsed, 17);
-    assert.equal(resumed.snapshot().goal!.timeUsedSeconds, 1.5);
+    assert.ok(resumed.snapshot().goal!.timeUsedSeconds! > 0);
     await resumed.clearGoal(); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal?.status, "cleared");
     // A stop-hook block-cap override (hasOutput true) must not fake completion.
     await resumed.prompt("/goal hold condition"); await until(() => resumed.snapshot().thread?.status === "idle");

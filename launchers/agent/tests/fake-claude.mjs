@@ -12,12 +12,15 @@ let hold = false;
 let timer;
 let goalTimer;
 let sequence = 0;
+let usageTotal = args.includes("--session-usage-baseline") ? Number(arg("--session-usage-baseline")) : 0;
+let clearCommands = 0;
 const resolved = process.env.FAKE_CLAUDE_RESOLVED_MODELS;
 const aliases = { default: "claude-sonnet-test", sonnet: "claude-sonnet-test", opus: "claude-opus-test", legacy: "claude-legacy-test" };
 let currentModel = args.includes("--model") ? arg("--model") : "sonnet";
 const resolveModel = (model) => resolved ? aliases[model] || model : model;
 currentModel = resolveModel(currentModel);
-const history = process.env.FAKE_CLAUDE_CONFIG ? join(process.env.FAKE_CLAUDE_CONFIG, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`) : null;
+const config = args.includes("--fixture-config") ? arg("--fixture-config") : process.env.FAKE_CLAUDE_CONFIG;
+const history = config ? join(config, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`) : null;
 const persist = (event) => {
   if (history) { mkdirSync(dirname(history), { recursive: true }); appendFileSync(history, JSON.stringify(event) + "\n"); }
 };
@@ -25,10 +28,15 @@ function message(type, content, id = `m${++sequence}`, rest = {}) {
   const event = { type, uuid: `${id}-uuid`, message: { id, role: type, content, ...(type === "assistant" ? { model: currentModel } : {}) }, ...rest };
   persist(event); send(event);
 }
-const result = (extra = {}) => { hold = false; system("session_state_changed", { state: "idle" }); send({ type: "result", result: "Done", ...extra }); };
+const result = (extra = {}) => {
+  usageTotal += Object.values(extra.usage || {}).filter(value => typeof value === "number").reduce((sum, value) => sum + value, 0);
+  hold = false; system("session_state_changed", { state: "idle" });
+  send({ type: "result", result: "Done", ...extra, usage: { input_tokens: usageTotal } });
+};
 for await (const line of createInterface({ input: process.stdin })) {
   const input = JSON.parse(line);
-  if (process.env.FAKE_CLAUDE_CALLS) appendFileSync(process.env.FAKE_CLAUDE_CALLS, line + "\n");
+  const calls = args.includes("--calls-file") ? arg("--calls-file") : process.env.FAKE_CLAUDE_CALLS;
+  if (calls) appendFileSync(calls, line + "\n");
   if (input.type === "control_request") {
     const subtype = input.request.subtype;
     const error = subtype === "initialize" && sessionId === "reject" ? "Cannot resume this session" : subtype === "set_model" && input.request.model === "invalid" ? "Invalid model" : subtype === "apply_flag_settings" && process.env.FAKE_CLAUDE_NO_EFFORT ? "Unsupported control request subtype: apply_flag_settings" : null;
@@ -51,6 +59,13 @@ for await (const line of createInterface({ input: process.stdin })) {
   const goalCommand = /^\/goal(?:\s+([\s\S]*))?$/.exec(value);
   if (goalCommand) {
     const args = goalCommand[1] || "";
+    if (args === "clear") {
+      clearCommands++;
+      if (process.argv.includes("--no-clear-ack") || process.argv.includes("--drop-first-clear") && clearCommands === 1) continue;
+      // A Stop-blocked turn does not consume an ordinary queued clear. An
+      // interrupt control request must release it first.
+      if (hold && process.argv.includes("--real-goal-wire")) continue;
+    } else if (hold && process.argv.includes("--real-goal-wire")) message("assistant", [{ type: "text", text: "[Request interrupted by user]" }]);
     const output = args === "clear" ? process.env.FAKE_CLAUDE_OLD_GOAL ? "Goal cleared: old condition" : "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
     const uuid = `goal-${randomUUID()}`;
     persist({ type: "system", subtype: "local_command", uuid, content: `<local-command-stdout>${output}</local-command-stdout>`, commandRun: { command: "goal", args } });
@@ -63,7 +78,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         if (args.startsWith("progress-loop")) message("assistant", [{ type: "tool_use", id: `progress-${count}`, name: "Read", input: { file_path: `evidence-${count}` } }]);
         if (args.startsWith("token-loop")) message("assistant", [{ type: "text", text: "still working" }], `usage-${count}`, { message: { id: `usage-${count}`, role: "assistant", model: currentModel, content: [{ type: "text", text: "still working" }], usage: { input_tokens: 100, output_tokens: 100 } } });
         const event = { type: "system", subtype: "stop_hook_summary", uuid: `reject-${randomUUID()}`, hookInfos: [{ promptText: args, ...(args.startsWith("impossible-loop") ? { result: { ok: false, impossible: true, reason: "Owner must create environment" } } : {}) }], hookErrors: [], hasOutput: true, preventedContinuation: true };
-        persist(event); send(event);
+        persist(event);
+        if (process.argv.includes("--real-goal-wire")) send({ type: "system", subtype: "stop_hook_summary", uuid: event.uuid, hook_count: 1,
+          hook_infos: [{ command: "prompt", prompt_text: `Evaluate this goal condition:\n${args}\nReturn ok or a blocking reason.` }],
+          hook_errors: [], has_output: true, prevented_continuation: true });
+        else send(event);
       }, 30);
       continue;
     }
@@ -76,6 +95,12 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   if (hold) { message("assistant", [{ type: "text", text: `Steered: ${value}` }]); result(); continue; }
   if (value === "hold") { hold = true; continue; }
+  if (/^usage \d+$/.test(value)) {
+    const tokens = Number(value.slice(6));
+    const id = `usage-${randomUUID()}`;
+    message("assistant", [{ type: "text", text: "Measured progress" }], id, { message: { id, model: currentModel, role: "assistant", content: [{ type: "text", text: "Measured progress" }], usage: { input_tokens: tokens } } });
+    result({ usage: { input_tokens: tokens } }); continue;
+  }
   if (value === "many-tasks") {
     for (let index = 0; index < 105; index++) system("task_notification", { task_id: `t${index}`, status: "completed", summary: "done" });
     system("task_started", { task_id: "still-running", task_type: "agent", description: "Working" });

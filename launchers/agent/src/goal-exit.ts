@@ -16,6 +16,7 @@ export class GoalExitRequests {
       this.pending = saved;
     }
     runtime.on("state", () => { void this.flush(); });
+    runtime.on("user-goal-clear", () => { this.pending = []; this.save(); });
     queueMicrotask(() => { void this.flush(); });
   }
   enqueue(input: GoalUpdate) {
@@ -41,8 +42,13 @@ export class GoalExitRequests {
         if (!goal || goal.objective !== entry.objective || entry.goalId && goal.id !== entry.goalId) { this.log("Discarded goal exit for a replaced goal"); this.pending.shift(); this.save(); continue; }
         try {
           if (goal.status !== entry.input.status || goal.reason !== entry.input.reason) await this.runtime.updateGoal(entry.input);
-          this.pending.shift(); this.save();
+          if (this.pending[0] === entry) { this.pending.shift(); this.save(); }
         } catch (error) {
+          if (!this.pending.includes(entry)) break;
+          if (this.runtime.snapshot().goal?.syncStatus === "exit_unconfirmed") {
+            this.log(`Goal exit unconfirmed; user must manually /goal clear: ${String(error)}`);
+            this.pending.shift(); this.save(); continue;
+          }
           this.log(`Goal exit pending; retrying native clear: ${String(error)}`);
           this.timer = setTimeout(() => { void this.flush(); }, 1000); this.timer.unref(); break;
         }
