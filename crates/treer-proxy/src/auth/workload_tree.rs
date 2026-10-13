@@ -30,6 +30,26 @@ fn folder(row: sqlx::postgres::PgRow) -> WorkloadFolder {
     }
 }
 
+async fn read_canonical_workload_paths(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: &str,
+) -> Result<HashMap<String, (String, String)>, AuthFailure> {
+    let tree = load_workload_tree(tx, workspace).await?;
+    let rows = sqlx::query("SELECT p.agent_id,COALESCE(n.name,a.name) AS name FROM workload_placements p JOIN agent_credentials c ON c.agent_id=p.agent_id AND c.workspace_id=p.workspace_id LEFT JOIN agent_names n ON n.agent_id=p.agent_id AND n.workspace_id=p.workspace_id LEFT JOIN app_deployments a ON a.workspace_id=p.workspace_id AND COALESCE(a.runtime_agent_id,a.app_id)=p.agent_id WHERE p.workspace_id=$1 AND c.revoked_at IS NULL")
+        .bind(workspace).fetch_all(&mut **tx).await.map_err(AuthFailure::database)?;
+    let mut paths = HashMap::new();
+    for row in rows {
+        let id: String = row.get("agent_id");
+        if let Some(name) = row.get::<Option<String>, _>("name") {
+            let path = tree
+                .workload_path(&id, &name)
+                .map_err(|_| invalid("invalid canonical workload path"))?;
+            paths.insert(id, (name, path));
+        }
+    }
+    Ok(paths)
+}
+
 impl AuthStore {
     // Every mutation locks the workspace row before reading the graph. This also
     // serializes simultaneous moves that would otherwise jointly form a cycle.
@@ -108,26 +128,40 @@ impl AuthStore {
         Ok(tree)
     }
 
-    /// Read current names and placement under the same cross-Proxy Tree lock.
+    async fn tree_read_snapshot(
+        &self,
+        workspace: &str,
+    ) -> Result<Transaction<'_, Postgres>, AuthFailure> {
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(AuthFailure::database)?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id=$1 AND deleted_at IS NULL)",
+        )
+        .bind(workspace)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AuthFailure::database)?;
+        if !exists {
+            return Err(AuthFailure::not_found(
+                "workspace_not_found",
+                "workspace does not exist",
+            ));
+        }
+        Ok(tx)
+    }
+
+    /// Read names and placement from one read-only MVCC snapshot, without
+    /// serializing App directory requests with Tree writes on any Proxy.
     /// Unplaced and revoked identities are deliberately absent.
     pub async fn canonical_workload_paths(
         &self,
         workspace: &str,
     ) -> Result<HashMap<String, (String, String)>, AuthFailure> {
-        let mut tx = self.lock_workload_tree(workspace).await?;
-        let tree = load_workload_tree(&mut tx, workspace).await?;
-        let rows = sqlx::query("SELECT p.agent_id,COALESCE(n.name,a.name) AS name FROM workload_placements p JOIN agent_credentials c ON c.agent_id=p.agent_id AND c.workspace_id=p.workspace_id LEFT JOIN agent_names n ON n.agent_id=p.agent_id AND n.workspace_id=p.workspace_id LEFT JOIN app_deployments a ON a.workspace_id=p.workspace_id AND COALESCE(a.runtime_agent_id,a.app_id)=p.agent_id WHERE p.workspace_id=$1 AND c.revoked_at IS NULL")
-            .bind(workspace).fetch_all(&mut *tx).await.map_err(AuthFailure::database)?;
-        let mut paths = HashMap::new();
-        for row in rows {
-            let id: String = row.get("agent_id");
-            if let Some(name) = row.get::<Option<String>, _>("name") {
-                let path = tree
-                    .workload_path(&id, &name)
-                    .map_err(|_| invalid("invalid canonical workload path"))?;
-                paths.insert(id, (name, path));
-            }
-        }
+        let mut tx = self.tree_read_snapshot(workspace).await?;
+        let paths = read_canonical_workload_paths(&mut tx, workspace).await?;
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(paths)
     }
@@ -395,6 +429,71 @@ async fn normalize(tx: &mut Transaction<'_, Postgres>, workspace: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn canonical_path_snapshot_does_not_block_writes_or_mix_revisions() {
+        let store = setup().await;
+        let original = store
+            .create_workload_folder(
+                "one",
+                CreateWorkloadFolderRequest {
+                    name: "original".into(),
+                    parent_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .create_named_agent_credential(
+                "one",
+                "srv",
+                "snapshot-agent",
+                "before",
+                Some(&original.folder_id),
+            )
+            .await
+            .unwrap();
+        let mut snapshot = store.tree_read_snapshot("one").await.unwrap();
+        // This selects folders/placement before the concurrent committed changes.
+        let before = read_canonical_workload_paths(&mut snapshot, "one")
+            .await
+            .unwrap();
+        assert_eq!(before["snapshot-agent"].1, "/original/before");
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            store
+                .create_named_agent_credential("one", "srv", "new-agent", "new", None)
+                .await
+                .unwrap();
+            store
+                .set_agent_name("one", "snapshot-agent", "after")
+                .await
+                .unwrap();
+            store
+                .update_workload_folder(
+                    "one",
+                    &original.folder_id,
+                    UpdateWorkloadFolderRequest {
+                        name: Some("renamed".into()),
+                        parent_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+        })
+        .await
+        .expect("open directory snapshot must not block creation/rename writes");
+        let retained = read_canonical_workload_paths(&mut snapshot, "one")
+            .await
+            .unwrap();
+        assert_eq!(
+            retained, before,
+            "folders, placement and names remain one consistent revision"
+        );
+        snapshot.commit().await.unwrap();
+        let current = store.canonical_workload_paths("one").await.unwrap();
+        assert_eq!(current["snapshot-agent"].1, "/renamed/after");
+        assert_eq!(current["new-agent"].1, "/new");
+    }
 
     fn app_request(name: &str, folder: Option<&str>) -> treer_protocol::CreateAppDeploymentRequest {
         treer_protocol::CreateAppDeploymentRequest {

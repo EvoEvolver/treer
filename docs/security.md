@@ -355,9 +355,11 @@ fallback or an unvalidated App write.
 
 App directory capability `app.directory-paths.v1` advertises current canonical
 Agent `path` fields derived from the authenticated workspace's Tree. Paths are
-included only for principals passing the existing discovery/metadata checks;
-they grant no additional permissions. Humans and unplaced legacy workloads have
-`path: null`. Apps needing placement must explicitly report unavailable on older
+included only for principals passing the existing discovery/metadata checks,
+and additionally require `agent.tree.read` on the workspace. Denial redacts only
+the path, not an otherwise visible principal. Paths grant no permissions. Humans,
+unplaced legacy workloads and principals without Tree read have `path: null`.
+Apps needing placement must explicitly report unavailable on older
 Proxies without this capability, rather than infer paths from names or IDs.
 
 Service-audience directory and recipient resolution apply Core Agent discovery/

@@ -7,6 +7,14 @@ binding, and recovery paths in the Proxy. The first wire contract is
 
 ## Selection And Transport
 
+App identity directory capability `app.directory-paths.v1` returns current
+canonical paths only when the caller passes `agent.tree.read` on the workspace,
+in addition to that principal's discovery/metadata checks. A visible principal
+with a denied path returns `path: null`; humans and unplaced legacy workloads
+also have no path. Missing capability means an older Proxy cannot provide
+placement. Apps must not infer a root path or use paths as authorization grants;
+Core authorization continues to bind stable IDs and evaluate current Tree facts.
+
 A workspace owner selects one private Managed App in Workspace settings. During
 selection the Proxy fetches and validates both endpoints over the existing
 Proxy-to-Controller command channel:

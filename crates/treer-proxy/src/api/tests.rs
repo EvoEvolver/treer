@@ -44,7 +44,7 @@ async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
         .await
         .unwrap();
     let store = WorkspacePolicyStore::new(auth.pool());
-    let doc=serde_json::from_value(json!({"schema_version":2,"defaults":{"agent.discover":"deny","agent.metadata.read":"deny","human.list":"deny"},"rules":[{"id":"one","priority":0,"effect":"allow","subjects":[{"kind":"human","id":"owner"}],"actions":["agent.discover","agent.metadata.read"],"resources":[{"kind":"agent","tree":{"path_eq":"/agent-a"}}]}]})).unwrap();
+    let doc=serde_json::from_value(json!({"schema_version":2,"defaults":{"agent.tree.read":"deny","agent.discover":"deny","agent.metadata.read":"deny","human.list":"deny"},"rules":[{"id":"one","priority":0,"effect":"allow","subjects":[{"kind":"human","id":"owner"}],"actions":["agent.discover","agent.metadata.read"],"resources":[{"kind":"agent","tree":{"path_eq":"/agent-a"}}]}]})).unwrap();
     store
         .replace(
             "default",
@@ -93,7 +93,8 @@ async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
         .iter()
         .find(|p| p["id"] == "agent-a")
         .unwrap();
-    assert_eq!(caller["path"], "/agent-a");
+    // Discovery/metadata allow the principal, but Tree read denial redacts path.
+    assert!(caller["path"].is_null());
     assert!(serialized.contains("owner"));
     assert!(!serialized.contains("reviewer"));
     assert!(!serialized.contains("other"));

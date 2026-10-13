@@ -396,9 +396,21 @@ async fn visible_workspace_app_principals(
             })?,
         },
     };
+    let paths_visible = policy
+        .authorize(&PolicyRequest::new(
+            &claims.workspace_id,
+            subject.clone(),
+            crate::policy::ACTION_AGENT_TREE_READ,
+            PolicyResource::new(crate::policy::RESOURCE_AGENT_TREE, &claims.workspace_id),
+        ))
+        .await
+        .is_ok();
     let all = workspace_app_principals(state, auth, &claims.workspace_id).await?;
     let mut visible = Vec::new();
-    for principal in all {
+    for mut principal in all {
+        if !paths_visible {
+            principal.path = None;
+        }
         if principal.kind == AppPrincipalKind::Human
             && claims.principal_kind == AppPrincipalKind::Human
             && principal.id == claims.sub
