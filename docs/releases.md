@@ -320,6 +320,14 @@ integrity pin, not a publisher signature. It needs only Windows
 PowerShell 5.1 or PowerShell 7 and Windows/.NET facilities, not git, Python, npm
 or a Unix shell. See the operator guide for split steps and receipts.
 
+The independent `windows-launcher-smoke` job is a required promotion gate.
+It downloads the already uploaded immutable Windows artifact, checks the
+Controller copy against that artifact's SHA256SUMS and runs browser/ACP tests
+without a write-back path to release bytes. Artifact collection requires the
+whole workflow and this job to succeed, including when an explicit run ID is
+supplied. Record its job/run link, `windows-smoke.json`, screenshots and the
+Playwright lockfile's Chromium revision in the release receipt.
+
 Next-version Windows acceptance must actually run Node 22, PowerShell crypto
 and tasklist through exec and through App/Agent workload launch paths; verifying
 environment maps alone is insufficient. The artifact job runs the update

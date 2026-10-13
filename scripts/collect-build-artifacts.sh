@@ -28,6 +28,20 @@ if [ -z "$run_id" ]; then
     }
 fi
 
+# An explicit run ID must not bypass a failed/incomplete native acceptance job.
+run_receipt=$(gh run view "$run_id" --repo "$repository" \
+    --json status,conclusion,headSha,displayTitle,jobs)
+printf '%s' "$run_receipt" | jq -e --arg commit "$commit" '
+    .status == "completed" and .conclusion == "success" and
+    (.headSha == $commit or .displayTitle == ("Machine artifacts " + $commit))
+' >/dev/null || { echo "artifact run is incomplete, failed or for another candidate" >&2; exit 1; }
+if git show "$commit:.github/workflows/build-release-artifacts.yml" | grep -q '^  windows-launcher-smoke:'; then
+    printf '%s' "$run_receipt" | jq -e '
+        [.jobs[] | select(.name == "Native Windows embedded launcher and ACP UI")] |
+        length == 1 and .[0].status == "completed" and .[0].conclusion == "success"
+    ' >/dev/null || { echo "native Windows launcher/UI acceptance did not pass" >&2; exit 1; }
+fi
+
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/treer-artifacts.XXXXXX")
 cleanup() {
     rm -rf "$temporary"
