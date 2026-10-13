@@ -433,6 +433,9 @@ impl Transfers {
                                     else {
                                         unreachable!()
                                     };
+                                    self.open_root()?
+                                        .validate_target(&entry.path)
+                                        .map_err(io_failure)?;
                                     staged
                                         .take()
                                         .unwrap()
@@ -508,7 +511,17 @@ impl Transfers {
                 Err(error) => return Err(io_failure(error)),
             }
         }
-        treer_platform::machine_file::Root::open(&self.root, &protected).map_err(io_failure)
+        let mut root =
+            treer_platform::machine_file::Root::open(&self.root, &protected).map_err(io_failure)?;
+        for path in &self.protected {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                std::env::current_dir().map_err(io_failure)?.join(path)
+            };
+            root.reserve_path(&path).map_err(io_failure)?;
+        }
+        Ok(root)
     }
 
     fn recover_staging(&self) -> Result<(), ProtocolError> {
@@ -943,6 +956,77 @@ mod tests {
         assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
         let id = f.begin(false);
         f.execute(Request::Abort { id, read: false }).unwrap();
+    }
+
+    #[test]
+    fn absent_and_atomically_replaced_core_state_paths_are_reserved_before_io() {
+        let mut f = Fixture::new(64);
+        f.transfers
+            .protected
+            .push(f.root.join("future/private.json"));
+        for path in ["future/private.json", "FUTURE/private.json"] {
+            let error = f
+                .transfers
+                .execute(
+                    f.actor.clone(),
+                    path,
+                    Request::PutBegin {
+                        path: path.into(),
+                        overwrite: true,
+                        mode: 0o600,
+                        size: None,
+                        limit: 64,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "machine_file_denied");
+        }
+        std::fs::create_dir(f.root.join("future")).unwrap();
+        for path in ["future/private.json", "future/PRIVATE.JSON"] {
+            let error = f
+                .transfers
+                .execute(
+                    f.actor.clone(),
+                    path,
+                    Request::PutBegin {
+                        path: path.into(),
+                        overwrite: true,
+                        mode: 0o600,
+                        size: None,
+                        limit: 64,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "machine_file_denied");
+        }
+        std::fs::write(f.root.join("future/private.json"), b"synthetic-secret").unwrap();
+        let replacement = f.root.join("replacement");
+        std::fs::write(&replacement, b"replacement-secret").unwrap();
+        #[cfg(unix)]
+        std::fs::rename(&replacement, f.root.join("future/private.json")).unwrap();
+        #[cfg(windows)]
+        {
+            std::fs::remove_file(f.root.join("future/private.json")).unwrap();
+            std::fs::rename(&replacement, f.root.join("future/private.json")).unwrap();
+        }
+        for path in ["future/private.json", "future/PRIVATE.JSON"] {
+            let error = f
+                .transfers
+                .execute(
+                    f.actor.clone(),
+                    path,
+                    Request::GetBegin {
+                        path: path.into(),
+                        limit: 64,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "machine_file_denied");
+        }
+        assert_eq!(
+            std::fs::read(f.root.join("future/private.json")).unwrap(),
+            b"replacement-secret"
+        );
     }
 
     #[cfg(unix)]

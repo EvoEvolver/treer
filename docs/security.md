@@ -54,8 +54,12 @@ Use a trusted HTTPS Proxy/artifact origin for public installation.
   output, and file content.
 - CLI file transfer uses separate `machine.file.read` and `machine.file.write`
   actions on every chunk and commit, with caller/path/generation-bound handles.
-  Treer private state is hard-denied by reserved namespace and opened object
-  identity, independent of Policy. Temporary files remain private until digest
+  Treer private state is hard-denied by reserved namespace, physical-parent/name
+  reservations (including absent files), and opened object identity, independent
+  of Policy. Commit refreshes these checks after atomic Core file replacements.
+  Reserved Core names conservatively fold Unicode normalization and case; if a
+  Core directory is absent, its first missing component is reserved too.
+  Temporary files remain private until digest
   verification; no-replace publication is atomic and overwrite is explicit.
   Portable paths reject Windows drive/UNC/device/ADS/short-name aliases too.
   A streamed SHA-256 is not a snapshot or an authenticity signature. Audited

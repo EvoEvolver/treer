@@ -1,6 +1,42 @@
 //! Root-relative single-file operations. No product identity or authorization
 //! belongs here: Controller must authorize before exposing handles or bytes.
 use std::{fs::File, io};
+use unicode_normalization::UnicodeNormalization;
+
+fn reserved_name(value: &str) -> String {
+    value.nfc().flat_map(char::to_uppercase).collect()
+}
+// Reserve the first missing Core component at an existing physical parent.
+// Conservatively fold reserved names only; ordinary Linux paths remain distinct.
+fn reserved_parent(path: &std::path::Path) -> io::Result<(File, String)> {
+    let mut candidate = path;
+    while let Some(parent) = candidate.parent() {
+        match open_protected(parent) {
+            Ok(file) => {
+                return Ok((
+                    file,
+                    reserved_name(
+                        candidate
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "invalid Core state path",
+                                )
+                            })?,
+                    ),
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => candidate = parent,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "Core state path has no physical parent",
+    ))
+}
 
 #[derive(Debug)]
 struct PublishedButUnconfirmed;
@@ -124,6 +160,7 @@ mod unix {
         device: u64,
         protected: Vec<Identity>,
         allow_mounts: bool,
+        reserved_names: Vec<(Identity, String)>,
     }
 
     impl Root {
@@ -156,6 +193,7 @@ mod unix {
                 device,
                 protected,
                 allow_mounts: false,
+                reserved_names: vec![],
             })
         }
 
@@ -169,6 +207,15 @@ mod unix {
         pub fn available_bytes(&self) -> io::Result<u64> {
             let stat = sys::fstatvfs(&self.file)?;
             Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        }
+        pub fn reserve_path(&mut self, path: &Path) -> io::Result<()> {
+            let (parent, name) = reserved_parent(path)?;
+            self.reserved_names.push((identity(&parent)?, name));
+            Ok(())
+        }
+        pub fn validate_target(&self, path: &str) -> io::Result<()> {
+            let (parent, name) = self.parent(path)?;
+            self.check_target(&parent, &name)
         }
 
         /// Controller-owned recovery metadata, opened with retained handles.
@@ -200,6 +247,7 @@ mod unix {
                 device: self.device,
                 protected: vec![],
                 allow_mounts: false,
+                reserved_names: vec![],
             })
         }
 
@@ -263,7 +311,17 @@ mod unix {
                 return Err(protected());
             }
             let mut directory = self.file.try_clone()?;
-            for component in &parts[..parts.len() - 1] {
+            self.check(&directory)?;
+            for (index, component) in parts.iter().enumerate() {
+                if self
+                    .reserved_names
+                    .contains(&(identity(&directory)?, reserved_name(component)))
+                {
+                    return Err(protected());
+                }
+                if index == parts.len() - 1 {
+                    break;
+                }
                 directory = sys::openat(
                     &directory,
                     *component,
@@ -334,6 +392,7 @@ mod unix {
                 root_device: self.device,
                 allow_mounts: self.allow_mounts,
                 path: path.to_owned(),
+                reserved_names: self.reserved_names.clone(),
             };
             sys::fchmod(staged.file.as_ref().unwrap(), Mode::RUSR | Mode::WUSR)?;
             Ok(staged)
@@ -371,6 +430,7 @@ mod unix {
         root_device: u64,
         allow_mounts: bool,
         path: String,
+        reserved_names: Vec<(Identity, String)>,
     }
 
     impl StagedFile {
@@ -385,6 +445,7 @@ mod unix {
                 device: self.root_device,
                 protected: self.protected.clone(),
                 allow_mounts: self.allow_mounts,
+                reserved_names: self.reserved_names.clone(),
             };
             let (current, _) = root.parent(&self.path)?;
             if identity(&current)? != identity(&self.parent)? {
@@ -506,13 +567,15 @@ mod tests {
     #[cfg(unix)]
     impl Fixture {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "treer-transfer-{}-{}",
+                "treer-transfer-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir(&root).unwrap();
             Self(std::fs::canonicalize(root).unwrap())
@@ -637,6 +700,24 @@ mod tests {
             0o644
         );
         assert!(validate_mode(0o666).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absent_reserved_core_names_are_bound_to_parent_identity_and_unicode_aliases() {
+        let f = Fixture::new();
+        let mut root = f.root();
+        root.reserve_path(&f.0.join("sécrets.json")).unwrap();
+        for name in ["sécrets.json", "SE\u{301}CRETS.JSON"] {
+            assert_eq!(
+                root.stage(name, ".treer-transfer-reserved", 0o600)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 0);
     }
 
     #[cfg(unix)]

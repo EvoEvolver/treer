@@ -3704,6 +3704,7 @@ version = "0.1.13"
 dependencies = [
  "rustix",
  "tokio",
+ "unicode-normalization",
  "url",
  "windows-sys 0.61.2",
 ]

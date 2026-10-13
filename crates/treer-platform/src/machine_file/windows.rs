@@ -49,6 +49,7 @@ pub struct Root {
     protected: Vec<Identity>,
     volume: u64,
     allow_mounts: bool,
+    reserved_names: Vec<(Identity, String)>,
 }
 impl Root {
     pub fn open(path: &Path, protected_files: &[File]) -> io::Result<Self> {
@@ -98,6 +99,7 @@ impl Root {
             protected,
             volume,
             allow_mounts: false,
+            reserved_names: vec![],
         })
     }
     pub fn open_local(root: &Path) -> io::Result<Self> {
@@ -107,6 +109,15 @@ impl Root {
     }
     pub fn available_bytes(&self) -> io::Result<u64> {
         crate::windows::transfer_available_bytes(&self.path)
+    }
+    pub fn reserve_path(&mut self, path: &Path) -> io::Result<()> {
+        let (parent, name) = reserved_parent(path)?;
+        self.reserved_names.push((metadata(&parent)?.0, name));
+        Ok(())
+    }
+    pub fn validate_target(&self, path: &str) -> io::Result<()> {
+        let (path, _guards) = self.parent(path)?;
+        self.check_target(&path)
     }
     pub fn transfer_journal(&self) -> io::Result<Self> {
         let mut path = self.path.clone();
@@ -136,6 +147,7 @@ impl Root {
             protected: vec![],
             volume: self.volume,
             allow_mounts: false,
+            reserved_names: vec![],
         })
     }
     pub fn exclusive_lease(&self) -> io::Result<File> {
@@ -190,7 +202,17 @@ impl Root {
             .map(File::try_clone)
             .collect::<io::Result<Vec<_>>>()?;
         let mut parent = self.path.clone();
-        for part in &parts[..parts.len() - 1] {
+        self.check(guards.last().ok_or_else(denied)?, true)?;
+        for (index, part) in parts.iter().enumerate() {
+            if self.reserved_names.contains(&(
+                metadata(guards.last().ok_or_else(denied)?)?.0,
+                reserved_name(part),
+            )) {
+                return Err(denied());
+            }
+            if index == parts.len() - 1 {
+                break;
+            }
             parent.push(part);
             let file = open(&parent)?;
             self.check(&file, true)?;
