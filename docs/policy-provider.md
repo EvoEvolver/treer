@@ -89,9 +89,10 @@ The selected binding includes `publish_authority`, default `owner_session`.
 Only the current workspace owner may change it through the dedicated
 `PUT /api/workspaces/{workspace}/policy-provider/publish-authority`, supplying
 `expected_app_id` and the explicit choice `owner_session` or `provider_operator`.
-An App UI bridge requires both the selected runtime credential and a current
-service-audience owner identity token. A local App admin token cannot change
-this switch or select a Provider.
+Only a Core owner session authorizes the switch. The App configuration endpoint
+is read-only, including with a current owner service-audience token and runtime
+credential; the App UI links to trusted Treer Workspace settings. A local App
+admin token cannot change this switch or select a Provider.
 
 `provider_operator` deliberately lets the App authenticate its management-token
 holders locally and use its runtime credential for the separate Core operator

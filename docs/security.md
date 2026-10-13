@@ -215,13 +215,18 @@ volatile, and are not tamper-proof or complete durable audit records.
 
 Publication authority defaults to `owner_session`. Only a current owner can
 explicitly choose `provider_operator` on the selected Provider binding. This
+requires a Core owner session: service-audience human tokens cannot change the
+choice, and the App's configuration endpoint is read-only. This prevents a
+Provider from persisting authority using an owner's short-lived UI token. It
 trusts that App and its management-token holders to edit arbitrary rules,
 including their own access. The App checks its private management token; Core
 does not receive that token and cannot independently prove that the App checked
 it. The separate operator validate/explain endpoints require fresh current
 Provider runtime credentials and the database switch on every request; they do
-not expose decision logs. Provider selection and owner recovery remain
-owner-only. The switch and its audit are atomic, and changing the bound App or
+not expose decision logs. Operator explain permits continuous workspace Tree/permission
+simulation and enumeration; no dedicated diagnostic rate budget is enforced.
+Provider selection and owner recovery remain owner-only. The switch and its
+audit are atomic, and changing the bound App or
 service resets authority to the default, including old Proxy SQL writes.
 Dedicated capability-gated APIs prevent old Proxies from silently ignoring the
 choice. This is not bounded delegation or protection against a compromised

@@ -146,24 +146,6 @@ pub(super) async fn app_get_policy_publish_authority(
     ))
 }
 
-pub(super) async fn app_set_policy_publish_authority(
-    Extension(auth): Extension<AuthStore>,
-    Extension(identity): Extension<IdentityIssuer>,
-    Path(service): Path<String>,
-    headers: HeaderMap,
-    request: Json<SetPolicyPublishAuthorityRequest>,
-) -> Result<Response, ApiFailure> {
-    let (workspace, session) =
-        policy_diagnostics::app_owner_session(&auth, &identity, &headers, &service).await?;
-    set_policy_publish_authority(
-        Extension(auth),
-        Extension(session),
-        Path(workspace),
-        request,
-    )
-    .await
-}
-
 pub(super) async fn app_operator_validate_policy(
     Extension(auth): Extension<AuthStore>,
     Path(service): Path<String>,

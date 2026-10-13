@@ -208,7 +208,7 @@ fn diagnostic_id(
     }
 }
 
-pub(super) async fn app_owner_session(
+async fn app_owner_session(
     auth: &AuthStore,
     identity: &IdentityIssuer,
     headers: &HeaderMap,

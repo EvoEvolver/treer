@@ -68,15 +68,6 @@ async fn default_owner_only_switch_audit_and_operator_validation() {
     )
     .await
     .is_err());
-    assert!(app_set_policy_publish_authority(
-        Extension(auth.clone()),
-        Extension(identity.clone()),
-        Path(app.service_id.clone()),
-        headers.clone(),
-        switch(&app, PolicyPublishAuthority::ProviderOperator)
-    )
-    .await
-    .is_err());
     set_policy_publish_authority(
         Extension(auth.clone()),
         Extension(session("owner")),
@@ -139,63 +130,86 @@ async fn default_owner_only_switch_audit_and_operator_validation() {
 }
 
 #[tokio::test]
-async fn owner_bridge_requires_current_owner_audience_and_bound_runtime() {
+async fn app_identity_cannot_modify_authority_and_demoted_owner_is_rejected() {
     let (auth, identity, app, headers) = policy_diagnostics::tests::fixture().await;
-    for absent in [
-        TREER_IDENTITY_TOKEN_HEADER,
-        AGENT_ID_HEADER,
-        treer_protocol::WORKLOAD_CREDENTIAL_HEADER,
-    ] {
-        let mut missing = headers.clone();
-        missing.remove(absent);
-        assert!(app_set_policy_publish_authority(
-            Extension(auth.clone()),
-            Extension(identity.clone()),
-            Path(app.service_id.clone()),
-            missing,
-            switch(&app, PolicyPublishAuthority::ProviderOperator)
+    let router = axum::Router::new()
+        .route(
+            "/api/apps/{service}/policy/publish-authority",
+            axum::routing::get(app_get_policy_publish_authority),
         )
+        .route(
+            "/api/workspaces/{workspace}/policy-provider/publish-authority",
+            axum::routing::put(set_policy_publish_authority).route_layer(
+                axum::middleware::from_fn_with_state(auth.clone(), crate::auth::require_user),
+            ),
+        )
+        .layer(Extension(auth.clone()));
+    let request_body =
+        serde_json::to_vec(&switch(&app, PolicyPublishAuthority::ProviderOperator).0).unwrap();
+    let request = |path: String, proof: HeaderMap| {
+        let mut request = axum::http::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.clone()))
+            .unwrap();
+        request.headers_mut().extend(proof);
+        request
+    };
+    // Even a current owner's App token plus the current Provider runtime is
+    // deliberately unable to mutate configuration via either API path.
+    let response = router
+        .clone()
+        .oneshot(request(
+            format!("/api/apps/{}/policy/publish-authority", app.service_id),
+            headers.clone(),
+        ))
         .await
-        .is_err());
-    }
-    for (user, audience) in [
-        ("member", app.service_id.as_str()),
-        ("owner", "other-service"),
-    ] {
-        let token = identity
-            .issue_human_request("diagnostic", user, user, "owner", audience)
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let response = router
+        .clone()
+        .oneshot(request(
+            "/api/workspaces/diagnostic/policy-provider/publish-authority".into(),
+            headers.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let token = identity
+        .issue_human_request("diagnostic", "owner", "Owner", "owner", &app.service_id)
+        .unwrap()
+        .access_token;
+    let mut bearer = headers;
+    bearer.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let response = router
+        .oneshot(request(
+            "/api/workspaces/diagnostic/policy-provider/publish-authority".into(),
+            bearer,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        PolicyProviderStore::new(auth.pool())
+            .get("diagnostic")
+            .await
             .unwrap()
-            .access_token;
-        let mut invalid = headers.clone();
-        invalid.insert(TREER_IDENTITY_TOKEN_HEADER, token.parse().unwrap());
-        assert!(app_set_policy_publish_authority(
-            Extension(auth.clone()),
-            Extension(identity.clone()),
-            Path(app.service_id.clone()),
-            invalid,
-            switch(&app, PolicyPublishAuthority::ProviderOperator)
-        )
-        .await
-        .is_err());
-    }
-    app_set_policy_publish_authority(
-        Extension(auth.clone()),
-        Extension(identity.clone()),
-        Path(app.service_id.clone()),
-        headers.clone(),
-        switch(&app, PolicyPublishAuthority::ProviderOperator),
-    )
-    .await
-    .unwrap();
+            .unwrap()
+            .publish_authority,
+        PolicyPublishAuthority::OwnerSession
+    );
     sqlx::query("UPDATE organization_members SET role='member' WHERE user_id='owner'")
         .execute(&auth.pool())
         .await
         .unwrap();
-    assert!(app_set_policy_publish_authority(
+    assert!(set_policy_publish_authority(
         Extension(auth),
-        Extension(identity),
-        Path(app.service_id.clone()),
-        headers,
+        Extension(session("owner")),
+        Path("diagnostic".into()),
         switch(&app, PolicyPublishAuthority::OwnerSession)
     )
     .await

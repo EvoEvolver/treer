@@ -23,8 +23,9 @@ explicit upgrade error, never permission to publish.
 - `GET /api/apps/{service}/policy/publish-authority`: selected Provider runtime
   workload identity, returning `provider`, `publish_authority`, capabilities and
   supported schema versions. No owner token is required for this read.
-- `PUT` on that App endpoint additionally requires a current, service-audience
-  owner token in `X-Treer-Identity-Token`; same request/response as the owner PUT.
+- The App endpoint is read-only: `PUT` returns 405 even with the current runtime
+  credential and an owner App token. Only a Core owner session can change the
+  switch. App UI displays the mode and links to trusted Treer Workspace settings.
 - `POST /api/apps/{service}/policy/operator/validate`: selected Provider runtime
   identity; JSON is the candidate `WorkspacePolicyDocument`. Every call reads
   the current binding from Postgres and requires `provider_operator`.
@@ -36,7 +37,9 @@ explicit upgrade error, never permission to publish.
 
 Runtime identity uses `X-Treer-Agent-Id` and
 `X-Treer-Workload-Credential`, freshly checked against the selected App's bound
-runtime. Core never accepts, receives or logs the Policy App management token.
+runtime. Service-audience human tokens cannot authorize owner configuration
+writes; otherwise a compromised Provider could persist authority during an
+owner's UI visit. Core never accepts, receives or logs the Policy App management token.
 The App authenticates that token locally, then calls the operator endpoint before
 publishing schema v2. Existing owner validate/explain/decision endpoints retain
 their dual-proof owner requirement, including in operator mode.
@@ -61,7 +64,9 @@ these end-to-end HTTP APIs.
 ## Trust and isolation
 
 Choosing operator mode trusts the selected Provider App and anyone holding its
-management token to edit policy, including rules governing themselves. Core
+management token to edit policy, including rules governing themselves. Operator
+explain also permits continuous simulation/enumeration of workspace Tree paths
+and permission results; it has no dedicated rate budget. Core
 does not constrain their rule scope or prevent self-escalation. A compromised
 Provider runtime can call the operator APIs directly: Core cannot establish
 whether the App checked its private token. Even the default does not make a

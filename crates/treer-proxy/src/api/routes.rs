@@ -692,7 +692,7 @@ pub fn router(
         )
         .route(
             "/api/apps/{service_id}/policy/publish-authority",
-            get(app_get_policy_publish_authority).put(app_set_policy_publish_authority),
+            get(app_get_policy_publish_authority),
         )
         .route(
             "/api/apps/{service_id}/policy/operator/validate",
