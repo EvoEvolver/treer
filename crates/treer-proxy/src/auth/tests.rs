@@ -3023,3 +3023,29 @@ async fn app_email_provider_failure_is_sanitized_and_retryable() {
     assert_eq!(count, 2);
     server.abort();
 }
+
+#[tokio::test]
+async fn administrator_digest_comparison_and_unknown_account_decoy_keep_error_codes() {
+    let store = AuthStore::for_test("owner-password").await;
+    for wrong in [
+        "",
+        "x",
+        "owner-passwor",
+        "owner-password ",
+        "owner-passwordX",
+    ] {
+        assert_eq!(
+            store.admin_login(wrong).await.unwrap_err().code(),
+            "invalid_admin_credentials"
+        );
+    }
+    store.admin_login("owner-password").await.unwrap();
+    assert_eq!(
+        store
+            .login("nobody@example.test", "whatever")
+            .await
+            .unwrap_err()
+            .code(),
+        "invalid_credentials"
+    );
+}

@@ -37,6 +37,9 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         let Some(row) = row else {
+            // Spend comparable hashing time so latency does not reveal which
+            // email addresses have accounts.
+            let _ = verify_password(password, &self.decoy_password_hash);
             return Err(AuthFailure::unauthorized(
                 "invalid_credentials",
                 "invalid email or password",
@@ -339,7 +342,10 @@ impl AuthStore {
     }
 
     pub(super) async fn admin_login(&self, password: &str) -> Result<AdminSession, AuthFailure> {
-        if password != self.admin_password.as_ref() {
+        // Compare fixed-length digests so length and prefix do not short-circuit.
+        let expected = Sha256::digest(self.admin_password.as_bytes());
+        let supplied = Sha256::digest(password.as_bytes());
+        if !bool::from(supplied.ct_eq(&expected)) {
             return Err(AuthFailure::unauthorized(
                 "invalid_admin_credentials",
                 "invalid administrator password",

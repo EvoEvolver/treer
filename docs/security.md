@@ -95,6 +95,12 @@ same-account access remains possible. The Controller's control-plane HTTP
 clients ignore environment proxies; external proxy variables are preserved for
 user tools, but are not a control-plane transport configuration.
 
+- The administrator password is compared as fixed-length SHA-256 digests with a
+  constant-time comparison, and sign-in for an unknown email verifies a decoy
+  password hash. This reduces timing differences that reveal password length or
+  account existence; it does not guarantee equal response time for arbitrary
+  input (hash parameters, database latency and CPU queuing still vary).
+
 ## Unsupported Claims
 
 Public Unix and Windows bootstrap installers check SHA256 hashes from the same

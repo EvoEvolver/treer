@@ -82,6 +82,7 @@ pub struct DeletedWorkspace {
 pub struct AuthStore {
     pool: PgPool,
     admin_password: Arc<str>,
+    decoy_password_hash: Arc<str>,
     app_public_url: Url,
     proxy_public_url: Url,
     secure_cookies: bool,
@@ -643,6 +644,9 @@ impl AuthStore {
         let store = Self {
             pool,
             admin_password: admin_password.into(),
+            decoy_password_hash: hash_password(&Uuid::new_v4().to_string())
+                .map_err(|error| anyhow::anyhow!(error.code().to_string()))?
+                .into(),
             app_public_url: config.app_public_url,
             proxy_public_url: config.proxy_public_url,
             secure_cookies: config.secure_cookies,
@@ -698,6 +702,7 @@ impl AuthStore {
         let store = Self {
             pool,
             admin_password: admin_password.to_string().into(),
+            decoy_password_hash: hash_password("decoy").expect("hash decoy").into(),
             app_public_url: Url::parse("https://app.treer.example/").expect("valid URL"),
             proxy_public_url: Url::parse("https://proxy.treer.example/").expect("valid URL"),
             secure_cookies: true,
