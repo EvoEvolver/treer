@@ -440,3 +440,144 @@ async fn windows_artifact_powershell_environment_matrix() {
     drop(runtime);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "isolated CI-only fresh private cache feasibility; not a release gate"]
+async fn windows_artifact_powershell_fresh_private_cache() {
+    use std::os::windows::fs::MetadataExt;
+    assert!(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"));
+    assert!(std::env::var("CI").as_deref() == Ok("true"));
+    fn reject_reparse(path: &Path) {
+        assert!(path.is_absolute(), "diagnostic directory must be absolute");
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            assert!(!matches!(component, std::path::Component::ParentDir));
+            current.push(component);
+            if matches!(component, std::path::Component::Prefix(_)) {
+                continue;
+            }
+            if let Ok(metadata) = std::fs::symlink_metadata(&current) {
+                assert!(
+                    !metadata.is_symlink() && metadata.file_attributes() & 0x400 == 0,
+                    "diagnostic path must not contain reparse points"
+                );
+            }
+        }
+    }
+    let root = test_root();
+    let (runtime, host) = runtime_for_exec(&root).await;
+    let mut environment = runtime.machine_exec_environment();
+    let state = treer_platform::config_directory()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("state");
+    let private = state.join(format!("ps-cache-diagnostic-{}", Uuid::new_v4().simple()));
+    reject_reparse(&private);
+    treer_platform::secure_directory(&private).unwrap();
+    reject_reparse(&private);
+    let cache = private.join("ModuleAnalysisCache");
+    assert!(!cache.exists(), "fresh diagnostic cache must not exist");
+    environment.retain(|key, _| {
+        !key.to_string_lossy()
+            .eq_ignore_ascii_case("PSModuleAnalysisCachePath")
+    });
+    environment.insert(
+        "PSModuleAnalysisCachePath".into(),
+        cache.clone().into_os_string(),
+    );
+    let default_parent = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap()
+        .join("Microsoft")
+        .join("Windows")
+        .join("PowerShell");
+    let default_parent_existed = default_parent.is_dir();
+    reject_reparse(&default_parent);
+    let default_parent_creatable = std::fs::create_dir_all(&default_parent).is_ok();
+    reject_reparse(&default_parent);
+    let probe = default_parent.join(format!("treer-write-probe-{}", Uuid::new_v4().simple()));
+    let default_parent_writable = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(file) => {
+            drop(file);
+            std::fs::remove_file(&probe).unwrap();
+            true
+        }
+        Err(_) => false,
+    };
+    eprintln!("fresh-private-cache default-parent-existed={default_parent_existed} default-parent-creatable={default_parent_creatable} default-parent-writable={default_parent_writable} initial-file-exists=false");
+    let mut previous_size = None;
+    let script = "Write-Output 'private-utility-ok'; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); [Console]::WriteLine('private-rng-ok'); exit 0";
+    for repetition in 1..=3 {
+        let before = std::fs::metadata(&cache)
+            .ok()
+            .map(|metadata| metadata.len());
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .current_dir(&root)
+            .env_clear()
+            .envs(&environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let started = Instant::now();
+        match tokio::time::timeout(
+            Duration::from_millis(30_000),
+            command.spawn().unwrap().wait_with_output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                eprintln!("fresh-private-cache repetition={repetition} duration_ms={} timeout=false exit={:?} utility_ok={} rng_ok={} stderr_present={}", started.elapsed().as_millis(), output.status.code(), stdout.contains("private-utility-ok"), stdout.contains("private-rng-ok"), !output.stderr.is_empty());
+            }
+            Ok(Err(_)) => eprintln!("fresh-private-cache repetition={repetition} wait_failed=true"),
+            Err(_) => eprintln!(
+                "fresh-private-cache repetition={repetition} duration_ms={} timeout=true",
+                started.elapsed().as_millis()
+            ),
+        }
+        let after = std::fs::metadata(&cache)
+            .ok()
+            .map(|metadata| metadata.len());
+        eprintln!("fresh-private-cache repetition={repetition} file-existed-before={} file-exists-after={} size-increased={} grew-since-last={}", before.is_some(), after.is_some(), after.zip(before).is_some_and(|(a,b)| a>b), after.zip(previous_size).is_some_and(|(a,b)| a>b));
+        previous_size = after;
+    }
+    // Check DACL only after feasibility probes, avoiding a PS warm-up first.
+    // The existing helper grants only current token SID + SYSTEM. No SID/path
+    // or original stdout/stderr is printed, including on assertion failure.
+    let acl_script = "$acl=[IO.Directory]::GetAccessControl($env:DIAGNOSTIC_CACHE_DIRECTORY); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $ok=$acl.AreAccessRulesProtected; $rules=$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]); foreach($rule in $rules) { if($rule.IdentityReference.Value -ne $sid -and $rule.IdentityReference.Value -ne 'S-1-5-18') {$ok=$false} }; [Console]::WriteLine('private-acl-only-owner-system='+$ok); if(!$ok){exit 2}; exit 0";
+    let acl = tokio::time::timeout(
+        Duration::from_millis(30_000),
+        tokio::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", acl_script])
+            .env_clear()
+            .envs(&environment)
+            .env("DIAGNOSTIC_CACHE_DIRECTORY", &private)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("private ACL diagnostic timed out")
+    .expect("private ACL diagnostic failed");
+    assert!(
+        acl.status.success()
+            && String::from_utf8_lossy(&acl.stdout).contains("private-acl-only-owner-system=True"),
+        "private cache ACL assertion failed"
+    );
+    eprintln!("fresh-private-cache private-acl-only-owner-system=true");
+    host.abort();
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(private).unwrap();
+}

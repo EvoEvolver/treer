@@ -89,3 +89,32 @@ Do not turn the restored caller paths or the cache-disable variant into a
 production allowlist change based on assumption. The variants run in order and
 can affect account caches: repeat on fresh runners if that confounds causality.
 No conclusion about the full-parent baseline exists until this native test runs.
+
+## Matrix results and fresh-cache release condition
+
+Run 38484078837: complete parent took 3633ms then 215ms; direct filtered
+baseline took 27150ms then 21334ms; actual Controller remained 21181/21182ms.
+Cache-path-only took 229/234ms, but module-path-only also took about 181ms.
+OS extras did not improve the baseline and cache-disabled remained about 21s.
+Parent/child USERPROFILE, APPDATA and LOCALAPPDATA equality was true.
+The default cache parent existed throughout and its file appeared after the
+first baseline invocation, with no later size increase. Thus lack of directory
+existence is not demonstrated; default file creation succeeded, yet useful
+reuse did not. The exact cache/search-path interaction is not established.
+
+The follow-up ignored test `windows_artifact_powershell_fresh_private_cache`
+uses a newly generated directory under Treer's account-local state area,
+outside the working root and shared temporary directory. It rejects reparse
+components, uses the existing protected private-directory helper, points the
+filtered environment at a **nonexistent** cache file and runs three identical
+Utility/RNG commands with the original 30s cap. It records file appearance and
+growth booleans, not content or path. The DACL check (only token SID + SYSTEM,
+protected inheritance) runs after these probes to avoid prewarming PowerShell.
+The default cache parent's creatability/writability is separately tested with
+a unique create-new disposable probe file, which is immediately closed/deleted;
+the actual default cache file is never altered. This is limited to isolated CI.
+
+Only fast second/third calls using this fresh private cache justify implementing
+the private-cache production proposal. A fast pre-generated runner cache does
+not establish feasibility on a user's clean machine. If all three stay slow,
+report that result and design another approach before touching production.
