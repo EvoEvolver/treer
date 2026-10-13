@@ -32,9 +32,12 @@ try {
         @{ Uri = 'http://fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
         @{ Uri = 'http://127.0.0.1.fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
         @{ Uri = 'http://localhost.fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'http://[::2]/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'http://[::ffff:127.0.0.1]/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
         @{ Uri = 'https://fixture-user:fixture-password@fixture.invalid/artifacts/'; Error = '*must not contain credentials*' }
         @{ Uri = 'http://fixture-user:fixture-password@127.0.0.1/artifacts/'; Error = '*must not contain credentials*' }
     )) {
+        Write-Host 'Testing rejected artifact origin (no URL or credential output). '
         $beforeRequests = $fixture.RequestCount
         $rejected = $false
         try {
@@ -53,7 +56,9 @@ try {
         'http://localhost/artifacts/'
         'http://127.0.0.1/artifacts/'
         'http://[::1]/artifacts/'
+        'http://[0:0:0:0:0:0:0:1]/artifacts/'
     )) {
+        Write-Host ('Testing allowed artifact origin: ' + $origin)
         $beforeRequests = $fixture.RequestCount
         & ./scripts/install.ps1 -ArtifactBase $origin -InstallDir $installation
         if ($fixture.RequestCount -le $beforeRequests) { throw 'Allowed artifact origin did not reach the download step.' }

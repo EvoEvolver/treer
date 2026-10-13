@@ -16,8 +16,15 @@ if ($ArtifactBase -eq '__TREER_ARTIFACT_BASE__' -or
 }
 # Hashes come from the same origin, so cleartext HTTP would let a network
 # attacker replace both binaries and checksums. Allow it only for loopback tests.
-if ($artifactUri.Scheme -eq 'http' -and
-    $artifactUri.Host -notin @('localhost', '127.0.0.1', '[::1]', '::1')) {
+# .NET Framework and modern .NET can format the same IPv6 host differently.
+# Compare parsed IPv6 address bytes, without DNS or a wider IPv4 allowlist.
+$loopbackOrigin = $artifactUri.Host -in @('localhost', '127.0.0.1')
+if ($artifactUri.HostNameType -eq [UriHostNameType]::IPv6) {
+    $ipv6Address = $null
+    $loopbackOrigin = [Net.IPAddress]::TryParse($artifactUri.DnsSafeHost, [ref]$ipv6Address) -and
+        $ipv6Address.Equals([Net.IPAddress]::IPv6Loopback)
+}
+if ($artifactUri.Scheme -eq 'http' -and !$loopbackOrigin) {
     throw 'Refusing cleartext HTTP artifacts; use an HTTPS Proxy URL (HTTP is allowed only for loopback).'
 }
 if ($artifactUri.UserInfo) { throw 'ArtifactBase must not contain credentials.' }
