@@ -695,6 +695,53 @@ The returned `CLAUDE_CONFIG_DIR` refers to that local store. Native IDs and cwd
 fields are rewritten, including subagent records; historical message contents
 remain unchanged. Imports never launch a process or mutate the current session.
 
+## Native Windows
+
+Use an official Controller release with its embedded portable launcher payload,
+and an explicitly selected, trusted **absolute path to Node.js 22+**. Neither the
+installation nor runtime needs Git, sh, curl, npm or a repository checkout. The
+source-only development payload still needs the documented explicit npm opt-in.
+In PowerShell, for example (replace these paths with your installed binaries):
+
+```powershell
+& 'C:\Treer\treer-agent-server.exe' launcher --node 'C:\Program Files\nodejs\node.exe' --treer 'C:\Treer\treer.exe' install
+& 'C:\Treer\treer-agent-server.exe' launcher --node 'C:\Program Files\nodejs\node.exe' --treer 'C:\Treer\treer.exe' status
+```
+
+The installation lives under the **enrolled machine root** at
+`.treer\launchers\agent`, not under the process's accidental current directory.
+Choose a writable user-owned root (typically beneath `%LOCALAPPDATA%`) when
+enrolling. An existing Host rooted at `C:\Windows\System32` must have its root
+explicitly corrected by its operator; installing a launcher does not migrate
+machine configuration or restart anything. Versioned assets and the stable
+`run.mjs` entry support spaces, Unicode and Windows long paths. Installation
+directories and Agent state use protected, inheritable ACLs granting only the
+current Windows user and SYSTEM; POSIX uses mode 0700/0600. State files are
+flushed before atomic replacement. Node cannot flush Windows directory handles,
+so the launcher does not claim Unix directory-fsync power-loss durability there.
+Built-in Windows PowerShell is used by absolute system path to apply state ACLs.
+
+Install the desired provider CLI yourself and complete its login yourself.
+The launcher neither installs provider CLIs nor reads/exposes their credentials.
+Set `CODEX_BIN` / `CLAUDE_BIN` to the provider's trusted absolute `.exe` path,
+or a standard npm `.cmd` shim; for ACP set `AGENT_UI_ACP_COMMAND`. Standard npm
+shims are resolved to their single `node_modules` JS entry and launched with the
+selected Node executable using literal argv, without `cmd.exe` expansion.
+Arbitrary `.cmd`/`.bat` scripts are rejected: select their native executable or
+JS entry instead. Native binaries are started directly. These paths must exist
+on the target machine; a macOS path saved in a profile is not portable to Windows.
+Provider subprocesses use protocol pipes underneath the Host's ConPTY launcher.
+Normal shutdown kills provider descendants through the absolute system
+`taskkill.exe /T /F`; Host termination/job ownership remains a Core concern.
+
+The native CI smoke needs no provider login. It runs a real embedded Controller
+installer with a sealed local enrollment/registration fixture and fake ACP,
+checks manifest registration, prompt/transcript, save/resume, user/SYSTEM ACLs,
+long paths and child-tree cleanup, and captures desktop/390px UI screenshots.
+It does not replace a real Host/ConPTY integration test, enroll a machine, or
+touch running Agents. Its JSON report records the actual operating system;
+running it on macOS is not Windows validation.
+
 ## Checks
 
 ```bash
@@ -705,6 +752,8 @@ npm --prefix launchers/agent test
 # Optional embedded-binary integration: sealed fake enrolled CLI, no credentials
 # or Agent creation/restarts. Requires a Controller built with the portable payload.
 node launchers/agent/tests/core-installer.mjs /absolute/path/to/treer-agent-server
+# Native Windows acceptance (Node 22+, rustc for fixture, Chromium installed):
+npm --prefix launchers/agent run test:windows -- --controller C:\Treer\treer-agent-server.exe --screenshots C:\artifacts\launcher
 # Browser regression and desktop/390px screenshots, with an isolated fake Codex.
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
 npm --prefix launchers/agent exec -- playwright install chromium

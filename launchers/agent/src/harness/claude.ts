@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawnProvider, stopProcessTree } from "../../scripts/process.mjs";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createReadStream } from "node:fs";
@@ -145,7 +146,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
         ...(process.env.AGENT_UI_GOAL_COMMAND && process.env.AGENT_UI_GOAL_AGENT_EXIT !== "0" ? ["--append-system-prompt", `You may formally exit a goal using node "$AGENT_UI_GOAL_COMMAND" done|blocked|stale --reason "reason" --required-action "who must do what". Use blocked for external dependencies and stale for obsolete goals; do not repeatedly spend tokens on an impossible goal. You may cite an explicit user request to close as-is in the reason. This launcher command clears the native goal on your behalf.`] : []),
         ...(resumed ? ["--resume", resumed] : ["--session-id", this.sessionId])];
       this.stopping = false;
-      const child = spawn(this.command, args, { cwd: this.cwd, stdio: "pipe" });
+      const child = spawnProvider(this.command, args, { cwd: this.cwd, stdio: "pipe" });
       this.child = child;
       child.stdin.on("error", (error) => { if (!this.stopping) this.fail(error); });
       createInterface({ input: child.stdout }).on("line", (line) => {
@@ -344,9 +345,9 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     this.child = null;
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       await new Promise<void>((done) => {
-        const timer = setTimeout(() => child.kill("SIGKILL"), 2000);
+        const timer = setTimeout(() => stopProcessTree(child, "SIGKILL"), 2000);
         child.once("close", () => { clearTimeout(timer); done(); });
-        child.stdin.end(); child.kill("SIGTERM");
+        child.stdin.end(); stopProcessTree(child);
       });
     }
   }
@@ -382,7 +383,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     this.ready = false;
     this.emit("goal-command-error", error);
     this.rejectControls(error);
-    this.child?.kill("SIGTERM");
+    stopProcessTree(this.child);
     if (this.thread) { this.thread.status = "error"; this.thread.lastError = error.message; this.thread.activeTurnId = null; }
     const turn = this.turns.at(-1);
     if (turn?.status === "inProgress") { turn.status = "failed"; turn.error = error.message; }

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Cross-platform entry point; resolve physical assets exactly once per process.
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { get } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compatibility } from "./bundle-contract.mjs";
+import { runProviderSync, spawnProvider, stopProcessTree } from "./process.mjs";
 
 const root = realpathSync(join(dirname(fileURLToPath(import.meta.url)), ".."));
 const env = { ...process.env, AGENT_UI_APP_ROOT: root };
@@ -31,19 +32,19 @@ env.AGENT_UI_PORT_FILE = join(temporary, "port");
 const cli = env.AGENT_UI_TREER_BIN || "treer";
 const contract = JSON.parse(readFileSync(join(root, "interface-contract.json"), "utf8"));
 try {
-  const response = spawnSync(cli, ["interface", "contract"], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 });
+  const response = runProviderSync(cli, ["interface", "contract"], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 });
   if (response.status !== 0) throw new Error("Controller does not expose the launcher compatibility handshake; update Controller");
   const aligned = compatibility(contract, JSON.parse(response.stdout));
   if (aligned.status !== "compatible") throw new Error(aligned.reason);
 } catch (error) { rmSync(temporary, { recursive: true, force: true }); throw new Error(error.message); }
 const portable = join(root, "runtime.mjs");
 const args = existsSync(portable) ? [portable] : ["--import", join(root, "node_modules/tsx/dist/loader.mjs"), join(root, "src/index.ts")];
-const child = spawn(process.execPath, args, { env, stdio: "inherit" });
+const child = spawnProvider(process.execPath, args, { env, stdio: "inherit" });
 let ended = false, registered = false, cleaned = false;
 function cleanup() {
   if (cleaned) return; cleaned = true;
-  if (registered) spawnSync(cli, ["interface", "clear"], { env, stdio: "ignore", timeout: 5000 });
-  child.kill(); rmSync(temporary, { recursive: true, force: true });
+  if (registered) runProviderSync(cli, ["interface", "clear"], { env, stdio: "ignore", timeout: 5000 });
+  stopProcessTree(child); rmSync(temporary, { recursive: true, force: true });
 }
 child.on("error", () => { ended = true; process.exitCode = 1; cleanup(); });
 child.on("exit", (code, signal) => { ended = true; process.exitCode = code ?? (signal ? 1 : 0); cleanup(); });

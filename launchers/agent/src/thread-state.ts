@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, renameSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, closeSync, writeFileSync, fsyncSync, renameSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { syncDirectory, protectDirectory } from "../scripts/private-state.mjs";
 
 export function threadStatePath(cwd: string, agentId: string) {
   if (!agentId) return undefined;
@@ -32,7 +33,7 @@ export function saveThreadId(file: string | undefined, threadId: string) {
   if (!file) return;
   const directory = dirname(file);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  chmodSync(directory, 0o700);
+  protectDirectory(directory);
   const temporary = `${file}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, "wx", 0o600);
   try {
@@ -41,6 +42,5 @@ export function saveThreadId(file: string | undefined, threadId: string) {
   } finally { closeSync(fd); }
   try { renameSync(temporary, file); }
   finally { try { unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
-  const directoryFd = openSync(directory, "r");
-  try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+  syncDirectory(directory);
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep, parse, relative } from "node:path";
+import { syncDirectory, protectDirectory } from "../scripts/private-state.mjs";
 import { submissionOptions, messageCheckpoints, type SubmissionRecord } from "./prompt-submission.js";
 
 /** Small bounded journal; a commit completes before HTTP accepts a submission. */
@@ -8,17 +9,17 @@ export class QueueStore {
   constructor(readonly file: string) {
     const directory = dirname(resolve(file));
     // Queue state must not be redirected into credentials or another Agent's state.
-    let current = directory.startsWith(sep) ? sep : "";
-    for (const part of directory.split(sep).filter(Boolean)) {
+    let current = parse(directory).root;
+    for (const part of relative(current, directory).split(sep).filter(Boolean)) {
       current = join(current, part);
       if (existsSync(current)) {
         if (lstatSync(current).isSymbolicLink() || !lstatSync(current).isDirectory()) throw new Error("Queue storage rejects symlink/non-directory ancestors");
       } else {
         mkdirSync(current, { mode: 0o700 });
-        const parent = openSync(dirname(current), constants.O_RDONLY);
-        try { fsyncSync(parent); } finally { closeSync(parent); }
+        syncDirectory(dirname(current));
       }
     }
+    protectDirectory(directory);
   }
   load(): SubmissionRecord[] {
     if (!existsSync(this.file)) return [];
@@ -49,8 +50,7 @@ export class QueueStore {
       writeFileSync(handle, JSON.stringify({ version: 1, records }));
       fsyncSync(handle); closeSync(handle); handle = undefined;
       renameSync(temporary, this.file);
-      const parent = openSync(directory, constants.O_RDONLY);
-      try { fsyncSync(parent); } finally { closeSync(parent); }
+      syncDirectory(directory);
     } finally {
       if (handle !== undefined) closeSync(handle);
       if (existsSync(temporary)) unlinkSync(temporary);

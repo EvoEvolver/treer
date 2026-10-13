@@ -1,8 +1,16 @@
-import { execFileSync } from "node:child_process";
+import { runProviderSync } from "./process.mjs";
 
 /** The same save/readback/restore transaction for legacy and Controller installs. */
 export function profileTransaction(treer, log = console.log) {
-  const run = (args) => (execFileSync(treer, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) || "").trim();
+  const run = (args) => {
+    const result = runProviderSync(treer, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 });
+    if (result.error || result.status !== 0) {
+      const error = new Error("Treer profile operation failed");
+      error.status = result.status; error.stdout = result.stdout; error.stderr = result.stderr;
+      throw error;
+    }
+    return (result.stdout || "").trim();
+  };
   function show(name) {
     try { return JSON.parse(run(["agent", "admin", "profile", "show", name])); }
     catch (error) {

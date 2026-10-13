@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawnProvider, stopProcessTree } from "../../scripts/process.mjs";
 import { EventEmitter } from "node:events";
 import { readGoalState, writeGoalState } from "../goal-storage.js";
 import { randomUUID } from "node:crypto";
@@ -71,7 +72,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
 
   async start() {
     const threadId = this.options.threadId || loadThreadId(this.options.stateFile);
-    const child = spawn(this.command, ["app-server", "--listen", "stdio://"], {
+    const child = spawnProvider(this.command, ["app-server", "--listen", "stdio://"], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: this.cwd,
     });
@@ -276,7 +277,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
 
   async stop() {
     this.client?.close();
-    this.child?.kill("SIGTERM");
+    stopProcessTree(this.child);
     this.client = null;
     this.child = null;
     this.ready = false;

@@ -2,10 +2,16 @@
 // Minimal ACP agent for adapter tests. Records every request in FAKE_ACP_CALLS
 // (JSONL). FAKE_ACP_NO_LOAD=1 hides loadSession; FAKE_ACP_HANG=1 keeps a prompt
 // running until session/cancel.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
 const calls = process.env.FAKE_ACP_CALLS;
+// Opt-in cleanup probe for native smoke; normal adapter fixtures stay unchanged.
+if (process.env.FAKE_ACP_CHILD_PID_FILE) {
+  const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore", windowsHide: true });
+  writeFileSync(process.env.FAKE_ACP_CHILD_PID_FILE, JSON.stringify([process.pid, child.pid]));
+}
 let nextId = 1000;
 const waiting = new Map();
 let pendingPrompt = null;

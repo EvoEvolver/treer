@@ -1,6 +1,6 @@
 // Read registration metadata from the running AIS, never a second capability list.
 import { get } from "node:http";
-import { execFileSync } from "node:child_process";
+import { runProviderSync } from "./process.mjs";
 
 const port = Number(process.argv[2]);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid AIS port");
@@ -33,4 +33,5 @@ if (manifest.ui_path != null) {
   if (typeof manifest.ui_path !== "string" || !manifest.ui_path.startsWith("/")) throw new Error("Invalid AIS UI path");
   args.push("--ui-path", manifest.ui_path);
 }
-execFileSync(process.env.AGENT_UI_TREER_BIN || "treer", args, { stdio: "inherit" });
+const registration = runProviderSync(process.env.AGENT_UI_TREER_BIN || "treer", args, { stdio: "inherit", timeout: 15000 });
+if (registration.error || registration.status !== 0) throw new Error("Treer interface registration failed");

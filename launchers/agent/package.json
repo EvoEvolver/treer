@@ -11,6 +11,7 @@
     "test:claude:settings": "node tests/browser-claude-settings.mjs",
     "test:claude:settings:fake": "node tests/browser-claude-settings.mjs --fake",
     "test:browser": "node tests/browser.mjs",
+    "test:windows": "node tests/windows-smoke.mjs",
     "build": "esbuild markdown.entry.js --bundle --format=esm --minify --legal-comments=inline --outfile=public/markdown.js",
     "check": "npm run typecheck && node --check public/app.js && node --check public/files.js && node --check public/theme.js && node --check public/markdown.js",
     "start": "tsx src/index.ts",

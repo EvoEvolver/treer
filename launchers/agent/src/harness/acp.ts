@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawnProvider, stopProcessTree } from "../../scripts/process.mjs";
 import { EventEmitter } from "node:events";
 import { isAbsolute, relative } from "node:path";
 
@@ -150,7 +151,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
 
   async start() {
     const sessionId = this.options.sessionId || loadThreadId(this.options.stateFile);
-    const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"], cwd: this.cwd });
+    const child = spawnProvider(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"], cwd: this.cwd });
     this.child = child;
     const client = new JsonRpcClient(child.stdout, child.stdin);
     this.client = client;
@@ -289,7 +290,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
 
   async stop() {
     this.client?.close();
-    this.child?.kill("SIGTERM");
+    stopProcessTree(this.child);
     this.client = null;
     this.child = null;
     this.ready = false;
