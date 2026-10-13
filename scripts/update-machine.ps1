@@ -3,6 +3,7 @@
 param(
     [ValidateSet('Plan','Prepare','Download','Apply','Status','Worker')][string]$Action = 'Plan',
     [string]$Commit,
+    [string]$SumsSha256,
     [string]$ConfigPath,
     [string]$BinDirectory,
     [string]$StageDirectory,
@@ -56,6 +57,10 @@ function Get-UpdateManifest($Path) {
     if ($rows.Count -ne 3) { throw 'incomplete_checksum_manifest' }
     return $rows
 }
+function Assert-UpdateSums($Path, $Expected) {
+    if ($Expected -notmatch '^[0-9a-fA-F]{64}$' -or
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ine $Expected) { throw 'out_of_band_manifest_hash_mismatch' }
+}
 function Assert-UpdateOrigin($Base) {
     $uri = $null
     if (![Uri]::TryCreate($Base, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
@@ -64,7 +69,7 @@ function Assert-UpdateOrigin($Base) {
 }
 function Get-UpdateArtifact($Uri, $Destination, $Limit) {
     # No ambient proxy, redirects, credentials or executable shell interpolation.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $request = [Net.HttpWebRequest]::Create($Uri)
     $request.Proxy = $null; $request.AllowAutoRedirect = $false
     $request.Timeout = 20000; $request.ReadWriteTimeout = 1000
@@ -92,7 +97,7 @@ function New-UpdateProcess($Executable, $Arguments, $WorkingDirectory) {
     $start.WorkingDirectory = $WorkingDirectory; $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.EnvironmentVariables.Clear()
-    foreach ($key in @('SystemRoot','windir','USERPROFILE','USERNAME','USERDOMAIN','APPDATA','LOCALAPPDATA','ProgramData','HOMEDRIVE','HOMEPATH','ComSpec','PATHEXT','PATH','TEMP','TMP')) {
+    foreach ($key in @('OS','SystemRoot','windir','USERPROFILE','USERNAME','USERDOMAIN','APPDATA','LOCALAPPDATA','ProgramData','HOMEDRIVE','HOMEPATH','ComSpec','PATHEXT','PATH','TEMP','TMP')) {
         $value = [Environment]::GetEnvironmentVariable($key)
         if ($value) { $start.EnvironmentVariables[$key] = $value }
     }
@@ -198,10 +203,14 @@ function Invoke-UpdateRestart($Controller, $Workspace, $Directory) {
         if ($process.ExitCode -ne 0) { throw 'restart_command_failed' }
     } finally { $process.Dispose() }
 }
-function Set-UpdateBinary($Source, $Destination) {
+function Set-UpdateBinary($Source, $Destination, $ExpectedHash) {
     $temporary = $Destination + '.' + [Guid]::NewGuid().ToString('N') + '.new'
     $old = $Destination + '.' + [Guid]::NewGuid().ToString('N') + '.old'
     [IO.File]::Copy($Source, $temporary, $false)
+    if ($ExpectedHash -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ine $ExpectedHash) {
+        [IO.File]::Delete($temporary)
+        throw 'replacement_copy_checksum_mismatch'
+    }
     [IO.File]::Move($Destination, $old)
     try { [IO.File]::Move($temporary, $Destination) }
     catch { [IO.File]::Move($old, $Destination); throw }
@@ -213,6 +222,9 @@ function Invoke-UpdateTransaction($Job, $Stage) {
     $health = Get-UpdateLocal $config '/api/health'
     if (!$health.proxy_connected -or !$health.controller_epoch) { throw 'controller_not_ready_before_update' }
     $agents = Get-UpdateAgents $config
+    $hostCommit = $health.host_build.git_commit
+    if ($hostCommit -notmatch '^[0-9a-f]{7,40}$') { throw 'host_build_identity_unavailable' }
+    Assert-UpdateSums (Join-Path $Stage 'SHA256SUMS') $Job.sums_sha256
     $hashes = Get-UpdateManifest (Join-Path $Stage 'SHA256SUMS')
     foreach ($name in @('treer-agent-server','treer')) {
         $file = Join-Path $Stage ($name + '.exe')
@@ -225,28 +237,33 @@ function Invoke-UpdateTransaction($Job, $Stage) {
     if (!(Test-UpdateCommit $oldCommit $health.controller_build.git_commit)) { throw 'installed_and_running_controller_differ' }
     $backup = Join-Path ([IO.Path]::GetDirectoryName($Stage)) ('backup-' + $oldCommit + '-' + [Guid]::NewGuid().ToString('N'))
     New-PrivateUpdateDirectory $backup
-    foreach ($name in @('treer-agent-server','treer')) { [IO.File]::Copy((Join-Path $bin ($name + '.exe')), (Join-Path $backup ($name + '.exe')), $false) }
+    $backupHashes = @{}
+    foreach ($name in @('treer-agent-server','treer')) {
+        [IO.File]::Copy((Join-Path $bin ($name + '.exe')), (Join-Path $backup ($name + '.exe')), $false)
+        $backupHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $backup ($name + '.exe')) -Algorithm SHA256).Hash
+    }
     Write-UpdateJson (Join-Path $Stage 'progress.json') @{ status='activating'; backup=$backup }
     $changed = New-Object 'Collections.Generic.List[string]'; $activated = $false
     try {
         $changed.Add('treer-agent-server')
-        Set-UpdateBinary (Join-Path $Stage 'treer-agent-server.exe') $controller
+        Set-UpdateBinary (Join-Path $Stage 'treer-agent-server.exe') $controller $hashes['treer-agent-server']
         $activated = $true
         Invoke-UpdateRestart $controller $config.workspace $Stage
-        $null = Wait-UpdateController $config $health.controller_epoch $Job.commit $agents $Job.timeout
+        $ready = Wait-UpdateController $config $health.controller_epoch $Job.commit $agents $Job.timeout
+        if (!(Test-UpdateCommit $hostCommit $ready.host_build.git_commit)) { throw 'host_build_changed' }
         $changed.Add('treer')
-        Set-UpdateBinary (Join-Path $Stage 'treer.exe') (Join-Path $bin 'treer.exe')
+        Set-UpdateBinary (Join-Path $Stage 'treer.exe') (Join-Path $bin 'treer.exe') $hashes['treer']
         foreach ($name in @('treer-agent-server','treer')) {
             if ((Get-FileHash -LiteralPath (Join-Path $bin ($name + '.exe')) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hashes[$name]) { throw 'installed_checksum_mismatch' }
         }
         if ((Get-UpdateAgents $config) -cne $agents) { throw 'agent_process_changed' }
-        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status='complete'; commit=$Job.commit; backup=$backup; host_changed=$false; agents_preserved=$true }
+        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status='complete'; commit=$Job.commit; backup=$backup; host_changed=$false; host_commit=$hostCommit; agents_preserved=$true }
     } catch {
         $failure = 'activation_failed'; $rollback = 'rolled_back'
         try {
             for ($index=$changed.Count-1; $index -ge 0; $index--) {
                 $name = $changed[$index]
-                Set-UpdateBinary (Join-Path $backup ($name + '.exe')) (Join-Path $bin ($name + '.exe'))
+                Set-UpdateBinary (Join-Path $backup ($name + '.exe')) (Join-Path $bin ($name + '.exe')) $backupHashes[$name]
             }
             if ($activated) {
                 $epoch = $null
@@ -255,7 +272,7 @@ function Invoke-UpdateTransaction($Job, $Stage) {
                 $null = Wait-UpdateController $config $epoch $oldCommit $agents $Job.timeout
             }
         } catch { $rollback = 'rollback_failed' }
-        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; backup=$backup; host_changed=$false }
+        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; backup=$backup; host_changed=$false; host_commit=$hostCommit }
         throw 'update_activation_failed_inspect_receipt'
     }
 }
@@ -269,6 +286,7 @@ function Invoke-WindowsMachineUpdate {
     $stage = [IO.Path]::GetFullPath($StageDirectory)
     if ($Action -eq 'Prepare') {
         if ($Commit -notmatch '^[0-9a-f]{40}$' -or !$ConfigPath -or !$BinDirectory) { throw 'require_commit_config_and_binary_directory' }
+        if ($SumsSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'require_out_of_band_release_receipt_sums_sha256' }
         $configFile = Assert-UpdatePath $ConfigPath; $bin = Assert-UpdatePath $BinDirectory
         $null = Get-UpdateConfig $configFile
         $base = Assert-UpdateOrigin $ArtifactBase
@@ -276,9 +294,10 @@ function Invoke-WindowsMachineUpdate {
         $null = Assert-UpdatePath ([IO.Path]::GetDirectoryName($stage))
         New-PrivateUpdateDirectory $stage
         Get-UpdateArtifact ($base + 'SHA256SUMS') (Join-Path $stage 'SHA256SUMS') 8192
+        Assert-UpdateSums (Join-Path $stage 'SHA256SUMS') $SumsSha256
         $null = Get-UpdateManifest (Join-Path $stage 'SHA256SUMS')
         [IO.File]::Copy($PSCommandPath, (Join-Path $stage 'worker.ps1'), $false)
-        Write-UpdateJson (Join-Path $stage 'job.json') @{ schema=1; commit=$Commit; config_path=$configFile; bin_directory=$bin; artifact_base=$base; timeout=$TimeoutSeconds }
+        Write-UpdateJson (Join-Path $stage 'job.json') @{ schema=1; commit=$Commit; sums_sha256=$SumsSha256.ToLowerInvariant(); config_path=$configFile; bin_directory=$bin; artifact_base=$base; timeout=$TimeoutSeconds }
         @{ status='prepared'; stage=$stage } | ConvertTo-Json; return
     }
     $null = Assert-UpdatePath $stage
@@ -290,9 +309,10 @@ function Invoke-WindowsMachineUpdate {
         @{status='prepared';stage=$stage} | ConvertTo-Json; return
     }
     $job = Get-Content -LiteralPath (Join-Path $stage 'job.json') -Raw | ConvertFrom-Json
-    if ($job.schema -ne 1 -or $job.commit -notmatch '^[0-9a-f]{40}$') { throw 'invalid_update_job' }
+    if ($job.schema -ne 1 -or $job.commit -notmatch '^[0-9a-f]{40}$' -or $job.sums_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'invalid_update_job' }
     if ($Action -eq 'Download') {
         if (!$Binary) { throw 'download_requires_binary' }
+        Assert-UpdateSums (Join-Path $stage 'SHA256SUMS') $job.sums_sha256
         $manifest = Get-UpdateManifest (Join-Path $stage 'SHA256SUMS')
         $destination = Join-Path $stage ($Binary + '.exe')
         Get-UpdateArtifact ((Assert-UpdateOrigin $job.artifact_base) + $Binary) $destination 268435456
@@ -306,7 +326,7 @@ function Invoke-WindowsMachineUpdate {
         $worker = Join-Path $stage 'worker.ps1'
         if ($stage.Contains('"') -or $stage.Contains("`r") -or $stage.Contains("`n")) { throw 'invalid_worker_path' }
         $shell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        $start = New-UpdateProcess $shell ('-NoProfile -NonInteractive -File "' + $worker + '" -Action Worker -StageDirectory "' + $stage + '"') $stage
+        $start = New-UpdateProcess $shell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $worker + '" -Action Worker -StageDirectory "' + $stage + '"') $stage
         # Activation comes only from a local terminal outside any Windows Job.
         # No worker launch through exec or another Controller-owned process.
         $process = [Diagnostics.Process]::Start($start)

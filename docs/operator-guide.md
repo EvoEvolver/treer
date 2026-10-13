@@ -1613,7 +1613,9 @@ activation-order, detachment and rollback checks.
 
 For a reviewed Canary set, use `scripts/update-machine.ps1` from a trusted local
 copy. This is separate from signed release-channel updates: same-origin
-`SHA256SUMS` verifies integrity, not an independent publisher signature. It uses
+`SHA256SUMS` is pinned to the file's SHA-256 copied from the independently
+delivered, trusted release receipt (`-SumsSha256`), before parsing or executing
+any downloaded binary. It still does not provide a publisher signature. It uses
 PowerShell 5.1/7 and .NET; no git, Python or shell launcher is required. It never
 updates or restarts the Host, changes the enrolled root, or restarts Agents.
 Only one local detached workspace install may share the binary directory.
@@ -1634,11 +1636,12 @@ absolute executable path may be needed when it is absent from PATH.
 .\update-machine.ps1
 # Fill these from the reviewed release and this machine's installed service.
 $commit = 'FULL_40_CHARACTER_SOURCE_SHA'
+$sums = 'WINDOWS_SHA256SUMS_FILE_SHA256_FROM_TRUSTED_RELEASE_RECEIPT'
 $config = "$env:LOCALAPPDATA\Treer\agent-servers\SERVER-controller.json"
 $bin = "$env:LOCALAPPDATA\Treer\bin"
 $stage = "$env:LOCALAPPDATA\Treer\stage-$commit"
 New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Treer" | Out-Null
-.\update-machine.ps1 -Action Prepare -Commit $commit -ConfigPath $config -BinDirectory $bin
+.\update-machine.ps1 -Action Prepare -Commit $commit -SumsSha256 $sums -ConfigPath $config -BinDirectory $bin
 .\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer-agent-server
 .\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer
 # Run Apply in an independent local user terminal, NEVER through treer exec.
@@ -1652,7 +1655,9 @@ Prepare, Download and Status may run through exec. Apply must run from an
 independent local user terminal with `-LocalTerminal`; it verifies that the
 process is outside every Windows Job and otherwise refuses activation. Neither
 Start-Process nor DETACHED_PROCESS proves escape from a Controller/Host Job.
-Apply submits a clean-environment PowerShell worker; do not synchronously wait
+Apply submits a clean-environment PowerShell worker with a process-scoped
+`-ExecutionPolicy Bypass` for its private script copy (no machine policy change);
+do not synchronously wait
 on `restart-controller` through the Controller being replaced. `submitted` is not success. The private stage holds progress
 and an atomic `result.json`; poll until `complete`, `rolled_back`,
 `rollback_failed` or `failed`. Never retry activation blindly after a lost reply.
@@ -1673,7 +1678,13 @@ process uses them. No automatic cleanup or root migration occurs. In particular,
 existing `C:\Windows\System32` roots remain unchanged; new enrollment must use
 an explicit user-owned `--root` as described above.
 
-Receipts contain only status, commit, backup path and preservation flags. Local
+Receipts contain only status, commit, preserved Host commit, backup path and
+preservation flags. Record the old Host/new Controller compatibility result in
+the release receipt; leaving the Host unchanged depends on that protocol
+compatibility. After the rollback window, an operator may remove only inspected
+`.old` files whose processes have exited and backups no longer needed; these
+images can contain old vulnerabilities. Never remove a running image or the only
+verified recovery copy. Local
 operator credentials are read only in memory for loopback inventory and are
 never passed in argv or written to progress/error logs. The worker strips
 inherited Treer, HTTP proxy and Node/loader variables from child processes.

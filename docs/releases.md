@@ -313,8 +313,10 @@ environment. The frontend artifact is already byte-identical across promotion.
 ### Windows manual machine update gate
 
 `scripts/update-machine.ps1` is the operator-reviewed Canary checksum workflow,
-not the signed release-channel updater. Its HTTPS `SHA256SUMS` pins integrity;
-it does not authenticate an independent publisher. It needs only Windows
+not the signed release-channel updater. Prepare requires `-SumsSha256` from the
+trusted, independently delivered Windows release receipt; it pins the HTTPS
+manifest before parsing or executing downloaded binaries. This is an out-of-band
+integrity pin, not a publisher signature. It needs only Windows
 PowerShell 5.1 or PowerShell 7 and Windows/.NET facilities, not git, Python, npm
 or a Unix shell. See the operator guide for split steps and receipts.
 

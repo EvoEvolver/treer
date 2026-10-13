@@ -22,6 +22,9 @@ try {
     $sum = Join-Path $temporary 'SHA256SUMS'
     $digest = 'a' * 64
     [IO.File]::WriteAllText($sum, "$digest  treer`n$digest  treer-agent-server`n$digest  treer-agent-host`n")
+    $pinnedSum = (Get-FileHash -LiteralPath $sum -Algorithm SHA256).Hash
+    Assert-UpdateSums $sum $pinnedSum
+    Assert-UpdateThrows { Assert-UpdateSums $sum ('b' * 64) } 'out-of-band-manifest-digest'
     Assert-UpdateTest ((Get-UpdateManifest $sum).Count -eq 3) 'manifest-three-binaries'
     [IO.File]::AppendAllText($sum, "$digest  treer`n")
     Assert-UpdateThrows { Get-UpdateManifest $sum } 'duplicate-manifest'
@@ -41,8 +44,10 @@ try {
     finally { $lockHandle.Dispose() }
     $source = Join-Path $temporary 'source'; $target = Join-Path $temporary 'target'
     [IO.File]::WriteAllText($source,'new'); [IO.File]::WriteAllText($target,'old')
-    Set-UpdateBinary $source $target
+    Set-UpdateBinary $source $target (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     Assert-UpdateTest ([IO.File]::ReadAllText($target) -ceq 'new') 'rename-and-copy'
+    Assert-UpdateThrows { Set-UpdateBinary $source $target ('b' * 64) } 'copy-digest-before-move'
+    Assert-UpdateTest ([IO.File]::ReadAllText($target) -ceq 'new') 'copy-digest-keeps-installed-target'
     $oldFiles = @(Get-ChildItem $temporary -Filter 'target.*.old')
     Assert-UpdateTest ($oldFiles.Count -eq 1 -and [IO.File]::ReadAllText($oldFiles[0].FullName) -ceq 'old') 'old-image-retained'
     # Pure transaction fixtures: real hashes, file moves, backups, atomic receipts;
@@ -52,7 +57,7 @@ try {
     $script:oldCommit = '1' * 40; $script:newCommit = '2' * 40
     function Get-UpdateConfig($Path) { return [PSCustomObject]@{workspace='ws_fixture';listen='127.0.0.1:1';bin_directory=$script:fixtureBin} }
     function Get-UpdateLocal($Config,$Route) {
-        return [PSCustomObject]@{proxy_connected=$true;controller_epoch='before';controller_build=[PSCustomObject]@{git_commit=$script:oldCommit}}
+        return [PSCustomObject]@{proxy_connected=$true;controller_epoch='before';controller_build=[PSCustomObject]@{git_commit=$script:oldCommit};host_build=[PSCustomObject]@{git_commit=$script:oldCommit}}
     }
     function Get-UpdateAgents($Config) { return 'agent-fixture:123:7' }
     function Get-UpdateVersion($Path) {
@@ -68,7 +73,7 @@ try {
         }
         if (($Expected -eq $script:newCommit -and $script:failCandidate) -or ($Expected -eq $script:oldCommit -and $script:failRollback)) { throw 'synthetic-readiness-failure' }
         Assert-UpdateTest ($Agents -ceq 'agent-fixture:123:7') 'inventory-snapshot'
-        return [PSCustomObject]@{controller_epoch='after'}
+        return [PSCustomObject]@{controller_epoch='after';host_build=[PSCustomObject]@{git_commit=$script:oldCommit}}
     }
     foreach ($scenario in @('complete','rolled_back','rollback_failed','checksum_refused')) {
         $script:events.Clear()
@@ -89,7 +94,7 @@ try {
         $script:failRollback = $scenario -eq 'rollback_failed'
         if ($scenario -eq 'checksum_refused') { [IO.File]::AppendAllText((Join-Path $stage 'treer.exe'),'tampered') }
         $script:fixtureBin = $bin
-        $job = [PSCustomObject]@{config_path='fixture';bin_directory=$bin;commit=$script:newCommit;timeout=1}
+        $job = [PSCustomObject]@{config_path='fixture';bin_directory=$bin;commit=$script:newCommit;sums_sha256=(Get-FileHash -LiteralPath (Join-Path $stage 'SHA256SUMS') -Algorithm SHA256).Hash;timeout=1}
         if ($scenario -eq 'complete') { Invoke-UpdateTransaction $job $stage }
         else { Assert-UpdateThrows { Invoke-UpdateTransaction $job $stage } ('transaction-' + $scenario) }
         if ($scenario -eq 'checksum_refused') {
@@ -107,13 +112,14 @@ try {
         }
     }
     if ($env:OS -eq 'Windows_NT') {
+        Assert-UpdateTest ($start.EnvironmentVariables['OS'] -ceq 'Windows_NT') 'worker-windows-baseline'
         # Test the actual image lock, not a text-file approximation.
         $image = Join-Path $temporary 'running-shell.exe'
         Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') -Destination $image
         $runningStart = New-UpdateProcess $image '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"' $temporary
         $running = [Diagnostics.Process]::Start($runningStart)
         try {
-            Set-UpdateBinary (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') $image
+            Set-UpdateBinary (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') $image (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash
             Assert-UpdateTest (!$running.HasExited -and (Test-Path -LiteralPath $image)) 'running-image-rename'
         } finally { if (!$running.HasExited) { $running.Kill(); $running.WaitForExit() }; $running.Dispose() }
         if (!$ArtifactDirectory) { throw 'native_update_tests_require_real_release_artifacts' }
@@ -156,6 +162,14 @@ $process.Dispose()
         $end = [DateTime]::UtcNow.AddSeconds(10)
         while (!(Test-Path -LiteralPath $marker) -and [DateTime]::UtcNow -lt $end) { Start-Sleep -Milliseconds 100 }
         Assert-UpdateTest ((Test-Path -LiteralPath $marker) -and [IO.File]::ReadAllText($marker) -ceq 'passed') 'worker-survives-parent-exit'
+        $jobRejected = $false
+        try { Assert-UpdateOutsideJob } catch {
+            if ($_.Exception.Message -cne 'activation_requires_independent_local_terminal_outside_windows_job') { throw }
+            $jobRejected = $true
+        }
+        $actuallyInJob = $false
+        Assert-UpdateTest ([TreerUpdateJobGuard]::IsProcessInJob([TreerUpdateJobGuard]::GetCurrentProcess(), [IntPtr]::Zero, [ref]$actuallyInJob)) 'native-job-query'
+        Assert-UpdateTest ($jobRejected -eq $actuallyInJob) 'native-job-activation-guard'
         Write-Output 'windows-update-native-passed' 
     } else { Write-Output 'update-portable-fixtures-passed; native Windows tests not executed' }
 } finally {
