@@ -56,6 +56,15 @@ import { useLocation, useNavigate, useParams } from "react-router"
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
+  const location = useLocation()
+  // A trusted settings deep link is a new scope, including SPA back/forward.
+  // Unmount the old workspace and any confirmation before loading its target.
+  const scope = location.hash === "#policy-provider" ? `policy:${route.organizationId ?? ""}/${route.workspaceId ?? ""}` : "workspace"
+  return <WorkspaceAppContent key={scope} />
+}
+
+function WorkspaceAppContent() {
+  const route = useParams<{ organizationId?: string; workspaceId?: string }>()
   const navigate = useNavigate()
   const location = useLocation()
   const routeSelectionRef = useRef({ organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null })

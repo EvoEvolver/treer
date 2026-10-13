@@ -1771,6 +1771,31 @@ for (const mobile of [false, true]) {
       await expect(block(page)).toContainText('Current: Owner session')
       expect(requests).toHaveLength(0)
     })
+    for (const target of ['/orgs/org-1/workspaces/missing#policy-provider', '/orgs/missing/workspaces/ws-1#policy-provider', '/orgs/org-2/workspaces/ws-2#policy-provider']) {
+      test(`live history navigation removes the previous writable settings: ${target}`, async ({ page }) => {
+        const requests = await installFixture(page)
+        await page.route('**/api/workspaces/ws-2/policy-provider', (route) => ok(route, {
+          provider: { ...provider('provider_operator'), workspace_id: 'ws-2' }, capabilities: [capability], cache: {},
+        }))
+        await page.goto(landing)
+        await block(page).getByRole('button', { name: 'Enable provider operator…', exact: true }).click()
+        await expect(page.getByRole('dialog')).toBeVisible()
+        await page.evaluate((target) => { history.pushState(null, '', target); dispatchEvent(new PopStateEvent('popstate')) }, target)
+        await expect(page.getByRole('dialog')).not.toBeVisible()
+        if (target.includes('missing')) {
+          await expect(page.getByText('Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.')).toBeVisible()
+          await expect(block(page)).toHaveCount(0)
+        } else {
+          await expect(block(page)).toContainText('Read only')
+          await expect(block(page)).toContainText('Current: Provider operator')
+          await expect(block(page).getByRole('button')).toHaveCount(0)
+        }
+        await page.goBack()
+        await expect(block(page)).toContainText('Current: Owner session')
+        await expect(block(page).getByRole('button', { name: 'Enable provider operator…', exact: true })).toBeVisible()
+        expect(requests).toHaveLength(0)
+      })
+    }
     test('non-owner sees the current operator authority read only', async ({ page }) => {
       const requests = await installFixture(page, { owner: false, authority: 'provider_operator' })
       await page.goto(landing)
