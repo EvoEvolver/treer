@@ -290,3 +290,42 @@ equals the fixed system directory, while PowerShell asserts that its startup
 search still contains it. Native PowerShell may add account-default directories;
 that does not excuse a failure of the initial environment equality assertion.
 Diagnosis is not the full release gate.
+
+Hosted Windows runner PowerShell 5.1 auto-loading without the image's
+pre-generated module analysis cache took 12–28s per invocation on both
+`windows-2022` and `windows-2025`, sometimes exceeding the unchanged 30s limit.
+A new private cache appeared but did not show measured growth or fast reuse;
+the default parent directory was present, creatable and actually writable.
+The precise cache-reuse interaction remains unexplained. This does not justify
+product cache management or a broad environment allowlist.
+
+Windows 11 manual fixed-module probes reported by leader took 130–144ms;
+new explicit-cache probes took 421/263/265ms. Exact `e3ed8ea` compiled identity
+and PS/Node tests on win_native passed in 0.02s and 0.79s respectively. These
+are product-environment observations, not universal performance guarantees.
+Test hosts must supply the standard OS baseline (ProgramFiles, COMPUTERNAME,
+the installed PowerShell executable's PATH, and PSPATH if required by their
+tooling). Missing host baseline is not repaired by the cache compensation.
+
+Only the isolated in-process Windows exec unit-test fixture may supply the
+test runner's `PSModuleAnalysisCachePath`, with both `CI=true` and
+`GITHUB_ACTIONS=true` and a supplied value. An absent value stays absent.
+The Controller field and use are under `cfg(all(test, windows))`, default to
+no opt-in, and the setter is in the test module. Production binaries contain
+no field, setter, CLI/API/configuration option or environment read for this
+compensation. Real-Host/integration tests do not opt in. The production
+inheritance allowlist still rejects the variable; initial PSModulePath remains
+the fixed Win32 system directory. No OS-token block reconstruction is included.
+
+Threat scope: a caller-controlled cache can affect module discovery and cache
+writes; inheriting it is inappropriate product behavior. Only an isolated
+hosted runner's image configuration is trusted here; CI flags are accidental-use
+guards, not authentication. Do not inject secrets or use untrusted runner cache
+configuration. This compensation is not clean-machine performance evidence.
+
+Record environment correctness separately from performance: strict initial
+PSModulePath equality, credential/proxy/loader-hook absence, Utility/version/RNG
+exit 0 and no timeout under the original 30s ceiling remain required. Per-probe
+durations record hosted-image behavior; CI green/red is not a performance
+guarantee. Keep Windows 11 evidence and the real Host/CLI/install/update/UI
+gates alongside this compensated unit test. Do not remove Utility/RNG coverage.

@@ -140,6 +140,15 @@ and AllUsers module directories; Treer does not restrict that native auto-loadin
 Use a separate OS account/container when those account-owned modules must be
 isolated from Agents.
 
+Windows PowerShell 5.1 automatic module loading can be slow without a usable
+pre-generated module analysis cache. Hosted Windows 2022/2025 images showed
+12–28s calls, while tested Windows 11 calls completed below one second; these
+observations are not runtime latency guarantees. Production exec does not
+inherit `PSModuleAnalysisCachePath` or create a Treer-managed analysis cache.
+Only a CI-guarded Windows unit-test fixture uses the hosted image's cache;
+that field/behavior is compiled out of production binaries. See the quality
+guide for the test compensation and independent clean-machine evidence.
+
 This reduces ambient environment exposure, not machine-account authority. Exec
 still runs as the machine's OS user and can read that user's accessible files,
 including local CLI configuration; omitting a credential from its environment

@@ -1243,6 +1243,13 @@ module configuration requires a separate explicit design. PowerShell can
 reconstruct its environment during startup, so the environment boundary is
 not a module-execution sandbox. `-NoProfile` skips profile scripts; it does not
 remove the native runtime's OS/module initialization requirements.
+Without a usable pre-generated module cache, PowerShell 5.1 auto-loading can
+be slow: hosted Windows 2022/2025 probes took 12–28s, while tested Windows 11
+calls took less than one second. The 30s exec ceiling remains unchanged;
+neither observation guarantees latency on another machine. Treer does not
+inherit an analysis-cache path or manage that cache in production. Hosted-image
+cache compensation is confined to a CI-guarded unit-test fixture; see the
+quality guide for its limits and separate native Windows 11 evidence.
 Running `service restart-controller` inside that exec can lose its reply when
 the Controller is replaced, even if restart succeeded. Run activation from a
 host terminal or a Host-owned managed command instead; inspect its output after

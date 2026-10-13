@@ -49,7 +49,69 @@ async fn runtime_for_exec(root: &Path) -> (ControllerRuntime, tokio::task::JoinH
         },
     )
     .unwrap();
+    // Hosted-image compensation ONLY for this in-process exec unit-test
+    // fixture, not Controller production/real-Host paths. GitHub runner images
+    // supply a pre-generated module-analysis cache; do not substitute arbitrary
+    // paths, broaden the inheritance allowlist or change the fixed PSModulePath.
+    #[cfg(windows)]
+    {
+        *runtime.inner.hosted_test_module_cache.lock().unwrap() = hosted_cache_for_fixture(
+            std::env::var_os("GITHUB_ACTIONS").as_deref(),
+            std::env::var_os("CI").as_deref(),
+            std::env::var_os("PSModuleAnalysisCachePath"),
+        );
+    }
     (runtime, task)
+}
+
+fn hosted_cache_for_fixture(
+    github_actions: Option<&std::ffi::OsStr>,
+    ci: Option<&std::ffi::OsStr>,
+    cache: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    (github_actions == Some(std::ffi::OsStr::new("true"))
+        && ci == Some(std::ffi::OsStr::new("true")))
+    .then_some(cache)
+    .flatten()
+}
+
+#[test]
+fn hosted_cache_compensation_requires_both_ci_guards_and_a_supplied_value() {
+    use std::ffi::{OsStr, OsString};
+    let yes = Some(OsStr::new("true"));
+    for (github, ci) in [
+        (None, None),
+        (yes, None),
+        (None, yes),
+        (Some(OsStr::new("false")), yes),
+    ] {
+        assert!(hosted_cache_for_fixture(github, ci, Some("synthetic-cache".into())).is_none());
+    }
+    assert!(hosted_cache_for_fixture(yes, yes, None).is_none());
+    assert_eq!(
+        hosted_cache_for_fixture(yes, yes, Some("synthetic-cache".into())),
+        Some(OsString::from("synthetic-cache"))
+    );
+    assert!(!treer_platform::machine_exec_variable_allowed(
+        "PSModuleAnalysisCachePath"
+    ));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_machine_exec_cache_compensation_requires_fixture_opt_in() {
+    let root = test_root();
+    let (runtime, host) = runtime_for_exec(&root).await;
+    *runtime.inner.hosted_test_module_cache.lock().unwrap() = None;
+    assert!(
+        !runtime.machine_exec_environment().keys().any(|key| key
+            .to_string_lossy()
+            .eq_ignore_ascii_case("PSModuleAnalysisCachePath")),
+        "no cache is inherited without fixture opt-in, even on CI"
+    );
+    host.abort();
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -190,7 +252,18 @@ fn machine_exec_child_fixture() {
 async fn windows_machine_exec_node_and_powershell_keep_os_baseline() {
     let root = test_root();
     let (runtime, host) = runtime_for_exec(&root).await;
-    for (command,args,expected) in [
+    let environment = runtime.machine_exec_environment();
+    let system = PathBuf::from(environment.get(std::ffi::OsStr::new("SystemRoot")).unwrap());
+    let modules = system
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("Modules");
+    assert!(
+        environment.get(std::ffi::OsStr::new("PSModulePath")) == Some(&modules.into_os_string()),
+        "initial PSModulePath must equal the fixed system directory"
+    );
+    for (index, (command,args,expected)) in [
         ("node",vec!["-e","const assert=require('node:assert'); for(const k of ['SystemRoot','windir','USERPROFILE','APPDATA','LOCALAPPDATA']) assert.ok(process.env[k],k); assert.ok(!Object.keys(process.env).some(k=>k.toUpperCase().startsWith('TREER_'))); console.log(1+1)"],"2"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$PSVersionTable.PSVersion) { exit 2 }; Write-Output 'powershell-version-ok'; exit 0"],"powershell-version-ok"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE -or !$env:PSModulePath) { exit 2 }; Write-Output 'powershell-baseline-ok'; exit 0"],"powershell-baseline-ok"),
@@ -198,8 +271,9 @@ async fn windows_machine_exec_node_and_powershell_keep_os_baseline() {
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","$expected=[IO.Path]::Combine($env:SystemRoot,'System32\\WindowsPowerShell\\v1.0\\Modules'); $contains=@($env:PSModulePath -split ';' | Where-Object { [string]::Equals($_,$expected,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0; Write-Output ('powershell-system-module-present=' + $contains); if (!$contains) { exit 3 }; exit 0"],"powershell-system-module-present=True"),
         ("powershell.exe",vec!["-NoProfile","-NonInteractive","-Command","if (!$env:SystemRoot -or !$env:USERPROFILE) { exit 2 }; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); Write-Output 'powershell-ok'"],"powershell-ok"),
         ("tasklist.exe",vec!["/FI","PID eq 0","/NH"],""),
-    ] {
+    ].into_iter().enumerate() {
         let response = runtime.exec_machine(MachineExecRequest { cwd:".".into(),command:command.into(),args:args.into_iter().map(str::to_owned).collect(),timeout_ms:30_000 }).await.unwrap();
+        eprintln!("windows-exec probe={index} duration_ms={} timeout={} exit={:?}", response.duration_ms,response.timed_out,response.exit_code);
         assert!(!response.timed_out, "{command} timed out after {}ms: exit={:?} stdout={:?} stderr={:?}",response.duration_ms,response.exit_code,response.stdout,response.stderr);
         assert_eq!(response.exit_code,Some(0),"{command} failed after {}ms: stdout={:?} stderr={:?}",response.duration_ms,response.stdout,response.stderr);
         assert!(response.stdout.contains(expected),"{command} did not complete its smoke check");

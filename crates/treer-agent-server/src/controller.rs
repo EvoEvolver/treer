@@ -132,6 +132,10 @@ pub struct ControllerConfig {
 }
 
 struct ControllerInner {
+    // No field, setter, wire/config option or read of this value in production.
+    // Only isolated Windows exec unit-test fixtures opt in (never real Hosts).
+    #[cfg(all(test, windows))]
+    hosted_test_module_cache: Mutex<Option<std::ffi::OsString>>,
     host: HostClient,
     workspace_id: String,
     server_id: String,
@@ -219,6 +223,8 @@ impl ControllerRuntime {
         let (process_events, _) = broadcast::channel(512);
         let runtime = Self {
             inner: Arc::new(ControllerInner {
+                #[cfg(all(test, windows))]
+                hosted_test_module_cache: Mutex::new(None),
                 file_transfers: crate::machine_file_transfer::Transfers::new(
                     config.root.clone(),
                     config.workspace_id.clone(),
@@ -1650,7 +1656,21 @@ impl ControllerRuntime {
     }
 
     fn machine_exec_environment(&self) -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
-        treer_platform::machine_exec_environment()
+        let environment = treer_platform::machine_exec_environment();
+        #[cfg(all(test, windows))]
+        {
+            let mut environment = environment;
+            if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+                && std::env::var("CI").as_deref() == Ok("true")
+            {
+                if let Some(path) = self.inner.hosted_test_module_cache.lock().unwrap().as_ref() {
+                    environment.insert("PSModuleAnalysisCachePath".into(), path.clone());
+                }
+            }
+            environment
+        }
+        #[cfg(not(all(test, windows)))]
+        environment
     }
 
     pub fn authenticate_agent(
