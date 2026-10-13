@@ -17,10 +17,14 @@ The default is 64 MiB, configurable downward/upward by the machine operator with
 a protocol hard ceiling; Proxy and Controller enforce the lower advertised limit.
 
 On Windows, a Host enrolled from System32 really has System32 as its root; the
-transfer must not silently substitute USERPROFILE. Changing an existing Host root
-is an explicit operator migration. Ask release-eng to make new Windows installs
-choose an explicit user-owned root rather than the install shell's cwd, with
-native tests; do not change existing enrollments in this feature.
+transfer must not silently substitute USERPROFILE. New enrollment defaults to
+the private `%LOCALAPPDATA%\Treer\root` (USERPROFILE fallback), independent of cwd.
+Changing an existing Host root requires an explicit stopped-service migration,
+`service relocate-root --root ... --accept-workload-migration`, preserving ID and
+credentials without copying files or activating services. See the
+[Windows readiness plan](2026-10-13-windows-runtime-readiness.md); native tests
+must verify the root and reparse-point boundary. Transfer itself never migrates
+an existing enrollment.
 
 ## Protocol, routing and streaming
 

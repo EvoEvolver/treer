@@ -23,6 +23,13 @@ Policy denial and derived caller/body-free audit dispatch. These do not prove
 snapshot semantics, isolation from a same-OS-account attacker, or complete
 auditing across a filesystem/SQL failure. Native Windows execution is a separate
 release gate; a cross-compiled platform check is not a native test result.
+The Windows real-Host fixture isolates user config in a subprocess started from
+System32, then exercises exec plus actual Controller-created Agent/App children
+with Node, PowerShell crypto, tasklist and service status. A Host-owned restarter
+must finish across Controller replacement; Controller-owned exec cannot guarantee
+a reply across its own restart. Root relocation tests cover identity preservation,
+live-Host refusal and recovery from mismatched configuration files. These tests
+are acceptance requirements, not a claim that native Windows has already passed.
 File I/O and recovery journal changes are serialized per Controller; a slow
 filesystem can delay other transfers. Expiry skips a busy registry instead of
 blocking the Tokio timer. Space checks are advisory, not capacity reservations;

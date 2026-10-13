@@ -1199,12 +1199,40 @@ transfer's file or add `--force`; a no-force retry may correctly return
 `machine_file_exists` for the already-published destination. Crash recovery
 removes recorded temporary hard links without deleting the published file.
 
-Windows roots enrolled from `C:\\Windows\\System32` remain unchanged. For new
-machines explicitly enroll with `--root` pointing at a user-owned directory.
-Changing an existing root is an operator migration, not a side effect of transfer
-or binary installation. Treer root constraints do not make machine file access
+New Windows enrollments default to `%LOCALAPPDATA%\Treer\root` (USERPROFILE
+fallback), independently of the install shell's cwd. An explicit `--root` must
+already exist. Windows roots previously enrolled from `C:\Windows\System32`
+remain unchanged. `connect` will not move an existing enrollment; an explicit
+different root is rejected. From a **host terminal**, schedule downtime, back up
+private configuration without exporting credentials, and move only your own
+project files into a new existing directory. Never copy all of System32:
+
+```powershell
+treer-agent-server.exe service --workspace WORKSPACE_ID stop
+treer-agent-server.exe service --workspace WORKSPACE_ID relocate-root --root "C:\Users\YOU\TreerRoot" --accept-workload-migration
+treer-agent-server.exe restore --workspace WORKSPACE_ID
+treer.exe machine show MACHINE_ID
+```
+
+Stopping the Host terminates its Agents/Apps. Relocation preserves machine ID,
+credentials and saved startup state, but does not move files, rewrite cwd/absolute
+executable paths, or start anything. Check those paths and launcher installations
+before restore. Individual configuration writes are atomic; startup rejects a
+Host/Controller root mismatch after an interrupted migration. Rerun relocation
+with the intended root while stopped to reconcile it. Changing root is not a
+side effect of transfer or binary installation. Treer root constraints do not make machine file access
 a sandbox: monitor/allow Policy can still permit ordinary sensitive files inside
 that root, and direct same-account OS access remains unrestricted.
+
+Windows machine exec has a 30-second ceiling and is owned by the Controller.
+Running `service restart-controller` inside that exec can lose its reply when
+the Controller is replaced, even if restart succeeded. Run activation from a
+host terminal or a Host-owned managed command instead; inspect its output after
+reconnecting. `Start-Process` alone is not a Windows Job-detachment guarantee.
+Host updates are cold replacements and terminate all workloads; the Rust
+in-place updater remains unsupported on Windows. See the
+[Windows update and acceptance plan](research/2026-10-13-windows-runtime-readiness.md)
+for staging, whole-set rollback and native test requirements.
 
 An Agent may register a `treer.agent-interface/v1` server on its private
 loopback. The Controller verifies its manifest and automatically sends semantic
