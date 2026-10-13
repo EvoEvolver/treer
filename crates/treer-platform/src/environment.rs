@@ -56,6 +56,7 @@ pub fn inherited_environment() -> BTreeMap<OsString, OsString> {
 /// Machine exec is not a workload identity. Pass only the OS/session baseline,
 /// never the Controller's service configuration, credentials or loader hooks.
 /// Names are compared without case so mixed-case Windows variables survive.
+/// Adding variables expands a security boundary and requires cross-review.
 pub fn machine_exec_variable_allowed(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
     name.starts_with("LC_")

@@ -1112,7 +1112,9 @@ does not load shell syntax unless the executable is an explicit shell.
 Exec receives only an OS/session baseline, including Windows system and user
 profile variables. It receives no `TREER_*` identity, proxy variables, provider
 tokens or Node/loader hooks; it is not an implicit way to act as the calling
-Agent. Configure additional tools explicitly in the command or a trusted wrapper.
+Agent. PATH is the Controller's OS baseline without Treer's previous CLI-directory
+prepend; use an absolute path for tools absent from it. Configure additional
+tools explicitly in the command or a trusted wrapper.
 The command still has the machine OS user's filesystem authority, so this is
 environment hygiene rather than credential or filesystem isolation.
 
