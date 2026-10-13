@@ -1,5 +1,6 @@
 {
   "schema": "treer.launcher-interface/v1",
+  "launcher_security_epoch": 1,
   "protocol": "treer.agent-interface/v1",
   "capabilities": ["prompt.submit", "transcript.read", "state.observe", "abort", "prompt.queue", "prompt.notify", "prompt.queue.read"],
   "ui_path": "/",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { after, test } from "node:test";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { compatibility, digest } from "../scripts/bundle-contract.mjs";
@@ -19,15 +19,15 @@ if(args.join(' ')==='interface contract'){console.log(fs.readFileSync(path.join(
 if(args[0]==='interface'){console.log('{}');process.exit();}
 if(args.slice(0,3).join(' ')!=='agent admin profile')throw Error('Unexpected operation');
 const [action,name]=args.slice(3),file=path.join(root,name+'.json');
-if(action==='show'){if(!fs.existsSync(file)){console.error('profile_not_found');process.exit(1)}const saved=JSON.parse(fs.readFileSync(file));if(process.env.BAD_SHOW===name)saved.args=[];console.log(JSON.stringify(saved));}
-else if(action==='create'||action==='update'){const i=args.indexOf('--cwd'),command=action==='create'?args[i+2]:args[args.indexOf('--command')+1],tail=action==='create'?args.slice(args.indexOf('--')+1):args.flatMap((v,i)=>v==='--arg'?[args[i+1]]:[]);fs.writeFileSync(file,JSON.stringify({cwd:args[i+1],command,args:tail}));}
+if(action==='show'){if(!fs.existsSync(file)){console.error('profile_not_found');process.exit(1)}const saved=JSON.parse(fs.readFileSync(file));if(process.env.BAD_SHOW===name&&fs.existsSync(path.join(root,'bad-'+name)))saved.args=[];console.log(JSON.stringify(saved));}
+else if(action==='create'||action==='update'){const i=args.indexOf('--cwd'),command=action==='create'?args[i+2]:args[args.indexOf('--command')+1],tail=action==='create'?args.slice(args.indexOf('--')+1):args.flatMap((v,i)=>v==='--arg'?[args[i+1]]:[]);fs.writeFileSync(file,JSON.stringify({cwd:args[i+1],command,args:tail}));if(process.env.BAD_SHOW===name)fs.writeFileSync(path.join(root,'bad-'+name),'1');}
 else if(action==='delete')fs.unlinkSync(file);else throw Error('Unexpected operation');
 `;
 function fixture(t: { after: (fn: () => void) => void }) {
   const root = temp(), machine = join(root, "machine"), bundle = join(root, "bundle"), treer = join(root, "treer");
   mkdirSync(machine); cpSync(prepared, bundle, { recursive: true }); writeFileSync(treer, mock, { mode: 0o700 });
   const contract = JSON.parse(readFileSync(join(bundle, "interface-contract.json"), "utf8"));
-  const controller = { git_commit: "a".repeat(40), protocol: contract.protocol, capabilities: contract.capabilities, features: contract.required_features };
+  const controller = { git_commit: "a".repeat(40), protocol: contract.protocol, capabilities: contract.capabilities, features: contract.required_features, minimum_launcher_security_epoch: 1 };
   writeFileSync(join(root, "controller.json"), JSON.stringify(controller));
   const request = { schema: "treer.launcher-install/v1", operation: "install", bundle_dir: bundle,
     version: `sha256-${digest(readFileSync(join(bundle, "bundle-manifest.json")))}`, source_commit: "a".repeat(40), root: machine, cwd: ".", agents: [], node: process.execPath, treer, controller, allow_network: false };
@@ -66,6 +66,50 @@ test("capability disagreement, unknown old Controller and rollback incompatibili
   f.call(); assert.throws(() => f.call({ operation: "rollback", rollback_version: f.request.version, controller: { ...f.request.controller, features: [] } }), /lacks launcher/);
   assert.equal(compatibility({}, null).status, "unknown");
   assert.equal(f.call({ operation: "status", controller: null }).versions[0].compatibility.status, "unknown");
+});
+test("security epoch blocks unsafe rollback even when old capabilities remain supported", (t) => {
+  const f = fixture(t); f.call(); const previous = f.request.version;
+  const contractPath = join(f.bundle, "interface-contract.json"), contract = JSON.parse(readFileSync(contractPath, "utf8")); contract.launcher_security_epoch = 2;
+  writeFileSync(contractPath, JSON.stringify(contract));
+  const manifestPath = join(f.bundle, "bundle-manifest.json"), manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const entry = manifest.files.find((file: any) => file.path === "interface-contract.json"), bytes = readFileSync(contractPath); entry.size = bytes.length; entry.sha256 = digest(bytes);
+  writeFileSync(manifestPath, JSON.stringify(manifest)); f.request.version = `sha256-${digest(readFileSync(manifestPath))}`;
+  f.call({ operation: "update", controller: { ...f.request.controller, minimum_launcher_security_epoch: 2 } });
+  assert.throws(() => f.call({ operation: "rollback", rollback_version: previous, controller: { ...f.request.controller, minimum_launcher_security_epoch: 2 } }), /security floor/);
+  assert.equal(f.call({ operation: "status" }).current, f.request.version);
+});
+test("owner profile customizations are preserved and tampered stable entry is detected and repaired", (t) => {
+  const f = fixture(t); f.call();
+  const profilePath = join(f.root, "Codex + UI.json"), original = readFileSync(profilePath, "utf8"), custom = JSON.parse(original);
+  custom.args.push("--sandbox", "owner choice"); writeFileSync(profilePath, JSON.stringify(custom)); revise(f);
+  assert.throws(() => f.call({ operation: "update" }), /customized/);
+  assert.deepEqual(JSON.parse(readFileSync(profilePath, "utf8")), custom);
+  writeFileSync(profilePath, original);
+  const runner = join(f.base, "run.mjs"); writeFileSync(runner, "tampered entry");
+  assert.equal(f.call({ operation: "status" }).entry_integrity, "mismatch");
+  f.call({ operation: "update" }); assert.equal(f.call({ operation: "status" }).entry_integrity, "valid");
+});
+test("development source refuses implicit network and verifies source on reinstall", (t) => {
+  const f = fixture(t); rmSync(join(f.bundle, "runtime.mjs"));
+  for (const name of ["src", "package.json", "package-lock.json"]) cpSync(join(launcher, name), join(f.bundle, name), { recursive: true });
+  const manifestPath = join(f.bundle, "bundle-manifest.json"), manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.runtime_ready = false; manifest.files = [];
+  function visit(directory: string, prefix = "") {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name), relative = prefix + name;
+      if (lstatSync(path).isDirectory()) visit(path, relative + "/");
+      else if (relative !== "bundle-manifest.json") { const bytes = readFileSync(path); manifest.files.push({ path: relative, size: bytes.length, sha256: digest(bytes), executable: Boolean(lstatSync(path).mode & 0o111) }); }
+    }
+  }
+  visit(f.bundle); writeFileSync(manifestPath, JSON.stringify(manifest)); f.request.version = `sha256-${digest(readFileSync(manifestPath))}`;
+  assert.throws(() => f.call(), /not runtime-ready/);
+  assert.equal(existsSync(join(f.root, "calls")), false);
+  const npm = join(f.root, "npm.cjs");
+  writeFileSync(npm, `const fs=require('node:fs');if(!process.argv.includes('--ignore-scripts'))throw Error('lifecycle scripts must be disabled');fs.mkdirSync('node_modules/tsx/dist',{recursive:true});fs.mkdirSync('node_modules/ws',{recursive:true});fs.writeFileSync('node_modules/tsx/dist/loader.mjs','');fs.writeFileSync('node_modules/ws/package.json','{}');`);
+  assert.equal(f.call({ allow_network: true, npm_cli: npm }).portable, false);
+  assert.equal(f.call({ operation: "status" }).versions[0].compatibility.status, "compatible");
+  writeFileSync(join(f.base, f.request.version, "src/index.ts"), "tampered");
+  assert.throws(() => f.call({ allow_network: true, npm_cli: npm }), /integrity mismatch/);
 });
 test("bundle integrity, path traversal, symlink escape and concurrent locks fail closed", (t) => {
   const f = fixture(t); writeFileSync(join(f.bundle, "runtime.mjs"), "unverified code");

@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { compatibility, regular, verifyBundle } from "./bundle-contract.mjs";
+import { compatibility, digest, regular, verifyBundle } from "./bundle-contract.mjs";
 import { profileTransaction } from "./profile-transaction.mjs";
 
 function present(path) { try { lstatSync(path); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } }
@@ -53,7 +53,12 @@ export function controllerInstall(request) {
       const versions = readdirSync(root).filter((name) => /^sha256-[a-f0-9]{64}$/.test(name)).map((version) => {
         try { return inspect(version); } catch { return { version, compatibility: { status: "incompatible", reason: "Installed launcher integrity check failed" } }; }
       });
-      return { schema: "treer.launcher-install-result/v1", operation: "status", current: pointer?.version ?? null, previous: pointer?.previous ?? null, versions,
+      let entryIntegrity = "missing";
+      if (pointer?.version) {
+        try { entryIntegrity = digest(regular(join(root, "run.mjs"))) === digest(regular(join(root, versionName(pointer.version), "scripts/installed-runner.mjs"))) ? "valid" : "mismatch"; }
+        catch { entryIntegrity = "invalid"; }
+      }
+      return { schema: "treer.launcher-install-result/v1", operation: "status", current: pointer?.version ?? null, previous: pointer?.previous ?? null, versions, entry_integrity: entryIntegrity,
         legacy_current: !pointer && present(join(root, "current")) ? "legacy pointer present; not migrated" : null };
     }
     const version = versionName(request.operation === "rollback" ? request.rollback_version || pointer?.previous : request.version);
@@ -74,11 +79,12 @@ export function controllerInstall(request) {
           regular(request.npm_cli);
           try { execFileSync(request.node, [request.npm_cli, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: candidate, stdio: "ignore", timeout: 300000 }); }
           catch { throw new Error("Development dependency installation failed; candidate was not activated"); }
+          regular(join(candidate, "node_modules/tsx/dist/loader.mjs")); regular(join(candidate, "node_modules/ws/package.json"));
         }
         renameSync(candidate, versionRoot);
       }
       // Reuse only verified immutable directories, never overwrite running assets.
-      if (verified.portable) verifyBundle(versionRoot, version, request.source_commit);
+      verifyBundle(versionRoot, version, request.source_commit, !verified.portable);
     }
     const aligned = compatibility(verified.contract, request.controller);
     if (aligned.status !== "compatible") throw new Error(aligned.reason);
@@ -89,22 +95,38 @@ export function controllerInstall(request) {
     if (profiles.some((profile) => !profile || typeof profile.name !== "string" || !Array.isArray(profile.args))) throw new Error("Unknown launcher provider");
     const transaction = profileTransaction(request.treer, (message) => console.error(message));
     const originals = new Map(profiles.map((profile) => [profile.name, transaction.show(profile.name)]));
-    const changed = [];
+    const receiptPath = join(root, "profiles-receipt.json");
+    const originalReceipt = present(receiptPath) ? regular(receiptPath) : null;
+    const receipt = originalReceipt ? JSON.parse(originalReceipt.toString("utf8")) : {};
     const runner = join(root, "run.mjs");
-    // The stable trampoline has no version-specific logic and is never replaced
-    // during an update; all runtime assets remain in immutable version trees.
-    if (!present(runner)) atomic(runner, regular(join(versionRoot, "scripts/installed-runner.mjs")));
-    else regular(runner);
+    const specification = (profile) => ({ command: profile.command, cwd: profile.cwd, args: profile.args ?? [] });
+    for (const profile of profiles) {
+      const current = originals.get(profile.name);
+      if (!current) continue;
+      const previous = receipt[profile.name];
+      // A first takeover only adopts a known legacy launcher entry, never an
+      // arbitrary owner's command. Any subsequent customization is protected.
+      const legacy = !previous && current.command === join(root, "current/launchers/agent/scripts/treer-agent.sh") && current.cwd === cwd && JSON.stringify(current.args) === JSON.stringify(profile.args);
+      if (!legacy && (!previous || JSON.stringify(specification(current)) !== JSON.stringify(previous))) throw new Error(`Launcher profile is customized; preserve or remove it explicitly before installation: ${profile.name}`);
+    }
+    const changed = [];
+    // A running Node process already loaded this trampoline. Atomically repair
+    // it against verified payload bytes without altering versioned runtime assets.
+    const runnerBytes = regular(join(versionRoot, "scripts/installed-runner.mjs"));
+    if (!present(runner) || digest(regular(runner)) !== digest(runnerBytes)) atomic(runner, runnerBytes);
     const next = { schema: "treer.launcher-current/v1", version, previous: pointer?.version !== version ? pointer?.version ?? null : pointer?.previous ?? null, node: request.node, treer: request.treer };
     atomic(pointerPath, JSON.stringify(next) + "\n");
     try {
       for (const profile of profiles) {
         changed.push({ name: profile.name, previous: originals.get(profile.name) });
         transaction.saveProfile({ ...profile, args: [runner, ...profile.args] }, request.node, cwd, originals.get(profile.name));
+        receipt[profile.name] = { command: request.node, cwd, args: [runner, ...profile.args] };
       }
+      atomic(receiptPath, JSON.stringify(receipt) + "\n");
     } catch (error) {
       let failed = false;
       for (const original of changed.reverse()) { try { transaction.restoreProfile(original); } catch { failed = true; } }
+      try { if (originalReceipt) atomic(receiptPath, originalReceipt); else if (present(receiptPath)) rmSync(receiptPath); } catch { failed = true; }
       if (failed) throw new Error("Profile rollback incomplete; retained usable candidate pointer, inspect profiles before retry");
       if (pointer) atomic(pointerPath, JSON.stringify(pointer) + "\n"); else rmSync(pointerPath);
       throw error;

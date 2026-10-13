@@ -10,6 +10,8 @@ export function regular(path, limit = 32 * 1024 * 1024) {
 }
 export function compatibility(contract, controller) {
   if (!controller || !Array.isArray(controller.capabilities) || !Array.isArray(controller.features)) return { status: "unknown", reason: "Controller capability handshake unavailable" };
+  if (!Number.isSafeInteger(controller.minimum_launcher_security_epoch) || controller.minimum_launcher_security_epoch < 1) return { status: "unknown", reason: "Controller launcher security floor unavailable" };
+  if (!Number.isSafeInteger(contract.launcher_security_epoch) || contract.launcher_security_epoch < controller.minimum_launcher_security_epoch) return { status: "incompatible", reason: "Launcher is below the Controller security floor; unsafe rollback is refused" };
   if (contract.schema !== "treer.launcher-interface/v1" || contract.protocol !== controller.protocol || !Array.isArray(contract.capabilities) || !Array.isArray(contract.required_features)) return { status: "incompatible", reason: "Launcher protocol/contract mismatch" };
   if (!contract.capabilities.every((capability) => controller.capabilities.includes(capability)) || !contract.required_features.every((feature) => controller.features.includes(feature))) return { status: "incompatible", reason: "Controller lacks launcher capabilities/features; update Controller before installing this launcher" };
   return { status: "compatible", reason: null };

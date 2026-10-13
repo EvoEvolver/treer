@@ -101,7 +101,8 @@ rollback; profile writes are read back, and failures restore prior profiles and
 the pointer. If profile restoration fails, the candidate stays usable and the
 error is explicit. No update restarts running Agents. A private installation
 lock serializes mutations; stale locks require manual inspection, not PID-based
-automatic breaking. Unix state files use 0600 and managed directories use 0700;
+automatic breaking. No automatic unlock/prune is provided: preserve retained
+versions unless an operator explicitly reviews cleanup. Unix state files use 0600 and managed directories use 0700;
 Windows relies on the owning account's private-directory ACL boundary rather
 than pretending POSIX mode bits provide ACL isolation.
 
@@ -112,6 +113,16 @@ install/update/rollback. Missing required features or protocol mismatch fail
 explicitly. The Node entry repeats the Controller handshake before starting the
 runtime. A new Controller may accept an older declared contract only if its
 capabilities and required features are supported.
+The contract also declares a `launcher_security_epoch`; the Controller reports
+its minimum accepted epoch. Rollback refuses older security epochs even when
+their protocol capabilities still work. Missing security-floor metadata is
+unknown, not compatible. Security fixes must bump the epoch and Controller floor
+when earlier retained versions must no longer be activated. Same-name profiles
+are adopted only from the known legacy entry or compared against the private
+last-verified receipt; owner customizations are preserved by refusing the update,
+requiring explicit operator review rather than silent overwrite. The stable
+trampoline is hash-compared with verified candidate bytes and atomically repaired
+on update; status exposes its integrity separately from immutable version assets.
 
 `install.sh`, `apply.sh` and the Git bootstrap below are legacy/development
 entry points, deprecated for default production installation. They retain the

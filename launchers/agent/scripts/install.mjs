@@ -123,7 +123,7 @@ catch (error) {
   console.error(safeMessage);
   if (process.argv[2] === "--controller-request") {
     const message = String(safeMessage);
-    const code = /rollback incomplete/.test(message) ? "profile_rollback_incomplete" : /Profile verification failed/.test(message) ? "profile_verification_failed" : /owns the lock/.test(message) ? "install_locked" : /lacks launcher|protocol\/contract mismatch|handshake unavailable/.test(message) ? "launcher_incompatible" : "launcher_install_failed";
+    const code = /rollback incomplete/.test(message) ? "profile_rollback_incomplete" : /Profile verification failed/.test(message) ? "profile_verification_failed" : /owns the lock/.test(message) ? "install_locked" : /lacks launcher|protocol\/contract mismatch|handshake unavailable|security floor/.test(message) ? "launcher_incompatible" : "launcher_install_failed";
     console.log(JSON.stringify({ error: { code, message } }));
   }
   if (process.argv[2] !== "--controller-request" && error.stderr) console.error(String(error.stderr));
