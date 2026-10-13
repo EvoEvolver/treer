@@ -50,6 +50,8 @@ test("truncated downloads cannot run a partial installer", (t) => {
 
 test("branch/tag/short/missing refs, unavailable SHA and wrong HEAD never run installer", (t) => {
   const f = fixture(t);
+  const missing = spawnSync("/bin/sh", ["-s"], { input: script, env: f.env, encoding: "utf8" });
+  assert.notEqual(missing.status, 0); assert.match(missing.stderr, /full 40-character/);
   for (const ref of ["main", "v1", "a".repeat(39), "", "g".repeat(40)]) {
     const result = f.run(["--ref", ref]); assert.notEqual(result.status, 0); assert.match(result.stderr, /full 40-character/);
   }

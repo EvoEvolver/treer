@@ -96,7 +96,7 @@ git -C treer-launcher sparse-checkout init --cone
 git -C treer-launcher sparse-checkout set launchers/agent
 git -C treer-launcher fetch --depth 1 origin "$sha"
 git -C treer-launcher checkout --detach FETCH_HEAD
-test "$(git -C treer-launcher rev-parse HEAD)" = "$sha"
+test "$(git -C treer-launcher rev-parse HEAD)" = "$sha" || exit 1
 ./treer-launcher/launchers/agent/install.sh --source ./treer-launcher --agent codex
 ```
 
