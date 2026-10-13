@@ -172,6 +172,35 @@ pub struct WorkspacePolicyProvider {
     pub revision_hint: u64,
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
+    #[serde(default)]
+    pub publish_authority: PolicyPublishAuthority,
+}
+
+pub const CAPABILITY_POLICY_PUBLISH_AUTHORITY: &str = "policy.publish-authority.v1";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyPublishAuthority {
+    #[default]
+    OwnerSession,
+    ProviderOperator,
+}
+
+impl PolicyPublishAuthority {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerSession => "owner_session",
+            Self::ProviderOperator => "provider_operator",
+        }
+    }
+}
+
+/// Sent only to the dedicated capability-gated endpoint, never the legacy PUT.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetPolicyPublishAuthorityRequest {
+    pub expected_app_id: String,
+    pub publish_authority: PolicyPublishAuthority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
