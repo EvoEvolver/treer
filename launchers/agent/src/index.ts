@@ -179,9 +179,11 @@ runtime.on("log", (message) => console.log(`[${runtime.harness.id}] ${message}`)
 
 const server = createServer(async (request, response) => {
   const method = request.method ?? "GET";
-  const url = new URL(request.url ?? "/", "http://127.0.0.1");
-  const path = requestPath(url);
   try {
+    let url: URL;
+    try { url = new URL(request.url ?? "/", "http://127.0.0.1"); }
+    catch { throw new HttpInputError("Invalid request URL", 400); }
+    const path = requestPath(url);
     const queueRoute = path === "/v1/prompts" || path === "/v1/queue" || path.startsWith("/v1/queue/") || path.startsWith("/v1/submissions/");
     const attested = queueRoute ? verifyInterfaceCaller(request.headers, agentId, interfaceInstanceId) : false;
     if (path === "/api/session/export" && method === "GET") {
@@ -369,7 +371,9 @@ const server = createServer(async (request, response) => {
 
 const socketsServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
 server.on("upgrade", (request, socket, head) => {
-  const path = requestPath(new URL(request.url ?? "/", "http://127.0.0.1"));
+  let path: string;
+  try { path = requestPath(new URL(request.url ?? "/", "http://127.0.0.1")); }
+  catch { socket.destroy(); return; }
   if (path !== "/ws") {
     socket.destroy();
     return;

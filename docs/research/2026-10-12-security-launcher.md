@@ -65,6 +65,9 @@ machine sandbox claim is made.
   object-only JSON and generic parse errors, request logs limited to error
   class, 16 KiB WS maxPayload and socket-error handling. Limits do not bound
   concurrent connections, cumulative history or model output.
+  An additional small fix guards malformed absolute URLs in HTTP/WS before
+  routing: `http://%` previously escaped the request try/catch. The sealed
+  regression now requires 400 and verifies the process still serves state.
 
 ### P1 — Loopback UI/AIS lacks independent local-client authentication (open design boundary)
 

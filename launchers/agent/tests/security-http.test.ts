@@ -64,3 +64,15 @@ test("oversized WebSocket client payload closes that socket without killing the 
   assert.equal(await closed, 1009);
   assert.equal((await fetch(server.base + "/api/state")).status, 200);
 });
+
+test("malformed absolute request URL is rejected without unhandled rejection or process exit", async (t) => {
+  const server = await fixture(t), url = new URL(server.base);
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = request({ hostname: url.hostname, port: url.port, path: "http://%", method: "GET" }, (response) => {
+      response.resume(); response.on("end", () => resolve(response.statusCode!));
+    });
+    req.on("error", reject); req.end();
+  });
+  assert.equal(status, 400);
+  assert.equal((await fetch(server.base + "/api/state")).status, 200);
+});
