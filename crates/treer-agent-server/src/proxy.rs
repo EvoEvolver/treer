@@ -994,6 +994,9 @@ async fn fetch_service_json(
     let url = format!("http://127.0.0.1:{port}{path}");
     let client = reqwest::Client::builder()
         .no_proxy()
+        // A service must not turn this loopback-only fetch into a request to
+        // another port or host.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_millis(timeout_ms))
         .build()
         .map_err(|error| ProtocolError::new("service_http_failed", error.to_string()))?;
@@ -1447,5 +1450,56 @@ mod tests {
             .await
             .expect_err("reject authority-relative path");
         assert_eq!(error.code, "invalid_service_http_request");
+    }
+
+    #[tokio::test]
+    async fn service_http_fetch_never_follows_redirects() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind redirect target");
+        let target_port = target.local_addr().expect("target address").port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            axum::serve(
+                target,
+                Router::new().route(
+                    "/secret",
+                    get(move || {
+                        let counted = counted.clone();
+                        async move {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Json(serde_json::json!({"leaked": true}))
+                        }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve target");
+        });
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind redirecting service");
+        let port = listener.local_addr().expect("service address").port();
+        let location = format!("http://127.0.0.1:{target_port}/secret");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/manifest",
+                    get(move || {
+                        let location = location.clone();
+                        async move { axum::response::Redirect::temporary(&location) }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve redirecting service");
+        });
+        let error = fetch_service_json(port, "/v1/manifest", 4_096, 1_000)
+            .await
+            .expect_err("redirect must not be followed");
+        assert_eq!(error.code, "service_http_status");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
