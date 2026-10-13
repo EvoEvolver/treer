@@ -22,6 +22,8 @@ class FakeProxy(BaseHTTPRequestHandler):
     def do_GET(self): self.dispatch()
     def do_POST(self): self.dispatch()
     def dispatch(self):
+        if self.path == '/redirect':
+            self.send_response(302);self.send_header('Location','/trap');self.send_header('Content-Length','0');self.end_headers();return
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))) or b'{}') if self.headers.get('Content-Type') != 'application/x-www-form-urlencoded' else self.rfile.read(int(self.headers['Content-Length']))
         self.server.calls.append((self.command,self.path,self.headers.get('Authorization'),body))
         token = self.headers.get('Authorization','').removeprefix('Bearer ')
@@ -106,6 +108,13 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':2,'revision':1})[0],200)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2},'human-member')[0],403)
         self.assertEqual(self.request('POST','/v1/policy/rollback',{'expected_revision':3,'revision':2})[0],200)
+    def test_authenticated_proxy_requests_never_follow_redirects(self):
+        with self.assertRaises(policy.AuthError) as caught:
+            self.app.auth.request('GET','/redirect','human-owner')
+        self.assertEqual(caught.exception.status,502)
+        self.assertFalse(any(call[1]=='/trap' for call in self.proxy.calls))
+        with self.assertRaises(policy.AuthError): self.app.auth.diagnostic('unrestricted-route','human-owner')
+
     def test_diagnostics_need_both_bound_runtime_and_human(self):
         with patch.dict(os.environ, {'TREER_WORKLOAD_CREDENTIAL':''}):
             self.assertEqual(self.request('GET','/v1/policy/decisions')[0],503)
