@@ -103,6 +103,13 @@ struct Args {
         help = "Disable login and use a local administrator session"
     )]
     disable_auth: bool,
+    #[arg(
+        long,
+        env = "TREER_ALLOW_UNAUTHENTICATED_LISTEN",
+        default_value_t = false,
+        help = "Permit --disable-auth on a non-loopback address (trusted isolated networks only)"
+    )]
+    allow_unauthenticated_listen: bool,
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     database_url: String,
     #[arg(
@@ -160,6 +167,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let admin_password = resolve_admin_password(args.admin_password, args.disable_auth)?;
     let listen = listen_address(args.listen, args.port);
+    require_loopback_for_disabled_auth(
+        args.disable_auth,
+        args.allow_unauthenticated_listen,
+        listen,
+    )?;
     let proxy_public_url = public_url(
         args.proxy_public_url,
         args.railway_public_domain.as_deref(),
@@ -376,6 +388,22 @@ fn resolve_admin_password(configured: Option<String>, auth_disabled: bool) -> Re
     }
 }
 
+/// Disabled authentication grants every caller administrator and machine
+/// identity, so it must not be reachable beyond the host by accident (for
+/// example a stray environment variable together with a PORT-derived 0.0.0.0).
+fn require_loopback_for_disabled_auth(
+    auth_disabled: bool,
+    allowed: bool,
+    listen: SocketAddr,
+) -> Result<()> {
+    if auth_disabled && !allowed && !listen.ip().is_loopback() {
+        anyhow::bail!(
+            "--disable-auth grants unauthenticated administrator access; listen on a loopback address or pass --allow-unauthenticated-listen on an isolated network"
+        );
+    }
+    Ok(())
+}
+
 fn listen_address(configured: Option<SocketAddr>, port: Option<u16>) -> SocketAddr {
     configured.unwrap_or_else(|| match port {
         Some(port) => SocketAddr::from(([0, 0, 0, 0], port)),
@@ -475,6 +503,18 @@ mod tests {
             status.success(),
             "credential redaction failed in isolated child"
         );
+    }
+
+    #[test]
+    fn disabled_auth_requires_loopback_unless_explicitly_allowed() {
+        let loopback: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let v6_loopback: SocketAddr = "[::1]:8787".parse().unwrap();
+        let public: SocketAddr = "0.0.0.0:8787".parse().unwrap();
+        assert!(require_loopback_for_disabled_auth(true, false, loopback).is_ok());
+        assert!(require_loopback_for_disabled_auth(true, false, v6_loopback).is_ok());
+        assert!(require_loopback_for_disabled_auth(true, false, public).is_err());
+        assert!(require_loopback_for_disabled_auth(true, true, public).is_ok());
+        assert!(require_loopback_for_disabled_auth(false, false, public).is_ok());
     }
 
     #[test]

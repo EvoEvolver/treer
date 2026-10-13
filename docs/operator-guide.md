@@ -43,6 +43,7 @@ export TREER_ENABLE_CORE_MESSAGES=true
 just stage-artifacts
 cargo run -p treer-proxy -- \
   --disable-auth \
+  --allow-unauthenticated-listen \
   --listen 0.0.0.0:8787 \
   --public-url http://PROXY_HOST:8787 \
   --app-public-url http://127.0.0.1:5173
@@ -53,7 +54,10 @@ pnpm dev
 ```
 
 `--disable-auth` is intended for local testing. It skips the login screen and
-uses a synthetic local user. Omit it and set `ADMIN_PASSWORD` for shared or
+uses a synthetic local user, and every caller (including machine and
+administrator routes) is trusted. The Proxy refuses it on a non-loopback
+address unless `--allow-unauthenticated-listen` (`TREER_ALLOW_UNAUTHENTICATED_LISTEN`)
+is also given; use that only on an isolated network. Omit it and set `ADMIN_PASSWORD` for shared or
 deployed servers.
 
 Core Message routes are rollout-gated and default off. Enable the Proxy gate
