@@ -152,7 +152,10 @@ AGENT_UI_HARNESS=acp AGENT_UI_ACP_COMMAND=claude-agent-acp AGENT_UI_CWD="$PWD" n
 ```
 
 The server binds an OS-selected free port on `127.0.0.1` by default. Each Agent
-has its own listener; the launcher registers the actual port, not a guessed
+has its own listener; the launcher reads `/v1/manifest` before registration and
+uses its capabilities, instance ID and UI path directly. It verifies the instance
+and CLI-supported protocol before registering, so new AIS capabilities cannot
+drift from the registration request. The launcher registers the actual port, not a guessed
 port. Set `AGENT_UI_PORT` to pin a private port (a conflict fails startup).
 `AGENT_UI_*` settings also accept the older `CODEX_UI_*` names. Saved startup
 commands must use `launchers/agent/scripts/treer-agent.sh` or an installed

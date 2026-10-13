@@ -111,14 +111,7 @@ if ! command -v treer >/dev/null 2>&1; then
 fi
 
 register() {
-  treer interface register \
-    --port "$PORT" \
-    --instance-id "$INSTANCE_ID" \
-    --capability prompt.submit \
-    --capability transcript.read \
-    --capability state.observe \
-    --capability abort \
-    --ui-path /
+  node "$APP_ROOT/scripts/register-interface.mjs" "$PORT"
 }
 
 register
