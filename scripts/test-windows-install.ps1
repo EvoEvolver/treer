@@ -6,11 +6,12 @@ $temporary = Join-Path ([IO.Path]::GetTempPath()) ('treer-installer-test-' + [Gu
 $installation = Join-Path $temporary 'bin with spaces'
 $previousUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $previousPath = $env:Path
-$fixture = @{ ArtifactDirectory = $ArtifactDirectory; ChecksumOverride = $null }
+$fixture = @{ ArtifactDirectory = $ArtifactDirectory; ChecksumOverride = $null; RequestCount = 0 }
 # Exercise the actual installer with native release executables. Keep network
 # responses deterministic; installation, process checks, hashes and PATH are real.
 ${function:Invoke-WebRequest} = {
     param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)
+    $fixture.RequestCount += 1
     $binary = ([Uri]$Uri).Segments[-1]
     if ($binary -eq 'SHA256SUMS') {
         $content = Get-Content -LiteralPath (Join-Path $fixture.ArtifactDirectory $binary) -Raw
@@ -26,7 +27,37 @@ try {
         [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $scriptFile), [ref]$tokens, [ref]$errors) | Out-Null
         if ($errors.Count) { throw ($errors | Out-String) }
     }
-    & ./scripts/install.ps1 -ArtifactBase 'https://fixture.invalid/artifacts/' -InstallDir $installation
+    # Rejected origins must fail before any request or installation write.
+    foreach ($case in @(
+        @{ Uri = 'http://fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'http://127.0.0.1.fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'http://localhost.fixture.invalid/artifacts/'; Error = '*Refusing cleartext HTTP artifacts*' }
+        @{ Uri = 'https://fixture-user:fixture-password@fixture.invalid/artifacts/'; Error = '*must not contain credentials*' }
+        @{ Uri = 'http://fixture-user:fixture-password@127.0.0.1/artifacts/'; Error = '*must not contain credentials*' }
+    )) {
+        $beforeRequests = $fixture.RequestCount
+        $rejected = $false
+        try {
+            & ./scripts/install.ps1 -ArtifactBase $case.Uri -InstallDir $installation
+        } catch {
+            if ($_.Exception.Message -notlike $case.Error) { throw }
+            $rejected = $true
+        }
+        if (!$rejected -or $fixture.RequestCount -ne $beforeRequests -or (Test-Path -LiteralPath $installation)) {
+            throw 'Rejected artifact origin reached the download or installation step.'
+        }
+    }
+    # Network responses stay mocked, but URL parsing and the actual install are real.
+    foreach ($origin in @(
+        'https://fixture.invalid/artifacts/'
+        'http://localhost/artifacts/'
+        'http://127.0.0.1/artifacts/'
+        'http://[::1]/artifacts/'
+    )) {
+        $beforeRequests = $fixture.RequestCount
+        & ./scripts/install.ps1 -ArtifactBase $origin -InstallDir $installation
+        if ($fixture.RequestCount -le $beforeRequests) { throw 'Allowed artifact origin did not reach the download step.' }
+    }
     & ./scripts/install.ps1 -ArtifactBase 'https://fixture.invalid/artifacts/' -InstallDir $installation
     foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
         if ((Get-Command "$binary.exe").Source -ne (Join-Path $installation "$binary.exe")) { throw "PATH failed for $binary." }
