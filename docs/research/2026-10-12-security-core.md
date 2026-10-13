@@ -289,7 +289,12 @@ sender 证明与取消权限、public ingress identity header 清洗等。
 CommandResult 增加假机器状态层回归；它不是真实网络攻击。未新启动真实 Host/Controller，
 未做 Linux/Windows runtime 验收；本次仅修改平台无关的 Proxy Rust 认证/状态代码。
 格式检查、Proxy all-targets Clippy `-D warnings`、文档检查通过；合并前由 release-eng
-交叉评审。NATS 可选测试可能在未提供 TREER_TEST_NATS_URL 时提前返回，不把整个 suite
+交叉评审。Controller all-targets Clippy 也通过。release-eng 对修复和定向依赖升级的源码
+评审通过，并以清空环境/全新 HOME/隔离 PostgreSQL 独立执行 3 个针对性回归通过
+（Core Message `msg_1e2b759d1a8e4198b8d968a7ba5ee4f5`）；没有独立重建完整 workspace。
+Host Unix IPC 的 socket 0600 和 Windows current-user/SYSTEM DACL、拒绝远端 named pipe
+客户端，以及 Controller 的 local workload credential 验证也检查了源码；本次没有重跑
+这些平台的真实进程攻击测试。NATS 可选测试可能在未提供 TREER_TEST_NATS_URL 时提前返回，不把整个 suite
 通过当成本次真实 NATS 集群或资源预算验收。
 
 下一阶段优先顺序：修复发布与 legacy inventory 退出计划 → enforce 默认迁移 → JWT 在线
