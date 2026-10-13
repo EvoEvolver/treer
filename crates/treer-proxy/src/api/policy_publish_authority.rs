@@ -23,6 +23,36 @@ fn authority_response(provider: WorkspacePolicyProvider, treer_url: &str) -> Res
         .into_response()
 }
 
+// Called only after authenticating this exact workspace's owner or the bound
+// Provider runtime. Do not enumerate organizations/workspaces to build a link.
+async fn settings_url(auth: &AuthStore, workspace: &str) -> Result<String, ApiFailure> {
+    let organization: Option<String> = sqlx::query_scalar(
+        "SELECT organization_id FROM workspaces WHERE workspace_id=$1 AND deleted_at IS NULL",
+    )
+    .bind(workspace)
+    .fetch_optional(&auth.pool())
+    .await
+    .map_err(|_| {
+        ApiFailure::internal(
+            "policy_provider_store_failed",
+            "cannot resolve settings target",
+        )
+    })?;
+    let organization = organization
+        .ok_or_else(|| ApiFailure::not_found("workspace_not_found", "workspace not available"))?;
+    let mut url = auth.app_public_url().clone();
+    url.path_segments_mut()
+        .map_err(|_| ApiFailure::internal("invalid_console_url", "invalid control console URL"))?
+        .clear()
+        .push("orgs")
+        .push(&organization)
+        .push("workspaces")
+        .push(workspace);
+    url.set_query(None);
+    url.set_fragment(Some("policy-provider"));
+    Ok(url.into())
+}
+
 pub(super) async fn set_policy_publish_authority(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
@@ -53,7 +83,8 @@ pub(super) async fn set_policy_publish_authority(
                 "expected App is no longer the selected Provider",
             )
         })?;
-    Ok(authority_response(provider, auth.app_public_url().as_str()))
+    let url = settings_url(&auth, &workspace).await?;
+    Ok(authority_response(provider, &url))
 }
 
 async fn provider_runtime(
@@ -142,10 +173,9 @@ pub(super) async fn app_get_policy_publish_authority(
     Path(service): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiFailure> {
-    Ok(authority_response(
-        provider_runtime(&auth, &service, &headers).await?,
-        auth.app_public_url().as_str(),
-    ))
+    let provider = provider_runtime(&auth, &service, &headers).await?;
+    let url = settings_url(&auth, &provider.workspace_id).await?;
+    Ok(authority_response(provider, &url))
 }
 
 pub(super) async fn app_operator_validate_policy(

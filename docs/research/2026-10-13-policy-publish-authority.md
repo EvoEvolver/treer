@@ -23,7 +23,10 @@ explicit upgrade error, never permission to publish.
 - `GET /api/apps/{service}/policy/publish-authority`: selected Provider runtime
   workload identity, returning `provider`, `publish_authority`, capabilities and
   supported schema versions. `treer_url` is the Core-configured control console
-  URL, not the Proxy API origin or a caller-supplied redirect. No owner token is required for this read.
+  URL with `/orgs/{organization_id}/workspaces/{workspace_id}#policy-provider`,
+  not the Proxy API origin or a caller-supplied redirect. Only the authenticated
+  binding's workspace is resolved; IDs are encoded as path segments and unrelated
+  workspaces are never enumerated. No owner token is required for this read.
 - The App endpoint is read-only: `PUT` returns 405 even with the current runtime
   credential and an owner App token. Only a Core owner session can change the
   switch. App UI displays the mode and links to trusted Treer Workspace settings.

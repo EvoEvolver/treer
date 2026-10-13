@@ -47,7 +47,10 @@ async fn default_owner_only_switch_audit_and_operator_validation() {
     .unwrap();
     let value = body(response).await;
     assert_eq!(value["publish_authority"], "owner_session");
-    assert_eq!(value["treer_url"], auth.app_public_url().as_str());
+    assert_eq!(
+        value["treer_url"],
+        "https://app.treer.example/orgs/org_diagnostic/workspaces/diagnostic#policy-provider"
+    );
     assert_eq!(
         value["capabilities"][0],
         CAPABILITY_POLICY_PUBLISH_AUTHORITY
@@ -495,6 +498,57 @@ async fn operator_explain_is_workspace_scoped_and_does_not_publish() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn settings_links_are_scoped_to_authenticated_provider_and_encode_segments() {
+    let (auth, _, app, headers) = policy_diagnostics::tests::fixture().await;
+    auth.seed_test_workspace("unrelated-secret-workspace").await;
+    let value = body(
+        app_get_policy_publish_authority(
+            Extension(auth.clone()),
+            Path(app.service_id.clone()),
+            headers.clone(),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        value["treer_url"],
+        "https://app.treer.example/orgs/org_diagnostic/workspaces/diagnostic#policy-provider"
+    );
+    assert!(!value.to_string().contains("unrelated-secret"));
+    assert!(app_get_policy_publish_authority(
+        Extension(auth.clone()),
+        Path("unrelated-secret-service".into()),
+        headers
+    )
+    .await
+    .is_err());
+    let response = set_policy_publish_authority(
+        Extension(auth.clone()),
+        Extension(session("owner")),
+        Path("diagnostic".into()),
+        switch(&app, PolicyPublishAuthority::OwnerSession),
+    )
+    .await
+    .unwrap();
+    assert_eq!(body(response).await["treer_url"], value["treer_url"]);
+    assert!(set_policy_publish_authority(
+        Extension(auth.clone()),
+        Extension(session("member")),
+        Path("unrelated-secret-workspace".into()),
+        switch(&app, PolicyPublishAuthority::ProviderOperator)
+    )
+    .await
+    .is_err());
+    assert!(settings_url(&auth, "missing-workspace").await.is_err());
+    auth.seed_test_workspace("encoded /?#workspace").await;
+    let url = Url::parse(&settings_url(&auth, "encoded /?#workspace").await.unwrap()).unwrap();
+    assert_eq!(url.fragment(), Some("policy-provider"));
+    assert!(url.query().is_none());
+    assert!(url.path().contains("encoded%20%2F%3F%23workspace"));
 }
 
 #[tokio::test]
