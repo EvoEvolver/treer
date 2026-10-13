@@ -107,6 +107,14 @@ enum ServiceCommand {
     Restart,
     #[command(about = "Hot restart only the replaceable Controller")]
     RestartController,
+    #[command(about = "Change a stopped machine's root; does not move files or start services")]
+    RelocateRoot {
+        #[arg(long)]
+        root: PathBuf,
+        /// Acknowledge that all saved relative workload paths must exist in the new root.
+        #[arg(long, required = true)]
+        accept_workload_migration: bool,
+    },
     #[command(
         about = "Repair and activate a partially installed service without a new enrollment key"
     )]
@@ -133,8 +141,9 @@ struct ConnectArgs {
     proxy: Url,
     #[arg(long = "key", env = "TREER_ENROLLMENT_KEY")]
     enrollment_key: String,
-    #[arg(long, env = "TREER_WORKSPACE_ROOT", default_value = ".")]
-    root: PathBuf,
+    /// New enrollment root; Windows defaults to a private user directory, Unix to cwd.
+    #[arg(long, env = "TREER_WORKSPACE_ROOT")]
+    root: Option<PathBuf>,
     #[arg(long, env = "TREER_AGENT_SERVER_LISTEN")]
     listen: Option<SocketAddr>,
     /// Select nohup (default), an operating-system service, or foreground mode.
@@ -418,6 +427,9 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
                 ServiceCommand::Stop => service::stop(&workspace),
                 ServiceCommand::Restart => service::restart(&workspace),
                 ServiceCommand::RestartController => service::restart_controller(&workspace),
+                ServiceCommand::RelocateRoot { root, .. } => {
+                    service::relocate_root(&workspace, &root)
+                }
                 ServiceCommand::Repair { service_mode } => {
                     let network = select_network_mode(config.network_mode)?;
                     let activation =
@@ -457,6 +469,11 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     selection.announce();
     let network = select_network_mode(None)?;
     if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
+        if let Some(root) = &args.root {
+            if std::fs::canonicalize(root)? != std::fs::canonicalize(&config.root)? {
+                anyhow::bail!("existing enrollment root is unchanged; stop the Host and use service relocate-root --root ... --accept-workload-migration explicitly");
+            }
+        }
         let installed_proxy = normalize_http_url(
             Url::parse(&config.proxy).context("invalid proxy URL in installed service config")?,
         )?;
@@ -504,8 +521,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         );
         return service::wait_for_foreground(activation).await;
     }
-    let root = std::fs::canonicalize(&args.root)
-        .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
+    let root = service::new_enrollment_root(args.root.as_deref())?;
     let listen = service::resolve_listen(&enrollment.workspace_id, args.listen).await?;
     let install_hostname = service::current_hostname()?;
     let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity, None).await?;
@@ -730,6 +746,42 @@ fn sibling_treer_binary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn offline_root_migration_requires_explicit_acknowledgement() {
+        use clap::Parser;
+        assert!(super::Args::try_parse_from([
+            "treer-agent-server",
+            "service",
+            "--workspace",
+            "fixture",
+            "relocate-root",
+            "--root",
+            "."
+        ])
+        .is_err());
+        let parsed = super::Args::try_parse_from([
+            "treer-agent-server",
+            "service",
+            "--workspace",
+            "fixture",
+            "relocate-root",
+            "--root",
+            ".",
+            "--accept-workload-migration",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(super::Command::Service(super::ServiceArgs {
+                command: super::ServiceCommand::RelocateRoot {
+                    accept_workload_migration: true,
+                    ..
+                },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn workload_proxy_url_contains_only_public_base() {
         let input = url::Url::parse(
             "wss://user:fixture-secret@proxy.example:8443/connect?key=fixture#secret",
@@ -901,7 +953,7 @@ mod tests {
         ConnectArgs {
             proxy: Url::parse("https://treer.example/").expect("proxy URL"),
             enrollment_key: "test-key".to_string(),
-            root: PathBuf::from("."),
+            root: Some(PathBuf::from(".")),
             listen: None,
             service_mode: service::ServiceMode::Auto,
             name: name.map(str::to_string),

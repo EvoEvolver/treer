@@ -56,6 +56,7 @@ pub fn start(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
         bail!("use restore or connect to start a foreground Host");
     }
     let _lock = treer_platform::LocalLock::acquire(&config.server_id)?;
+    require_root_alignment(paths, config)?;
     if let Some(process) = identity(paths, config)? {
         if live(&process)? {
             if host_is_running(&config.host_socket) {

@@ -25,11 +25,78 @@ fn windows_supervision_and_identity_paths() {
 }
 
 #[cfg(windows)]
-#[tokio::test]
+#[test]
 #[ignore = "requires freshly built sibling Controller and Host binaries"]
-async fn windows_real_host_detached_restart_and_stop() {
+fn windows_real_host_detached_restart_and_stop() {
+    let private = env::temp_dir().join(format!("treer-win-smoke-{}", Uuid::new_v4().simple()));
+    for child in ["local", "roaming", "temp"] {
+        treer_platform::secure_directory(&private.join(child)).unwrap();
+    }
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .env_clear()
+        .envs(treer_platform::machine_exec_environment())
+        .args([
+            "--exact",
+            "service::tests::windows_isolated_host_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("LOCALAPPDATA", private.join("local"))
+        .env("TREER_TEST_WINDOWS_CONFIG_DIR", private.join("local"))
+        .env("APPDATA", private.join("roaming"))
+        .env("TEMP", private.join("temp"))
+        .env("TMP", private.join("temp"))
+        .env("TREER_MACHINE_TOKEN", "synthetic-stale-machine")
+        .env("TREER_OPERATOR_CREDENTIAL", "synthetic-stale-operator")
+        .env("TREER_ENROLLMENT_KEY", "synthetic-stale-enrollment")
+        .env("AGENT_UI_INSTANCE_ID", "synthetic-stale-ui")
+        .current_dir(PathBuf::from(env::var_os("SystemRoot").unwrap()).join("System32"));
+    let output = command.output().unwrap();
+    let _ = fs::remove_dir_all(private);
+    assert!(
+        output.status.success(),
+        "isolated Windows fixture failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "child fixture with a private configuration directory; called by the wrapper"]
+async fn windows_isolated_host_fixture() {
     use crate::host_client::HostClient;
     use treer_host_protocol::{HostCommand, HostResponse, HostSpawnRequest};
+    let isolated = env::var_os("TREER_TEST_WINDOWS_CONFIG_DIR")
+        .expect("run this child fixture through windows_real_host_detached_restart_and_stop");
+    assert_eq!(env::var_os("LOCALAPPDATA"), Some(isolated));
+    let default_root = new_enrollment_root(None).unwrap();
+    assert!(default_root.ends_with("Treer/root"));
+    assert_ne!(
+        default_root,
+        fs::canonicalize(env::current_dir().unwrap()).unwrap()
+    );
+    let junction_target = env::temp_dir().join("default-root-junction-target");
+    fs::create_dir(&junction_target).unwrap();
+    fs::remove_dir(&default_root).unwrap();
+    let junction = Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&default_root)
+        .arg(&junction_target)
+        .output()
+        .unwrap();
+    assert!(
+        junction.status.success(),
+        "native fixture could not create a junction"
+    );
+    assert!(
+        new_enrollment_root(None).is_err(),
+        "default root must reject a junction before setting ACLs"
+    );
+    fs::remove_dir(&default_root).unwrap();
+    fs::remove_dir(&junction_target).unwrap();
+    new_enrollment_root(None).unwrap();
     let root = env::temp_dir().join(format!("treer-windows-host-{}", Uuid::new_v4().simple()));
     treer_platform::secure_directory(&root).unwrap();
     let binaries = env::current_exe()
@@ -39,18 +106,14 @@ async fn windows_real_host_detached_restart_and_stop() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let paths = ServicePaths {
-        executable: binaries.join("treer-agent-server.exe"),
-        host_executable: binaries.join("treer-agent-host.exe"),
-        config: root.join("controller.json"),
-        host_config: root.join("host.json"),
-        state_dir: root.clone(),
-    };
+    let server_id = format!("srv_{}", Uuid::new_v4().simple());
+    let mut paths = ServicePaths::new(&server_id).unwrap();
+    paths.executable = binaries.join("treer-agent-server.exe");
+    paths.host_executable = binaries.join("treer-agent-host.exe");
     assert!(
         paths.executable.is_file() && paths.host_executable.is_file(),
         "build sibling binaries first"
     );
-    let server_id = format!("srv_{}", Uuid::new_v4().simple());
     let config = ServiceConfig {
         proxy: "http://127.0.0.1:9/".into(),
         workspace: "windows-test".into(),
@@ -99,7 +162,26 @@ async fn windows_real_host_detached_restart_and_stop() {
         .state_dir
         .join(format!("agent-host-{}.pid", fixture.1.server_id));
     let host_identity = fs::read(&pid_file).unwrap();
-    let (host, _) = HostClient::connect(&fixture.1.host_socket).await.unwrap();
+    let (host, events) = HostClient::connect(&fixture.1.host_socket).await.unwrap();
+    let sync = host.sync(Default::default()).await.unwrap();
+    let (runtime, _) = crate::controller::ControllerRuntime::from_sync(
+        host.clone(),
+        sync,
+        events,
+        crate::controller::ControllerConfig {
+            protected_paths: vec![fixture.0.config.clone()],
+            workspace_id: fixture.1.workspace.clone(),
+            server_id: fixture.1.server_id.clone(),
+            agent_server_url: format!("http://{}", fixture.1.listen),
+            proxy_public_url: fixture.1.proxy.clone(),
+            treer_binary: None,
+            interface_cache_path: fixture.1.root.join("fixture-interfaces.json"),
+            startup_store_path: fixture.1.root.join("fixture-startup.json"),
+            root: fixture.1.root.clone(),
+        },
+    )
+    .unwrap();
+    windows_check_process_paths(&runtime, &host, &fixture.0.executable, &fixture.1.workspace).await;
     let spawn = HostSpawnRequest {
         process_id: "survivor".into(),
         command: "powershell.exe".into(),
@@ -138,9 +220,13 @@ async fn windows_real_host_detached_restart_and_stop() {
     else {
         panic!("expected inventory");
     };
-    assert_eq!(processes[0].pid, before.pid);
-    assert_eq!(processes[0].stream_epoch, before.stream_epoch);
-    assert!(processes[0].running);
+    let survivor = processes
+        .iter()
+        .find(|p| p.process_id == "survivor")
+        .unwrap();
+    assert_eq!(survivor.pid, before.pid);
+    assert_eq!(survivor.stream_epoch, before.stream_epoch);
+    assert!(survivor.running);
     let workload_created = treer_platform::process_created_at(before.pid.unwrap())
         .unwrap()
         .unwrap();
@@ -182,6 +268,221 @@ async fn windows_real_host_detached_restart_and_stop() {
 fn workspace_keys_are_safe_for_service_names() {
     assert_eq!(workspace_key("team one/alpha"), "team_one_alpha");
     assert_eq!(workspace_key("default"), "default");
+}
+
+#[cfg(windows)]
+async fn windows_check_process_paths(
+    runtime: &crate::controller::ControllerRuntime,
+    host: &crate::host_client::HostClient,
+    controller: &Path,
+    workspace: &str,
+) {
+    use treer_host_protocol::HostResponse;
+    let node_script = "const a=require('node:assert'); for(const k of ['SystemRoot','windir','USERPROFILE','USERNAME','APPDATA','LOCALAPPDATA','ProgramData','HOMEDRIVE','HOMEPATH']) a.ok(process.env[k],k); for(const k of ['TREER_MACHINE_TOKEN','TREER_OPERATOR_CREDENTIAL','TREER_ENROLLMENT_KEY','AGENT_UI_INSTANCE_ID']) a.ok(!process.env[k],k); console.log('node-os-ok')";
+    let commands: Vec<(String, Vec<String>, &str)> = vec![
+        ("node.exe".into(), vec!["-e".into(), node_script.into()], "node-os-ok"),
+        ("powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "if (!$env:SystemRoot -or !$env:USERPROFILE) { exit 2 }; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); Write-Output 'powershell-os-ok'".into()], "powershell-os-ok"),
+        ("tasklist.exe".into(), vec!["/FI".into(), "PID eq 0".into(), "/NH".into()], ""),
+        (controller.display().to_string(), vec!["service".into(), "--workspace".into(), workspace.into(), "status".into()], "Manager: Detached"),
+    ];
+    for (index, (command, args, expected)) in commands.iter().enumerate() {
+        let output = runtime
+            .exec_machine(treer_protocol::MachineExecRequest {
+                cwd: ".".into(),
+                command: command.clone(),
+                args: args.clone(),
+                timeout_ms: 30_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            output.exit_code,
+            Some(0),
+            "exec smoke {index}: {}",
+            output.stderr
+        );
+        assert!(
+            output.stdout.contains(expected),
+            "exec smoke {index} missing completion marker"
+        );
+        for kind in ["command", "app"] {
+            let id = format!("{kind}-smoke-{index}");
+            runtime
+                .create(
+                    &id,
+                    id.clone(),
+                    format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+                    treer_protocol::CreateAgentRequest {
+                        folder_id: None,
+                        server_id: None,
+                        kind: kind.into(),
+                        name: id.clone(),
+                        cwd: ".".into(),
+                        args: std::iter::once(command.clone())
+                            .chain(args.clone())
+                            .collect(),
+                        cols: 100,
+                        rows: 24,
+                        publish_ports: vec![],
+                        recipe: None,
+                    },
+                )
+                .await
+                .unwrap();
+            windows_wait_process(host, &id, expected).await;
+        }
+    }
+    // This is a Host-owned App process, not Controller-owned machine exec:
+    // killing/replacing the Controller cannot kill the caller or its reply.
+    let id = "host-owned-controller-restarter";
+    runtime
+        .create(
+            id,
+            id.into(),
+            format!("wlc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+            treer_protocol::CreateAgentRequest {
+                folder_id: None,
+                server_id: None,
+                kind: "app".into(),
+                name: id.into(),
+                cwd: ".".into(),
+                args: vec![
+                    controller.display().to_string(),
+                    "service".into(),
+                    "--workspace".into(),
+                    workspace.into(),
+                    "restart-controller".into(),
+                ],
+                cols: 100,
+                rows: 24,
+                publish_ports: vec![],
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+    windows_wait_process(host, id, "").await;
+    let HostResponse::Synced { .. } = host.sync(Default::default()).await.unwrap() else {
+        panic!("Host did not survive hot restart")
+    };
+}
+
+#[test]
+fn root_relocation_preserves_identity_and_rejects_live_hosts_or_partial_state() {
+    #[cfg(unix)]
+    let base = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let base = env::temp_dir();
+    let directory = base.join(format!("trm-{}", Uuid::new_v4().simple()));
+    treer_platform::secure_directory(&directory).unwrap();
+    let old = directory.join("old");
+    let new = directory.join("new");
+    fs::create_dir(&old).unwrap();
+    fs::create_dir(&new).unwrap();
+    let paths = ServicePaths {
+        executable: directory.join("controller"),
+        host_executable: directory.join("host"),
+        config: directory.join("controller.json"),
+        host_config: directory.join("host.json"),
+        state_dir: directory.clone(),
+    };
+    #[cfg(unix)]
+    let socket = directory.join("host.sock");
+    #[cfg(windows)]
+    let socket = host_socket_path(&format!("srv_{}", Uuid::new_v4().simple())).unwrap();
+    let config = ServiceConfig {
+        proxy: "http://127.0.0.1:9/".into(),
+        workspace: "root-test".into(),
+        server_id: "srv_root_fixture".into(),
+        machine_token: "synthetic-machine".into(),
+        operator_credential: "synthetic-operator".into(),
+        root: old.clone(),
+        listen: "127.0.0.1:9".into(),
+        host_socket: socket.clone(),
+        install_hostname: "fixture".into(),
+        network_mode: None,
+        service_manager: ServiceManager::Foreground,
+        service_fallback_reason: None,
+    };
+    config.save(&paths.config).unwrap();
+    save_json(
+        &HostDaemonConfig {
+            socket_path: socket.clone(),
+            controller_path: paths.executable.clone(),
+            controller_config_path: paths.config.clone(),
+            root: old.clone(),
+        },
+        &paths.host_config,
+    )
+    .unwrap();
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&paths.config).unwrap()).unwrap();
+    {
+        let _runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = _runtime.enter();
+        let listener = treer_platform::LocalListener::bind(&socket).unwrap();
+        assert!(relocate_root_at(&paths, &config, &new).is_err());
+        drop(listener);
+    }
+    #[cfg(unix)]
+    fs::remove_file(&socket).unwrap();
+    relocate_root_at(&paths, &config, &new).unwrap();
+    let migrated = ServiceConfig::load(&paths.config).unwrap();
+    require_root_alignment(&paths, &migrated).unwrap();
+    let mut after: serde_json::Value =
+        serde_json::from_slice(&fs::read(&paths.config).unwrap()).unwrap();
+    after["root"] = original["root"].clone();
+    assert_eq!(
+        after, original,
+        "only root may change, not identity or credentials"
+    );
+    let mut incomplete = migrated.clone();
+    incomplete.root = old;
+    incomplete.save(&paths.config).unwrap();
+    assert!(require_root_alignment(&paths, &incomplete).is_err());
+    relocate_root_at(&paths, &incomplete, &new).unwrap();
+    require_root_alignment(&paths, &ServiceConfig::load(&paths.config).unwrap()).unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(windows)]
+async fn windows_wait_process(host: &crate::host_client::HostClient, id: &str, expected: &str) {
+    use treer_host_protocol::{HostCommand, HostResponse};
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let HostResponse::Synced { processes, .. } = host.sync(Default::default()).await.unwrap()
+        else {
+            panic!("expected inventory")
+        };
+        let process = processes.iter().find(|p| p.process_id == id).unwrap();
+        let HostResponse::Output { replay } = host
+            .request(
+                HostCommand::Read {
+                    process_id: id.into(),
+                    cursor: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected output")
+        };
+        let output = replay
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.data.iter().copied())
+            .collect::<Vec<_>>();
+        if !process.running && String::from_utf8_lossy(&output).contains(expected) {
+            assert_eq!(process.exit_code, Some(0), "{id} failed");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{id} did not exit with its completion marker"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 #[test]
