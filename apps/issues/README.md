@@ -236,7 +236,10 @@ cycles, saved views, drag-and-drop and a kanban board are not implemented.
 Assignee pickers in creation, editing, details and filtering share one directory:
 humans appear under People; Agents appear in expandable folders using the
 canonical `path` supplied by Treer's permission-filtered App identity directory.
-Search matches names and paths, including identically named Agents in different
+The selected assignee keeps its full path visible; activity and list tooltips also
+include paths. Missing paths display the stable Agent ID explicitly, rather than
+leaving identically named Agents indistinguishable. Search matches names, paths
+and IDs, including identically named Agents in different
 folders. Selection always sends the stable principal ID, never a display name
 or a folder path. The App performs no additional privileged tree lookup. Older
 Proxies without directory paths show Agents under Placement unavailable until

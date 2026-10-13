@@ -11,7 +11,8 @@ async function api(path, method = 'GET', body) {
   return result;
 }
 function run(fn) { return async () => { try { await fn(); } catch (e) { message(e.message); if (e.status === 401 && e.code === 'authentication_required') $('login').hidden = false; } }; }
-function name(id) { return people.find(p => p.id === id)?.name || id || 'Unassigned'; }
+function principalContext(person) { return person.kind === 'agent' ? person.path || `Path unavailable · ${person.id}` : 'Human'; }
+function name(id) { const person=people.find(p=>p.id===id);return person ? `${person.name} · ${principalContext(person)}` : id || 'Unassigned'; }
 function select(values, selected, nullable = false) {
   const n = node('select');
   if (nullable) n.add(new Option('Unassigned',''));
@@ -29,18 +30,23 @@ function assigneePicker(selected, onChange, prompt = 'Unassigned') {
   const search=node('input');search.type='search';search.placeholder='Search people or Agent paths…';search.setAttribute('aria-label','Search assignees');search.className='picker-search';
   const content=node('div',undefined,'picker-content');popup.append(search,content);wrapper.append(trigger,popup);
   trigger.setAttribute('aria-haspopup','dialog');trigger.setAttribute('aria-expanded','false');
-  function drawTrigger() { const person=people.find(p=>p.id===choice);trigger.replaceChildren(avatar(person),node('span',person?.name || (choice ? name(choice)+' (unavailable)' : prompt),'selected-name'),node('span','⌄','chevron')); }
+  function drawTrigger() {
+    const person=people.find(p=>p.id===choice),text=node('span',person?.name || (choice ? name(choice)+' (unavailable)' : prompt),'selected-name');
+    if(person)text.append(node('small',principalContext(person),'person-path'));
+    trigger.title=person ? name(choice) : choice || prompt;
+    trigger.replaceChildren(avatar(person),text,node('span','⌄','chevron'));
+  }
   function close(focus=false) {popup.hidden=true;trigger.setAttribute('aria-expanded','false');if(activePicker?.wrapper===wrapper)activePicker=null;if(focus)trigger.focus();}
   function option(person) {
     const id=person?.id || '',item=node('button',undefined,'picker-option');item.type='button';item.dataset.principalId=id;item.setAttribute('aria-pressed',String(id===choice));
-    item.setAttribute('aria-label',person ? `${person.name} · ${person.kind}${person.path?' · '+person.path:''}` : prompt);
-    const text=node('span',person?.name || prompt,'person-label');if(person?.path)text.append(node('small',person.path,'person-path'));
+    item.setAttribute('aria-label',person ? `${person.name} · ${person.kind} · ${principalContext(person)}` : prompt);
+    const text=node('span',person?.name || prompt,'person-label');if(person)text.append(node('small',principalContext(person),'person-path'));
     item.append(avatar(person),text);if(id===choice)item.append(node('span','✓'));
     item.onclick=()=>{choice=id;drawTrigger();close(true);onChange?.(id);};return item;
   }
   function drawChoices() {
     content.replaceChildren(option(null));const query=search.value.trim().toLowerCase();
-    const visible=people.filter(p=>!query || `${p.name} ${p.path || ''}`.toLowerCase().includes(query));
+    const visible=people.filter(p=>!query || `${p.name} ${p.path || ''} ${p.id}`.toLowerCase().includes(query));
     const humans=visible.filter(p=>p.kind==='human');if(humans.length){content.append(node('div','PEOPLE','picker-heading'));for(const p of humans)content.append(option(p));}
     const agents=visible.filter(p=>p.kind==='agent');
     if(agents.length) {
@@ -60,7 +66,7 @@ function assigneePicker(selected, onChange, prompt = 'Unassigned') {
         for(const p of branch.agents.sort((a,b)=>a.name.localeCompare(b.name)))target.append(option(p));
       }
       renderBranch(root,content);
-      if(unplaced.length){content.append(node('div','PLACEMENT UNAVAILABLE','picker-heading'));for(const p of unplaced)content.append(option(p));}
+      if(unplaced.length){content.append(node('div','PLACEMENT UNAVAILABLE','picker-heading'),node('p','Folder placement unavailable. Agent IDs distinguish these entries.','picker-empty'));for(const p of unplaced)content.append(option(p));}
     }
     if(!visible.length)content.append(node('p','No matching people or Agents','picker-empty'));
   }

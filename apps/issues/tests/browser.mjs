@@ -57,10 +57,28 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     await page.screenshot({path:`${screenshotDir}/issues-assignee-${width}.png`,fullPage:true});
     await picker.getByRole('searchbox',{name:'Search assignees'}).press('Escape');
     assert.equal(await picker.isVisible(),false);
+    await assign(page,'ag_b');
+    assert.match(await page.locator('#detail .assignee-trigger').innerText(), /Reviewer[\s\S]*\/engineering\/review\/Reviewer/);
+    await assign(page,'ag_c');
+    assert.match(await page.locator('#detail .assignee-trigger').innerText(), /Reviewer[\s\S]*\/design\/Reviewer/);
+    assert.doesNotMatch(await page.locator('#detail .assignee-trigger').innerText(), /engineering/);
+    await assign(page,'ag_no_path');
+    assert.match(await page.locator('#detail .assignee-trigger').innerText(), /Path unavailable · ag_no_path/);
     await assign(page,'ag_a');
+    assert.match(await page.locator('#detail .assignee-trigger').innerText(), /\/engineering\/backend\/Builder/);
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Selected full path fits narrow screen');
     await page.getByLabel('Labels (comma separated)',{exact:true}).fill('team, backend');
     await page.getByRole('button',{name:'Create issue',exact:true}).click();
     await page.getByRole('heading',{name:title,exact:true}).waitFor();
+    for(const [id,path] of [['ag_b','/engineering/review/Reviewer'],['ag_c','/design/Reviewer']]) {
+      await assign(page,id);
+      await page.getByRole('button',{name:'Save status / assignee',exact:true}).click();
+      await page.waitForFunction(path=>document.querySelector('#list .issue-row')?.getAttribute('aria-label').includes(path) && document.querySelector('#detail .selected-name .person-path')?.textContent===path && !document.querySelector('#detail .assignee-trigger')?.disabled,path);
+      const saved=await page.evaluate(async()=> (await (await fetch(new URL('v1/issues/1',document.baseURI))).json()).issue.assignee);
+      assert.equal(saved,id,'Same-name selections persist the distinct Agent ID');
+      assert.match(await page.locator('#list .issue-row').first().getAttribute('aria-label'),new RegExp(path));
+    }
+    await page.screenshot({path:`${screenshotDir}/issues-selected-path-${width}.png`,fullPage:true});
     await page.getByRole('button',{name:'Add child',exact:true}).click();
     await page.getByLabel('Title',{exact:true}).fill('Reproduce build failure');
     await page.getByRole('button',{name:'Create issue',exact:true}).click();
