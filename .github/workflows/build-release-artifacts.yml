@@ -57,6 +57,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p treer-agent-server --bin treer-agent-server windows_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test native file-transfer Controller and CLI boundaries
+        run: |
+          cargo test --locked -p treer-agent-server --bin treer-agent-server machine_file_transfer::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-cli --bin treer machine_file::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build machine binaries
         run: cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
       - name: Test real Controller and CLI

@@ -99,6 +99,12 @@ contains the CLI, Host, Controller, source commit metadata, and checksums. The
 workflow has read-only repository permission and never publishes a GitHub
 Release or writes to R2.
 
+The native Windows artifact gate explicitly runs Controller
+`machine_file_transfer::tests` and CLI `machine_file::tests`, in addition to the
+platform filesystem tests. Each command checks its exit status before staging
+artifacts. These checks require the file-transfer implementation in the fixed
+candidate; changing the workflow alone is not native Windows acceptance evidence.
+
 Windows binaries are PE `.exe` files in the build output. Staged artifacts and
 public download keys retain the three logical binary names without a suffix;
 the PowerShell installer saves them with `.exe`. Each platform directory also
