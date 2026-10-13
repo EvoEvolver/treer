@@ -200,6 +200,11 @@ for (const disabled of [false, true]) test(`Agent goal command ${disabled ? "res
     const exit = promisify(execFile)(process.execPath, [join(root, "scripts/goal.mjs"), "blocked", "--reason", "No deployment environment", "--required-action", "Owner: create environment"], { env: hermeticEnv({ AGENT_UI_URL: base }) });
     if (disabled) {
       await assert.rejects(exit, /disabled/);
+      for (const status of ["done", "blocked", "stale"]) {
+        const body = JSON.stringify({ status, reason: "Agent must not bypass disabled exit" });
+        assert.equal((await localFetch(base + "/v1/goal/exit", { method: "POST", body })).status, 403);
+        assert.equal((await localFetch(base + "/api/goal", { method: "PUT", body })).status, 403);
+      }
       const state = await (await localFetch(base + "/v1/state")).json(); assert.equal(state.goal.status, "active"); return;
     }
     await exit;

@@ -73,7 +73,7 @@ test("busy objective edit steers without interruption, exposes desync and applie
   assert.ok(!JSON.stringify(f.runtime.snapshot()).includes("Request interrupted by user"));
 });
 
-test("native hook's snake_case decorated condition rejects three times then interrupt-clears and notifies", async t => {
+test("native hook's snake_case condition rejects three times then interrupt-clears and notifies", async t => {
   const f = await fixture(t);
   const notices: any[] = []; f.runtime.on("goal-exit", goal => notices.push(goal));
   await f.runtime.updateGoal({ objective: "reject-loop native shape" });
@@ -83,6 +83,21 @@ test("native hook's snake_case decorated condition rejects three times then inte
   assert.match(f.runtime.snapshot().goal!.reason!, /without new/);
   assert.equal(notices.length, 1);
   assert.ok(f.calls().some(call => call.request?.subtype === "interrupt"));
+});
+
+test("unrelated Stop hooks containing the objective do not reject, complete or mark it impossible", async t => {
+  const f = await fixture(t); await f.runtime.updateGoal({ objective: "hold condition" }); await f.idle();
+  const hook = { prompt_text: "Another user hook: hold condition must be mentioned in the report", result: { ok: false, impossible: true, reason: "Unrelated condition failed" } };
+  for (let index = 0; index < 4; index++) (f.runtime as any).handle({ type: "system", subtype: "stop_hook_summary", uuid: `unrelated-${index}`, hook_infos: [hook], hook_errors: [], has_output: index !== 3, prevented_continuation: index !== 3 });
+  assert.equal(f.runtime.snapshot().goal!.status, "active");
+  assert.equal(f.runtime.snapshot().goal!.rejectionCount, 0);
+  (f.runtime as any).handle({ type: "system", subtype: "stop_hook_summary", uuid: "matching-native", hook_infos: [{ prompt_text: "hold condition" }, hook], hook_errors: [], has_output: true, prevented_continuation: true });
+  assert.equal(f.runtime.snapshot().goal!.status, "active", "unrelated impossible result must not poison a matching goal hook");
+  assert.equal(f.runtime.snapshot().goal!.rejectionCount, 1);
+  (f.runtime as any).goalEvent({ type: "attachment", attachment: { type: "goal_status", condition: "another condition", met: true } });
+  assert.equal(f.runtime.snapshot().goal!.status, "active");
+  (f.runtime as any).goalEvent({ type: "attachment", attachment: { type: "goal_status", condition: "hold condition", met: true } });
+  assert.equal(f.runtime.snapshot().goal!.status, "done", "native met attachment shape must complete the matching goal");
 });
 
 test("session-cumulative usage baseline is excluded; edit resets epoch and reaching 100k clears", async t => {
@@ -153,4 +168,19 @@ test("HTTP user DELETE preempts an accepted Agent exit instead of returning muta
   response = await request("/api/goal", "DELETE"); assert.equal(response.status, 200, logs);
   const state = await (await request("/v1/state", "GET")).json();
   assert.equal(state.goal.status, "cleared"); assert.equal(state.goal.syncStatus, "synced");
+});
+
+test("resume preserves active budgets and an unconfirmed exit without retrying it forever", async t => {
+  const f = await fixture(t, ["--no-clear-ack"], 100);
+  await f.runtime.updateGoal({ objective: "hold retained goal", tokenBudget: 12345, roundBudget: 7 }); await f.idle();
+  await assert.rejects(f.runtime.updateGoal({ status: "blocked", reason: "Owner action needed" }), /timed out/);
+  await f.runtime.stop();
+  const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir, goalCommandTimeoutMs: 100,
+    args: [fake, "--fixture-config", f.configDir, "--calls-file", join(f.cwd, "calls.jsonl"), "--no-clear-ack"] });
+  t.after(() => resumed.stop()); await resumed.start();
+  const goal = resumed.snapshot().goal!;
+  assert.equal(goal.tokenBudget, 12345); assert.equal(goal.roundBudget, 7);
+  assert.equal(goal.syncStatus, "exit_unconfirmed"); assert.match(goal.syncError!, /manually enter/);
+  await resumed.updateGoal({ tokenBudget: 20000 }); // no sticky pending mutation after resume
+  assert.equal(resumed.snapshot().goal!.tokenBudget, 20000);
 });

@@ -492,7 +492,9 @@ when the Stop hook refuses to end the turn. Native acknowledgement has a 30-seco
 deadline. On timeout, the goal remains active with `syncStatus=exit_unconfirmed`,
 the mutation lock and exit journal are released, and the user is notified to
 manually enter `/goal clear`. The launcher never claims a hook was released
-without acknowledgement. User clear always supersedes a pending Agent exit,
+without acknowledgement. Agent exits (`done|blocked|stale`) and automatic budget
+or rejection-loop exits also interrupt the current turn, including an executing
+tool, to release the Stop hook. User clear always supersedes a pending Agent exit,
 cancels its journal, and sends a fresh native clear; it never returns 409 because
 that exit is pending. Replacing the objective invalidates an old pending exit.
 The command deliberately delegates user-equivalent native clear authority to
@@ -581,8 +583,9 @@ intent, retaining the reason/action and retrying its notification; a replacement
 goal invalidates the old intent. Overlapping ordinary mutations return 409 for
 retry; user clear preempts them. Claude wire summaries use `hook_infos`,
 `prompt_text`, and `prevented_continuation`, whereas JSONL can use camelCase.
-Both shapes are normalized and deduplicated; decorated native checker prompts
-are matched to the native objective. These wire-shape/deadlock regressions use
+Both shapes are normalized and deduplicated; hook prompts must exactly equal the
+nonempty native objective (the native goal registers its condition directly).
+Unrelated hooks containing that text do not count. These wire-shape/deadlock regressions use
 fake stream-json and a fake checker, not real inference. Install the updated
 launcher and resume/restart the affected Agent with its existing session ID to
 acquire the fix; this change does not restart any live session itself.

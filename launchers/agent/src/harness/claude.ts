@@ -138,7 +138,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       if (resumed && this.options.stateFile) {
         const saved = record(readGoalState(this.options.stateFile + ".goal-usage.json"));
         if (saved.sessionId === this.sessionId && saved.goalKey === this.goalKey) {
-          if (saved.goal && record(saved.goal).syncStatus === "desynced" && record(saved.goal).status === "active") this.goal = saved.goal as unknown as Goal;
+          if (saved.goal && record(saved.goal).status === "active" && (record(saved.goal).syncStatus === "desynced" || this.goal?.status === "active" && record(saved.goal).objective === this.goal.objective)) this.goal = saved.goal as unknown as Goal;
           else if (saved.pendingExit && this.goal?.status === "cleared") this.goal = saved.pendingExit as unknown as Goal;
           else if (saved.goal && ["blocked", "stale", "done", "cleared"].includes(text(record(saved.goal).status))) this.goal = saved.goal as unknown as Goal;
           if (this.goal) {
@@ -337,11 +337,13 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     this.goal = { id: randomUUID(), objective, nativeObjective, status: "active", syncStatus: "desynced",
       syncError: "Waiting for native goal acknowledgement; the current turn will not be interrupted.", tokensUsed: 0, timeUsedSeconds: 0, tokenBudget: null };
     this.resetGoalGuard(input);
+    this.deferredGoal = objective;
     if (this.thread?.status === "running") {
-      this.deferredGoal = objective; await this.saveGoalUsage(); this.publish(); return;
+      await this.saveGoalUsage(); this.publish(); return;
     }
     await this.goalCommand(objective);
     if (this.goal) {
+      if (this.goal.objective === objective) this.deferredGoal = null;
       await this.saveGoalUsage(); this.publish();
     }
   }
@@ -674,8 +676,8 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private goalEvent(event: RecordValue, historical = false) {
     if (event.isSidechain || event.parent_tool_use_id) return;
     const attachment = record(event.attachment);
-    if (event.type === "attachment" && attachment.type === "goal_status" && this.goal?.status === "active") {
-      const state = text(attachment.status);
+    if (event.type === "attachment" && attachment.type === "goal_status" && this.goal?.status === "active" && (!attachment.condition || attachment.condition === (this.goal.nativeObjective || this.goal.objective))) {
+      const state = text(attachment.status) || (attachment.failed === true ? "failed" : attachment.met === true && attachment.sentinel !== true ? "met" : "");
       if (["impossible", "failed", "met", "achieved", "cleared"].includes(state)) {
         this.goal = { ...this.goal, status: ["impossible", "failed"].includes(state) ? "blocked" : state === "cleared" ? "cleared" : "done", reason: text(attachment.reason) || `Native evaluator reported ${state}` };
         if (!historical && this.goal.status === "blocked") this.emit("goal-exit", this.goal);
@@ -718,8 +720,12 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       this.goalHookSeen.add(hookKey);
       if (this.goal?.status !== "active") return;
       const objective = this.goal.nativeObjective || this.goal.objective;
-      const matching = Array.isArray(hooks) && hooks.some((hook) => text(record(hook).prompt_text ?? record(hook).promptText).includes(objective));
-      const impossible = matching && Array.isArray(hooks) && hooks.map(record).map((hook) => record(hook.result)).find((result) => result.ok === false && result.impossible === true);
+      // Native /goal installs {type: "prompt", prompt: condition}; the SDK
+      // reports that exact condition, not an evaluator's decorated prompt.
+      // A user Stop hook mentioning the objective is not this goal's hook.
+      const matchingHooks = objective.trim() && Array.isArray(hooks) ? hooks.map(record).filter((hook) => text(hook.prompt_text ?? hook.promptText) === objective) : [];
+      const matching = matchingHooks.length > 0;
+      const impossible = matchingHooks.map((hook) => record(hook.result)).find((result) => result.ok === false && result.impossible === true);
       if (impossible && !historical) { this.blockGoal(text(impossible.reason) || "Native evaluator reported an impossible goal"); return; }
       if (matching && prevented === true && !historical) {
         const reason = this.goalGuard.reject();

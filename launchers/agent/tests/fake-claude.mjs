@@ -80,7 +80,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         const event = { type: "system", subtype: "stop_hook_summary", uuid: `reject-${randomUUID()}`, hookInfos: [{ promptText: args, ...(args.startsWith("impossible-loop") ? { result: { ok: false, impossible: true, reason: "Owner must create environment" } } : {}) }], hookErrors: [], hasOutput: true, preventedContinuation: true };
         persist(event);
         if (process.argv.includes("--real-goal-wire")) send({ type: "system", subtype: "stop_hook_summary", uuid: event.uuid, hook_count: 1,
-          hook_infos: [{ command: "prompt", prompt_text: `Evaluate this goal condition:\n${args}\nReturn ok or a blocking reason.` }],
+          hook_infos: [{ command: "prompt", prompt_text: args }],
           hook_errors: [], has_output: true, prevented_continuation: true });
         else send(event);
       }, 30);

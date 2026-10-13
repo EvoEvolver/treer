@@ -264,6 +264,8 @@ export async function testRuntimeControls(browser, screenshots) {
     await page.screenshot({ path: join(screenshots, "controls-desktop-blocked.png") });
     setState({ goal: { ...state.goal, status: "active", syncStatus: "desynced", nativeObjective: "Previous condition", syncError: `Waiting for idle ${malicious}` } });
     await expect(page.locator(".goal-sync")).toContainText(`Waiting for idle ${malicious}`);
+    assert.equal(await page.evaluate(() => window.controlsXSS), undefined, "syncError must be rendered with textContent");
+    await expect(page.locator(".goal-sync img")).toHaveCount(0);
     await page.screenshot({ path: join(screenshots, "controls-desktop-desynced.png") });
     await page.getByRole("button", { name: "Re-align native goal", exact: true }).click();
     await expect(page.locator(".goal-sync")).toHaveCount(0);
