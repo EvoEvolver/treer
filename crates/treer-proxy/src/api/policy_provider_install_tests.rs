@@ -180,6 +180,32 @@ mod unix {
         .with_subscriber(subscriber.clone())
         .await
         .unwrap();
+        // Bundled installs must include the exact client advertised by the App,
+        // and its installed asset lookup must resolve without a source checkout.
+        let client = fixture.0.join("treer-policy-client.py");
+        assert_eq!(
+            std::fs::read(&client).unwrap(),
+            include_bytes!("../../../../apps/policy/treer-policy")
+        );
+        let asset_check = std::process::Command::new("python3")
+            .args(["-c", "import runpy,sys; app=runpy.run_path(sys.argv[1]); assert app['ASSETS']['/treer-policy'][1].is_file()"])
+            .arg(fixture.0.join(DEFAULT_POLICY_APP_SCRIPT))
+            .env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .current_dir(&fixture.0).output().unwrap();
+        assert!(asset_check.status.success());
+        assert!(asset_check.stdout.is_empty() && asset_check.stderr.is_empty());
+        let client_help = std::process::Command::new("python3")
+            .arg(client)
+            .arg("--help")
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap();
+        assert!(client_help.status.success() && client_help.stderr.is_empty());
+        assert!(String::from_utf8(client_help.stdout)
+            .unwrap()
+            .contains("submit"));
         let token = std::fs::read_to_string(fixture.0.join(".treer-policy-admin-token")).unwrap();
         let token = token.trim();
         assert!(token.len() >= 43);

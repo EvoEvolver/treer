@@ -18,6 +18,10 @@ const DEFAULT_POLICY_APP_PORT_START: u16 = 8_787;
 const DEFAULT_POLICY_APP_PORT_END: u16 = 8_899;
 const DEFAULT_POLICY_APP_FILES: &[(&str, &[u8])] = &[
     (
+        "treer-policy-client.py",
+        include_bytes!("../../../../apps/policy/treer-policy"),
+    ),
+    (
         "treer-policy-agent.md",
         include_bytes!("../../../../apps/policy/AGENT.md"),
     ),
@@ -593,6 +597,7 @@ mod tests {
             .map(|(name, _)| *name)
             .collect::<HashSet<_>>();
         assert_eq!(names.len(), DEFAULT_POLICY_APP_FILES.len());
+        assert!(names.contains("treer-policy-client.py"));
         assert!(DEFAULT_POLICY_APP_FILES
             .iter()
             .all(|(_, contents)| !contents.is_empty()));

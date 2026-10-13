@@ -9,12 +9,13 @@ use treer_protocol::{
 #[path = "policy_publish_authority_tests.rs"]
 mod tests;
 
-fn authority_response(provider: WorkspacePolicyProvider) -> Response {
+fn authority_response(provider: WorkspacePolicyProvider, treer_url: &str) -> Response {
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(json!({
             "publish_authority": provider.publish_authority,
             "provider": provider,
+            "treer_url": treer_url,
             "capabilities": [CAPABILITY_POLICY_PUBLISH_AUTHORITY],
             "supported_schema_versions": [1, 2]
         })),
@@ -52,7 +53,7 @@ pub(super) async fn set_policy_publish_authority(
                 "expected App is no longer the selected Provider",
             )
         })?;
-    Ok(authority_response(provider))
+    Ok(authority_response(provider, auth.app_public_url().as_str()))
 }
 
 async fn provider_runtime(
@@ -143,6 +144,7 @@ pub(super) async fn app_get_policy_publish_authority(
 ) -> Result<Response, ApiFailure> {
     Ok(authority_response(
         provider_runtime(&auth, &service, &headers).await?,
+        auth.app_public_url().as_str(),
     ))
 }
 

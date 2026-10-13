@@ -47,6 +47,7 @@ async fn default_owner_only_switch_audit_and_operator_validation() {
     .unwrap();
     let value = body(response).await;
     assert_eq!(value["publish_authority"], "owner_session");
+    assert_eq!(value["treer_url"], auth.app_public_url().as_str());
     assert_eq!(
         value["capabilities"][0],
         CAPABILITY_POLICY_PUBLISH_AUTHORITY
