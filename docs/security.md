@@ -259,9 +259,10 @@ workspace-authenticated Managed App UI tunnel, the Proxy issues a fresh
 issuing when membership is revoked. The App receives it in
 `X-Treer-Identity-Token`, so **App code can act as the current user through that
 service's App APIs until this token expires**. This is intentional delegation
-to trusted workspace code, not merely a login hint. App compromise exposes that
-short-lived, service-scoped authority; it does not reveal the platform login
-session or grant another App's audience. Apps must verify tokens and current
+to trusted workspace code, not merely a login hint. Exposure of this forwarded token grants that short-lived, service-scoped
+authority; the token itself does not reveal the platform login session or grant
+another App's audience. This token scope does not isolate browser-embedded App
+JavaScript from the Proxy-origin session authority described above. Apps must verify tokens and current
 membership on every request, avoid logging/persisting forwarded tokens, and
 apply their own data permissions. The 12-hour OAuth token is never used for
 per-request forwarding. Public ingress issues no human identity, even if the

@@ -239,7 +239,8 @@ updates/compatibility. A future clean audit is not asserted.
 Results: full browser suite **97/97 passed** before the dependency follow-up;
 security suite **7/7 passed**, including added SameSite and command quoting cases.
 Build, Worker typecheck, Foundation regression, iOS project syntax and docs checks
-passed. The dependency follow-up receives focused startup-editor/Worker retesting.
+passed. After rebuilding with shell-quote 1.11.0, focused desktop/mobile
+startup-editor and Worker/security retesting passed **16/16**.
 
 Run from this worktree, with synthetic identities and isolated environment:
 
