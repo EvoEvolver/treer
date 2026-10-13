@@ -406,7 +406,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY] }),
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER] }),
     )
 }
 

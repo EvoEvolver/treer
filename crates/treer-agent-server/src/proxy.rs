@@ -926,6 +926,20 @@ impl ProxyClient {
                     )
                 })
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::FileTransfer {
+                actor,
+                authorized_path,
+                request,
+            } => self
+                .runtime
+                .transfer_machine_file(actor, authorized_path, request)
+                .await
+                .map(|value| CommandResult::success(command_id.clone(), value))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::FileTransferInfo {} => CommandResult::success(
+                command_id.clone(),
+                self.runtime.machine_file_transfer_info(),
+            ),
             AgentCommand::UploadChunk {
                 upload_id,
                 content_base64,

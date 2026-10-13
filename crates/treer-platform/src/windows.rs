@@ -25,6 +25,51 @@ fn checked(success: i32) -> io::Result<()> {
         Ok(())
     }
 }
+
+/// Metadata from an already-open, non-reparse-following handle.
+pub fn transfer_file_identity(file: &std::fs::File) -> io::Result<(u64, u64, u32, u32)> {
+    use windows_sys::Win32::Storage::FileSystem::*;
+    unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = mem::zeroed();
+        checked(GetFileInformationByHandle(file.as_raw_handle(), &mut info))?;
+        Ok((
+            u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            info.nNumberOfLinks,
+            info.dwFileAttributes,
+        ))
+    }
+}
+
+/// Atomic same-directory publication, with no delete-then-rename interval.
+pub fn publish_transfer_file(source: &Path, target: &Path, overwrite: bool) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::*;
+    let source = wide(source.as_os_str());
+    let target = wide(target.as_os_str());
+    let flags = MOVEFILE_WRITE_THROUGH
+        | if overwrite {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+    unsafe { checked(MoveFileExW(source.as_ptr(), target.as_ptr(), flags)) }
+}
+
+pub fn transfer_available_bytes(path: &Path) -> io::Result<u64> {
+    let path = wide(path.as_os_str());
+    let mut bytes = 0;
+    unsafe {
+        checked(
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                path.as_ptr(),
+                &mut bytes,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+        )?;
+    }
+    Ok(bytes)
+}
 struct Allocation(*mut std::ffi::c_void);
 impl Drop for Allocation {
     fn drop(&mut self) {

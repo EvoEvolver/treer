@@ -3672,11 +3672,14 @@ name = "treer-cli"
 version = "0.1.13"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64",
  "crossterm",
  "futures-util",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "treer-build-info",

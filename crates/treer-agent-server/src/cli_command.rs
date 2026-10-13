@@ -79,6 +79,35 @@ pub fn session_action(
     else {
         return Ok(None);
     };
+    if let Some(Command::Machine { command }) = &args.command {
+        let transfer = match command {
+            MachineCommand::Put {
+                machine,
+                local,
+                remote,
+                force,
+                mode,
+            } => Some((machine, local, remote, false, *force, *mode)),
+            MachineCommand::Get {
+                machine,
+                local,
+                remote,
+                force,
+                mode,
+            } => Some((machine, local, remote, true, *force, *mode)),
+            _ => None,
+        };
+        if let Some((machine, local, remote, download, overwrite, mode)) = transfer {
+            return Ok(Some(treer_protocol::cli::CliOutput::FileTransfer {
+                path: format!("/api/machines/{}/file-transfer", path_segment(machine)),
+                local: local.clone(),
+                remote: remote.clone(),
+                download,
+                overwrite,
+                mode,
+            }));
+        }
+    }
     if let Some(Command::Service {
         command: ServiceCommand::Forward { service, listen },
     }) = &args.command

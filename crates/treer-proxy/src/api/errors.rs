@@ -77,6 +77,12 @@ impl From<ProtocolError> for ApiFailure {
             | "server_ambiguous"
             | "recipient_ambiguous" => StatusCode::CONFLICT,
             "machine_file_exists" => StatusCode::CONFLICT,
+            "file_transfer_unsupported" => StatusCode::NOT_IMPLEMENTED,
+            "machine_file_denied" => StatusCode::FORBIDDEN,
+            "machine_transfer_not_found" | "machine_file_not_found" => StatusCode::NOT_FOUND,
+            "machine_file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+            "machine_transfer_limit" | "machine_transfer_busy" => StatusCode::TOO_MANY_REQUESTS,
+            "machine_file_checksum_mismatch" | "machine_file_changed" => StatusCode::CONFLICT,
             "agent_startup_not_found" => StatusCode::NOT_FOUND,
             "policy_denied" | "policy_subject_mismatch" | "agent_identity_mismatch" => {
                 StatusCode::FORBIDDEN
@@ -92,6 +98,9 @@ impl From<ProtocolError> for ApiFailure {
             | "invalid_machine_path"
             | "invalid_machine_file_name"
             | "invalid_machine_upload"
+            | "invalid_machine_file"
+            | "machine_transfer_direction"
+            | "machine_transfer_offset"
             | "machine_upload_chunk_too_large" => StatusCode::BAD_REQUEST,
             "invalid_agent_startup" | "invalid_agent_startup_validation" => StatusCode::BAD_REQUEST,
             _ => StatusCode::BAD_GATEWAY,

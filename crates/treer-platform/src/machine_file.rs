@@ -2,6 +2,17 @@
 //! belongs here: Controller must authorize before exposing handles or bytes.
 use std::{fs::File, io};
 
+pub fn open_protected(path: &std::path::Path) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        File::open(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_protected(path)
+    }
+}
+
 /// Portable wire paths deliberately exclude Windows aliases on Unix too.
 /// This is validation, not a canonical filesystem name or Policy selector.
 pub fn validate_relative_path(path: &str) -> io::Result<Vec<&str>> {
@@ -91,6 +102,7 @@ mod unix {
         file: File,
         device: u64,
         protected: Vec<Identity>,
+        allow_mounts: bool,
     }
 
     impl Root {
@@ -122,12 +134,93 @@ mod unix {
                 file,
                 device,
                 protected,
+                allow_mounts: false,
             })
+        }
+
+        /// Local CLI paths have no enrolled root boundary. Retain NOFOLLOW
+        /// traversal but allow ordinary mounted home/temp directories.
+        pub fn open_local(root: &Path) -> io::Result<Self> {
+            let mut result = Self::open(root, &[])?;
+            result.allow_mounts = true;
+            Ok(result)
+        }
+        pub fn available_bytes(&self) -> io::Result<u64> {
+            let stat = sys::fstatvfs(&self.file)?;
+            Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        }
+
+        /// Controller-owned recovery metadata, opened with retained handles.
+        pub fn transfer_journal(&self) -> io::Result<Self> {
+            let mut directory = self.file.try_clone()?;
+            for name in [".treer", "file-transfers"] {
+                match sys::mkdirat(&directory, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                    Ok(()) => {}
+                    Err(error) if error == rustix::io::Errno::EXIST => {}
+                    Err(error) => return Err(error.into()),
+                }
+                directory = sys::openat(
+                    &directory,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?
+                .into();
+                let stat = sys::fstat(&directory)?;
+                if identity(&directory)?.device != self.device
+                    || stat.st_uid != rustix::process::geteuid().as_raw()
+                    || stat.st_mode & if name == ".treer" { 0o022 } else { 0o077 } != 0
+                {
+                    return Err(protected());
+                }
+            }
+            Ok(Self {
+                file: directory,
+                device: self.device,
+                protected: vec![],
+                allow_mounts: false,
+            })
+        }
+
+        pub fn exclusive_lease(&self) -> io::Result<File> {
+            let file: File = sys::openat(
+                &self.file,
+                ".registry.lock",
+                OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )?
+            .into();
+            sys::flock(&file, sys::FlockOperation::NonBlockingLockExclusive)?;
+            Ok(file)
+        }
+
+        /// Only a recorded random staging name can be removed by recovery.
+        pub fn cleanup_staging(&self, path: &str, temporary_name: &str) -> io::Result<()> {
+            if validate_relative_path(temporary_name)?.len() != 1
+                || !temporary_name.starts_with(".treer-transfer-xfer_")
+            {
+                return Err(protected());
+            }
+            let (parent, _) = self.parent(path)?;
+            match sys::statat(&parent, temporary_name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => {
+                    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
+                        || stat.st_nlink != 1
+                        || self.protected.contains(&stat_identity(&stat))
+                    {
+                        return Err(protected());
+                    }
+                    sys::unlinkat(&parent, temporary_name, AtFlags::empty())?;
+                    parent.sync_all()
+                }
+                Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+                Err(error) => Err(error.into()),
+            }
         }
 
         fn check(&self, file: &File) -> io::Result<()> {
             let id = identity(file)?;
-            if id.device != self.device {
+            if !self.allow_mounts && id.device != self.device {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "file transfer cannot cross a filesystem mount",
@@ -143,7 +236,10 @@ mod unix {
             let parts = validate_relative_path(path)?;
             // Reserve the namespace even before .treer exists. Physical identity
             // checks below also cover case-insensitive aliases of existing state.
-            if parts.iter().any(|part| part.eq_ignore_ascii_case(".treer")) {
+            if parts.iter().any(|part| {
+                part.eq_ignore_ascii_case(".treer")
+                    || part.to_ascii_lowercase().starts_with(".treer-transfer-")
+            }) {
                 return Err(protected());
             }
             let mut directory = self.file.try_clone()?;
@@ -308,6 +404,11 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::{Root, StagedFile};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{Root, StagedFile};
 
 #[cfg(test)]
 mod tests {

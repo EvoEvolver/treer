@@ -9,6 +9,7 @@ use treer_protocol::{
     AGENT_ID_HEADER, OPERATOR_CREDENTIAL_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
 use url::Url;
+mod machine_file;
 
 #[derive(Debug, serde::Deserialize)]
 struct Config {
@@ -317,6 +318,27 @@ where
         .await?;
     Ok(())
 }
+fn ensure_file_transfer_capability(
+    health: &serde_json::Value,
+    argv: &[String],
+) -> anyhow::Result<()> {
+    if argv.first().is_some_and(|arg| arg == "machine")
+        && argv
+            .get(1)
+            .is_some_and(|arg| matches!(arg.as_str(), "put" | "get"))
+    {
+        anyhow::ensure!(
+            health["cli_capabilities"]
+                .as_array()
+                .is_some_and(|caps| caps
+                    .iter()
+                    .any(|cap| cap == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER)),
+            "file_transfer_unsupported: upgrade the local Controller before transferring files"
+        );
+    }
+    Ok(())
+}
+
 async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
     let connection = connection(raw)?;
     // Never let an older interpreter silently reinterpret sibling targets globally.
@@ -332,6 +354,7 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
     ensure_path_target_capability(&health)?;
     ensure_prompt_delivery_capability(&health, &connection.argv)?;
     ensure_creation_placement_capability(&health, &connection.argv)?;
+    ensure_file_transfer_capability(&health, &connection.argv)?;
     let mut url = connection.url.join("/api/cli/session")?;
     let scheme = match url.scheme() {
         "http" => "ws",
@@ -361,6 +384,7 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
                 terminal,
                 cols,
                 rows,
+                capabilities: vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
             })?
             .into(),
         ))
@@ -391,6 +415,9 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
                         CliOutput::StdinReady { bytes } => { stdin_credit = stdin_credit.checked_add(bytes).context("stdin credit overflow")?; anyhow::ensure!(stdin_credit <= 8192, "invalid stdin capacity"); },
                         CliOutput::Session { path, terminal } => return relay_session(&connection.url, &connection.headers, &path, terminal, &mut stdin).await,
                         CliOutput::Forward { path, listen } => return forward(&connection.url, &connection.headers, &path, &listen).await,
+                        CliOutput::FileTransfer { path, local, remote, download, overwrite, mode } => {
+                            return machine_file::transfer(&connection.url, &connection.headers, machine_file::Options { path, local, remote, download, overwrite, mode }).await;
+                        },
                     },
                     Message::Ping(data) => outgoing.send(Message::Pong(data)).await?,
                     Message::Close(_) => bail!("Controller disconnected; command was not retried"),

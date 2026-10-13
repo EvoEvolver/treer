@@ -6,6 +6,7 @@ mod host_client;
 mod interface_cache;
 mod launcher;
 mod local_api;
+mod machine_file_transfer;
 mod network;
 mod proxy;
 mod release_update;

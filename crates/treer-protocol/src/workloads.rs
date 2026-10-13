@@ -448,6 +448,12 @@ pub enum AgentCommand {
     UploadAbort {
         upload_id: String,
     },
+    FileTransfer {
+        actor: MachineTransferActor,
+        authorized_path: String,
+        request: MachineFileTransferRequest,
+    },
+    FileTransferInfo {},
     ShutdownMachine,
 }
 
@@ -474,6 +480,9 @@ impl AgentCommand {
                 Some(CAPABILITY_AGENT_STARTUP)
             }
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
+            Self::FileTransfer { .. } | Self::FileTransferInfo {} => {
+                Some(CAPABILITY_MACHINE_FILE_TRANSFER)
+            }
             Self::UploadBegin { .. }
             | Self::UploadChunk { .. }
             | Self::UploadCommit { .. }

@@ -134,6 +134,7 @@ async fn real_controller_auth_parser_stdin_and_cancel() {
                 terminal: false,
                 cols: 120,
                 rows: 36,
+                capabilities: Vec::new(),
             })
             .unwrap()
             .into(),

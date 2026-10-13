@@ -416,6 +416,12 @@ pub fn router(state: LocalApiState) -> Router {
         )
         .route("/api/machines/{server_id}/exec", post(exec_machine))
         .route(
+            "/api/machines/{server_id}/file-transfer",
+            get(file_transfer_info)
+                .post(file_transfer)
+                .layer(DefaultBodyLimit::max(96 * 1024)),
+        )
+        .route(
             "/api/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )

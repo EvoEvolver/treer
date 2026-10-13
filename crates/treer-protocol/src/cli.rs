@@ -9,6 +9,8 @@ pub struct CliRequest {
     pub terminal: bool,
     pub cols: u16,
     pub rows: u16,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -21,10 +23,32 @@ pub enum CliInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CliOutput {
-    StdinReady { bytes: usize },
-    Session { path: String, terminal: bool },
-    Forward { path: String, listen: String },
-    Stdout { data: Vec<u8> },
-    Stderr { data: Vec<u8> },
-    Exit { code: i32 },
+    StdinReady {
+        bytes: usize,
+    },
+    Session {
+        path: String,
+        terminal: bool,
+    },
+    Forward {
+        path: String,
+        listen: String,
+    },
+    FileTransfer {
+        path: String,
+        local: String,
+        remote: String,
+        download: bool,
+        overwrite: bool,
+        mode: u32,
+    },
+    Stdout {
+        data: Vec<u8>,
+    },
+    Stderr {
+        data: Vec<u8>,
+    },
+    Exit {
+        code: i32,
+    },
 }

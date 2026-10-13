@@ -143,6 +143,7 @@ struct ControllerInner {
     startup_store: StartupStore,
     recovery_lock: tokio::sync::Mutex<()>,
     uploads: Mutex<HashMap<String, PendingUpload>>,
+    file_transfers: crate::machine_file_transfer::Transfers,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
     terminal_events: broadcast::Sender<TerminalOutput>,
@@ -217,6 +218,22 @@ impl ControllerRuntime {
         let (process_events, _) = broadcast::channel(512);
         let runtime = Self {
             inner: Arc::new(ControllerInner {
+                file_transfers: crate::machine_file_transfer::Transfers::new(
+                    config.root.clone(),
+                    config.workspace_id.clone(),
+                    [
+                        Some(config.startup_store_path.clone()),
+                        Some(config.interface_cache_path.clone()),
+                        treer_platform::config_directory(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                    std::env::var("TREER_MACHINE_FILE_MAX_BYTES")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(crate::machine_file_transfer::Transfers::default_limit),
+                ),
                 host,
                 workspace_id: config.workspace_id,
                 server_id: config.server_id,
@@ -404,9 +421,29 @@ impl ControllerRuntime {
     }
 
     pub fn set_proxy_link_status(&self, status: ProxyLinkStatus) {
+        if !status.connected {
+            self.inner.file_transfers.clear();
+        }
         if let Ok(mut current) = self.inner.proxy_link.write() {
             *current = status;
         }
+    }
+
+    pub async fn transfer_machine_file(
+        &self,
+        actor: treer_protocol::MachineTransferActor,
+        path: String,
+        request: treer_protocol::MachineFileTransferRequest,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        let runtime = self.clone();
+        tokio::task::spawn_blocking(move || {
+            runtime.inner.file_transfers.execute(actor, &path, request)
+        })
+        .await
+        .map_err(|_| ProtocolError::new("machine_file_io_failed", "file transfer task failed"))?
+    }
+    pub fn machine_file_transfer_info(&self) -> serde_json::Value {
+        self.inner.file_transfers.info()
     }
 
     pub fn available_agent_kinds(&self) -> Vec<String> {
@@ -2519,6 +2556,17 @@ impl ControllerRuntime {
     }
 
     fn start_event_tasks(&self, mut events: HostEvents) {
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else {
+                    break;
+                };
+                inner.file_transfers.expire();
+            }
+        });
         let output_runtime = self.clone();
         tokio::spawn(async move {
             loop {

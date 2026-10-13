@@ -6,6 +6,7 @@ mod context;
 mod interface;
 #[path = "agents/machine.rs"]
 mod machine;
+mod machine_files;
 mod policy;
 mod profiles;
 #[path = "agents/startup.rs"]
@@ -16,6 +17,7 @@ pub(super) use agent::*;
 pub(super) use context::*;
 pub(super) use interface::*;
 pub(super) use machine::*;
+pub(super) use machine_files::*;
 pub(super) use policy::*;
 pub(super) use profiles::*;
 pub(super) use startup::*;

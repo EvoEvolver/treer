@@ -56,6 +56,14 @@ async fn run(
         .find(|(key, _)| key == "TREER_AGENT_ID")
         .map(|(_, value)| value.as_str());
     if let Some(action) = crate::cli_command::session_action(&request.argv, source_agent_id)? {
+        anyhow::ensure!(
+            !matches!(&action, CliOutput::FileTransfer { .. })
+                || request
+                    .capabilities
+                    .iter()
+                    .any(|value| value == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER),
+            "file_transfer_unsupported: upgrade the treer CLI before transferring files"
+        );
         send(socket, action).await?;
         return Ok(());
     }

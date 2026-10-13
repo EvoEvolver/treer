@@ -533,6 +533,28 @@ pub(super) enum ProfileCommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum MachineCommand {
+    #[command(about = "Upload a single file within the machine root (- reads stdin)")]
+    Put {
+        #[arg(long)]
+        machine: String,
+        local: String,
+        remote: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, default_value = "600", value_parser = parse_file_mode)]
+        mode: u32,
+    },
+    #[command(about = "Download a single file within the machine root (- writes verified stdout)")]
+    Get {
+        #[arg(long)]
+        machine: String,
+        remote: String,
+        local: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, default_value = "600", value_parser = parse_file_mode)]
+        mode: u32,
+    },
     #[command(about = "List machines in the current workspace")]
     List,
     #[command(about = "Show one machine by unique name or id")]
@@ -541,6 +563,13 @@ pub(super) enum MachineCommand {
     Rename { target: String, name: String },
     #[command(about = "Remove a machine and revoke its credential")]
     Delete { target: String },
+}
+
+fn parse_file_mode(value: &str) -> Result<u32, String> {
+    u32::from_str_radix(value, 8)
+        .ok()
+        .filter(|mode| *mode <= 0o777)
+        .ok_or_else(|| "mode must contain ordinary octal permission bits (000-777)".to_owned())
 }
 
 #[derive(Debug, Subcommand)]

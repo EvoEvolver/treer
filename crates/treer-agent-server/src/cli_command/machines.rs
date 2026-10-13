@@ -5,6 +5,11 @@ pub(super) async fn run_machine_command(
     command: MachineCommand,
 ) -> anyhow::Result<Value> {
     match command {
+        MachineCommand::Put { .. } | MachineCommand::Get { .. } => {
+            anyhow::bail!(
+                "file_transfer_unsupported: file transfer requires a compatible treer CLI session"
+            )
+        }
         MachineCommand::List => {
             let snapshot: WorkspaceSnapshot =
                 client.request(Method::GET, "api/discovery", None).await?;

@@ -149,6 +149,12 @@ pub fn router(
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/file-transfer",
+            get(machine_file_transfer_info)
+                .post(machine_file_transfer)
+                .layer(DefaultBodyLimit::max(96 * 1024)),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/services",
             get(agent_list_machine_services).post(agent_create_machine_service),
         )
@@ -533,6 +539,12 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/file-transfer",
+            get(machine_file_transfer_info)
+                .post(machine_file_transfer)
+                .layer(DefaultBodyLimit::max(96 * 1024)),
         )
         .route(
             "/api/workspaces/{workspace_id}/agents",

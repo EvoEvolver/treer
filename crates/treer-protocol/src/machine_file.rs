@@ -17,6 +17,13 @@ pub struct MachineTransferActor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineFileTransferCall {
+    pub path: String,
+    pub request: MachineFileTransferRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MachineFileTransferRequest {
     PutBegin {
@@ -52,6 +59,8 @@ pub enum MachineFileTransferRequest {
     },
     Abort {
         id: String,
+        #[serde(default)]
+        read: bool,
     },
 }
 const fn private_mode() -> u32 {
@@ -115,6 +124,7 @@ mod tests {
             },
             MachineFileTransferRequest::Abort {
                 id: "fixture".into(),
+                read: false,
             },
         ];
         for request in requests {

@@ -10,11 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 treer-build-info.workspace = true
@@ -25,3 +27,6 @@ uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+axum.workspace = true

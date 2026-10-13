@@ -151,7 +151,7 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "treer-agent-server",
-        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY, treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT],
+        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY, treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER],
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
         "controller_epoch": state.controller_epoch,
@@ -179,6 +179,76 @@ pub(super) async fn launcher_contract(
         workspace_id: state.workspace_id,
     });
     Ok(Json(contract))
+}
+
+async fn transfer_target(
+    state: &LocalApiState,
+    target: &str,
+    agent: Option<&ValidatedAgent>,
+) -> Result<String, LocalApiError> {
+    let value = state.get_as("snapshot", agent).await?;
+    let snapshot: treer_protocol::WorkspaceSnapshot = serde_json::from_value(value)
+        .map_err(|_| LocalApiError::bad_gateway("invalid discovery response".into()))?;
+    let target = if matches!(target, "self" | ".") {
+        state.server_id.as_str()
+    } else {
+        target
+    };
+    if let Some(server) = snapshot
+        .servers
+        .iter()
+        .find(|server| server.server_id == target)
+    {
+        return Ok(server.server_id.clone());
+    }
+    let mut servers = snapshot
+        .servers
+        .iter()
+        .filter(|server| server.name == target);
+    let server = servers.next().ok_or_else(|| {
+        LocalApiError::bad_request("machine was not found in the visible workspace".into())
+    })?;
+    if servers.next().is_some() {
+        return Err(LocalApiError::bad_request(
+            "machine name is ambiguous; use its ID".into(),
+        ));
+    }
+    Ok(server.server_id.clone())
+}
+
+pub(super) async fn file_transfer_info(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(target): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let target = transfer_target(&state, &target, agent.as_ref()).await?;
+    Ok(Json(
+        state
+            .get_as(&format!("machines/{target}/file-transfer"), agent.as_ref())
+            .await?,
+    ))
+}
+
+pub(super) async fn file_transfer(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(target): Path<String>,
+    Json(call): Json<treer_protocol::MachineFileTransferCall>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let target = transfer_target(&state, &target, agent.as_ref()).await?;
+    let body = serde_json::to_value(call)
+        .map_err(|_| LocalApiError::bad_request("invalid transfer request".into()))?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("machines/{target}/file-transfer"),
+                &body,
+                agent.as_ref(),
+            )
+            .await?,
+    ))
 }
 
 pub(super) async fn discovery(
