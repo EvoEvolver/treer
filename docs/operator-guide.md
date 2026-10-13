@@ -1193,6 +1193,11 @@ staging is cleaned on the next transfer. If publication succeeded but its reply
 was lost, inspect the destination before retrying; retries never auto-force.
 `machine_file_commit_uncertain` likewise means publication happened but cleanup
 or directory durability could not be confirmed; inspect rather than retrying.
+Have the host operator verify the destination's size/hash and inspect any
+same-directory `.treer-transfer-*` residue. Do not blindly remove a live
+transfer's file or add `--force`; a no-force retry may correctly return
+`machine_file_exists` for the already-published destination. Crash recovery
+removes recorded temporary hard links without deleting the published file.
 
 Windows roots enrolled from `C:\\Windows\\System32` remain unchanged. For new
 machines explicitly enroll with `--root` pointing at a user-owned directory.

@@ -266,6 +266,54 @@ fn machine_delete_command_parses() {
 }
 
 #[test]
+fn machine_file_transfer_commands_parse_and_preserve_local_transport_paths() {
+    let argv = [
+        "machine",
+        "put",
+        "--machine",
+        "build machine",
+        "-",
+        "research/result",
+        "--force",
+        "--mode",
+        "640",
+    ]
+    .map(str::to_owned);
+    let action = session_action(&argv, None).unwrap().unwrap();
+    assert!(
+        matches!(action,treer_protocol::cli::CliOutput::FileTransfer {path,local,remote,download:false,overwrite:true,mode:0o640} if path=="/api/machines/build%20machine/file-transfer" && local=="-" && remote=="research/result")
+    );
+    let args = Args::try_parse_from([
+        "treer",
+        "machine",
+        "get",
+        "--machine",
+        "self",
+        "report",
+        "-",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command,Some(Command::Machine {command:MachineCommand::Get {local,remote,force:false,mode:0o600,..}}) if local=="-" && remote=="report")
+    );
+    for mode in ["888", "4755", "-1"] {
+        assert!(Args::try_parse_from([
+            "treer",
+            "machine",
+            "put",
+            "--machine",
+            "self",
+            "input",
+            "output",
+            "--mode",
+            mode
+        ])
+        .is_err());
+    }
+    assert!(Args::try_parse_from(["treer", "machine", "put", "input", "output"]).is_err());
+}
+
+#[test]
 fn machine_exec_command_preserves_argv() {
     let args = Args::try_parse_from([
         "treer",

@@ -914,6 +914,108 @@ async fn machine_file_transfer_is_never_replayed_into_a_new_connection_generatio
 }
 
 #[tokio::test]
+async fn nats_machine_file_transfer_routes_without_proxy_local_transfer_state() {
+    let Ok(nats_url) = std::env::var("TREER_TEST_NATS_URL") else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let workspace_id = format!("file-ws-{suffix}");
+    let prefix = format!("treer.test.file.{suffix}");
+    let bus_a = ClusterBus::connect(&nats_url, format!("file-a-{suffix}"), prefix.clone())
+        .await
+        .unwrap();
+    let bus_b = ClusterBus::connect(&nats_url, format!("file-b-{suffix}"), prefix)
+        .await
+        .unwrap();
+    let a = AppState::with_backplanes(EventBus::in_process(), bus_a.clone());
+    let b = AppState::with_backplanes(EventBus::in_process(), bus_b.clone());
+    let workspace = b
+        .ensure_workspace(&workspace_id, "File transfer test")
+        .await;
+    bus_b.start(b.clone()).await.unwrap();
+    bus_b
+        .broadcast_projection(ClusterProjectionUpdate::WorkspaceUpsert { workspace })
+        .await
+        .unwrap();
+    bus_a.start(a.clone()).await.unwrap();
+    let mut server = test_server();
+    server.workspace_id = workspace_id.clone();
+    let connection = Uuid::new_v4();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    b.register_server_instance_with_capabilities(
+        server.clone(),
+        connection,
+        "file-native-controller".into(),
+        vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
+        tx,
+    )
+    .await
+    .unwrap();
+    b.apply_snapshot(
+        connection,
+        AgentServerSnapshot {
+            server,
+            agents: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while a.resolve_server(&workspace_id, "server").await.is_err() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let actor = treer_protocol::MachineTransferActor {
+        workspace_id: workspace_id.clone(),
+        kind: "agent".into(),
+        id: "synthetic-agent".into(),
+    };
+    for (sender, offset) in [(a.clone(), 0_u64), (b.clone(), 65536)] {
+        let command = AgentCommand::FileTransfer {
+            actor: actor.clone(),
+            authorized_path: "result".into(),
+            request: treer_protocol::MachineFileTransferRequest::PutChunk {
+                id: "synthetic-handle".into(),
+                offset,
+                content_base64: "AAAA".repeat(treer_protocol::MACHINE_TRANSFER_CHUNK_BYTES / 3),
+            },
+        };
+        let expected = command.clone();
+        let workspace_id = workspace_id.clone();
+        let waiting =
+            tokio::spawn(
+                async move { sender.send_command(&workspace_id, "server", command).await },
+            );
+        let message = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ProxyMessage::Command { envelope } =
+            serde_json::from_str(&expect_text(message)).unwrap()
+        else {
+            panic!("expected file command")
+        };
+        assert_eq!(envelope.command, expected);
+        b.complete_command_from(
+            &actor.workspace_id,
+            "server",
+            connection,
+            CommandResult::success(
+                envelope.command_id,
+                serde_json::json!({"offset":offset+65536}),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(waiting.await.unwrap().unwrap()["offset"], offset + 65536);
+    }
+    b.disconnect_server(&workspace_id, "server", connection)
+        .await;
+}
+
+#[tokio::test]
 async fn pending_command_is_rejected_when_replacement_lacks_its_capability() {
     let state = AppState::new();
     let server = test_server();

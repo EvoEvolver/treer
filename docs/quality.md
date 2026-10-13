@@ -23,6 +23,11 @@ Policy denial and derived caller/body-free audit dispatch. These do not prove
 snapshot semantics, isolation from a same-OS-account attacker, or complete
 auditing across a filesystem/SQL failure. Native Windows execution is a separate
 release gate; a cross-compiled platform check is not a native test result.
+File I/O and recovery journal changes are serialized per Controller; a slow
+filesystem can delay other transfers. Expiry skips a busy registry instead of
+blocking the Tokio timer. Space checks are advisory, not capacity reservations;
+aggregate staging is bounded by active-handle count times the per-file limit.
+The Proxy limits in-flight transfer calls globally, not fairly per caller.
 
 Updater executable staging closes and syncs the writable file before executing
 validation. Unix validation retries only transient `ETXTBSY` within the existing

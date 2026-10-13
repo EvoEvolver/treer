@@ -46,6 +46,7 @@ pub fn validate_relative_path(path: &str) -> io::Result<Vec<&str>> {
                 .unwrap_or_default()
                 .to_ascii_uppercase();
             part.is_empty()
+                || base.ends_with(' ')
                 || *part == "."
                 || *part == ".."
                 || part.len() > 255
@@ -480,6 +481,8 @@ mod tests {
             "com1.log",
             "LPT².txt",
             "CONOUT$",
+            "con .txt",
+            "COM¹ .txt",
             "a.",
             "a ",
             "a\0b",
