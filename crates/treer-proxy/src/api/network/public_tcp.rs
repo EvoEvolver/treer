@@ -277,7 +277,10 @@ pub(super) fn spawn_public_tcp_listeners(state: AppState, auth: AuthStore) {
                     let Ok(service) = auth.resolve_machine_service(&workspace, &id).await else {
                         return;
                     };
-                    if !matches!(is_active_policy_provider_service(&auth.pool(), &workspace, &id).await, Ok(false)) {
+                    if !matches!(
+                        is_active_policy_provider_service(&auth.pool(), &workspace, &id).await,
+                        Ok(false)
+                    ) {
                         return;
                     }
                     if !service_destination_identity_active(&auth, &service).await {

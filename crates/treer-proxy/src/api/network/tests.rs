@@ -661,16 +661,20 @@ async fn raw_public_tcp_is_refused_for_the_active_policy_provider_service() {
         )
         .await
         .unwrap();
-    assert!(
-        public_tcp::is_active_policy_provider_service(&auth.pool(), "tcp-provider", &service.service_id)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !public_tcp::is_active_policy_provider_service(&auth.pool(), "other", &service.service_id)
-            .await
-            .unwrap()
-    );
+    assert!(public_tcp::is_active_policy_provider_service(
+        &auth.pool(),
+        "tcp-provider",
+        &service.service_id
+    )
+    .await
+    .unwrap());
+    assert!(!public_tcp::is_active_policy_provider_service(
+        &auth.pool(),
+        "other",
+        &service.service_id
+    )
+    .await
+    .unwrap());
     let error = publish_public_tcp_service(
         Extension(auth.clone()),
         Extension(config),
@@ -680,13 +684,12 @@ async fn raw_public_tcp_is_refused_for_the_active_policy_provider_service() {
     .await
     .expect_err("provider service must stay private");
     assert_eq!(error.error.code, "policy_provider_must_be_private");
-    let mapped: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM public_tcp_services WHERE service_id=$1)",
-    )
-    .bind(&service.service_id)
-    .fetch_one(&auth.pool())
-    .await
-    .unwrap();
+    let mapped: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public_tcp_services WHERE service_id=$1)")
+            .bind(&service.service_id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
     assert!(!mapped);
 }
 
@@ -732,22 +735,37 @@ async fn concurrent_provider_selection_and_raw_tcp_publication_are_mutually_excl
         })
     };
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(!publishing.is_finished(), "publication must wait for the selection transaction");
+    assert!(
+        !publishing.is_finished(),
+        "publication must wait for the selection transaction"
+    );
     selecting.commit().await.unwrap();
-    let error = publishing.await.unwrap().expect_err("publication must be rejected after selection");
-    assert!(error.to_string().contains("policy_provider_must_be_private"));
+    let error = publishing
+        .await
+        .unwrap()
+        .expect_err("publication must be rejected after selection");
+    assert!(error
+        .to_string()
+        .contains("policy_provider_must_be_private"));
     // Reverse order: an enabled mapping blocks later selection.
-    sqlx::query("DELETE FROM workspace_policy_providers WHERE workspace_id='tcp-race'").execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO public_tcp_services(service_id,public_port,enabled) VALUES($1,39992,TRUE)")
-        .bind(&app.service_id)
+    sqlx::query("DELETE FROM workspace_policy_providers WHERE workspace_id='tcp-race'")
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO public_tcp_services(service_id,public_port,enabled) VALUES($1,39992,TRUE)",
+    )
+    .bind(&app.service_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let error = sqlx::query("INSERT INTO workspace_policy_providers(workspace_id,app_id,service_id,updated_at,updated_by) VALUES('tcp-race',$1,$2,'now','owner')")
         .bind(&app.app_id)
         .bind(&app.service_id)
         .execute(&pool)
         .await
         .expect_err("selection must be rejected while raw TCP is enabled");
-    assert!(error.to_string().contains("policy_provider_must_be_private"));
+    assert!(error
+        .to_string()
+        .contains("policy_provider_must_be_private"));
 }

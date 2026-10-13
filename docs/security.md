@@ -427,8 +427,9 @@ Policy Provider cannot be switched to public HTTP access or published as raw
 public TCP: selection, publication and every accepted public-TCP connection
 check the active Provider service. PostgreSQL triggers serialize selection and
 publication under one advisory lock, so concurrent requests on any Proxy cannot
-both succeed, and open public-TCP streams are closed within about a second of a
-Provider selection.
+both succeed. Open public-TCP streams periodically recheck the active Provider
+and fail closed on a failed or timed-out check. Revocation is not instantaneous:
+bytes already in flight and the interval/query-timeout window remain possible.
 
 ## Policy And Rollout
 
