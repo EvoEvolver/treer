@@ -128,6 +128,19 @@ pub(super) async fn set_policy_provider(
             "Policy Provider App must require a workspace session",
         ));
     }
+    let public_tcp: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM public_tcp_services WHERE service_id=$1 AND enabled)",
+    )
+    .bind(&app.service_id)
+    .fetch_one(&auth.pool())
+    .await
+    .map_err(|error| ApiFailure::internal("database_error", &error.to_string()))?;
+    if public_tcp {
+        return Err(ApiFailure::bad_request(
+            "policy_provider_must_be_private",
+            "Policy Provider service must not be published as raw public TCP",
+        ));
+    }
     let service = auth
         .resolve_machine_service(&workspace_id, &app.service_id)
         .await?;

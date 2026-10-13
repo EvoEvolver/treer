@@ -56,13 +56,27 @@ pub(super) fn public_tcp_range() -> Result<(u16, u16), ApiFailure> {
     }
 }
 
+/// The selected Policy Provider must stay behind workspace authentication; raw TCP
+/// publication has no login, so it is refused at publish time, at provider
+/// selection, and again at every accepted connection to close races.
+pub(in crate::api) async fn is_active_policy_provider_service(
+    pool: &sqlx::PgPool,
+    workspace_id: &str,
+    service_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workspace_policy_providers WHERE workspace_id=$1 AND service_id=$2)")
+        .bind(workspace_id)
+        .bind(service_id)
+        .fetch_one(pool)
+        .await
+}
+
 pub(in crate::api) async fn publish_public_tcp_service(
     Extension(auth): Extension<AuthStore>,
     Extension(config): Extension<IngressConfig>,
     Path((workspace_id, service_id)): Path<(String, String)>,
     Json(request): Json<Value>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let (start, end) = public_tcp_range()?;
     if request.get("access").and_then(Value::as_str) != Some("public") {
         return Err(ApiFailure::bad_request("public_access_required", "raw public TCP requires explicit access=public; use authenticated forwarding for workspace access"));
     }
@@ -76,6 +90,16 @@ pub(in crate::api) async fn publish_public_tcp_service(
         ));
     }
     let pool = auth.pool();
+    if is_active_policy_provider_service(&pool, &workspace_id, &service.service_id)
+        .await
+        .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?
+    {
+        return Err(ApiFailure::bad_request(
+            "policy_provider_must_be_private",
+            "the active Policy Provider service cannot have public ingress",
+        ));
+    }
+    let (start, end) = public_tcp_range()?;
     let mut tx = pool
         .begin()
         .await
@@ -253,6 +277,9 @@ pub(super) fn spawn_public_tcp_listeners(state: AppState, auth: AuthStore) {
                     let Ok(service) = auth.resolve_machine_service(&workspace, &id).await else {
                         return;
                     };
+                    if !matches!(is_active_policy_provider_service(&auth.pool(), &workspace, &id).await, Ok(false)) {
+                        return;
+                    }
                     if !service_destination_identity_active(&auth, &service).await {
                         return;
                     }

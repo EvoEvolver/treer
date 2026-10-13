@@ -423,7 +423,9 @@ Workspace members may change an existing Managed App's owned ingress between
 `workspace` and `public` access from the App settings UI. This endpoint resolves
 the ingress from the App record and does not accept a service, hostname, or
 arbitrary ingress identifier from the caller. An App selected as the active
-Policy Provider cannot be switched to public access.
+Policy Provider cannot be switched to public HTTP access or published as raw
+public TCP: selection, publication and every accepted public-TCP connection
+check the active Provider service.
 
 ## Policy And Rollout
 

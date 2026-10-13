@@ -616,3 +616,76 @@ async fn public_tcp_allocation_is_stable_and_explicitly_revocable() {
         0
     );
 }
+
+#[tokio::test]
+async fn raw_public_tcp_is_refused_for_the_active_policy_provider_service() {
+    let (auth, _state, service, _token, _session, _receiver, _connection) =
+        relay_fixture("tcp-provider").await;
+    let config = IngressConfig::new(
+        None,
+        &Url::parse("https://proxy.example/").unwrap(),
+        &Url::parse("https://app.example/").unwrap(),
+    )
+    .unwrap();
+    let app = auth
+        .create_app_deployment(
+            "tcp-provider",
+            "owner",
+            service.server_id.clone(),
+            treer_protocol::CreateAppDeploymentRequest {
+                server_id: Some(service.server_id.clone()),
+                name: "Policy".into(),
+                command: "python3".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8888,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    let service = auth
+        .resolve_machine_service("tcp-provider", &app.service_id)
+        .await
+        .unwrap();
+    crate::policy_provider_store::PolicyProviderStore::new(auth.pool())
+        .set(
+            "tcp-provider",
+            &app.app_id,
+            &service.service_id,
+            treer_protocol::PolicyProviderFailureMode::FailClosed,
+            0,
+            0,
+            "owner",
+        )
+        .await
+        .unwrap();
+    assert!(
+        public_tcp::is_active_policy_provider_service(&auth.pool(), "tcp-provider", &service.service_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !public_tcp::is_active_policy_provider_service(&auth.pool(), "other", &service.service_id)
+            .await
+            .unwrap()
+    );
+    let error = publish_public_tcp_service(
+        Extension(auth.clone()),
+        Extension(config),
+        Path(("tcp-provider".into(), service.service_id.clone())),
+        Json(json!({"access":"public"})),
+    )
+    .await
+    .expect_err("provider service must stay private");
+    assert_eq!(error.error.code, "policy_provider_must_be_private");
+    let mapped: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM public_tcp_services WHERE service_id=$1)",
+    )
+    .bind(&service.service_id)
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert!(!mapped);
+}
