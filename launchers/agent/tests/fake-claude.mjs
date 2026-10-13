@@ -71,7 +71,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       message("assistant", [{ type: "text", text: "GOAL_DONE" }], undefined, {});
       persist({ type: "system", subtype: "stop_hook_summary", uuid: `hook-${randomUUID()}`, hookInfos: [{ promptText: args }], hookErrors: [], hasOutput: args.includes("hold"), preventedContinuation: false });
     }
-    result({ result: args && args !== "clear" ? "GOAL_DONE" : output, usage: { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 7 }, duration_ms: 1500 });
+    result({ result: args && args !== "clear" ? "GOAL_DONE" : output, usage: process.argv.includes("--zero-goal-usage") ? {} : { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 7 }, duration_ms: 1500 });
     continue;
   }
   if (hold) { message("assistant", [{ type: "text", text: `Steered: ${value}` }]); result(); continue; }
@@ -116,6 +116,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
     stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Done" } });
     message("assistant", [{ type: "text", text: "Done" }], "answer");
-    result();
+    result(value === "Report current state with usage" ? { usage: { input_tokens: 7, output_tokens: 9, cache_read_input_tokens: 5 } } : {});
   }, 30);
 }

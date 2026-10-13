@@ -139,12 +139,16 @@ for (const harness of ["codex", "claude"] as const) test(`${harness} refuses ove
 });
 
 test("Claude budget edits still release the goal after the mutation lock completes", async () => {
-  const runtime = new ClaudeRuntime(join(root, "tests/fake-claude.mjs"), temp());
+  // The ordinary fixture previously reported no usage. Relying on incidental
+  // /goal command usage made this assertion depend on native-ack scheduling.
+  const runtime = new ClaudeRuntime(process.execPath, temp(), { args: [join(root, "tests/fake-claude.mjs"), "--zero-goal-usage"] });
   try {
     await runtime.start(); await runtime.updateGoal({ objective: "hold external condition" });
     await until(() => runtime.snapshot().thread?.status === "idle");
-    await runtime.prompt("Report current state"); await until(() => runtime.snapshot().thread?.status === "idle");
-    assert.ok((runtime.snapshot().goal?.tokensUsed ?? 0) > 1);
+    await runtime.prompt("Report current state with usage");
+    const turnId = runtime.snapshot().thread!.activeTurnId;
+    await until(() => runtime.snapshot().thread?.turns.some((turn) => turn.id === turnId && turn.status === "completed") === true && (runtime.snapshot().goal?.tokensUsed ?? 0) === 21);
+    assert.equal(runtime.snapshot().goal?.tokensUsed, 21);
     await runtime.updateGoal({ tokenBudget: 1 });
     await until(() => runtime.snapshot().goal?.status === "blocked");
     assert.match(runtime.snapshot().goal!.reason!, /token budget/);
