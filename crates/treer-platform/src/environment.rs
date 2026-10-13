@@ -83,6 +83,8 @@ pub fn machine_exec_variable_allowed(name: &str) -> bool {
                 | "COMSPEC"
                 | "PATHEXT"
                 | "USERPROFILE"
+                | "HOMEDRIVE"
+                | "HOMEPATH"
                 | "USERNAME"
                 | "USERDOMAIN"
                 | "USERDOMAIN_ROAMINGPROFILE"
@@ -151,6 +153,8 @@ mod tests {
             "SystemRoot",
             "windir",
             "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
             "USERNAME",
             "APPDATA",
             "LOCALAPPDATA",
