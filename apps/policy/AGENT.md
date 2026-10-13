@@ -29,10 +29,25 @@ The App's workload credential is used only for the typed invalidation route.
 - `GET /v1/policy/bundle?workspace_id=...`
 - `POST /v1/policy/publish`
 - `POST /v1/policy/invalidate`
-- `POST /v1/policy/test`
+- `GET /v1/policy/history`, `/v1/policy/revisions/N`
+- `POST /v1/policy/rollback`, `/v1/policy/validate`
+- `GET /v1/templates`, `POST /v1/templates/team-isolation`
+- `POST /v1/policy/explain`, `GET /v1/policy/decisions`
+- `POST /v1/policy/test` (legacy v1 only)
 
 Policy administration is locked by default. An operator must configure the
 private `POLICY_ADMIN_TOKEN` and supply it as Bearer authentication with JSON
 for publish/invalidate, or enter it in the browser password field. Workspace
 membership and self-reported role headers do not grant editing. Never include
 this token in URLs, source control or logs. Bundle reads remain unchanged.
+
+
+Schema-2 path policies require a schema-2 capable Core/Controller. The manifest
+advertises policy.bundle.v2; bundle callers must request max_schema_version=2.
+Never downgrade by removing Tree selectors/conditions. Use monitor initially.
+Human diagnostics and v2 publication use injected App identity first, or OAuth
+fallback, with per-request verification and current owner authorization in Core.
+Publishing still requires the separate private operator Bearer. Human mutations
+also need X-Policy-Request: 1 and valid browser Origin/Fetch Metadata.
+Rollback preserves monotonic revisions and checks concurrent edits.
+See README for grammar, editable templates, migration, backups and limits.

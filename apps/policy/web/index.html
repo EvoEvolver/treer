@@ -18,8 +18,11 @@
       <button class="nav-item" data-view="editor">Policy</button>
       <button class="nav-item" data-view="simulator">Simulator</button>
       <button class="nav-item" data-view="history">History</button>
+      <button class="nav-item" data-view="templates">Templates</button>
+      <button class="nav-item" data-view="logs">Decision log</button>
     </nav>
     <main>
+      <aside class="auth-bar"><span id="identity-status">Checking Treer identity…</span><a id="login-link" href="./api/auth/start" hidden>Sign in with Treer</a><button id="logout-button" class="secondary" hidden>Sign out</button></aside>
       <section class="view active" id="view-overview">
         <div class="page-heading"><div><p class="eyebrow">Runtime</p><h1>Policy server</h1></div><button class="secondary" id="sync-button">Retry sync</button></div>
         <div class="metrics">
@@ -34,8 +37,32 @@
       </section>
 
       <section class="view" id="view-editor">
-        <div class="page-heading"><div><p class="eyebrow">Bundle editor</p><h1>Workspace policy</h1></div><div class="actions"><button class="secondary" id="format-button">Format</button><button class="primary" id="publish-button">Publish</button></div></div>
+        <div class="page-heading"><div><p class="eyebrow">Bundle editor</p><h1>Workspace policy</h1></div><div class="actions"><button class="secondary" id="format-button">Format</button><button class="secondary" id="validate-button">Validate draft</button><button class="primary" id="publish-button">Publish</button></div></div>
         <div class="mode-row"><span>Runtime mode</span><div class="segments" role="group" aria-label="Policy mode"><button data-mode="monitor" class="active">Monitor</button><button data-mode="enforce">Enforce</button></div></div>
+        <p class="notice">Monitor records computed denials while allowing requests. Owner Policy/Tree rescue belongs to Core; other owner operations can still be denied. Path grants follow current placement and names.</p>
+        <details open><summary>Folder-path rule editor</summary>
+          <form id="rule-form" class="rule-grid">
+            <label>Rule ID<input id="rule-id" value="new-path-rule" required maxlength="128"></label>
+            <label>Priority<input id="rule-priority" type="number" value="100" required></label>
+            <label>Effect<select id="rule-effect"><option>allow</option><option>deny</option></select></label>
+            <label>Actions (comma separated)<input id="rule-actions" value="agent.prompt" required></label>
+            <label>Actor principal kind<select id="rule-actor-kind"><option value="agent">Agent/App runtime</option><option value="human">Human</option><option value="machine">Machine</option><option value="service">Service</option><option value="">Any</option></select></label>
+            <label>Actor Tree kind<select id="rule-actor-tree-kind"><option value="">Any placed node</option><option>agent</option><option>app</option><option>folder</option></select></label>
+            <label>Actor match<select id="rule-actor-match"><option value="path_glob">Path glob</option><option value="path_prefix">Path prefix (includes self)</option><option value="path_eq">Exact path</option><option value="">No path restriction</option></select></label>
+            <label>Actor path<input id="rule-actor-path" value="/team/**"></label>
+            <label>Target resource kind<input id="rule-target-kind" placeholder="Any (or agent, message.mailbox, machine.service)"></label>
+            <label>Target Tree kind<select id="rule-target-tree-kind"><option value="">Any placed node</option><option>agent</option><option>app</option><option>folder</option></select></label>
+            <label>Target match<select id="rule-target-match"><option value="path_glob">Path glob</option><option value="path_prefix">Path prefix (includes self)</option><option value="path_eq">Exact path</option><option value="">No path restriction</option></select></label>
+            <label>Target path<input id="rule-target-path" value="/**"></label>
+            <label>Relationship<select id="rule-relation"><option value="">None</option><option value="same_folder">Same folder</option><option value="resource_below_subject_folder">Target below actor folder</option><option value="resource_below_folder">Target below fixed folder</option><option value="keep">Preserve advanced conditions/bindings</option></select></label>
+            <label>Fixed folder path<input id="rule-folder-path" value="/"></label>
+            <label class="check-label"><input id="rule-strict" type="checkbox"> Descendants only (strict)</label>
+            <button type="submit" id="apply-rule">Add / update draft rule</button><button type="button" id="new-rule" class="secondary">New rule</button>
+          </form>
+          <p>Globs use whole-component * and one terminal **. Human principals have no folder placement. Advanced IDs, groups, OR selectors, include_self=false and bindings remain editable in JSON.</p>
+        </details>
+        <div id="rule-list" aria-label="Draft rules"></div>
+        <div class="notice hidden" id="safety-warnings" role="alert"></div>
         <div class="editor-wrap">
           <div class="editor-toolbar"><span>policy.json</span><span id="editor-state">Current revision</span></div>
           <label>Operator administration token <input id="admin-token" type="password" autocomplete="off" placeholder="Required to publish or retry sync"></label><textarea id="policy-editor" spellcheck="false" aria-label="Policy JSON"></textarea>
@@ -44,17 +71,30 @@
       </section>
 
       <section class="view" id="view-simulator">
-        <div class="page-heading"><div><p class="eyebrow">Local evaluator</p><h1>Decision simulator</h1></div><button class="primary" id="test-button">Evaluate</button></div>
+        <div class="page-heading"><div><p class="eyebrow">Core evaluator</p><h1>Decision simulator</h1></div><button class="primary" id="test-button">Evaluate</button></div>
         <form id="test-form" class="test-grid">
           <label>Subject kind<select id="subject-kind"><option>agent</option><option>human</option><option>machine</option><option>service</option></select></label>
           <label>Subject ID<input id="subject-id" value="agent_example" required></label>
-          <label>Machine ID<input id="machine-id" value="machine_example"></label>
+<label>Actor path (resolved by Core)<input id="actor-path" placeholder="/team/agent"></label>
+          <label>Target path (resolved by Core)<input id="target-path" placeholder="/team/reviewer"></label>
           <label>Action<input id="action" value="agent.prompt" required></label>
           <label>Resource kind<input id="resource-kind" value="agent" required></label>
           <label>Resource ID<input id="resource-id" value="agent_target" required></label>
         </form>
         <div class="decision empty" id="decision"><span class="decision-mark">-</span><div><small>Decision</small><strong>Not evaluated</strong><p>Run the current published bundle against this request.</p></div></div>
         <div class="notice hidden" id="test-error"></div>
+      </section>
+      <section class="view" id="view-templates">
+        <div class="page-heading"><div><p class="eyebrow">Editable starting points</p><h1>Policy templates</h1></div></div>
+        <div class="rule-grid"><label>Actor subtree<input id="template-actor" value="/"></label><label>Target subtree<input id="template-target" value="/"></label></div>
+        <p>Templates replace the draft, reset it to monitor, and never publish automatically. Review action coverage and explicit human access before enforcement.</p>
+        <div id="template-list"></div><div class="notice hidden" id="template-error"></div>
+      </section>
+      <section class="view" id="view-logs">
+        <div class="page-heading"><div><p class="eyebrow">Core diagnostics</p><h1>Decision log</h1></div><button id="logs-refresh" class="secondary">Refresh</button></div>
+        <label class="check-label"><input id="logs-denials" type="checkbox" checked> Show computed denials (would deny in enforce)</label>
+        <p>Bounded diagnostic records, not a complete or tamperproof audit. Prompt bodies, credentials and file contents are excluded.</p>
+        <div class="notice hidden" id="logs-error"></div><div id="logs-list"></div><button id="logs-next" class="secondary" hidden>Next page</button>
       </section>
       <section class="view" id="view-history">
         <div class="page-heading"><div><p class="eyebrow">Versioned policy</p><h1>Revision history</h1></div><button class="secondary" id="history-refresh">Refresh</button></div>

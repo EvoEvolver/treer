@@ -1,4 +1,4 @@
-const state = { bundle: null, mode: "monitor", dirty: false }
+const state = { bundle: null, mode: "monitor", dirty: false, editing: null, decisions: [] }
 
 function applicationUrl(path) {
   const base = new URL("./", window.location.href)
@@ -8,7 +8,8 @@ function applicationUrl(path) {
 async function request(path, options = {}) {
   const response = await fetch(applicationUrl(path), {
     ...options,
-    headers: { "content-type": "application/json", ...((["v1/policy/publish","v1/policy/invalidate","v1/policy/rollback","v1/policy/history"].includes(path) || path.startsWith("v1/policy/revisions/")) ? {Authorization: "Bearer " + document.getElementById("admin-token").value} : {}), ...(options.headers || {}) },
+    headers: { "content-type": "application/json", "X-Policy-Request":"1",
+      ...(document.getElementById("admin-token").value ? {Authorization:"Bearer " + document.getElementById("admin-token").value} : {}), ...(options.headers || {}) },
   })
   const body = await response.json()
   if (!response.ok) throw new Error(body.error?.message || `HTTP ${response.status}`)
@@ -36,6 +37,7 @@ function render(status) {
   document.querySelectorAll("[data-mode]").forEach((button) => button.classList.toggle("active", button.dataset.mode === state.mode))
   document.getElementById("status-dot").classList.add("ok")
   text("server-status", "Serving bundle")
+  renderRules()
   const syncError = document.getElementById("sync-error")
   if (status.proxy_sync.status === "failed" || status.proxy_sync.status === "unavailable") {
     syncError.textContent = status.proxy_sync.message
@@ -52,6 +54,8 @@ document.querySelectorAll(".nav-item").forEach((button) => button.addEventListen
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item === button))
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${button.dataset.view}`))
   if (button.dataset.view === "history") void loadHistory()
+  if (button.dataset.view === "templates") void loadTemplates()
+  if (button.dataset.view === "logs") void loadLogs()
 }))
 
 document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => {
@@ -61,7 +65,7 @@ document.querySelectorAll("[data-mode]").forEach((button) => button.addEventList
   text("editor-state", "Unpublished changes")
 }))
 
-document.getElementById("policy-editor").addEventListener("input", () => { state.dirty = true; text("editor-state", "Unpublished changes") })
+document.getElementById("policy-editor").addEventListener("input", () => { state.dirty = true; text("editor-state", "Unpublished changes"); renderRules() })
 document.getElementById("policy-editor").addEventListener("keydown", (event) => {
   if (event.key === "Tab") {
     event.preventDefault()
@@ -84,6 +88,8 @@ document.getElementById("publish-button").addEventListener("click", async () => 
   const button = document.getElementById("publish-button")
   button.disabled = true
   try {
+    await validateDraft()
+    if (state.mode === "enforce" && !window.confirm("Enforce these rules? They may deny your own non-recovery operations. Review warnings and simulations first.")) return
     const body = await request("v1/policy/publish", { method: "POST", body: JSON.stringify({ expected_revision: state.bundle.revision, mode: state.mode, document: JSON.parse(document.getElementById("policy-editor").value) }) })
     render({ bundle: body.bundle, proxy_sync: body.proxy_sync })
     toast(body.proxy_sync.status === "synced" ? "Published and Proxy cache invalidated" : "Published; Proxy sync needs attention")
@@ -104,11 +110,19 @@ document.getElementById("sync-button").addEventListener("click", async () => {
 document.getElementById("test-button").addEventListener("click", async () => {
   clearError("test-error")
   try {
-    const result = await request("v1/policy/test", { method: "POST", body: JSON.stringify({
-      subject: { kind: document.getElementById("subject-kind").value, id: document.getElementById("subject-id").value, machine_id: document.getElementById("machine-id").value },
-      action: document.getElementById("action").value,
-      resource: { kind: document.getElementById("resource-kind").value, id: document.getElementById("resource-id").value },
-    }) })
+    const body = {
+      subject: { kind: value("subject-kind"), id: value("subject-id") },
+      action: value("action"), resource: {kind:value("resource-kind"), id:value("resource-id")},
+    }
+    if(value("actor-path") || value("target-path")) {
+      body.subject.path = value("actor-path") || undefined
+      body.resource.path = value("target-path") || undefined
+    }
+    const response = await request("v1/policy/explain", {method:"POST", body:JSON.stringify(body)})
+    const detail = response.explanation
+    const result = {decision:detail.effective_decision, effect:detail.computed_effect, mode:detail.mode,
+      revision:detail.policy_revision, matched_rule_id:detail.matched_rule_id}
+
     const node = document.getElementById("decision")
     node.className = `decision ${result.decision}`
     const marker = document.createElement("span");marker.className="decision-mark";marker.textContent=result.decision === "allow" ? "A" : "D";
@@ -121,6 +135,7 @@ document.getElementById("test-button").addEventListener("click", async () => {
 })
 
 load()
+loadIdentity()
 
 async function loadHistory() {
   clearError("history-error")
@@ -152,3 +167,130 @@ async function loadHistory() {
   } catch (error) { showError("history-error", error) }
 }
 document.getElementById("history-refresh").addEventListener("click",loadHistory)
+
+function value(id) { return document.getElementById(id).value.trim() }
+function draft() { return JSON.parse(document.getElementById("policy-editor").value) }
+function setDraft(documentValue) {
+  document.getElementById("policy-editor").value = JSON.stringify(documentValue,null,2)
+  state.dirty = true; text("editor-state","Unpublished changes");renderRules()
+}
+function warnings(values) {
+  const node = document.getElementById("safety-warnings")
+  node.replaceChildren()
+  for (const item of values) { const p = document.createElement("p");p.textContent=item;node.append(p) }
+  node.classList.toggle("hidden",!values.length)
+}
+async function validateDraft() {
+  const result = await request("v1/policy/validate",{method:"POST",body:JSON.stringify({document:draft()})})
+  warnings(result.warnings || []);return result
+}
+document.getElementById("validate-button").addEventListener("click",async()=>{
+  clearError("editor-error")
+  try { await validateDraft();toast("Draft validated") } catch(error) {showError("editor-error",error)}
+})
+async function loadIdentity() {
+  try {
+    const result = await request("v1/session")
+    text("identity-status", result.principal ? `Treer: ${result.principal.name || result.principal.id}` : "No Treer human session")
+    document.getElementById("login-link").hidden = !!result.principal || !result.oauth_available
+    document.getElementById("logout-button").hidden = !result.principal
+  } catch(error) {text("identity-status",error.message);document.getElementById("login-link").hidden=true}
+}
+document.getElementById("logout-button").addEventListener("click",async()=>{
+  try {await request("api/auth/logout",{method:"POST",body:"{}"});await loadIdentity()}
+  catch(error) {text("identity-status",error.message)}
+})
+function renderRules() {
+  const list = document.getElementById("rule-list");list.replaceChildren()
+  let rules
+  try {rules = draft().rules || []} catch {return}
+  for (const rule of rules) {
+    const card=document.createElement("article"),title=document.createElement("h3"),summary=document.createElement("p")
+    title.textContent=`${rule.id} · ${rule.effect} · priority ${rule.priority}`
+    summary.textContent=JSON.stringify({subjects:rule.subjects,actions:rule.actions,resources:rule.resources,conditions:rule.conditions})
+    const edit=document.createElement("button"),remove=document.createElement("button")
+    edit.textContent="Edit rule";edit.className="secondary";edit.addEventListener("click",()=>editRule(rule))
+    remove.textContent="Remove from draft";remove.className="secondary";remove.addEventListener("click",()=>{
+      const documentValue=draft();documentValue.rules=documentValue.rules.filter(r=>r.id!==rule.id);setDraft(documentValue)
+    })
+    card.append(title,summary,edit,remove);list.append(card)
+  }
+}
+function fill(id, val) {document.getElementById(id).value=val ?? ""}
+function editRule(rule) {
+  state.editing=rule.id
+  for(const [id,val] of Object.entries({"rule-id":rule.id,"rule-priority":rule.priority,"rule-effect":rule.effect,"rule-actions":rule.actions.join(",")})) fill(id,val)
+  for(const [prefix,selector] of [["actor",rule.subjects[0]],["target",rule.resources[0]]]) {
+    fill(`rule-${prefix}-kind`,selector.kind)
+    fill(`rule-${prefix}-tree-kind`,selector.tree?.kind)
+    const match=["path_glob","path_prefix","path_eq"].find(k=>selector.tree?.[k]!==undefined) || ""
+    fill(`rule-${prefix}-match`,match);fill(`rule-${prefix}-path`,match==="path_prefix"?selector.tree[match].path:selector.tree?.[match])
+  }
+  fill("rule-relation","keep")
+  toast("Editing first selectors; advanced selectors, bindings and conditions are preserved")
+}
+document.getElementById("new-rule").addEventListener("click",()=>{
+  state.editing=null;document.getElementById("rule-form").reset()
+})
+document.getElementById("rule-form").addEventListener("submit",event=>{
+  event.preventDefault();clearError("editor-error")
+  try {
+    const documentValue=draft(), old=documentValue.rules.find(r=>r.id===state.editing)
+    const rule=old?structuredClone(old):{subjects:[{}],resources:[{}]}
+    Object.assign(rule,{id:value("rule-id"),priority:Number(value("rule-priority")),effect:value("rule-effect"),actions:value("rule-actions").split(",").map(s=>s.trim()).filter(Boolean)})
+    if(documentValue.rules.some(r=>r.id===rule.id && r.id!==state.editing)) throw new Error("Rule ID already exists")
+    for(const [prefix,selectors] of [["actor",rule.subjects],["target",rule.resources]]) {
+      const selector=selectors[0],kind=value(`rule-${prefix}-kind`),tree={...selector.tree},match=value(`rule-${prefix}-match`)
+      if(kind) selector.kind=kind;else delete selector.kind
+      const includeSelf=tree.path_prefix?.include_self ?? true
+      for(const k of ["path_glob","path_prefix","path_eq"]) delete tree[k]
+      const treeKind=value(`rule-${prefix}-tree-kind`)
+      if(treeKind) tree.kind=treeKind;else delete tree.kind
+      if(match) tree[match]=match==="path_prefix"?{path:value(`rule-${prefix}-path`),include_self:includeSelf}:value(`rule-${prefix}-path`)
+      if(Object.keys(tree).length) selector.tree=tree;else delete selector.tree
+    }
+    const relation=value("rule-relation")
+    if(relation!=="keep") {
+      rule.conditions=relation?[{op:relation}]:[]
+      if(relation && relation!=="same_folder") rule.conditions[0].strict=document.getElementById("rule-strict").checked
+      if(relation==="resource_below_folder") rule.conditions[0].folder={path:value("rule-folder-path")}
+    }
+    const index=documentValue.rules.findIndex(r=>r.id===state.editing)
+    if(index<0) documentValue.rules.push(rule);else documentValue.rules[index]=rule
+    documentValue.schema_version=2;state.editing=rule.id;setDraft(documentValue)
+  } catch(error) {showError("editor-error",error)}
+})
+async function loadTemplates() {
+  clearError("template-error")
+  try {
+    const {templates}=await request("v1/templates"),list=document.getElementById("template-list");list.replaceChildren()
+    for(const template of templates) {
+      const card=document.createElement("article"),title=document.createElement("h3"),description=document.createElement("p"),button=document.createElement("button")
+      title.textContent=template.name;description.textContent=template.description;button.textContent="Use as editable monitor draft"
+      button.addEventListener("click",async()=>{
+        try {
+          if(state.dirty && !window.confirm("Replace the current unpublished draft?")) return
+          const result=await request(`v1/templates/${template.id}`,{method:"POST",body:JSON.stringify({actor_path:value("template-actor"),target_path:value("template-target")})})
+          state.mode="monitor";document.querySelectorAll("[data-mode]").forEach(b=>b.classList.toggle("active",b.dataset.mode==="monitor"))
+          setDraft(result.document);warnings(result.warnings);document.querySelector('[data-view="editor"]').click()
+        } catch(error) {showError("template-error",error)}
+      })
+      card.append(title,description,button);list.append(card)
+    }
+  } catch(error) {showError("template-error",error)}
+}
+async function loadLogs() {
+  clearError("logs-error")
+  try {const result=await request("v1/policy/decisions");state.decisions=result.decisions;renderLogs()}
+  catch(error) {showError("logs-error",error)}
+}
+function renderLogs() {
+  const list=document.getElementById("logs-list");list.replaceChildren()
+  for(const record of state.decisions) {
+    if(document.getElementById("logs-denials").checked && record.computed_effect!=="deny") continue
+    const card=document.createElement("article"),content=document.createElement("pre");content.textContent=JSON.stringify(record,null,2);card.append(content);list.append(card)
+  }
+  if(!list.childNodes.length) {const p=document.createElement("p");p.textContent="No matching records in this Proxy's bounded log";list.append(p)}
+}
+document.getElementById("logs-refresh").addEventListener("click",loadLogs)
+document.getElementById("logs-denials").addEventListener("change",renderLogs)
