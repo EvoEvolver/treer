@@ -575,8 +575,9 @@ does not verify its runtime wire shapes or feature gating. The 2.1.296 command
 and evaluator behavior was verified earlier/by the leader. Capability discovery
 still hides goal controls if initialize does not advertise `goal`; missing fields
 are not treated as proof of completion. Mariana was not accessed or restarted.
-On first upgrade from a legacy checkpoint without a cumulative-usage baseline,
-active usage/round/rejection counters restart (budgets are retained), with a
+Upgrading resets legacy active goal usage counters once, granting a fresh budget
+allowance. For checkpoints without a cumulative-usage baseline,
+active token/time/round/rejection counters restart (budgets are retained), with a
 visible reason explaining that old per-goal usage could not be verified. We do
 not relabel old session-wide totals as accurate goal usage. If its saved desired
 objective differs from the native goal, the UI marks desync and alignment runs
