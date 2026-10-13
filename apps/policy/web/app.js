@@ -46,7 +46,7 @@ function render(status) {
 }
 
 async function load() {
-  try { render(await request("v1/state")) }
+  try { render(await request("v1/state")); await loadAuthority() }
   catch (error) { showError("sync-error", error); text("server-status", "Unavailable") }
 }
 
@@ -295,3 +295,23 @@ function renderLogs() {
 }
 document.getElementById("logs-refresh").addEventListener("click",loadLogs)
 document.getElementById("logs-denials").addEventListener("change",renderLogs)
+
+async function loadAuthority() {
+  const warning=document.getElementById('authority-warning')
+  try {
+    const result=await request('v1/policy/authority')
+    if(result.publish_authority==='provider_operator') {
+      text('publish-authority','Provider operator')
+      warning.textContent='Full policy administration: anyone holding the operator token can publish rules and switch to enforce without further human approval. Use an isolated administration Agent and private token storage. Only the workspace owner can change the Provider or publication authority.'
+      warning.classList.remove('hidden')
+    } else if(result.publish_authority==='owner_session') {
+      text('publish-authority','Owner session')
+      warning.textContent='Publication requires the operator token and a current Treer owner session.'
+      warning.classList.remove('hidden')
+    } else throw new Error('Core publication authority is unsupported')
+  } catch(error) {
+    text('publish-authority','Unavailable')
+    warning.textContent='Publication authority could not be verified. Operator-only publication is unavailable; update/check Core before using it.'
+    warning.classList.remove('hidden')
+  }
+}

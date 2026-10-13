@@ -914,6 +914,18 @@ subject/action/resource requests locally. Managed Agent requests carry their
 authenticated Agent identity; workload HTTP entries use the same subject and
 resolve service-name aliases to stable IDs before authorization.
 
+Policy publication defaults to `owner_session`. An owner may explicitly choose
+`provider_operator` in the Provider binding to let holders of the Policy App's
+private administration token publish without per-request human approval. This
+is full administration authority; default monitor mode does not isolate anyone.
+Use a dedicated folder for the administration Agent, allow its path to use the
+Policy App and deny other Agents, then verify in monitor before enforcing.
+Also restrict tree moves, control of the administration Agent, machine exec and
+file access. Run the App/administrator in a separate unprivileged OS account or
+container with a private port and secret mounts: **0600 files cannot isolate
+Agents sharing an OS user**, and loopback access bypasses Treer ingress policy.
+See the [Policy App isolation example and private JSON client](../apps/policy/README.md#isolating-the-policy-administration-agent).
+
 Path rules use bundle schema 2; consult the
 [fixed contract](research/2026-10-13-policy-schema-v2-contract.md) for complete
 JSON examples. `/team/*` selects direct children, `/infra/**` includes the

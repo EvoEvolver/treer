@@ -156,6 +156,7 @@ class PolicyServerTest(unittest.TestCase):
         install_root.mkdir()
         files = {
             SERVER: "treer-policy.py",
+            APP_ROOT / "treer-policy": "treer-policy-client.py",
             APP_ROOT / "AGENT.md": "treer-policy-agent.md",
             APP_ROOT / "web" / "index.html": "treer-policy-index.html",
             APP_ROOT / "web" / "app.css": "treer-policy-app.css",
@@ -192,6 +193,9 @@ class PolicyServerTest(unittest.TestCase):
                 status, _, page = self.request("GET", "/", headers={"Accept": "text/html"})
                 self.assertEqual(status, 200)
                 self.assertIn("<title>Treer Policy</title>", page)
+                status, _, client = self.request("GET", "/treer-policy")
+                self.assertEqual(status, 200)
+                self.assertIn("def read_config", client)
                 status, headers, stylesheet = self.request("GET", "/app.css")
                 self.assertEqual(status, 200)
                 self.assertIn("text/css", headers["content-type"])

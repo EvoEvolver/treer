@@ -29,15 +29,31 @@ class FakeProxy(BaseHTTPRequestHandler):
         token = self.headers.get('Authorization','').removeprefix('Bearer ')
         status=200
         if self.path == '/.treer/apps/identity/verify':
-            token=body['token'];valid=token in ('human-owner','human-member','expired','wrong-audience','revoked')
+            token=body['token'];valid=token in ('human-owner','human-member','expired','wrong-audience','revoked','agent-valid')
             result={'active':valid,'claims':{'service_id':'other' if token=='wrong-audience' else 'svc_policy',
-                'workspace_id':'ws_test','principal_kind':'human','sub':'owner' if token!='human-member' else 'member',
+                'workspace_id':'ws_test','principal_kind':'agent' if token=='agent-valid' else 'human','sub':'delegate' if token=='agent-valid' else 'owner' if token!='human-member' else 'member',
                 'exp':time.time()+(-60 if token=='expired' else 60)}}
         elif self.path == '/api/apps/oauth/token':
             from datetime import datetime, timezone
             result={'access_token':'human-owner','expires_at':datetime.fromtimestamp(time.time()+300,timezone.utc).isoformat()}
         elif self.path.endswith('/directory'):
-            result={'principals':[] if token=='revoked' else [{'id':'owner','kind':'human','name':'Owner'},{'id':'member','kind':'human','name':'Member'}]}
+            result={'principals':[] if token=='revoked' else [{'id':'owner','kind':'human','name':'Owner'},{'id':'member','kind':'human','name':'Member'},{'id':'delegate','kind':'agent','name':'Delegate'}]}
+        elif self.path.endswith('/policy/publish-authority') or '/policy/operator/' in self.path:
+            runtime_ok = self.headers.get('X-Treer-Agent-Id')=='runtime_policy' and self.headers.get('X-Treer-Workload-Credential')=='synthetic-runtime-credential'
+            fault = getattr(self.server, 'authority_fault', None)
+            if not runtime_ok: status=403;result={'error':{'code':'policy_provider_required'}}
+            elif fault == 'authority404' or fault == 'operator404' and '/operator/' in self.path:
+                status=404;result={'error':{'code':'route_not_found'}}
+            elif self.path.endswith('/publish-authority'):
+                result={'publish_authority':getattr(self.server,'authority','owner_session'),
+                    'capabilities':[] if fault=='missingcap' else ['policy.publish-authority.v1'], 'provider':{'app_id':'app_policy'}}
+                if fault == 'flip': self.server.authority='owner_session'
+            elif getattr(self.server,'authority','owner_session')!='provider_operator':
+                status=403;result={'error':{'code':'provider_operator_required'}}
+            elif self.path.endswith('/validate'):
+                result={'valid':True,'schema_version':body['schema_version'],'recovery_guaranteed':getattr(self.server,'recovery',True),'capabilities':['policy.path-rules.v2']}
+            else:
+                result={'explanation':{'computed_effect':'deny','effective_decision':'allow','mode':'monitor','matched_rule_id':'operator-rule','policy_revision':2}}
         elif '/policy/' in self.path:
             token=self.headers.get('X-Treer-Identity-Token')
             if self.headers.get('X-Treer-Agent-Id')!='runtime_policy' or self.headers.get('X-Treer-Workload-Credential')!='synthetic-runtime-credential':
@@ -76,6 +92,61 @@ class IdentityTests(unittest.TestCase):
         connection=http.client.HTTPConnection('127.0.0.1',self.app.server_port,timeout=5)
         connection.request(method,path,data,headers);response=connection.getresponse();raw=response.read();result=json.loads(raw) if response.getheader('Content-Type','').startswith('application/json') else raw.decode()
         response_headers=response.getheaders();connection.close();return response.status,result,response_headers
+    def test_operator_mode_requires_local_capability_and_verified_injected_identity(self):
+        document=policy.template_document('team-isolation',{})['document']
+        publish={'expected_revision':1,'mode':'monitor','document':document}
+        self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity='agent-valid')[0],403)
+        self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],1)
+        self.proxy.authority='provider_operator'
+        self.assertEqual(self.request('GET','/v1/policy/authority')[1]['publish_authority'],'provider_operator')
+        for identity in ('forged','expired','wrong-audience',''):
+            self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity=identity)[0],401)
+        self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity='agent-valid',extra={'Authorization':'Bearer forged'})[0],401)
+        self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity='agent-valid')[0],200)
+        self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],2)
+        simulation={'subject':{'kind':'agent','path':'/team/a'},'action':'agent.prompt','resource':{'kind':'agent','path':'/team/b'}}
+        self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity=None)[0],200)
+        self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity='human-member')[0],200)
+        self.assertEqual(self.request('GET','/v1/policy/decisions',identity='agent-valid')[0],401)
+        self.assertNotIn(ADMIN,json.dumps(self.proxy.calls))
+        self.assertTrue(any('/operator/validate' in call[1] for call in self.proxy.calls))
+        self.assertTrue(all(call[2] is None for call in self.proxy.calls if '/operator/' in call[1]))
+        self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity=None,extra={'Origin':'https://evil.test'})[0],403)
+        self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity=None,extra={'Sec-Fetch-Site':'cross-site'})[0],403)
+        self.proxy.authority='owner_session'
+        self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity='agent-valid')[0],401)
+
+    def test_mixed_proxy_versions_and_mode_switch_fail_without_publication(self):
+        document=policy.template_document('team-isolation',{})['document']
+        publish={'expected_revision':1,'mode':'monitor','document':document}
+        for fault,expected in [('authority404',409),('missingcap',409),('operator404',409),('flip',403)]:
+            self.proxy.authority='provider_operator';self.proxy.authority_fault=fault
+            self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity=None)[0],expected,fault)
+            self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],1)
+        self.assertFalse(any(call[1].endswith('/policy/validate') for call in self.proxy.calls),'No legacy owner fallback')
+        self.proxy.authority_fault=None;self.proxy.authority='owner_session'
+        self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity=None)[0],401)
+        self.assertEqual(self.request('POST','/v1/policy/publish',publish)[0],200)
+
+    def test_operator_client_against_app_and_file_capability_agent_path(self):
+        import subprocess, sys
+        self.proxy.authority='provider_operator'
+        client_config=Path(self.temp.name).resolve()/'client.json'
+        client_config.write_text(json.dumps({'url':self.origin,'token':ADMIN}));client_config.chmod(0o600)
+        payload=Path(self.temp.name)/'publication.json'
+        payload.write_text(json.dumps({'expected_revision':1,'mode':'monitor','document':policy.template_document('team-isolation',{})['document']}))
+        client=Path(__file__).resolve().parents[1]/'treer-policy'
+        for command in (['read'],['submit',str(payload)],['preview','-']):
+            result=subprocess.run([sys.executable,str(client),'--config',str(client_config),*command],input='{}',capture_output=True,text=True,
+                env={'PATH':os.defpath,'HOME':self.temp.name},timeout=5)
+            self.assertEqual(result.returncode,0,result.stdout);self.assertEqual(result.stderr,'');self.assertNotIn(ADMIN,result.stdout)
+        source=policy.AdminTokenFile(Path(self.temp.name).resolve()/'file-admin');source.initialize();self.app.admin_token_file=source
+        simulation={'action':'agent.prompt'}
+        self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity='agent-valid',extra={'Authorization':'Bearer '+source.read()})[0],200)
+        source.path.unlink()
+        self.assertEqual(self.request('POST','/v1/policy/explain',simulation,identity='agent-valid',extra={'Authorization':'Bearer '+ADMIN})[0],503)
+        self.assertNotIn(ADMIN,json.dumps(self.proxy.calls))
+
     def test_injected_identity_precedes_cookie_and_operator_capability(self):
         with self.app.auth.store.connect() as db: db.execute('INSERT INTO sessions VALUES(?,?,?)',(policy.digest('session'),'human-owner',time.time()+100))
         for token,expected in [('forged',401),('',401),('expired',401),('wrong-audience',401),('revoked',403)]:

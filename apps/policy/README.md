@@ -57,8 +57,9 @@ Protect its environment/configuration and use workspace-only ingress. Existing
 instances upgrading must configure this secret to resume editing; reads and
 Controller bundle polling continue without it. Injected identity/role headers
 do not grant policy administration. This capability is separate from Treer
-OAuth. Path-policy publications additionally require a verified current workspace
-owner through Core validation; OAuth alone never grants App editing. Same-UID processes are
+OAuth. Path-policy publications default to requiring a verified current workspace
+owner through Core validation (the owner may explicitly choose operator-only
+publication as described below); OAuth alone never grants App editing. Same-UID processes are
 not isolated. State writes use exclusive private temporary files and atomic
 rename. Do not rely on this App for hostile-tenant isolation.
 
@@ -287,3 +288,109 @@ against the machine account/admin is not guaranteed. App-local action checks
 integration; naming an action in a rule does not invent an enforcement hook.
 The simulator resolves existing current Tree paths; it cannot invent nonexistent
 nodes or spoof placement. Draft simulations are not persisted decisions.
+
+## Operator publication and Agent client
+
+The Provider binding defaults to `publish_authority=owner_session`: path-policy
+publication needs both the operator capability and the current human owner.
+An owner may explicitly select `provider_operator` in Core's Provider settings.
+In that mode **any caller possessing this App's operator token can publish policy
+and simulate requests without another human approval**. This includes replacing
+rules or switching to enforce; it is full policy administration, not a bounded
+delegation. The token cannot change the Core Provider selection or owner rescue
+channel. The App UI has no switch for this setting. Review the displayed authority
+before sharing a token, and rotate the token to revoke a holder. Old/mixed Proxy
+versions must not silently treat the setting as supported.
+
+`treer-policy` is a dependency-free, single-file JSON client. Source runs serve
+it at `/treer-policy`; bundled installs must include `treer-policy-client.py`.
+Install a trusted copy locally and invoke it with Python 3 (or mark executable). It reads a machine-local config
+from `~/.config/treer-policy/config.json` or `--config FILE` /
+`POLICY_CLIENT_CONFIG`. Its directory must be owned by the caller and mode 0700;
+the regular file must be owned by the caller and mode 0600. Symlink paths are
+rejected. The JSON object contains `url` and `token`. No token argv/environment
+option exists, and the client neither prints its token nor follows redirects.
+The managed HTTP proxy still supplies the Agent's own workload identity.
+
+Provision the config in an authorized **private local terminal**, using a secret
+manager/private mounted file or a non-echoing prompt. Never transfer the token
+through Treer exec, Core Messages, recorded terminals or source control. For a
+new private config, a local administrator can use:
+
+```sh
+python3 - <<'PYCONFIG'
+import getpass, json, os
+from pathlib import Path
+root = Path.home() / '.config' / 'treer-policy'
+root.mkdir(parents=True, mode=0o700, exist_ok=True)
+fd = os.open(root / 'config.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'w') as stream:
+    json.dump({'url': 'http://policy.treer/', 'token': getpass.getpass('Operator token: ')}, stream)
+PYCONFIG
+```
+
+The client refuses existing unsafe directory permissions; correct those locally
+before use. A failed provisioning attempt may leave an incomplete private file;
+repair it locally. Do not overwrite an existing config without reviewing it.
+
+```sh
+apps/policy/treer-policy read
+apps/policy/treer-policy submit publication.json
+apps/policy/treer-policy preview simulation.json
+```
+
+Submission uses the existing publish contract: `{expected_revision, mode,
+document}`. Read the current revision first; stale changes fail rather than
+silently overwrite another edit. Preview uses the Core explain contract
+(`subject`, `action`, `resource`, optional `document` and `mode`). Output is JSON;
+API failures exit nonzero. Agent publish/preview requires explicitly enabled
+`provider_operator`; default owner-session authorization remains intact.
+
+## Isolating the policy administration Agent
+
+Place the administration Agent and Policy App in a dedicated folder, for example
+`/policy-admin/maintainer` and `/policy-admin/policy`. Explicitly allow only that
+Agent's path to reach the App, then deny other Agent paths. For example, merge
+these schema-2 rules into the existing document (do not replace unrelated rules):
+
+```json
+{
+  "schema_version": 2, "defaults": {}, "groups": {}, "rules": [
+    {"id":"policy-admin-access","priority":10,"effect":"allow",
+     "subjects":[{"kind":"agent","tree":{"path_eq":"/policy-admin/maintainer"}}],
+     "actions":["identity.token.issue","service.connect","network.connect"],
+     "resources":[{"tree":{"kind":"app","path_eq":"/policy-admin/policy"}}]},
+    {"id":"policy-other-agents-deny","priority":20,"effect":"deny",
+     "subjects":[{"kind":"agent"}],"actions":["identity.token.issue","service.connect","network.connect"],
+     "resources":[{"tree":{"kind":"app","path_eq":"/policy-admin/policy"}}]}
+  ]
+}
+```
+
+Confirm actual App/Agent paths and action/resource matching with Core explain.
+Keep monitor initially, inspect decision logs, and explicitly enable enforce
+only after owner access and recovery checks: **monitor does not block access**.
+These two rules cover the App access gate only. Separately restrict other
+Agents' ability to move/rename nodes, prompt/control the administration Agent,
+change its startup, execute on the machine or read/write machine files. Otherwise
+another allowed operation can bypass the intended boundary. Path permissions
+follow placement; a same-name replacement is not a stable-ID permission.
+
+Run the Policy App and authorized administration workload under a dedicated
+unprivileged OS account or containers/VMs with narrowly shared secret mounts.
+Only the App and authorized administrator should read the token/config. Keep the
+App port private; a loopback port is reachable by other local processes and
+bypasses the Treer path gate. Restrict host/container networking accordingly.
+**Mode 0600 does not isolate other Agents running as the same OS user.** Treer
+policy cannot prevent that user from reading a file directly or connecting to a
+local raw port. Use OS/network isolation in addition to path policy.
+
+The App reads authority from Core without caching and sends no management token
+to Core. Operator validate/explain independently check the current Provider
+runtime and current database choice on every call. Switching back does not
+cancel a write already validated in flight; rotate the token as needed. Upgrade
+all Proxy replicas first: one capability response does not prove fleet readiness.
+Unknown authority/capability and missing operator endpoints reject publication.
+This choice trusts the Provider runtime itself: Core cannot prove that a
+compromised App actually checked its token. No grant, scope, expiry or
+anti-escalation restriction is promised by operator mode.

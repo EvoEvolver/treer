@@ -2,6 +2,7 @@
 import http.client
 import json
 import os
+import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,7 +24,7 @@ class Gateway(BaseHTTPRequestHandler):
         # Direct fallback route deliberately has no injected identity.
         if path.startswith('/fallback/'):
             path='/'+path[len('/fallback/'):]
-        else: headers['X-Treer-Identity-Token']='human-owner'
+        else: headers['X-Treer-Identity-Token']='human-member' if '--operator' in sys.argv else 'human-owner'
         length=int(self.headers.get('Content-Length','0'));body=self.rfile.read(length) if length else None
         connection=http.client.HTTPConnection('127.0.0.1',self.server.app.server_port,timeout=10)
         connection.request(self.command,path,body,headers);response=connection.getresponse();data=response.read()
@@ -35,6 +36,7 @@ class Gateway(BaseHTTPRequestHandler):
 
 with tempfile.TemporaryDirectory() as root:
     proxy=ThreadingHTTPServer(('127.0.0.1',0),FakeProxy);proxy.calls=[]
+    proxy.authority='provider_operator' if '--operator' in sys.argv else 'owner_session'
     threading.Thread(target=proxy.serve_forever,daemon=True).start()
     policy.PolicyHandler.store=policy.PolicyStore(Path(root)/'policy.json','ws_test')
     app=policy.PolicyServer(('127.0.0.1',0),policy.PolicyHandler);app.admin_token=ADMIN

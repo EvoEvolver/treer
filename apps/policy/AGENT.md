@@ -65,3 +65,29 @@ Only a machine administrator may retrieve it in a private local/SSH terminal or
 explicitly rotate/recover it with local `--rotate-admin-token-file` (no secret
 output, no server/restart). A lost/unsafe file locks editing; persisted
 initialization markers prevent silent regeneration on startup. See README.
+
+## Operator-only publication (owner opt-in)
+
+The default Core Provider setting is `publish_authority=owner_session`. Only
+a workspace owner may select `provider_operator`; this trusts token holders
+with full policy administration, including changing rules that govern themselves.
+Owner Provider selection and rescue remain owner-only. `GET /v1/policy/authority`
+reports Core's current setting; a missing capability/old Proxy explicitly fails
+operator publication instead of falling back to the owner path.
+
+Use the single-file `treer-policy` JSON client for `read`, `submit FILE` and
+`preview FILE`. Its private `~/.config/treer-policy/config.json` contains the App
+`url` and operator `token`; use `--config FILE` for another private config.
+Provision it through an authorized private local terminal/secret mount, never
+Treer exec output or Messages. The client requires a caller-owned 0700 directory
+and caller-owned 0600 regular file, refuses symlinks and redirects, and never
+prints the token. Submit `{expected_revision,mode,document}`; preview uses Core's
+explain request. Tokens stay in this App and are never forwarded to Core.
+Use the Agent's own managed HTTP proxy/workload identity. In default mode,
+operator-only Agent v2 publication/preview is rejected.
+
+Isolate the administration Agent in its own tree folder and restrict Policy App
+access, tree changes, management-Agent control and machine exec/file rights.
+Use a dedicated OS user or container with private network/secret mounts. Mode
+0600 does not isolate other Agents using the same OS account; monitor mode does
+not block access. See README for a reviewed starting rule set and limitations.

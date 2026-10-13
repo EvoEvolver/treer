@@ -43,6 +43,7 @@ def bundled_path(source: Path, installed_name: str) -> Path:
 
 
 ASSETS = {
+    "/treer-policy": ("text/plain; charset=utf-8", bundled_path(APP_ROOT / "treer-policy", "treer-policy-client.py")),
     "/app.js": (
         "application/javascript; charset=utf-8",
         bundled_path(APP_ROOT / "web" / "app.js", "treer-policy-app.js"),
@@ -495,7 +496,7 @@ class Auth:
                 code = json.loads(exc.read(65536))['error']['code']
             except (ValueError, KeyError, TypeError):
                 code = 'treer_request_failed'
-            raise AuthError(exc.code if exc.code in (400, 401, 403, 404) else 502,
+            raise AuthError(exc.code if exc.code in (400, 401, 403, 404, 409, 422, 429, 503) else 502,
                         code, 'Treer rejected the request') from exc
         except (OSError, ValueError) as exc:
             raise AuthError(502, 'treer_unavailable', 'Treer API unavailable') from exc
@@ -514,7 +515,37 @@ class Auth:
             extra_headers={'X-Treer-Identity-Token':token, 'X-Treer-Agent-Id':runtime,
                            'X-Treer-Workload-Credential':credential})
 
-    def verify(self, token):
+    def runtime_request(self, method, operation, body=None):
+        runtime = os.environ.get('TREER_AGENT_ID')
+        credential = os.environ.get('TREER_WORKLOAD_CREDENTIAL')
+        if not runtime or not credential:
+            raise AuthError(503, 'managed_runtime_required', 'Publication authority requires the Managed Policy App runtime')
+        return self.request(method, f'/api/apps/{self.service_id}/policy/{operation}', body=body,
+            extra_headers={'X-Treer-Agent-Id':runtime,'X-Treer-Workload-Credential':credential})
+
+    def publish_authority(self):
+        try:
+            result = self.runtime_request('GET', 'publish-authority')
+        except AuthError as error:
+            if error.status == 404:
+                raise AuthError(409, 'publish_authority_unsupported', 'Upgrade all Proxy replicas: publication authority is unsupported') from error
+            raise
+        if ('policy.publish-authority.v1' not in result.get('capabilities', [])
+                or result.get('publish_authority') not in ('owner_session', 'provider_operator')):
+            raise AuthError(409, 'publish_authority_unsupported', 'Core must confirm publication authority support')
+        return result
+
+    def operator_diagnostic(self, operation, body):
+        if operation not in ('validate', 'explain'):
+            raise AuthError(400, 'invalid_diagnostic', 'Unknown operator diagnostic')
+        try:
+            return self.runtime_request('POST', 'operator/' + operation, body)
+        except AuthError as error:
+            if error.status == 404:
+                raise AuthError(409, 'publish_authority_unsupported', 'Upgrade all Proxy replicas: operator publication is unsupported') from error
+            raise
+
+    def verify(self, token, allowed_kinds=('human',)):
         if not token or len(token) > 8192:
             raise AuthError(401, 'authentication_required', 'Sign in with Treer or use a service token')
         result = self.request('POST', '/.treer/apps/identity/verify',
@@ -522,7 +553,7 @@ class Auth:
         claims = result.get('claims') or {}
         if (result.get('active') is not True or claims.get('service_id') != self.service_id
                 or claims.get('workspace_id') != self.workspace_id
-                or claims.get('principal_kind') != 'human' or not claims.get('sub')
+                or claims.get('principal_kind') not in allowed_kinds or not claims.get('sub')
                 or not isinstance(claims.get('exp'), (int, float)) or claims['exp'] <= time.time()):
             raise AuthError(401, 'identity_invalid', 'Identity is inactive or outside this App workspace')
         # Require current workspace directory membership in addition to verified claims.
@@ -533,7 +564,7 @@ class Auth:
             raise AuthError(403, 'identity_unavailable', 'Caller is absent from the workspace directory')
         return principal, directory
 
-    def authenticate(self, headers, raw_cookie):
+    def authenticate(self, headers, raw_cookie, allowed_kinds=('human',)):
         # Header presence, including an empty/invalid value, is authoritative:
         # never silently fall back to a different human session after rejection.
         cookie_auth = False
@@ -547,7 +578,7 @@ class Auth:
         else:
             cookie_auth = True
             token = self.session_token(raw_cookie)
-        principal, directory = self.verify(token)
+        principal, directory = self.verify(token, allowed_kinds)
         return token, principal, directory, cookie_auth
 
     def check_browser_mutation(self, headers, principal, cookie_auth):
@@ -708,6 +739,8 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 if self.store.bundle()["document"]["schema_version"] == 2 and max_schema != "2":
                     raise PolicyError(409, "unsupported_policy_schema", "This bundle requires a schema v2 capable Proxy")
                 self._json(200, self.store.bundle())
+            elif parsed.path == "/v1/policy/authority":
+                self._json(200, self._auth().publish_authority())
             elif parsed.path == "/v1/session":
                 if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session') or ('Authorization' in self.headers and self.headers.get('Authorization') != 'Bearer ' + str(self._operator_token())):
                     token, actor, _, _ = self._identity()
@@ -772,13 +805,11 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 warnings = safety_warnings(document)
                 result = {'valid':True, 'warnings':warnings, 'core_validated':False}
                 if document['schema_version'] == 2:
-                    token, _, _, _ = self._identity(mutation=True)
-                    result['core'] = self._core_validate(token, document)
+                    result['core'] = self._core_validate(document)
                     result['core_validated'] = True
                 self._json(200, result)
             elif urlsplit(self.path).path == "/v1/policy/explain":
-                token, _, _, _ = self._identity(mutation=True)
-                self._json(200, self._auth().diagnostic('explain', token, body))
+                self._json(200, self._publication_diagnostic('explain', body))
             elif urlsplit(self.path).path == "/v1/policy/publish":
                 self._validate_publish(body)
                 bundle = self.store.publish(body)
@@ -809,14 +840,23 @@ class PolicyHandler(BaseHTTPRequestHandler):
             raise PolicyError(400, 'invalid_publication', 'Publication requires an object')
         document = validate_document(body.get('document'))
         # Schema 1 remains compatible with existing operator-only automation.
-        # Path policy publication requires the owner-authorized Core validator;
+        # Path publication requires the configured Core authorization path;
         # an unavailable/old Core cannot silently accept an unenforceable draft.
         if document['schema_version'] == 2:
-            token, _, _, _ = self._identity(mutation=True)
-            self._core_validate(token, document)
+            self._core_validate(document)
 
-    def _core_validate(self, token, document):
-        result = self._auth().diagnostic('validate', token, document)
+    def _publication_diagnostic(self, operation, body):
+        authority = self._auth().publish_authority()
+        if authority['publish_authority'] == 'provider_operator':
+            self._require_operator()
+            # No private admin token or human token goes upstream. Core freshly
+            # verifies bound runtime + current DB authority on every operation.
+            return self._auth().operator_diagnostic(operation, body)
+        token, _, _, _ = self._identity(mutation=True)
+        return self._auth().diagnostic(operation, token, body)
+
+    def _core_validate(self, document):
+        result = self._publication_diagnostic('validate', document)
         if result.get('valid') is not True or result.get('recovery_guaranteed') is not True or 'policy.path-rules.v2' not in result.get('capabilities', []):
             raise PolicyError(409, 'policy_recovery_unconfirmed', 'Core must confirm path-policy support and owner recovery before publishing')
         return result
@@ -835,7 +875,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
         except CookieError: return ''
         return cookie[name].value if name in cookie else ''
 
-    def _identity(self, mutation=False):
+    def _identity(self, mutation=False, allow_agents=False):
         auth = self._auth()
         # Operator credential belongs to the App, not to Treer. Never pass it to
         # Core verification/diagnostics as a caller token.
@@ -845,7 +885,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
             # Includes stale/rotated capabilities. In file mode, human callers
             # use injected identity or OAuth cookies, never this Bearer channel.
             del headers['Authorization']
-        token, actor, directory, cookie_auth = auth.authenticate(headers, self._raw_cookie('policy_session'))
+        token, actor, directory, cookie_auth = auth.authenticate(headers, self._raw_cookie('policy_session'), ('human', 'agent') if allow_agents else ('human',))
         if mutation: auth.check_browser_mutation(self.headers, actor, cookie_auth)
         return token, actor, directory, cookie_auth
 
@@ -875,14 +915,24 @@ class PolicyHandler(BaseHTTPRequestHandler):
         except (OSError, ValueError): return None
 
     def _require_operator(self) -> None:
-        if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session'):
-            self._identity(mutation=self.command != 'GET')
         token = self._operator_token()
         if not token:
             raise PolicyError(503, "policy_edits_locked", "Policy editing is disabled until an operator configures an admin token")
         supplied = self.headers.get("Authorization", "")
         if not hmac.compare_digest(supplied.encode(), ("Bearer " + token).encode()):
             raise PolicyError(401, "policy_admin_required", "Operator policy administration credential required")
+        if 'X-Treer-Identity-Token' in self.headers or self._raw_cookie('policy_session'):
+            _, actor, _, _ = self._identity(mutation=self.command != 'GET', allow_agents=True)
+            if actor['kind'] == 'agent' and self._auth().publish_authority()['publish_authority'] != 'provider_operator':
+                raise AuthError(403, 'workspace_owner_required', 'Agent administration requires owner-enabled provider_operator')
+        elif self.command != 'GET':
+            # A direct Bearer client has no ambient session, but browser-origin
+            # headers must still be checked before an operator diagnostic/write.
+            if self.headers.get('Sec-Fetch-Site') not in (None, 'same-origin', 'same-site'):
+                raise AuthError(403, 'csrf_rejected', 'Cross-site operator mutations rejected')
+            origin = self.headers.get('Origin')
+            if origin is not None and origin not in {Auth.origin(self._auth().public_url), Auth.origin(self._auth().proxy_url)}:
+                raise AuthError(403, 'csrf_rejected', 'Operator origin is not this App or its Treer tunnel')
 
     def _read_json(self) -> Any:
         try:

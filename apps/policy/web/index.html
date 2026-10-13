@@ -23,6 +23,7 @@
     </nav>
     <main>
       <aside class="auth-bar"><span id="identity-status">Checking Treer identity…</span><a id="login-link" href="./api/auth/start" hidden>Sign in with Treer</a><button id="logout-button" class="secondary" hidden>Sign out</button></aside>
+      <p class="notice hidden" id="authority-warning" role="status"></p>
       <section class="view active" id="view-overview">
         <div class="page-heading"><div><p class="eyebrow">Runtime</p><h1>Policy server</h1></div><button class="secondary" id="sync-button">Retry sync</button></div>
         <div class="metrics">
@@ -33,6 +34,7 @@
         </div>
         <div class="section-row"><div><h2>Bundle endpoint</h2><p>Protocol and publication state exposed to Treer Proxy.</p></div><code>/v1/policy/bundle</code></div>
         <div class="section-row"><div><h2>Last publish</h2><p id="published-at">-</p></div><span class="badge" id="protocol">treer.policy-provider/v1</span></div>
+        <div class="section-row"><div><h2>Publication authority</h2><p>Only the workspace owner can change this setting in Treer Provider settings.</p></div><span class="badge" id="publish-authority">Checking Core…</span></div>
         <div class="notice hidden" id="sync-error"></div>
       </section>
 
