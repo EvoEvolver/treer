@@ -129,6 +129,14 @@ user tools, but are not a control-plane transport configuration.
   administrator comparison and decoy hash reduce timing differences (see above)
   without guaranteeing equal response time for arbitrary input.
 
+- The Controller refuses to open a service stream or probe to a link-local address
+  (169.254.0.0/16, fe80::/10, including cloud instance-metadata endpoints) unless
+  `TREER_ALLOW_LINK_LOCAL_SERVICES` is set on that machine, and connects to the
+  address it checked. Human-registered services may still target any other host
+  the machine can reach (private networks included); publishing such a service,
+  especially with public access, exposes that host, so treat service creation as
+  a network-reach permission and restrict it with Policy.
+
 ## Unsupported Claims
 
 Public Unix and Windows bootstrap installers check SHA256 hashes from the same

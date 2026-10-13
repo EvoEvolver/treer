@@ -208,3 +208,48 @@ async fn service_output_obeys_credit_before_resuming() {
     runtime.reset_all().await;
     write.await.unwrap();
 }
+
+#[tokio::test]
+async fn service_connections_refuse_link_local_and_cloud_metadata_targets() {
+    for address in [
+        "169.254.169.254",
+        "169.254.0.1",
+        "fe80::1",
+        "::ffff:169.254.169.254",
+        "fd00:ec2::254",
+    ] {
+        assert!(
+            super::is_link_local_or_metadata(address.parse().unwrap()),
+            "{address}"
+        );
+    }
+    for address in [
+        "127.0.0.1",
+        "::1",
+        "10.0.0.5",
+        "192.168.1.1",
+        "8.8.8.8",
+        "fd00::1",
+    ] {
+        assert!(
+            !super::is_link_local_or_metadata(address.parse().unwrap()),
+            "{address}"
+        );
+    }
+    let error = match super::connect_destination("169.254.169.254", 80, None).await {
+        Ok(_) => panic!("metadata target must be refused"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("link-local"), "{error}");
+    // Loopback services keep working.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    assert!(super::connect_destination("127.0.0.1", port, None)
+        .await
+        .is_ok());
+    assert!(super::connect_destination("localhost", port, None)
+        .await
+        .is_ok());
+}

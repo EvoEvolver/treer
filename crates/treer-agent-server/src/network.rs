@@ -264,10 +264,44 @@ async fn connect_destination(
     _target_agent_id: Option<&str>,
 ) -> anyhow::Result<Box<dyn DestinationStream>> {
     // Agent-owned endpoint registration denotes ownership, not an OS namespace.
-    let socket = TcpStream::connect((host, port))
+    // Resolve first and connect to the checked address so a later DNS answer
+    // cannot redirect the connection to a blocked one.
+    let allow_link_local = std::env::var_os("TREER_ALLOW_LINK_LOCAL_SERVICES").is_some();
+    let mut last_error = None;
+    for address in tokio::net::lookup_host((host, port))
         .await
-        .with_context(|| format!("failed to connect to service {host}:{port}"))?;
-    Ok(Box::new(socket))
+        .with_context(|| format!("failed to resolve service {host}:{port}"))?
+    {
+        if !allow_link_local && is_link_local_or_metadata(address.ip()) {
+            last_error = Some(anyhow!(
+                "service target {host} resolves to a link-local or cloud-metadata address; set TREER_ALLOW_LINK_LOCAL_SERVICES on the machine to permit it"
+            ));
+            continue;
+        }
+        match TcpStream::connect(address).await {
+            Ok(socket) => return Ok(Box::new(socket)),
+            Err(error) => last_error = Some(anyhow!(error)),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("service {host}:{port} did not resolve")))
+        .with_context(|| format!("failed to connect to service {host}:{port}"))
+}
+
+/// Link-local space includes cloud instance-metadata endpoints (169.254.169.254,
+/// fd00:ec2::254). Members may publish services, but must not turn the machine's
+/// cloud identity into a published service by default.
+fn is_link_local_or_metadata(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_link_local();
+            }
+            (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6 == std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)
+        }
+    }
 }
 
 pub(crate) async fn connect_agent_service(
