@@ -17,12 +17,12 @@ impl AuthStore {
         identifier: &str,
     ) -> Result<(), AuthFailure> {
         const NOW: &str = "to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS')";
-        sqlx::query(&format!(
+        sqlx::query(
             "DELETE FROM login_attempts WHERE bucket IN (SELECT bucket FROM login_attempts \
              WHERE window_started_at <= to_char((now() - make_interval(secs => $1)) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS') \
              LIMIT 100 FOR UPDATE SKIP LOCKED) \
              AND window_started_at <= to_char((now() - make_interval(secs => $1)) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS')"
-        ))
+        )
         .bind(LOGIN_ATTEMPT_WINDOW_SECONDS as f64)
         .execute(&self.pool)
         .await
