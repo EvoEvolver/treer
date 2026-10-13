@@ -71,7 +71,12 @@ try {
         & ./scripts/install.ps1 -ArtifactBase $origin -InstallDir $installation
         if ($fixture.RequestCount -le $beforeRequests) { throw 'Allowed artifact origin did not reach the download step.' }
     }
-    & ./scripts/install.ps1 -ArtifactBase 'https://fixture.invalid/artifacts/' -InstallDir $installation
+    $instructions = (& ./scripts/install.ps1 -ArtifactBase 'https://fixture.invalid/artifacts/' -InstallDir $installation 6>&1 | Out-String)
+    if (!$instructions.Contains('New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\Treer\workspace"') -or
+        !$instructions.Contains('connect --root "$env:LOCALAPPDATA\Treer\workspace"') -or
+        !$instructions.Contains('Existing enrolled machines keep their configured root')) {
+        throw 'New enrollment must explicitly use a user-owned root without migrating existing machines.'
+    }
     foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
         if ((Get-Command "$binary.exe").Source -ne (Join-Path $installation "$binary.exe")) { throw "PATH failed for $binary." }
     }

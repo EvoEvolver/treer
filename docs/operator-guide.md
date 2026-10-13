@@ -219,15 +219,21 @@ The web Add machine dialog also offers **Windows · PowerShell** commands:
 ```powershell
 Invoke-WebRequest https://PROXY_HOST/install.ps1 -OutFile "$env:TEMP\treer-install.ps1"
 & "$env:TEMP\treer-install.ps1"
-treer-agent-server connect --key 'enr_v1_...' --proxy 'https://PROXY_HOST/'
+New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\Treer\workspace" | Out-Null
+treer-agent-server connect --root "$env:LOCALAPPDATA\Treer\workspace" --key 'enr_v1_...' --proxy 'https://PROXY_HOST/'
 ```
 
 The installer verifies SHA-256 and matching build identities before installing
 `treer.exe`, `treer-agent-host.exe`, and `treer-agent-server.exe` together under
 `%LOCALAPPDATA%\Treer\bin`. It updates the current session and user PATH. Other
 already-open shells must be reopened. Installation needs no administrator rights
-and does not enroll the machine; run `connect` separately from the workspace
-directory. A session that blocks unsigned scripts can run the saved installer
+and does not enroll the machine. For a new enrollment, create the user-owned
+workspace directory and pass `--root` explicitly as shown above; this avoids
+accidentally using a shell's current directory such as `C:\Windows\System32`.
+Choose another user-owned directory with `--root` if desired. Existing enrollments
+retain their configured root, including legacy System32 roots; reinstalling the
+binaries does not migrate, reconnect, or restart them. A session that blocks
+unsigned scripts can run the saved installer
 with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\treer-install.ps1"`;
 then open a fresh terminal to pick up PATH. No global execution-policy change is needed.
 

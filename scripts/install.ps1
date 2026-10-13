@@ -78,7 +78,10 @@ try {
     }
     if (($env:Path -split ';') -notcontains $InstallDir) { $env:Path += ";$InstallDir" }
     Write-Host "Installed Treer $identity in $InstallDir. This shell and newly opened shells can use all three commands."
-    Write-Host 'Next: treer-agent-server connect --key ENROLLMENT_KEY --proxy PROXY_URL'
+    Write-Host 'For a new machine, create a user-owned workspace directory:'
+    Write-Host 'New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\Treer\workspace" | Out-Null'
+    Write-Host 'Next: treer-agent-server connect --root "$env:LOCALAPPDATA\Treer\workspace" --key ENROLLMENT_KEY --proxy PROXY_URL'
+    Write-Host 'Existing enrolled machines keep their configured root; installation does not migrate or reconnect them.'
 } finally {
     Remove-Item -LiteralPath $temporary -Recurse -Force
 }
