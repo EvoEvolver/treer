@@ -3641,6 +3641,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "nix 0.29.0",
  "percent-encoding",
  "ratatui",
  "reqwest",

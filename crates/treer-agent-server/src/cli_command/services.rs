@@ -16,6 +16,11 @@ pub(super) async fn run_interface_command(
     command: InterfaceCommand,
 ) -> anyhow::Result<Value> {
     match command {
+        InterfaceCommand::Contract => {
+            client
+                .value(Method::GET, "api/interface/contract", None)
+                .await
+        }
         InterfaceCommand::Show => client.value(Method::GET, "api/interface", None).await,
         InterfaceCommand::Register {
             port,

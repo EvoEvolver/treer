@@ -188,6 +188,9 @@ pub struct TerminalSnapshot {
 }
 
 impl ControllerRuntime {
+    pub(crate) fn machine_root(&self) -> &Path {
+        &self.inner.root
+    }
     pub(crate) fn agent_server_url(&self) -> &str {
         &self.inner.agent_server_url
     }

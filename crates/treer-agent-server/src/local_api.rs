@@ -482,6 +482,7 @@ pub fn router(state: LocalApiState) -> Router {
                 .put(register_agent_interface)
                 .delete(clear_agent_interface),
         )
+        .route("/api/interface/contract", get(launcher_contract))
         .route(
             "/api/agent/startup",
             get(get_agent_startup)

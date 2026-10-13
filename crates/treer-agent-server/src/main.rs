@@ -4,6 +4,7 @@ mod cli_session;
 mod controller;
 mod host_client;
 mod interface_cache;
+mod launcher;
 mod local_api;
 mod network;
 mod proxy;
@@ -47,6 +48,10 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(
+        about = "Install, update, inspect or roll back the version-bound default Agent launcher"
+    )]
+    Launcher(launcher::LauncherArgs),
     #[command(about = "Start or reconnect the enrolled machine and restore its workloads")]
     Restore {
         #[arg(long)]
@@ -209,6 +214,7 @@ async fn async_main() -> Result<()> {
         return tui::run(&workspace).await;
     }
     match args.command {
+        Some(Command::Launcher(args)) => launcher::run(args).await,
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
         Some(Command::Update(update)) => {

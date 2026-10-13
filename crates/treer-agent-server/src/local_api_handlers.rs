@@ -167,6 +167,20 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     }))
 }
 
+pub(super) async fn launcher_contract(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<treer_protocol::LauncherControllerContract>, LocalApiError> {
+    validated_source_agent(&state, &headers)?;
+    let mut contract = crate::launcher::controller_contract();
+    contract.machine = Some(treer_protocol::LauncherMachineContext {
+        root: state.runtime.machine_root().display().to_string(),
+        server_id: state.server_id,
+        workspace_id: state.workspace_id,
+    });
+    Ok(Json(contract))
+}
+
 pub(super) async fn discovery(
     State(state): State<LocalApiState>,
     headers: HeaderMap,

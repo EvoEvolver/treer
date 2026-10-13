@@ -556,6 +556,8 @@ pub(super) enum TokenCommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum InterfaceCommand {
+    #[command(about = "Show the running Controller's launcher compatibility contract")]
+    Contract,
     #[command(about = "Show this Agent's registered interface")]
     Show,
     #[command(about = "Register or refresh this Agent's interface")]

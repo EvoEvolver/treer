@@ -33,7 +33,11 @@ pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
 pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
 pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
 pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
+pub const CAPABILITY_LAUNCHER_INSTALL: &str = "launcher.install.v1";
+pub const CAPABILITY_AGENT_INTERFACE_PROVENANCE: &str = "agent.interface-provenance.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
+    CAPABILITY_LAUNCHER_INSTALL,
+    CAPABILITY_AGENT_INTERFACE_PROVENANCE,
     CAPABILITY_WORKLOAD_CREATE_PLACEMENT,
     CAPABILITY_AGENT_PATH_TARGETS,
     CAPABILITY_AGENT_ABORT,
@@ -48,6 +52,34 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_POLICY_PATH_RULES,
 ];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
+/// Semantic AIS features implemented by this Controller. Unknown advertised AIS
+/// extensions are still preserved during registration, but not asserted here.
+pub const CONTROLLER_INTERFACE_CAPABILITIES: &[&str] = &[
+    "abort",
+    "prompt.notify",
+    "prompt.queue",
+    "prompt.queue.read",
+    "prompt.submit",
+    "state.observe",
+    "transcript.read",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LauncherControllerContract {
+    pub git_commit: String,
+    pub protocol: String,
+    pub capabilities: Vec<String>,
+    pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<LauncherMachineContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LauncherMachineContext {
+    pub root: String,
+    pub server_id: String,
+    pub workspace_id: String,
+}
 /// Browser-defense provenance, not a secret or an OS process authentication token.
 pub const AGENT_INTERFACE_SOURCE_HEADER: &str = "x-treer-interface-source";
 pub const AGENT_INTERFACE_INSTANCE_HEADER: &str = "x-treer-interface-instance";

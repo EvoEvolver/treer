@@ -490,6 +490,31 @@ pub fn registered_config(workspace: &str) -> Result<Option<ServiceConfig>> {
     Ok(find_installed_service(workspace)?.map(|(_, config)| config))
 }
 
+/// Non-secret local installation context for read-only launcher inspection when
+/// an older Controller does not yet expose its launcher compatibility contract.
+pub(crate) fn launcher_machine_context() -> Result<treer_protocol::LauncherMachineContext> {
+    let workspace = std::env::var("TREER_WORKSPACE_ID").ok();
+    let mut configs = installed_services()?
+        .into_iter()
+        .map(|(_, config)| config)
+        .filter(|config| {
+            workspace
+                .as_ref()
+                .is_none_or(|workspace| config.workspace == *workspace)
+        });
+    let config = configs
+        .next()
+        .context("no selected local enrollment; connect this machine first")?;
+    if configs.next().is_some() {
+        bail!("multiple local enrollments; select TREER_WORKSPACE_ID");
+    }
+    Ok(treer_protocol::LauncherMachineContext {
+        root: config.root.display().to_string(),
+        server_id: config.server_id,
+        workspace_id: config.workspace,
+    })
+}
+
 pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<ServiceSelection> {
     validate_workspace(workspace)?;
     require_host_binary(&ServicePaths::new("preflight")?)?;
