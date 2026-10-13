@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { test } from "node:test";
 import { providerCommand, spawnProvider, stopProcessTree } from "../scripts/process.mjs";
 import { hermeticEnv } from "./hermetic.mjs";
@@ -31,6 +31,17 @@ test("native exe paths remain argv vectors and ambiguous npm shims fail closed",
   const shim = join(root, "claude.cmd");
   writeFileSync(shim, '"%dp0%\\node_modules\\one\\cli.js"\n"%dp0%\\node_modules\\two\\cli.js"');
   assert.throws(() => providerCommand(shim, [], { platform: "win32" }), /Unsupported provider/);
+});
+
+test("Windows provider search ignores relative PATH and npm shim traversal is rejected", t => {
+  const root = mkdtempSync(join(tmpdir(), "provider-bounds-")); t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "codex.exe"), "not executed");
+  assert.throws(() => providerCommand("codex", [], { platform: "win32", env: { PATH: relative(process.cwd(), root) } }), /not on PATH/);
+  mkdirSync(join(root, "node_modules"));
+  writeFileSync(join(root, "outside.mjs"), "console.log('not executed')");
+  const shim = join(root, "codex.cmd");
+  writeFileSync(shim, '"%dp0%\\node_modules\\..\\outside.mjs"');
+  assert.throws(() => providerCommand(shim, [], { platform: "win32" }), /escapes its node_modules/);
 });
 
 test("stopping a provider removes its child process tree", async t => {

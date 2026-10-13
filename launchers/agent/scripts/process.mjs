@@ -1,7 +1,7 @@
 // Provider processes use argv vectors, never interpolate model/user text into a shell.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export function providerCommand(command, args = [], options = {}) {
   const platform = options.platform || process.platform, env = options.env || process.env;
@@ -10,7 +10,7 @@ export function providerCommand(command, args = [], options = {}) {
     const search = Object.entries(env).find(([name]) => name.toUpperCase() === "PATH")?.[1] || "";
     const suffixes = extname(file) ? [""] : [".exe", ".com", ".cmd", ".bat", ""];
     file = search.split(options.pathDelimiter || (process.platform === "win32" ? ";" : delimiter))
-      .filter(Boolean).flatMap(directory => suffixes.map(suffix => join(directory, command + suffix)))
+      .filter(directory => isAbsolute(directory)).flatMap(directory => suffixes.map(suffix => join(directory, command + suffix)))
       .find(candidate => existsSync(candidate) && statSync(candidate).isFile());
     if (!file) throw new Error(`Provider executable is not on PATH: ${command}; set its explicit executable path`);
   }
@@ -22,7 +22,9 @@ export function providerCommand(command, args = [], options = {}) {
     const matches = [...source.matchAll(/"%(?:dp0%|~dp0)[\\/]((?:node_modules)[\\/][^"\r\n%]+\.(?:cjs|mjs|js))"/gi)];
     const entries = [...new Set(matches.map(match => resolve(dirname(shim), ...match[1].split(/[\\/]/))))];
     if (entries.length !== 1 || !statSync(entries[0], { throwIfNoEntry: false })?.isFile()) throw new Error("Unsupported provider .cmd/.bat shim; select its native .exe or JS entry explicitly");
-    return { command: process.execPath, args: [realpathSync(entries[0]), ...args] };
+    const entry = realpathSync(entries[0]), inside = relative(join(dirname(shim), "node_modules"), entry);
+    if (isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`)) throw new Error("Provider npm shim entry escapes its node_modules; select a trusted JS entry explicitly");
+    return { command: process.execPath, args: [entry, ...args] };
   }
   if (/\.(mjs|cjs|js)$/i.test(file)) return { command: process.execPath, args: [resolve(file), ...args] };
   return { command: file, args };
