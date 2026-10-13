@@ -14,6 +14,13 @@ if ($ArtifactBase -eq '__TREER_ARTIFACT_BASE__' -or
     $artifactUri.Scheme -notin @('http', 'https')) {
     throw 'Use the Proxy /install.ps1 endpoint or supply an HTTP(S) -ArtifactBase URL.'
 }
+# Hashes come from the same origin, so cleartext HTTP would let a network
+# attacker replace both binaries and checksums. Allow it only for loopback tests.
+if ($artifactUri.Scheme -eq 'http' -and
+    $artifactUri.Host -notin @('localhost', '127.0.0.1', '[::1]', '::1')) {
+    throw 'Refusing cleartext HTTP artifacts; use an HTTPS Proxy URL (HTTP is allowed only for loopback).'
+}
+if ($artifactUri.UserInfo) { throw 'ArtifactBase must not contain credentials.' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 $binaries = @('treer', 'treer-agent-host', 'treer-agent-server')
