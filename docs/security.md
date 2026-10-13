@@ -192,6 +192,18 @@ operations to callers already authorized by Proxy Policy. Interface ports use
 machine loopback, which is shared without external isolation; the Controller is the external routing and policy
 boundary.
 
+For registered Agent Interface UI tunnels, Core strips client `x-treer-*` headers
+and injects `X-Treer-Interface-Source: proxy-ui` with the resolved Agent and current
+interface instance. Controller semantic AIS requests use `controller-api` with
+the same target binding. Strict launchers check these markers, loopback Host and
+browser Origin/Fetch Metadata to reject direct cross-origin HTTP/WebSocket and
+DNS-rebinding requests. The values are public, not secrets: local non-browser
+clients can forge them and remain within the trusted machine-account model.
+UI provenance is not sender attestation or per-command Policy authorization;
+only Controller semantic calls may attest queue senders. Old Core lacks provenance
+and must be updated before strict launchers are enabled. See the
+[forwarding contract](architecture.md#browser-defense-forwarding-provenance).
+
 Repository launchers are optional code executed with the Agent's operating-
 system authority. Treer's binary installer, updater, and release artifacts do
 not fetch or install them. The optional `launchers/agent` launcher is obtained

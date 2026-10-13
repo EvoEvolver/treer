@@ -41,6 +41,11 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_SERVICE_HTTP_FETCH,
 ];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
+/// Browser-defense provenance, not a secret or an OS process authentication token.
+pub const AGENT_INTERFACE_SOURCE_HEADER: &str = "x-treer-interface-source";
+pub const AGENT_INTERFACE_INSTANCE_HEADER: &str = "x-treer-interface-instance";
+pub const AGENT_INTERFACE_SOURCE_UI: &str = "proxy-ui";
+pub const AGENT_INTERFACE_SOURCE_CONTROLLER: &str = "controller-api";
 pub const POLICY_PROVIDER_PROTOCOL_V1: &str = "treer.policy-provider/v1";
 pub const POLICY_PROVIDER_BUNDLE_CAPABILITY_V1: &str = "policy.bundle.v1";
 pub const DOMAIN_EVENT_SCHEMA_VERSION: u32 = 1;

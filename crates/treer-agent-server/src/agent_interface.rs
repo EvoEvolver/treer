@@ -187,7 +187,14 @@ async fn request<B: Serialize + ?Sized, T: DeserializeOwned>(
             .header("content-type", "application/json")
             .header("accept", "application/json")
             .header("x-treer-agent-id", agent_id)
-            .header("x-treer-interface-instance", &interface.instance_id)
+            .header(
+                treer_protocol::AGENT_INTERFACE_INSTANCE_HEADER,
+                &interface.instance_id,
+            )
+            .header(
+                treer_protocol::AGENT_INTERFACE_SOURCE_HEADER,
+                treer_protocol::AGENT_INTERFACE_SOURCE_CONTROLLER,
+            )
             .body(Full::new(Bytes::from(bytes)))
             .map_err(unavailable)?;
         let response = sender.send_request(request).await.map_err(unavailable)?;
@@ -287,6 +294,8 @@ mod tests {
                     assert!(headers.starts_with(&format!("{method} {path} ").to_lowercase()));
                     assert!(headers.contains("x-treer-agent-id: target"));
                     assert!(headers.contains("x-treer-interface-instance: instance"));
+                    assert!(headers.contains("x-treer-interface-source: controller-api"));
+                    assert!(headers.contains("host: agent-interface"));
                     assert!(!headers.lines().any(|line| line.starts_with("origin:")));
                     if method == "POST" {
                         let body: serde_json::Value =

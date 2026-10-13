@@ -583,6 +583,52 @@ and events, while the live endpoint remains on machine loopback (shared in an un
 optional `ui_path` exposes an embedded browser interface on that same endpoint;
 HTTP and WebSocket traffic below the path is opaque to the semantic AIS contract.
 
+### Browser-defense forwarding provenance
+
+Core uses three protected headers for the registered interface endpoint:
+
+| Header | Agent UI tunnel | Controller semantic AIS request |
+| --- | --- | --- |
+| `X-Treer-Interface-Source` | `proxy-ui` | `controller-api` |
+| `X-Treer-Agent-Id` | Resolved target Agent ID | Target Agent ID |
+| `X-Treer-Interface-Instance` | Registered descriptor instance ID | Registered descriptor instance ID |
+| `Host` | `127.0.0.1:<registered-port>` | `agent-interface` |
+
+The authenticated Agent UI route validates browser Origin through the existing
+BrowserAccess check, removes cookies/platform authorization and every client
+`x-treer-*` header, then injects its own target-bound provenance. Origin is
+preserved as browser context, not used as the provenance token. HTTP and WebSocket
+upgrades share this preparation. Ordinary virtual-host, App UI and public ingress
+tunnels remove these headers and never inject interface provenance. The Controller
+only transports the UI tunnel's opaque TCP bytes; the Proxy prepares its HTTP
+headers. Controller-generated semantic AIS HTTP requests inject `controller-api`
+and have no browser Origin. None of these headers contains a workload credential.
+
+The launcher checks source plus target and current instance, independently checks
+Host against its loopback listener authority (localhost/127.0.0.1/[::1] with the
+actual listener port; `agent-interface` only for Controller calls), and rejects
+unmarked browser requests: Origin or any Sec-Fetch-* header identifies a browser
+request, including simple POST, navigation/file GET, and WebSocket upgrades.
+Untrusted preflights receive no permissive CORS response. An arbitrary Host is
+rejected even if the request has no Origin, closing the DNS-rebinding file path.
+Only `controller-api` without browser Origin may attest a queue submission's
+sender; `proxy-ui` must not turn user-supplied sender JSON into Controller identity.
+
+These public marker values defend against ordinary browser-origin access, not
+malicious local non-browser clients: same-account clients can forge them and
+remain trusted. They are not cryptographic authentication or a per-request Policy
+decision for arbitrary launcher APIs. The opaque UI tunnel grants access to the
+interface as a whole; applications must not claim it enforces each semantic Core
+action on arbitrary UI routes. A future stronger local boundary needs a distinct
+rotating interface capability plus external OS isolation. Never trust arbitrary
+X-Forwarded-* or client-provided markers as proof of an authenticated human.
+
+Strict launchers need updated Core provenance producers. Old Controller semantic
+calls lack the marker and must fail clearly rather than accepting browser-like
+requests as a compatibility fallback; update Proxy/Controller before enabling
+strict launcher guards. No Controller protocol version change is required for
+these HTTP headers, and old launchers simply ignore the additional header.
+
 The Controller routes `prompt.submit` and `transcript.read` through AIS when the
 matching capability is present. Explicit steering and legacy prompt commands
 can use the PTY compatibility path when no prompt interface is available.

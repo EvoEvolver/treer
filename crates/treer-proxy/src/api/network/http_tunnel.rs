@@ -135,8 +135,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui(
         .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
     *request.version_mut() = Version::HTTP_11;
     let upgraded = request.headers().contains_key(header::UPGRADE);
-    let authority = format!("127.0.0.1:{}", interface.port);
-    sanitize_tunnel_request_headers(request.headers_mut(), upgraded, &authority)?;
+    sanitize_agent_interface_headers(request.headers_mut(), upgraded, &agent.agent_id, interface)?;
     tunnel_http_request(
         state,
         &workspace_id,
@@ -212,6 +211,39 @@ pub(in crate::api) async fn tunnel_http_request(
     Ok(Response::from_parts(parts, Body::new(body)))
 }
 
+fn sanitize_agent_interface_headers(
+    headers: &mut HeaderMap,
+    upgraded: bool,
+    agent_id: &str,
+    interface: &treer_protocol::AgentInterfaceDescriptor,
+) -> Result<(), ApiFailure> {
+    // Only this authenticated Agent UI route injects provenance. Generic service
+    // and public ingress routes strip these headers without restoring them.
+    sanitize_tunnel_request_headers(headers, upgraded, &format!("127.0.0.1:{}", interface.port))?;
+    for (name, value) in [
+        (
+            treer_protocol::AGENT_INTERFACE_SOURCE_HEADER,
+            treer_protocol::AGENT_INTERFACE_SOURCE_UI,
+        ),
+        (treer_protocol::AGENT_ID_HEADER, agent_id),
+        (
+            treer_protocol::AGENT_INTERFACE_INSTANCE_HEADER,
+            interface.instance_id.as_str(),
+        ),
+    ] {
+        headers.insert(
+            name,
+            HeaderValue::from_str(value).map_err(|_| {
+                ApiFailure::bad_gateway(
+                    "invalid_agent_interface",
+                    "invalid registered interface identity",
+                )
+            })?,
+        );
+    }
+    Ok(())
+}
+
 pub(in crate::api) fn sanitize_tunnel_request_headers(
     headers: &mut HeaderMap,
     upgraded: bool,
@@ -238,6 +270,79 @@ pub(in crate::api) fn sanitize_tunnel_request_headers(
             .map_err(|error| ApiFailure::bad_gateway("invalid_virtual_host", &error.to_string()))?,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn agent_ui_replaces_spoofed_provenance_for_http_and_websocket() {
+        let interface = treer_protocol::AgentInterfaceDescriptor {
+            protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
+            instance_id: "registered-instance".into(),
+            port: 12345,
+            capabilities: vec![],
+            ui_path: Some("/".into()),
+            registered_at: Utc::now(),
+        };
+        for upgraded in [false, true] {
+            let mut headers = HeaderMap::new();
+            for (name, value) in [
+                ("x-treer-interface-source", "controller-api"),
+                ("x-treer-interface-instance", "forged"),
+                ("x-treer-agent-id", "victim"),
+                ("host", "evil.example"),
+                ("origin", "https://proxy.example.test"),
+                ("cookie", "synthetic-session"),
+                ("authorization", "Bearer synthetic"),
+                ("upgrade", "websocket"),
+                ("connection", "upgrade"),
+            ] {
+                headers.insert(name, HeaderValue::from_static(value));
+            }
+            sanitize_agent_interface_headers(&mut headers, upgraded, "target", &interface).unwrap();
+            assert_eq!(headers["x-treer-interface-source"], "proxy-ui");
+            assert_eq!(headers["x-treer-interface-instance"], "registered-instance");
+            assert_eq!(headers["x-treer-agent-id"], "target");
+            assert_eq!(headers["host"], "127.0.0.1:12345");
+            assert_eq!(headers["origin"], "https://proxy.example.test");
+            assert!(!headers.contains_key("cookie"));
+            assert!(!headers.contains_key("authorization"));
+            assert_eq!(headers.contains_key("upgrade"), upgraded);
+        }
+    }
+
+    #[test]
+    fn ordinary_and_public_tunnels_never_preserve_interface_provenance() {
+        for public in [false, true] {
+            let mut headers = HeaderMap::new();
+            for name in [
+                "x-treer-interface-source",
+                "x-treer-interface-instance",
+                "x-treer-agent-id",
+            ] {
+                headers.insert(name, HeaderValue::from_static("forged"));
+            }
+            if public {
+                sanitize_ingress_request_headers(
+                    &mut headers,
+                    true,
+                    "public.example.test",
+                    "https",
+                    "ingress",
+                    None,
+                )
+                .unwrap();
+            } else {
+                sanitize_tunnel_request_headers(&mut headers, true, "service.example.test")
+                    .unwrap();
+            }
+            assert!(!headers
+                .keys()
+                .any(|name| name.as_str().starts_with("x-treer-")));
+        }
+    }
 }
 
 pub(in crate::api) fn sanitize_ingress_request_headers(
