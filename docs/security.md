@@ -101,6 +101,34 @@ user tools, but are not a control-plane transport configuration.
   account existence; it does not guarantee equal response time for arbitrary
   input (hash parameters, database latency and CPU queuing still vary).
 
+- Password sign-in for humans and the administrator is limited to 10 attempts per
+  account (or the single administrator) per 15 minutes across all Proxies. Attempts
+  are counted atomically in PostgreSQL before password hashing, using the database
+  clock and PostgreSQL `lower()` (the same normalization as the account lookup, so
+  Unicode case variants share one budget); success clears the count, and expired
+  rows are removed in bounded batches. Once the budget is spent a correct password
+  is also refused, so guesses cannot be confirmed past the limit.
+  **Known limitation:** the budget is per account, not per client. Without a
+  trusted client-address model (the peer address behind a reverse proxy or load
+  balancer is only the edge node), any anonymous client can make new sign-ins for
+  a known account or the administrator fail for the rest of the window, and can
+  create short-lived counter rows. Mitigations: existing user and administrator
+  sessions are unaffected; operators recover with `treer-proxy
+  --reset-login-attempts` (same `DATABASE_URL`; clears all counters and exits;
+  not an HTTP route); restrict administrator login to trusted networks (a risk-reduction precondition, not a
+  guarantee that the software prevents lockout; under a sustained flood first limit
+  the failing traffic at a trusted ingress, then reset, then sign in). A trusted
+  proxy-header model and per-source limits are follow-up work.
+  Counting fails closed: a database error during reservation or clearing rejects
+  the sign-in even with the right password (recovery of the database restores
+  sign-in; no automated error-injection test exists). The limit applies once every
+  Proxy replica runs this version (older replicas neither count nor enforce it),
+  and the `login_attempts` table must be kept on rollback (older means the released
+  Proxy without that table; unreleased intermediate table layouts are not migrated). It does not cover
+  machine or other token endpoints, global CPU budgets, or OAuth/SSO. The
+  administrator comparison and decoy hash reduce timing differences (see above)
+  without guaranteeing equal response time for arbitrary input.
+
 ## Unsupported Claims
 
 Public Unix and Windows bootstrap installers check SHA256 hashes from the same

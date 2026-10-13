@@ -276,6 +276,13 @@ CREATE INDEX IF NOT EXISTS password_reset_tokens_user_id
 CREATE INDEX IF NOT EXISTS password_reset_tokens_expires_at
     ON password_reset_tokens(expires_at);
 
+CREATE TABLE IF NOT EXISTS login_attempts (
+    bucket TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    window_started_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS login_attempts_window ON login_attempts(window_started_at);
+
 CREATE TABLE IF NOT EXISTS admin_sessions (
     token TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,

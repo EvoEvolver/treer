@@ -1,6 +1,68 @@
 use super::*;
 
+/// Failed-or-pending sign-in attempts allowed per account (or the administrator)
+/// in one window, shared by every Proxy through PostgreSQL.
+pub(super) const LOGIN_ATTEMPT_LIMIT: i32 = 10;
+const LOGIN_ATTEMPT_WINDOW_SECONDS: i64 = 15 * 60;
+
 impl AuthStore {
+    /// Atomically count this attempt before any password hashing so parallel
+    /// guesses cannot overshoot the limit. Successful sign-in clears the bucket.
+    /// The bucket key is normalized by PostgreSQL's `lower()`, the same function
+    /// the account lookup uses, so Unicode case variants share one budget; the
+    /// window is judged on the database clock shared by all Proxies.
+    async fn reserve_login_attempt(
+        &self,
+        prefix: &str,
+        identifier: &str,
+    ) -> Result<(), AuthFailure> {
+        const NOW: &str = "to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS')";
+        sqlx::query(&format!(
+            "DELETE FROM login_attempts WHERE bucket IN (SELECT bucket FROM login_attempts \
+             WHERE window_started_at <= to_char((now() - make_interval(secs => $1)) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS') \
+             LIMIT 100 FOR UPDATE SKIP LOCKED) \
+             AND window_started_at <= to_char((now() - make_interval(secs => $1)) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS')"
+        ))
+        .bind(LOGIN_ATTEMPT_WINDOW_SECONDS as f64)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let attempts: i32 = sqlx::query_scalar(&format!(
+            "INSERT INTO login_attempts(bucket, attempts, window_started_at) VALUES($1 || lower($2), 1, {NOW}) \
+             ON CONFLICT(bucket) DO UPDATE SET \
+             attempts = CASE WHEN login_attempts.window_started_at <= to_char((now() - make_interval(secs => $3)) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS') THEN 1 ELSE login_attempts.attempts + 1 END, \
+             window_started_at = CASE WHEN login_attempts.window_started_at <= to_char((now() - make_interval(secs => $3)) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS') THEN {NOW} ELSE login_attempts.window_started_at END \
+             RETURNING attempts"
+        ))
+        .bind(prefix)
+        .bind(identifier)
+        .bind(LOGIN_ATTEMPT_WINDOW_SECONDS as f64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if attempts > LOGIN_ATTEMPT_LIMIT {
+            return Err(AuthFailure::too_many_requests(
+                "login_rate_limited",
+                "too many sign-in attempts; try again later",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn clear_login_attempts(
+        &self,
+        prefix: &str,
+        identifier: &str,
+    ) -> Result<(), AuthFailure> {
+        sqlx::query("DELETE FROM login_attempts WHERE bucket = $1 || lower($2)")
+            .bind(prefix)
+            .bind(identifier)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) async fn login(
         &self,
@@ -28,6 +90,7 @@ impl AuthStore {
                 "invalid email or password",
             ));
         }
+        self.reserve_login_attempt("user:", &identifier).await?;
         let row = sqlx::query(
             "SELECT id, email, preferred_name, password_hash FROM users \
              WHERE lower(email) = lower($1)",
@@ -37,8 +100,8 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         let Some(row) = row else {
-            // Spend comparable hashing time so latency does not reveal which
-            // email addresses have accounts.
+            // Spend the same hashing time so response latency does not reveal
+            // which email addresses have accounts.
             let _ = verify_password(password, &self.decoy_password_hash);
             return Err(AuthFailure::unauthorized(
                 "invalid_credentials",
@@ -52,6 +115,7 @@ impl AuthStore {
                 "invalid email or password",
             ));
         }
+        self.clear_login_attempts("user:", &identifier).await?;
         self.create_session(
             row.get("id"),
             row.get("email"),
@@ -342,6 +406,7 @@ impl AuthStore {
     }
 
     pub(super) async fn admin_login(&self, password: &str) -> Result<AdminSession, AuthFailure> {
+        self.reserve_login_attempt("admin", "").await?;
         // Compare fixed-length digests so length and prefix do not short-circuit.
         let expected = Sha256::digest(self.admin_password.as_bytes());
         let supplied = Sha256::digest(password.as_bytes());
@@ -351,6 +416,7 @@ impl AuthStore {
                 "invalid administrator password",
             ));
         }
+        self.clear_login_attempts("admin", "").await?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let now = Utc::now();
         let expires_at = now + Duration::hours(ADMIN_SESSION_TTL_HOURS);

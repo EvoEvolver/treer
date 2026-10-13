@@ -114,6 +114,11 @@ struct Args {
     database_url: String,
     #[arg(
         long,
+        help = "Operator recovery: clear all sign-in attempt counters in the database, then exit"
+    )]
+    reset_login_attempts: bool,
+    #[arg(
+        long,
         env = "TREER_NATS_URL",
         hide_env_values = true,
         help = "NATS server URL for domain events and multi-Proxy live routing"
@@ -165,6 +170,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    if args.reset_login_attempts {
+        // Break-glass for an administrator locked out by sustained failed
+        // attempts: requires database access, never an HTTP route.
+        let pool = sqlx::PgPool::connect(&args.database_url).await?;
+        let removed = sqlx::query("DELETE FROM login_attempts")
+            .execute(&pool)
+            .await
+            .context("cannot clear login_attempts; start a current Proxy once to create the table")?
+            .rows_affected();
+        println!("cleared {removed} sign-in attempt counters");
+        return Ok(());
+    }
     let admin_password = resolve_admin_password(args.admin_password, args.disable_auth)?;
     let listen = listen_address(args.listen, args.port);
     require_loopback_for_disabled_auth(

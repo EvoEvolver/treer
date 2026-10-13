@@ -587,6 +587,20 @@ require an invitation by default. Set
 `TREER_INVITATION_REQUIRED=false` to allow open password and OAuth registration;
 every open registration creates a user-owned personal organization.
 
+### Recovering from sign-in lockout
+
+Password sign-in is limited per account and for the administrator (see
+[security](security.md)). If a sustained failed-login flood keeps an account or
+the administrator refused, a single reset only restores the budget for an instant:
+
+1. Limit or isolate the failing traffic at a trusted ingress (firewall, load
+   balancer rule or allowlist for `/api/auth/login` and `/api/admin/login`).
+2. On a machine with database access run
+   `DATABASE_URL=... treer-proxy --reset-login-attempts`. It clears every counter,
+   prints how many it removed, and exits without starting a listener.
+3. Sign in, then lift the temporary restriction. Existing sessions were never
+   affected. Do not use `--disable-auth` as a recovery method.
+
 ## NATS event bus and multi-Proxy routing
 
 The Proxy can publish revisioned workspace changes as versioned domain events

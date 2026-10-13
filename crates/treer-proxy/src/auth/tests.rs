@@ -3025,27 +3025,207 @@ async fn app_email_provider_failure_is_sanitized_and_retryable() {
 }
 
 #[tokio::test]
-async fn administrator_digest_comparison_and_unknown_account_decoy_keep_error_codes() {
+async fn sign_in_attempts_are_limited_per_account_and_administrator() {
     let store = AuthStore::for_test("owner-password").await;
-    for wrong in [
-        "",
-        "x",
-        "owner-passwor",
-        "owner-password ",
-        "owner-passwordX",
-    ] {
+    let (invite, _) = store.create_personal_invitation().await.unwrap();
+    store
+        .register(
+            Some(&invite),
+            "victim@example.com",
+            "Victim",
+            "correct-horse",
+        )
+        .await
+        .unwrap();
+    for _ in 0..accounts::LOGIN_ATTEMPT_LIMIT {
         assert_eq!(
-            store.admin_login(wrong).await.unwrap_err().code(),
-            "invalid_admin_credentials"
+            store
+                .login("victim@example.com", "wrong-guess")
+                .await
+                .unwrap_err()
+                .code(),
+            "invalid_credentials"
         );
     }
-    store.admin_login("owner-password").await.unwrap();
+    // Even the right password is refused once the budget is spent, so a guess
+    // cannot be confirmed past the limit; the unknown-account path is limited too.
     assert_eq!(
         store
-            .login("nobody@example.test", "whatever")
+            .login("victim@example.com", "correct-horse")
             .await
             .unwrap_err()
             .code(),
-        "invalid_credentials"
+        "login_rate_limited"
     );
+    for _ in 0..=accounts::LOGIN_ATTEMPT_LIMIT {
+        let _ = store.login("nobody@example.com", "x").await;
+    }
+    assert_eq!(
+        store
+            .login("nobody@example.com", "x")
+            .await
+            .unwrap_err()
+            .code(),
+        "login_rate_limited"
+    );
+    // Another account is unaffected, and success clears the account's budget.
+    let (invite, _) = store.create_personal_invitation().await.unwrap();
+    store
+        .register(Some(&invite), "other@example.com", "Other", "correct-horse")
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let _ = store.login("other@example.com", "wrong").await;
+    }
+    store
+        .login("other@example.com", "correct-horse")
+        .await
+        .unwrap();
+    for _ in 0..accounts::LOGIN_ATTEMPT_LIMIT {
+        assert_eq!(
+            store
+                .login("other@example.com", "wrong")
+                .await
+                .unwrap_err()
+                .code(),
+            "invalid_credentials"
+        );
+    }
+    for _ in 0..accounts::LOGIN_ATTEMPT_LIMIT {
+        assert_eq!(
+            store.admin_login("guess").await.unwrap_err().code(),
+            "invalid_admin_credentials"
+        );
+    }
+    assert_eq!(
+        store
+            .admin_login("owner-password")
+            .await
+            .unwrap_err()
+            .code(),
+        "login_rate_limited"
+    );
+    // Window expiry restores service.
+    sqlx::query("UPDATE login_attempts SET window_started_at='2000-01-01T00:00:00+00:00'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store.admin_login("owner-password").await.unwrap();
+}
+
+#[tokio::test]
+async fn unicode_case_variants_of_an_email_share_one_login_budget() {
+    let store = AuthStore::for_test("owner-password").await;
+    for _ in 0..accounts::LOGIN_ATTEMPT_LIMIT {
+        let _ = store.login("victim\u{e9}@example.test", "wrong").await;
+    }
+    assert_eq!(
+        store
+            .login("victim\u{c9}@example.test", "wrong")
+            .await
+            .unwrap_err()
+            .code(),
+        "login_rate_limited"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_guesses_cannot_exceed_the_attempt_budget_and_reset_restores_service() {
+    let store = AuthStore::for_test("owner-password").await;
+    let tasks: Vec<_> = (0..30)
+        .map(|_| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .admin_login("guess")
+                    .await
+                    .unwrap_err()
+                    .code()
+                    .to_string()
+            })
+        })
+        .collect();
+    let mut checked = 0;
+    let mut limited = 0;
+    for task in tasks {
+        match task.await.unwrap().as_str() {
+            "invalid_admin_credentials" => checked += 1,
+            "login_rate_limited" => limited += 1,
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!(
+        (checked, limited),
+        (
+            accounts::LOGIN_ATTEMPT_LIMIT,
+            30 - accounts::LOGIN_ATTEMPT_LIMIT
+        )
+    );
+    // Operator recovery (`treer-proxy --reset-login-attempts`) is a plain DELETE.
+    sqlx::query("DELETE FROM login_attempts")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store.admin_login("owner-password").await.unwrap();
+}
+
+#[tokio::test]
+async fn cleanup_never_deletes_a_counter_refreshed_by_a_concurrent_attempt() {
+    let store = AuthStore::for_test("owner-password").await;
+    sqlx::query("INSERT INTO login_attempts VALUES('user:racer', 7, '2000-01-01T00:00:00')")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    // A concurrent attempt has refreshed the expired window but not committed yet.
+    let mut refreshing = store.pool.begin().await.unwrap();
+    sqlx::query("UPDATE login_attempts SET attempts = 1, window_started_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS') WHERE bucket = 'user:racer'")
+        .execute(&mut *refreshing)
+        .await
+        .unwrap();
+    // Cleanup triggered by another attempt must neither block nor delete the row.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.login_with_client("other@example.test", "x", None),
+    )
+    .await
+    .expect("cleanup must not wait on a locked row")
+    .unwrap_err();
+    refreshing.commit().await.unwrap();
+    let attempts: i32 =
+        sqlx::query_scalar("SELECT attempts FROM login_attempts WHERE bucket = 'user:racer'")
+            .fetch_one(&store.pool)
+            .await
+            .expect("refreshed counter survives cleanup");
+    assert_eq!(attempts, 1);
+}
+
+#[tokio::test]
+async fn cleanup_keeps_unexpired_rows_and_removes_at_most_one_hundred_expired_rows() {
+    let store = AuthStore::for_test("owner-password").await;
+    for index in 0..150 {
+        sqlx::query("INSERT INTO login_attempts VALUES($1, 3, '2000-01-01T00:00:00')")
+            .bind(format!("user:expired{index}"))
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO login_attempts VALUES('user:live', 4, to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS'))")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let _ = store
+        .login_with_client("someone@example.test", "x", None)
+        .await;
+    let expired: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM login_attempts WHERE bucket LIKE 'user:expired%'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(expired, 50, "one cleanup removes at most 100 expired rows");
+    let live: i32 =
+        sqlx::query_scalar("SELECT attempts FROM login_attempts WHERE bucket = 'user:live'")
+            .fetch_one(&store.pool)
+            .await
+            .expect("unexpired rows are never cleaned");
+    assert_eq!(live, 4);
 }
