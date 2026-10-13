@@ -390,7 +390,7 @@ fn sanitize_headers(headers: &mut HeaderMap, upgraded: bool) {
     // Never pass local machine/operator/workload credentials or spoofed Treer identity.
     for name in headers
         .keys()
-        .filter(|name| name.as_str().starts_with("x-treer-"))
+        .filter(|name| treer_protocol::is_treer_header_name(name.as_str()))
         .cloned()
         .collect::<Vec<_>>()
     {

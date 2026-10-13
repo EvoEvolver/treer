@@ -968,3 +968,25 @@ fn machine_exec_and_upload_commands_round_trip() {
         startup
     );
 }
+
+#[test]
+fn treer_header_names_fold_underscores_and_case() {
+    for name in [
+        "x-treer-agent-id",
+        "X-Treer-Agent-Id",
+        "x_treer_agent_id",
+        "X_TREER_IDENTITY_TOKEN",
+        "x-treer_mixed",
+    ] {
+        assert!(is_treer_header_name(name), "{name}");
+    }
+    for name in [
+        "x-treerx-agent",
+        "x-trees-agent",
+        "authorization",
+        "x-treer",
+        "",
+    ] {
+        assert!(!is_treer_header_name(name), "{name}");
+    }
+}

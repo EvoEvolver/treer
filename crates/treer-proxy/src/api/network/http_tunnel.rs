@@ -255,7 +255,7 @@ pub(in crate::api) fn sanitize_tunnel_request_headers(
     headers.remove(TREER_AUTHORIZATION_HEADER);
     for name in headers
         .keys()
-        .filter(|name| name.as_str().starts_with("x-treer-"))
+        .filter(|name| treer_protocol::is_treer_header_name(name.as_str()))
         .cloned()
         .collect::<Vec<_>>()
     {
@@ -284,7 +284,7 @@ pub(in crate::api) fn sanitize_ingress_request_headers(
     headers.remove(TREER_AUTHORIZATION_HEADER);
     for name in headers
         .keys()
-        .filter(|name| name.as_str().starts_with("x-treer-"))
+        .filter(|name| treer_protocol::is_treer_header_name(name.as_str()))
         .cloned()
         .collect::<Vec<_>>()
     {
@@ -424,6 +424,8 @@ mod provenance_tests {
                 "x-treer-interface-source",
                 "x-treer-interface-instance",
                 "x-treer-agent-id",
+                "x_treer_identity_token",
+                "X_TREER_AGENT_ID",
             ] {
                 headers.insert(name, HeaderValue::from_static("forged"));
             }
@@ -443,7 +445,7 @@ mod provenance_tests {
             }
             assert!(!headers
                 .keys()
-                .any(|name| name.as_str().starts_with("x-treer-")));
+                .any(|name| treer_protocol::is_treer_header_name(name.as_str())));
         }
     }
 }

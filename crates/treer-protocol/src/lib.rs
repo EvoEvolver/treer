@@ -68,6 +68,23 @@ pub const MAX_MESSAGE_WAIT_MILLISECONDS: u64 = 30_000;
 pub const MAX_MESSAGE_IDEMPOTENCY_KEY_BYTES: usize = 256;
 pub const MAX_MESSAGE_EXTERNAL_METADATA_ENTRIES: usize = 16;
 pub const MACHINE_ENROLLMENT_KEY_PREFIX: &str = "enr_v1_";
+/// Treer-controlled header names. Underscores are folded to hyphens because CGI/WSGI
+/// style servers map `X_Treer_Foo` and `X-Treer-Foo` to the same variable, so a
+/// forged underscore spelling must be stripped like the hyphenated one.
+pub fn is_treer_header_name(name: &str) -> bool {
+    name.len() >= 8
+        && name.as_bytes()[..8]
+            .iter()
+            .map(|b| {
+                if *b == b'_' {
+                    b'-'
+                } else {
+                    b.to_ascii_lowercase()
+                }
+            })
+            .eq(*b"x-treer-")
+}
+
 pub const AGENT_ID_HEADER: &str = "x-treer-agent-id";
 pub const WORKLOAD_CREDENTIAL_HEADER: &str = "x-treer-workload-credential";
 pub const OPERATOR_CREDENTIAL_HEADER: &str = "x-treer-operator-credential";
