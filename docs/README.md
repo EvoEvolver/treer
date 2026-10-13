@@ -33,6 +33,10 @@ matching the question; follow its source links for implementation detail.
 
 ## Active execution plans
 
+- [Supply-chain security review (2026-10-12)](research/2026-10-12-security-supply-chain.md):
+  local findings, release-workflow fixes, dependency audit snapshot and minimum
+  baseline for critical-service deployment.
+
 Active plans record approved target behavior and delivery gates. Source and
 maintained current-state documents remain authoritative until each phase ships;
 the plan identifies every maintained document that must change at completion.
