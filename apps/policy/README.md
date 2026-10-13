@@ -21,6 +21,15 @@ Treer copies this bundled App to the selected online machine, chooses an unused
 port, starts it, validates it, and selects it automatically. No repository
 checkout or network download is required on that machine.
 
+The App listens on `127.0.0.1:8787` by default; `--port N` changes only the port
+and keeps the loopback bind. Controller forwarding reaches it locally, so direct
+machine-network access is unnecessary. `POLICY_LISTEN=HOST:PORT` explicitly
+overrides both (including `--port`). Container deployments may need an explicit
+bind such as `0.0.0.0:8787`; restrict the published port to the Controller or a
+private network. Bundle/state reads intentionally have no App authentication
+for Controller access and contain paths/group IDs: exposing the raw port bypasses
+private Treer ingress. Loopback still permits access by local machine processes.
+
 State defaults to `apps/policy/data/policy.json`. Override it with
 `POLICY_DATA_FILE` when the source checkout is not the desired durable location.
 Back up that file. Publication writes it atomically with mode `0600` and uses an

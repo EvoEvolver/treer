@@ -968,7 +968,7 @@ def main() -> None:
     if not workspace_id:
         raise SystemExit("TREER_WORKSPACE_ID is required")
     listen = os.environ.get(
-        "POLICY_LISTEN", f"0.0.0.0:{args.port}" if args.port is not None else "0.0.0.0:8787"
+        "POLICY_LISTEN", f"127.0.0.1:{args.port}" if args.port is not None else "127.0.0.1:8787"
     )
     host, raw_port = listen.rsplit(":", 1)
     default_data_file = (
