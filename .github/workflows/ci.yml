@@ -12,9 +12,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - mode: cold-2025
-            runner: windows-2025
-            source: f452023e25b4990425287787d38863d598ce733a
           - mode: exact-e3-test-binary
             runner: windows-2022
             source: e3ed8ea99c80df072fd1b509b7def2ea235272ae
@@ -68,6 +65,10 @@ jobs:
           New-Item -ItemType Directory -Path test-binary | Out-Null
           Copy-Item -LiteralPath $bins[0].executable -Destination test-binary/controller-tests.exe
           $hash = (Get-FileHash test-binary/controller-tests.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Output "diagnostic-controller-sha256=$hash"
+          Write-Output "diagnostic-source-commit=$env:TREER_BUILD_COMMIT"
+          "diagnostic-controller-sha256=$hash" >> $env:GITHUB_STEP_SUMMARY
+          "diagnostic-source-commit=$env:TREER_BUILD_COMMIT" >> $env:GITHUB_STEP_SUMMARY
           "$hash  controller-tests.exe" | Set-Content -Encoding ascii test-binary/SHA256SUMS
           "$env:TREER_BUILD_COMMIT" | Set-Content -Encoding ascii test-binary/SOURCE_COMMIT
       - name: Upload diagnostic test executable only
