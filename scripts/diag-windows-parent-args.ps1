@@ -1,36 +1,24 @@
-# Read-only diagnostic: delta-debug the smallest set of extra environment variable
-# names that lets a nested Windows PowerShell 5.1 run its first cmdlet when started
-# with the update fixture's cleared environment. Outputs variable names only.
+# Read-only diagnostic: how long does the first cmdlet take in a nested Windows
+# PowerShell 5.1 under the fixture's cleared environment, cold and warm? Timings
+# and booleans only; private temporary directory.
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/update-machine.ps1"
 $shell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-$directory = Join-Path ([IO.Path]::GetTempPath()) ('treer-envbisect-' + [Guid]::NewGuid().ToString('N'))
+$directory = Join-Path ([IO.Path]::GetTempPath()) ('treer-coldtime-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($directory) | Out-Null
 $cmdlet = Join-Path $directory 'cmdlet.ps1'
 [IO.File]::WriteAllText($cmdlet, 'param($Marker); $null = Join-Path "a" "b"; [IO.File]::WriteAllText($Marker, "x")')
-$base = New-UpdateProcess 'unused' '' $directory
-$extras = @([Environment]::GetEnvironmentVariables().Keys | Where-Object { !$base.EnvironmentVariables.ContainsKey($_) } | Sort-Object)
-$counter = 0
-function Test-Set($Names) {
-    $script:counter++
-    $marker = Join-Path $directory ('m' + $script:counter)
-    $start = New-UpdateProcess $shell ('-NoProfile -NonInteractive -File "' + $cmdlet + '" -Marker "' + $marker + '"') $directory
-    foreach ($name in $Names) { $start.EnvironmentVariables[$name] = [Environment]::GetEnvironmentVariable($name) }
-    $process = [Diagnostics.Process]::Start($start)
-    $ok = $process.WaitForExit(5000) -and $process.ExitCode -eq 0 -and (Test-Path -LiteralPath $marker)
-    if (!$process.HasExited) { $process.Kill(); $process.WaitForExit() }; $process.Dispose()
-    return $ok
-}
+$cacheDirectory = Join-Path $env:LOCALAPPDATA 'Microsoft/Windows/PowerShell'
+Write-Output ('analysis-cache-dir-present-before=' + (Test-Path -LiteralPath $cacheDirectory) + ' analysis-cache-path-env-set=' + [bool]$env:PSModuleAnalysisCachePath + ' module-path-entry-count=' + @($env:PSModulePath -split ';').Count)
 try {
-    Write-Output ('extra-variable-count=' + $extras.Count + ' all-extras-cure=' + (Test-Set $extras) + ' no-extras-cure=' + (Test-Set @()))
-    $set = @($extras); $chunks = 2
-    while ($set.Count -ge 2) {
-        $size = [Math]::Max(1, [int][Math]::Ceiling($set.Count / $chunks)); $reduced = $false
-        for ($offset = 0; $offset -lt $set.Count; $offset += $size) {
-            $without = @($set | Select-Object -First $offset) + @($set | Select-Object -Skip ($offset + $size))
-            if ($without.Count -gt 0 -and (Test-Set $without)) { $set = $without; $chunks = [Math]::Max(2, $chunks - 1); $reduced = $true; break }
-        }
-        if (!$reduced) { if ($size -eq 1) { break }; $chunks = [Math]::Min($set.Count, $chunks * 2) }
+    foreach ($run in 1..3) {
+        $marker = Join-Path $directory ('m' + $run)
+        $start = New-UpdateProcess $shell ('-NoProfile -NonInteractive -File "' + $cmdlet + '" -Marker "' + $marker + '"') $directory
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $process = [Diagnostics.Process]::Start($start)
+        $exited = $process.WaitForExit(180000); $elapsed = $watch.ElapsedMilliseconds
+        $code = if ($exited) { $process.ExitCode } else { -1 }
+        if (!$exited) { $process.Kill(); $process.WaitForExit() }; $process.Dispose()
+        Write-Output ('run=' + $run + ' exited=' + $exited + ' exit=' + $code + ' ms=' + $elapsed + ' marker=' + (Test-Path -LiteralPath $marker) + ' analysis-cache-dir-present-after=' + (Test-Path -LiteralPath $cacheDirectory))
     }
-    Write-Output ('minimal-curing-names=' + ($set -join ',') + ' trials=' + $counter)
 } finally { Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue }
