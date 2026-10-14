@@ -202,6 +202,7 @@ async function mockApi(page: Page) {
   const trees: Record<string, { folders: { folder_id: string; name: string; parent_id: string | null }[]; placements: { agent_id: string; folder_id: string | null; position: number }[] }> = {}
   let currentUser = { ...user }
   let currentApp: typeof managedApp = { ...managedApp }
+  let appDeleted = false
   let policyInstalled = false
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, () => {})
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/agents\/[^/]+\/terminal(?:\?.*)?$/, () => {})
@@ -298,14 +299,14 @@ async function mockApi(page: Page) {
       fallback: { kind: "treer_default", name: "Treer Default", mode: "monitor", effect: "allow" },
       cache: {},
     })
-    if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: [currentApp] })
+    if (path === "/workspaces/ws-1/apps" && route.request().method() === "GET") return ok(route, { apps: appDeleted ? [] : [currentApp] })
     if (path === "/workspaces/ws-1/apps/app-1/access" && route.request().method() === "PATCH") {
       const body = route.request().postDataJSON() as { access: "public" | "workspace" }
       currentApp = { ...currentApp, access: body.access }
       return ok(route, { app: currentApp })
     }
     if (/^\/workspaces\/ws-1\/apps\/[^/]+\/(start|stop|restart)$/.test(path) && route.request().method() === "POST") return ok(route, { app: currentApp })
-    if (/^\/workspaces\/ws-1\/apps\/[^/]+$/.test(path) && route.request().method() === "DELETE") return ok(route, {})
+    if (/^\/workspaces\/ws-1\/apps\/[^/]+$/.test(path) && route.request().method() === "DELETE") { appDeleted = true; return ok(route, {}) }
     if (path === "/workspaces/ws-2/apps" && route.request().method() === "GET") return ok(route, { apps: [] })
 
     return route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
@@ -742,10 +743,16 @@ test("an App missing from machine inventory remains visible with its stable runt
 
 test("shared App rename and delete update metadata without resurrecting a placeholder", async ({ page }) => {
   let runtime = { ...appRuntimeAgent }
+  let app = { ...managedApp }
   let deleted = false
+  await page.route("**/api/workspaces/ws-1/apps", (route) => ok(route, { apps: deleted ? [] : [app] }))
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB, ...(deleted ? [] : [runtime])] }))
   await page.route("**/api/workspaces/ws-1/agents/appw-1", async (route) => {
-    if (route.request().method() === "PATCH") runtime = { ...runtime, name: route.request().postDataJSON().name }
+    if (route.request().method() === "PATCH") {
+      const name = route.request().postDataJSON().name
+      runtime = { ...runtime, name }
+      app = { ...app, name }
+    }
     if (route.request().method() === "DELETE") deleted = true
     return ok(route, runtime)
   })
@@ -754,6 +761,10 @@ test("shared App rename and delete update metadata without resurrecting a placeh
   await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
   await page.getByRole("dialog").getByRole("textbox").fill("Research Archive")
   await page.getByRole("dialog").getByRole("button", { name: "Rename", exact: true }).click()
+  await expect(page.getByRole("treeitem", { name: "Research Archive", exact: true })).toBeVisible()
+  const renamedList = page.waitForResponse((response) => response.url().endsWith("/ws-1/apps"))
+  await page.evaluate(() => dispatchEvent(new Event("focus")))
+  expect((await renamedList).ok()).toBe(true)
   await expect(page.getByRole("treeitem", { name: "Research Archive", exact: true })).toBeVisible()
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(0)
   await page.getByRole("button", { name: "Actions for Research Archive", exact: true }).click()
@@ -764,6 +775,9 @@ test("shared App rename and delete update metadata without resurrecting a placeh
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click()
   await page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click()
   await expect.poll(() => deleted).toBe(true)
+  const deletedList = page.waitForResponse((response) => response.url().endsWith("/ws-1/apps"))
+  await page.evaluate(() => dispatchEvent(new Event("focus")))
+  expect(await (await deletedList).json()).toEqual({ apps: [] })
   await expect(page.getByRole("treeitem", { name: "Research Archive", exact: true })).toHaveCount(0)
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(0)
   await expect(page.getByRole("treeitem")).toHaveCount(2)

@@ -153,6 +153,7 @@ function WorkspaceAppContent() {
   const appsMutation = useRef(0)
   const appsRequest = useRef(0)
   const appsRefreshTimer = useRef<number | undefined>(undefined)
+  const appsRefreshMaxTimer = useRef<number | undefined>(undefined)
   const setApps = useCallback((value: SetStateAction<AppDeployment[]>) => {
     appsMutation.current += 1
     setAppsState(value)
@@ -279,10 +280,17 @@ function WorkspaceAppContent() {
   // runtime/snapshot hints and foreground checks; only Core lists establish mapping.
   const scheduleAppsRefresh = useCallback(() => {
     if (preview || !workspaceId) return
-    window.clearTimeout(appsRefreshTimer.current)
-    appsRefreshTimer.current = window.setTimeout(() => {
+    const refresh = () => {
+      window.clearTimeout(appsRefreshTimer.current)
+      window.clearTimeout(appsRefreshMaxTimer.current)
+      appsRefreshTimer.current = undefined
+      appsRefreshMaxTimer.current = undefined
       if (workspaceIdRef.current === workspaceId) void loadApps().catch(showError)
-    }, 200)
+    }
+    window.clearTimeout(appsRefreshTimer.current)
+    appsRefreshTimer.current = window.setTimeout(refresh, 200)
+    // A continuous stream must not keep an App undiscovered indefinitely.
+    if (appsRefreshMaxTimer.current === undefined) appsRefreshMaxTimer.current = window.setTimeout(refresh, 2000)
   }, [preview, workspaceId, loadApps, showError])
 
   useEffect(() => {
@@ -291,6 +299,9 @@ function WorkspaceAppContent() {
     document.addEventListener("visibilitychange", refresh)
     return () => {
       window.clearTimeout(appsRefreshTimer.current)
+      window.clearTimeout(appsRefreshMaxTimer.current)
+      appsRefreshTimer.current = undefined
+      appsRefreshMaxTimer.current = undefined
       window.removeEventListener("focus", refresh)
       document.removeEventListener("visibilitychange", refresh)
     }

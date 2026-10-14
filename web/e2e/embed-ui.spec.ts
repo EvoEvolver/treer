@@ -273,6 +273,29 @@ for (const mobile of [false, true]) {
       await expect.poll(() => backend.requests()).toBeGreaterThan(before + 1)
       await expect(page.getByRole('treeitem', { name: 'Late App', exact: true })).toHaveCount(0)
     })
+    test('continuous refresh hints flush within two seconds and reset the maxWait window', async ({ page }) => {
+      await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
+      await page.clock.pauseAt(new Date('2026-01-01T00:00:01Z'))
+      const backend = await fixture(page)
+      await page.clock.runFor(250)
+      backend.setApps([backend.app])
+      const before = backend.requests()
+      for (let index = 0; index < 19; index++) {
+        await page.evaluate(() => dispatchEvent(new Event('focus')))
+        await page.clock.runFor(100)
+      }
+      expect(backend.requests()).toBe(before)
+      await page.evaluate(() => dispatchEvent(new Event('focus')))
+      await page.clock.runFor(100)
+      await expect.poll(() => backend.requests()).toBe(before + 1)
+      await page.clock.runFor(200)
+      expect(backend.requests()).toBe(before + 1) // trailing timer was cancelled
+      await page.evaluate(() => dispatchEvent(new Event('focus')))
+      await page.clock.runFor(200)
+      await expect.poll(() => backend.requests()).toBe(before + 2)
+      await page.clock.runFor(2000)
+      expect(backend.requests()).toBe(before + 2) // trailing flush cancelled maxWait
+    })
     test('snapshot fallback and foreground refresh update App metadata without polling', async ({ page }) => {
       const backend = await fixture(page)
       backend.setApps([backend.app])

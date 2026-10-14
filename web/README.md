@@ -63,7 +63,9 @@ filtered by this replay guard. See the [reproduction and impact report](terminal
 The console refreshes its authoritative Core App list after App-like runtime
 creation/update, known App rename/delete, workspace snapshots and machine events.
 `kind: app` and the legacy `app:` name prefix are refresh hints, never an App
-identity or URL source. Requests are debounced for 200ms; there is no polling.
+identity or URL source. Requests are debounced for 200ms with a maximum wait of 2 seconds during
+continuous events; both timers are cleared on a flush or workspace switch. There
+is no polling.
 Returning to a visible/focused page also refreshes the list, including hostname,
 public URL and status. Pure metadata changes without runtime events become visible
 on this foreground refresh. Stale requests cannot overwrite newer workspace data
