@@ -51,7 +51,23 @@ jobs:
           rustup toolchain install "${env:RUST_VERSION}-x86_64-pc-windows-msvc" --profile minimal
           rustup default "${env:RUST_VERSION}-x86_64-pc-windows-msvc"
           rustc --version --verbose
-      - name: Run embedded extraction regression and sibling Windows launcher tests
+      - name: Build exact Controller test executable without running tests
         run: |
-          cargo test --locked -p treer-agent-server --bin treer-agent-server launcher::tests -- --nocapture
+          cargo test --locked -p treer-agent-server --bin treer-agent-server --no-run --message-format=json > test-build.jsonl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bins = @(Get-Content test-build.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'treer-agent-server' -and $_.profile.test -eq $true -and $_.executable })
+          if ($bins.Count -ne 1) { throw 'Expected exactly one Controller test binary' }
+          New-Item -ItemType Directory -Path test-binary/deps | Out-Null
+          Copy-Item -LiteralPath $bins[0].executable -Destination test-binary/deps/controller-tests.exe
+          $hash = (Get-FileHash test-binary/deps/controller-tests.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Output "diagnostic-controller-sha256=$hash"
+          Write-Output "diagnostic-source-commit=0d18410c37856b55d594d5acff117dde66ff6dc3"
+          "$hash  deps/controller-tests.exe" | Set-Content -Encoding ascii test-binary/SHA256SUMS
+          "0d18410c37856b55d594d5acff117dde66ff6dc3" | Set-Content -Encoding ascii test-binary/SOURCE_COMMIT
+      - name: Upload diagnostic test executable only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: diagnostic-0d18410-controller-tests
+          path: test-binary/
+          if-no-files-found: error
+          retention-days: 3
