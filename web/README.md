@@ -32,6 +32,14 @@ operation. The editor scrolls on short mobile screens and preserves input after
 a denied operation. Managed Apps have separate settings; their startup editing
 requires the forthcoming App update API.
 
+## Terminal replay
+
+The shared desktop/mobile browser terminal and Managed App logs swallow historical
+terminal queries using xterm parser handlers (DA1/DA2, CPR/DSR and OSC color queries).
+Handlers remain active until the last replay write has parsed, then are disposed
+before queued live output parses. Live queries still respond; user input is never
+filtered by this replay guard. See the [reproduction and impact report](terminal-replay-report.md).
+
 ## Trusted Policy publication settings
 
 Workspace settings → Policy Provider shows the Core-confirmed `publish_authority`.

@@ -1223,6 +1223,87 @@ test("terminal drains a burst of small output frames without stalling", async ({
   await expect.poll(() => acknowledgedBytes).toBe(outputBytes)
 })
 
+for (const mobile of [false, true]) {
+  test.describe(`terminal replay queries on ${mobile ? '390px' : 'desktop'}`, () => {
+    test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 } })
+    const queries = '\x1b]10;?\x07\x1b]11;?\x1b\\\x1b[c\x1b[>c\x1b[6n\x1b[?6n\x1b[5n\x1b]12;?\x07\x1b]4;1;?\x07'
+    async function open(page: Page) {
+      await page.goto('/')
+      await page.getByRole('button', { name: /^api-server / }).click()
+      await expect(page.locator('.xterm')).toBeVisible()
+    }
+    test('split replay is silent, queued live queries respond, and typed input is unchanged', async ({ page }) => {
+      const input: string[] = []
+      let ack = 0
+      const history = ['history\r\n\x1b]10;', '?\x07' + queries + '\r\nreplay-end\r\n']
+      const live = queries + '\r\nlive-end\r\n'
+      await page.routeWebSocket(/\/agents\/[^/]+\/terminal(?:\?.*)?$/, (ws) => {
+        ws.onMessage((message) => {
+          if (typeof message !== 'string') input.push(Buffer.from(message).toString())
+          else { const control = JSON.parse(message); if (control.type === 'ack') ack += control.bytes }
+        })
+        ws.send(JSON.stringify({ type: 'ready', stream_epoch: 'queries', revision: 2, replay_chunks: history.length }))
+        history.forEach((chunk) => ws.send(Buffer.from(chunk)))
+        // Queue live output before the asynchronous replay write callbacks run.
+        ws.send(Buffer.from(live))
+        ws.send(JSON.stringify({ type: 'cursor', stream_epoch: 'queries', revision: 3 }))
+      })
+      await open(page)
+      await expect.poll(() => ack).toBe(Buffer.byteLength(history.join('') + live))
+      await expect(page.locator('.xterm-rows')).toContainText('live-end')
+      expect(input).toHaveLength(9) // Exactly one response per live query, none for history.
+      expect(input.join('')).toContain('10;rgb:d8d8/dcdc/dfdf')
+      expect(input.join('')).toContain('11;rgb:0f0f/1212/1515')
+      expect(input.join('')).toMatch(/\x1b\[\?[\d;]+c/)
+      expect(input.join('')).toMatch(/\x1b\[>[\d;]+c/)
+      expect(input.join('')).toMatch(/\x1b\[\d+;\d+R/)
+      input.length = 0
+      await page.locator('.xterm-helper-textarea').pressSequentially('hello')
+      await page.locator('.xterm-helper-textarea').press('Enter')
+      await expect.poll(() => input.join('')).toBe('hello\r')
+    })
+    test('user keys during replay survive; reconnect and refresh never answer historical queries', async ({ page }) => {
+      const input: string[] = []
+      let connections = 0
+      let ack = 0
+      let finishReplay: (() => void) | undefined
+      let disconnect: (() => void) | undefined
+      const first = 'partial\r\n' + queries
+      const last = queries + '\r\nreplay-end\r\n'
+      await page.routeWebSocket(/\/agents\/[^/]+\/terminal(?:\?.*)?$/, (ws) => {
+        connections += 1
+        ws.onMessage((message) => {
+          if (typeof message !== 'string') input.push(Buffer.from(message).toString())
+          else { const control = JSON.parse(message); if (control.type === 'ack') ack += control.bytes }
+        })
+        ws.send(JSON.stringify({ type: 'ready', stream_epoch: 'queries', revision: 2, gap: connections > 1 && !mobile, replay_chunks: 2 }))
+        ws.send(Buffer.from(first))
+        finishReplay = () => ws.send(Buffer.from(last))
+        disconnect = () => ws.close()
+        if (connections > 1) finishReplay()
+      })
+      await open(page)
+      await expect.poll(() => ack).toBe(Buffer.byteLength(first))
+      expect(input).toEqual([])
+      await page.locator('.xterm-helper-textarea').pressSequentially('during-replay')
+      await expect.poll(() => input.join('')).toBe('during-replay')
+      input.length = 0
+      finishReplay!()
+      await expect.poll(() => ack).toBe(Buffer.byteLength(first + last))
+      expect(input).toEqual([])
+      disconnect!()
+      await expect.poll(() => connections).toBe(2)
+      await expect.poll(() => ack).toBe(2 * Buffer.byteLength(first + last))
+      expect(input).toEqual([])
+      await page.reload()
+      if (mobile) await page.getByRole('button', { name: /^api-server / }).click()
+      await expect.poll(() => connections).toBe(3)
+      await expect.poll(() => ack).toBe(3 * Buffer.byteLength(first + last))
+      expect(input).toEqual([])
+    })
+  })
+}
+
 test("terminal uses a browser-safe close code when output backlog exceeds its limit", async ({ page }) => {
   const pageErrors: Error[] = []
   page.on("pageerror", (error) => pageErrors.push(error))

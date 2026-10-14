@@ -299,6 +299,30 @@ test("selecting a plain terminal agent shows the terminal pane, not an iframe", 
   await expect(page.locator("iframe[title='plain-tty interface']")).toBeHidden()
 })
 
+test('embedded UI logs use the shared replay-safe terminal', async ({ page }) => {
+  await mockApp(page, 'running', 'app-runtime')
+  const input: string[] = []
+  let ack = 0
+  const history = Buffer.from('embedded-history\r\n\x1b]10;?\x07\x1b]11;?\x07\x1b[c\x1b[6n')
+  await page.routeWebSocket(/\/agents\/[^/]+\/terminal(?:\?.*)?$/, (ws) => {
+    ws.onMessage((message) => {
+      if (typeof message !== 'string') input.push(Buffer.from(message).toString())
+      else { const control = JSON.parse(message); if (control.type === 'ack') ack += control.bytes }
+    })
+    ws.send(JSON.stringify({ type: 'ready', stream_epoch: 'embed-replay', revision: 1, replay_chunks: 1 }))
+    ws.send(history)
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /^Soul Archive / }).click()
+  await expect(page.locator("iframe[title='/Soul Archive interface']")).toBeVisible()
+  await page.getByRole('button', { name: 'Show logs', exact: true }).click()
+  await expect(page.locator('.xterm')).toBeVisible()
+  await expect.poll(() => ack).toBe(history.byteLength)
+  expect(input).toEqual([])
+  await page.locator('.xterm-helper-textarea').pressSequentially('logs-input')
+  await expect.poll(() => input.join('')).toBe('logs-input')
+})
+
 test("reload button label changes when an agent has an embedded UI", async ({ page }) => {
   await page.goto("/")
   await page.locator("aside").getByText("Tree", { exact: true }).click()

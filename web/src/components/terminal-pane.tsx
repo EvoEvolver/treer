@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react"
-import { Terminal } from "@xterm/xterm"
+import { Terminal, type IDisposable } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { websocketUrl } from "@/lib/api"
@@ -131,6 +131,25 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     terminal.open(host)
     focusRef.current = () => terminal.focus()
 
+    let replayQueryHandlers: IDisposable[] = []
+    const endReplay = () => {
+      for (const handler of replayQueryHandlers) handler.dispose()
+      replayQueryHandlers = []
+    }
+    const beginReplay = () => {
+      endReplay()
+      // Replay is display history, not a new request from the running PTY.
+      // Swallow queries in the parser rather than filtering onData: real keys
+      // must still pass through, and terminal.write parses asynchronously.
+      replayQueryHandlers = [
+        terminal.parser.registerCsiHandler({ final: "c" }, () => true),
+        terminal.parser.registerCsiHandler({ prefix: ">", final: "c" }, () => true),
+        terminal.parser.registerCsiHandler({ final: "n" }, (params) => params[0] === 5 || params[0] === 6),
+        terminal.parser.registerCsiHandler({ prefix: "?", final: "n" }, (params) => params[0] === 6),
+        ...[4, 10, 11, 12].map((id) => terminal.parser.registerOscHandler(id, (data) => data.split(";").includes("?"))),
+      ]
+    }
+
     // Windows browsers (Chrome/Edge) auto-copy selected text to the clipboard;
     // xterm would forward that as Ctrl+C → SIGINT. If a selection exists when
     // Ctrl+C is pressed, swallow the key so the agent's foreground job is not
@@ -244,6 +263,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       // xterm batches queued writes into time slices. Feeding it every frame keeps
       // that batching intact; serializing callbacks here makes small-frame TUIs stall.
       terminal.write(data, () => {
+        // This callback runs after the final replay chunk has been parsed,
+        // before the next queued live write. Frame receipt/counts are too early.
+        if (pending.refreshAfterWrite) endReplay()
         pending.parsed = true
         pendingOutputBytes = Math.max(0, pendingOutputBytes - pending.bytes)
         if (disposed) return
@@ -285,6 +307,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
           if (message.stream_epoch && message.revision != null) {
             replayCursor = { stream_epoch: message.stream_epoch, revision: message.revision }
             replayChunksRemaining = message.replay_chunks ?? 1
+            if (replayChunksRemaining > 0) beginReplay()
+            else endReplay()
             if (replayChunksRemaining === 0) {
               cursor = replayCursor
               replayCursor = null
@@ -360,6 +384,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       observer.disconnect()
       input.dispose()
       parsed.dispose()
+      endReplay()
       socket?.close()
       commitQueue.length = 0
       pendingAcks.clear()
