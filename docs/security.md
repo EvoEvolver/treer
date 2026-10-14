@@ -341,6 +341,12 @@ debug HTTP URLs may still contain user-provided secrets. Avoid dumping process
 environments, configuration files, request queries, or startup snapshots in support
 logs; protect log and backup access with the same account boundary as live secrets.
 
+Unknown embedded-launcher installer errors expose at most 300 characters of
+single-line prose. The Controller removes the enrolled root, configured credential
+environment values, control/format characters and path/token-shaped words before
+printing that diagnostic; raw installer stderr is not forwarded. This does not
+make arbitrary third-party error strings safe to contain secrets.
+
 Do not describe Treer as zero trust, mutually untrusted multi-tenancy,
 end-to-end encrypted from the Proxy, per-user provider credential isolation, or
 a filesystem sandbox. The current coding-agent launch modes can execute with

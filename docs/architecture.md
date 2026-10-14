@@ -293,7 +293,15 @@ incompatibility fails explicitly, including in fail-open mode. See the
 ## Routing And State
 
 Machines connect outward to the Proxy over an authenticated WebSocket. The
-Controller-to-Host protocol is a local length-prefixed bincode socket. The
+Controller keeps up to 16 machine exec commands pending independently of socket
+receive/heartbeat processing. An exec child can make a nested Treer request on
+the same connection without waiting for its own exit. Duplicate pending command
+IDs share the original execution; completed results retain the usual cache.
+Excess exec commands fail with `machine_exec_busy`. Connection teardown drops
+pending exec futures and their kill-on-drop children; other commands retain
+their existing ordering and lifecycle locks.
+
+The Controller-to-Host protocol is a local length-prefixed bincode socket. The
 Host keeps each frame-read future alive across asynchronous output/process
 events; the Controller uses a dedicated reader task. Neither direction may
 discard partial framing state. Frames remain bounded by `MAX_HOST_FRAME_BYTES`;

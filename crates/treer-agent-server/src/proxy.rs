@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -313,9 +313,16 @@ impl ProxyClient {
         let mut close_tick = tokio::time::interval(Duration::from_millis(25));
         close_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         info!(proxy = %self.proxy_ws, "connected to proxy");
+        let mut exec_commands = FuturesUnordered::new();
+        let mut exec_ids = std::collections::HashSet::new();
 
         loop {
             tokio::select! {
+                Some(result) = exec_commands.next(), if !exec_commands.is_empty() => {
+                    let result: CommandResult = result;
+                    exec_ids.remove(&result.command_id);
+                    send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
+                }
                 _ = heartbeat.tick() => {
                     send(&mut outgoing, &AgentServerMessage::Heartbeat { sent_at: Utc::now() }).await?;
                     let candidates = self.runtime.automatic_startup_candidate_ids();
@@ -596,6 +603,23 @@ impl ProxyClient {
                             }
                         }
                         ProxyMessage::Command { envelope } => {
+                            // Exec children may call Treer themselves. Awaiting them here
+                            // prevents this socket from receiving their nested requests.
+                            // Keep a bounded, connection-owned set: disconnect drops the
+                            // futures and kill_on_drop terminates their child processes.
+                            if matches!(envelope.command, AgentCommand::Exec { .. }) {
+                                if exec_ids.contains(&envelope.command_id) {
+                                    continue;
+                                }
+                                if exec_commands.len() >= 16 {
+                                    let result = CommandResult::failure(envelope.command_id, ProtocolError::new("machine_exec_busy", "Controller already has 16 pending exec commands"));
+                                    send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
+                                } else {
+                                    exec_ids.insert(envelope.command_id.clone());
+                                    exec_commands.push(self.execute(envelope));
+                                }
+                                continue;
+                            }
                             let result = self.execute(envelope).await;
                             send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
                         }
@@ -1243,6 +1267,199 @@ mod tests {
     use axum::{routing::get, Json, Router};
     use std::net::Ipv4Addr;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn exec_child_nested_startup_request_is_serviced_before_exec_finishes() {
+        use crate::controller::ControllerConfig;
+        use crate::host_client::HostClient;
+        use treer_host_protocol::{HostBuildInfo, HostResponse};
+
+        #[cfg(unix)]
+        let base = std::path::PathBuf::from("/tmp");
+        #[cfg(windows)]
+        let base = std::env::temp_dir();
+        let root = base.join(format!("trr-nested-{}", uuid::Uuid::new_v4()));
+        treer_platform::secure_directory(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        #[cfg(unix)]
+        let endpoint = root.join("host.sock");
+        #[cfg(windows)]
+        let endpoint = treer_platform::endpoint_name(
+            &uuid::Uuid::new_v4().to_string(),
+            &treer_platform::current_user_sid().unwrap(),
+        );
+        let mut listener = treer_platform::LocalListener::bind(&endpoint).unwrap();
+        let host_task = tokio::spawn(async move {
+            let _stream = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (host, events) = HostClient::connect(&endpoint).await.unwrap();
+        let (runtime, _) = ControllerRuntime::from_sync(
+            host,
+            HostResponse::Synced {
+                host_epoch: "fixture".into(),
+                host_build: HostBuildInfo {
+                    version: "fixture".into(),
+                    git_commit: "fixture".into(),
+                },
+                processes: vec![],
+                replay: vec![],
+            },
+            events,
+            ControllerConfig {
+                root: root.clone(),
+                protected_paths: vec![],
+                workspace_id: "fixture".into(),
+                server_id: "machine".into(),
+                agent_server_url: "http://127.0.0.1:1".into(),
+                proxy_public_url: "https://proxy.invalid/".into(),
+                treer_binary: None,
+                interface_cache_path: root.join("interface.json"),
+                startup_store_path: root.join("startup.json"),
+            },
+        )
+        .unwrap();
+
+        // The actual exec child blocks on this HTTP reply. Only the nested
+        // startup result on the SAME Proxy socket releases it: no sleeps/race.
+        let child_started = Arc::new(Notify::new());
+        let release_child = Arc::new(Notify::new());
+        let http = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = format!("http://{}/", http.local_addr().unwrap());
+        let started = child_started.clone();
+        let release = release_child.clone();
+        let http_task = tokio::spawn(async move {
+            axum::serve(
+                http,
+                Router::new().route(
+                    "/",
+                    get(move || {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            "complete"
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let ws = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let server = server_info(
+            "machine".into(),
+            "fixture".into(),
+            "fixture".into(),
+            root.to_string_lossy().into_owned(),
+            treer_protocol::BuildInfo {
+                version: "fixture".into(),
+                git_commit: "fixture".into(),
+            },
+            vec![],
+            None,
+        );
+        let client = ProxyClient::new(
+            Url::parse(&format!("ws://{}/", ws.local_addr().unwrap())).unwrap(),
+            None,
+            server,
+            runtime,
+            NetworkRuntime::new(),
+        );
+        let proxy_task = tokio::spawn(async move {
+            let (stream, _) = ws.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                if let Message::Text(text) = message {
+                    if matches!(
+                        serde_json::from_str::<AgentServerMessage>(&text).unwrap(),
+                        AgentServerMessage::Snapshot { .. }
+                    ) {
+                        break;
+                    }
+                }
+            }
+            #[cfg(unix)]
+            let curl = "/usr/bin/curl";
+            #[cfg(windows)]
+            let curl = "curl.exe";
+            let exec = ProxyMessage::Command {
+                envelope: CommandEnvelope {
+                    command_id: "outer-exec".into(),
+                    workspace_id: "fixture".into(),
+                    command: AgentCommand::Exec {
+                        request: treer_protocol::MachineExecRequest {
+                            cwd: ".".into(),
+                            command: curl.into(),
+                            args: vec!["--silent".into(), "--noproxy".into(), "*".into(), url],
+                            timeout_ms: 10_000,
+                        },
+                    },
+                },
+            };
+            socket
+                .send(Message::Text(serde_json::to_string(&exec).unwrap().into()))
+                .await
+                .unwrap();
+            child_started.notified().await;
+            let nested = ProxyMessage::Command {
+                envelope: CommandEnvelope {
+                    command_id: "nested-startup".into(),
+                    workspace_id: "fixture".into(),
+                    command: AgentCommand::StartupAdminGet {
+                        agent_id: "missing".into(),
+                    },
+                },
+            };
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&nested).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                    if let AgentServerMessage::CommandResult { result } =
+                        serde_json::from_str(&text).unwrap()
+                    {
+                        assert_eq!(
+                            result.command_id, "nested-startup",
+                            "nested request must finish while exec is still blocked"
+                        );
+                        assert!(result.error.is_some());
+                        break;
+                    }
+                }
+            }
+            release_child.notify_one();
+            loop {
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                    if let AgentServerMessage::CommandResult { result } =
+                        serde_json::from_str(&text).unwrap()
+                    {
+                        assert_eq!(result.command_id, "outer-exec");
+                        assert!(result.error.is_none());
+                        assert_eq!(result.data.unwrap()["exit_code"], 0);
+                        break;
+                    }
+                }
+            }
+        });
+        let connection = tokio::spawn(async move { client.run_connection().await });
+        let outcome = tokio::time::timeout(Duration::from_secs(5), proxy_task).await;
+        connection.abort();
+        http_task.abort();
+        host_task.abort();
+        let _ = connection.await;
+        let _ = http_task.await;
+        let _ = host_task.await;
+        outcome
+            .expect("Proxy stopped receiving while exec was pending")
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn recovery_validation_batches_at_proxy_boundary_and_preserves_stopped_ids() {
