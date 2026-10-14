@@ -23,7 +23,7 @@ jobs:
   windows:
     name: Windows detached-parent diagnostic
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -36,3 +36,11 @@ jobs:
         if: ${{ !cancelled() }}
         shell: powershell
         run: ./scripts/diag-windows-detached-parent.ps1 -Iterations 3
+      - name: Nested shell variant matrix under pwsh 7
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./scripts/diag-windows-nested-shell.ps1
+      - name: Nested shell variant matrix under Windows PowerShell 5.1
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: ./scripts/diag-windows-nested-shell.ps1
