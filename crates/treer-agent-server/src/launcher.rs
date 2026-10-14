@@ -452,9 +452,13 @@ async fn bounded_output(mut cmd: Command, input: Option<Vec<u8>>, seconds: u64) 
 }
 
 async fn run_json(treer: &Path, args: &[&str]) -> Result<Value> {
+    run_json_with_timeout(treer, args, 30).await
+}
+
+async fn run_json_with_timeout(treer: &Path, args: &[&str], seconds: u64) -> Result<Value> {
     let mut cmd = command(treer);
     cmd.args(args);
-    let output = bounded_output(cmd, None, 30).await?;
+    let output = bounded_output(cmd, None, seconds).await?;
     if !output.status.success() {
         bail!(
             "Treer command failed ({}); check enrollment, permissions and Controller compatibility",
@@ -465,6 +469,37 @@ async fn run_json(treer: &Path, args: &[&str]) -> Result<Value> {
         bail!("Treer response exceeds installer limit");
     }
     serde_json::from_slice(&output.stdout).context("Treer returned invalid installer metadata")
+}
+
+// Diagnostics are untrusted text, never a channel for paths or credentials.
+fn installer_message(message: &str, root: &Path, secrets: &[String]) -> String {
+    let mut value = message.to_owned();
+    for secret in
+        std::iter::once(root.to_string_lossy().into_owned()).chain(secrets.iter().cloned())
+    {
+        if !secret.is_empty() {
+            value = value.replace(&secret, "[redacted]");
+        }
+    }
+    let value: String = value.chars().map(|c| {
+        if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}') {
+            ' '
+        } else { c }
+    }).collect();
+    value
+        .split_whitespace()
+        .map(|word| {
+            if word.contains(['/', '\\', ':', '=', '@']) || word.chars().count() >= 32 {
+                "[redacted]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(300)
+        .collect()
 }
 
 fn node_major(value: &[u8]) -> Option<u32> {
@@ -578,15 +613,30 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
     install_cmd.arg(node_entry).arg("--controller-request");
     let output = bounded_output(install_cmd, Some(serde_json::to_vec(&request)?), 360).await?;
     if !output.status.success() {
-        let code = serde_json::from_slice::<Value>(&output.stdout)
-            .ok()
-            .and_then(|value| value["error"]["code"].as_str().map(str::to_owned));
-        match code.as_deref() {
+        let error = serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null);
+        match error["error"]["code"].as_str() {
             Some("launcher_incompatible") => bail!("launcher_incompatible: retained launcher and running Controller are not compatible; update Controller or choose a compatible version"),
             Some("profile_verification_failed") => bail!("profile_verification_failed: saved profile readback failed; installer attempted restoration"),
             Some("profile_rollback_incomplete") => bail!("profile_rollback_incomplete: inspect private install state; usable candidate retained; no Agent was restarted"),
             Some("install_locked") => bail!("install_locked: another installation owns the private installer lock"),
             _ => {}
+        }
+        let secrets = std::env::vars()
+            .filter(|(name, _)| {
+                let name = name.to_ascii_uppercase();
+                ["TOKEN", "CREDENTIAL", "SECRET", "PASSWORD", "KEY"]
+                    .iter()
+                    .any(|part| name.contains(part))
+            })
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        let message = installer_message(
+            error["error"]["message"].as_str().unwrap_or(""),
+            &root,
+            &secrets,
+        );
+        if !message.is_empty() {
+            bail!("launcher installer failed: {message}");
         }
         bail!("launcher installer failed; private state and profiles may need inspection (no Agent restart was requested)");
     }
@@ -603,14 +653,16 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
 }
 
 async fn startup_references(treer: &Path, server_id: &str, root: &Path) -> Value {
-    let Ok(agents) = run_json(treer, &["status"]).await else {
-        return json!({"available":false});
+    let Ok(agents) = run_json_with_timeout(treer, &["status"], 2).await else {
+        return json!({"available":false,"partial":true,"reason":"agent_list_unavailable_or_timed_out"});
     };
     let records = agents.as_array().or_else(|| agents["agents"].as_array());
     let Some(records) = records else {
-        return json!({"available":false});
+        return json!({"available":false,"partial":true,"reason":"invalid_agent_list"});
     };
     let mut entries = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut partial = false;
     for agent in records
         .iter()
         .filter(|agent| agent["server_id"].as_str() == Some(server_id))
@@ -618,14 +670,26 @@ async fn startup_references(treer: &Path, server_id: &str, root: &Path) -> Value
         let Some(id) = agent["agent_id"].as_str() else {
             continue;
         };
-        let saved = run_json(treer, &["agent", "admin", "startup", "show", id]).await;
+        // Do not even spawn another CLI once the shared budget is exhausted.
+        let saved = if tokio::time::Instant::now() >= deadline {
+            Err(anyhow::anyhow!("status budget exhausted"))
+        } else {
+            tokio::time::timeout_at(
+                deadline,
+                run_json_with_timeout(treer, &["agent", "admin", "startup", "show", id], 1),
+            )
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("status budget exhausted")))
+        };
+        partial |= saved.is_err();
         let version = saved
             .as_ref()
             .ok()
             .and_then(|saved| startup_version(saved, root));
-        entries.push(json!({"agent_id":id,"path":agent["path"],"startup_available":saved.is_ok(),"launcher_version":version}));
+        entries.push(json!({"agent_id":id,"path":agent["path"],"startup_available":saved.is_ok(),"launcher_version":version,
+            "reason": if saved.is_ok() { Value::Null } else { json!("startup_unavailable_or_timed_out") }}));
     }
-    json!({"available":true,"agents":entries})
+    json!({"available":true,"partial":partial,"agents":entries})
 }
 
 fn startup_version(saved: &Value, root: &Path) -> Option<String> {
@@ -664,6 +728,64 @@ fn startup_version(saved: &Value, root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installer_diagnostics_preserve_prose_but_bound_and_redact_untrusted_text() {
+        let root = Path::new("/private/machine root");
+        let message = installer_message(
+            "Launcher profile is customized; choose another name.",
+            root,
+            &[],
+        );
+        assert_eq!(
+            message,
+            "Launcher profile is customized; choose another name."
+        );
+        let message = installer_message("Bad\nprofile\r\t\u{001b}\u{202e} /private/machine root/config C:\\Users\\private\\key token=short known-secret abcdef0123456789abcdef0123456789abcdef0123", root, &["known-secret".into()]);
+        assert!(!message.chars().any(char::is_control));
+        for forbidden in [
+            "/private",
+            "machine root",
+            "C:",
+            "known-secret",
+            "token=",
+            "abcdef0123",
+            "\u{202e}",
+        ] {
+            assert!(
+                !message.contains(forbidden),
+                "diagnostic disclosed a synthetic sensitive fragment"
+            );
+        }
+        let message = installer_message(&"profile 问题 ".repeat(200), root, &[]);
+        assert_eq!(message.chars().count(), 300);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_report_returns_partial_when_nested_reads_do_not_complete() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("trr-status-{}", uuid::Uuid::new_v4()));
+        treer_platform::secure_directory(&root).unwrap();
+        let cli = root.join("treer");
+        fs::write(&cli, "#!/bin/sh\nif [ \"$1\" = status ]; then\nprintf '%s\\n' '{\"agents\":[{\"server_id\":\"local\",\"agent_id\":\"one\"},{\"server_id\":\"local\",\"agent_id\":\"two\"}]}'\nelse\nexec /bin/sleep 15\nfi\n").unwrap();
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(4),
+            startup_references(&cli, "local", &root),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["available"], true);
+        assert_eq!(report["partial"], true);
+        assert_eq!(report["agents"].as_array().unwrap().len(), 2);
+        for entry in report["agents"].as_array().unwrap() {
+            assert_eq!(entry["startup_available"], false);
+            assert_eq!(entry["reason"], "startup_unavailable_or_timed_out");
+            assert!(entry["launcher_version"].is_null());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn embedded_payload_is_verified_and_paths_cannot_escape() {
         verify_payload(FILES, PAYLOAD_DIGEST).unwrap();

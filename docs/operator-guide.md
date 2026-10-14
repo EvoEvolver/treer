@@ -781,6 +781,13 @@ relative `--cwd` (default `.`). Update the running Controller first if it report
 `launcher_controller_unsupported`. Status against older Controllers reports
 unknown rather than certifying compatibility.
 
+Launcher status is best-effort: startup reads have a one-second per-Agent limit
+and a five-second shared budget (the Agent list has a separate two-second limit).
+`agent_startups.partial` and each unavailable entry's `reason` distinguish missing
+metadata or a timed-out nested query from a confirmed launcher version. A failed
+installation includes a bounded, single-line diagnostic with paths and known
+credential values removed; inspect private state locally if more detail is needed.
+
 Versions remain in the enrolled root's private `.treer/launchers/agent` directory;
 running launchers keep their resolved physical assets. Rollback verifies the
 retained bundle and the running Controller's compatibility/security floor.
