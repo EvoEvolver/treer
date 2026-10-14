@@ -98,7 +98,7 @@ export function controllerInstall(request) {
     const transaction = profileTransaction(request.treer, (message) => console.error(message));
     const receiptPath = join(root, "profiles-receipt.json");
     const originalReceipt = present(receiptPath) ? regular(receiptPath) : null;
-    const receipt = originalReceipt ? JSON.parse(originalReceipt.toString("utf8")) : {};
+    const receipt = Object.assign(Object.create(null), originalReceipt ? JSON.parse(originalReceipt.toString("utf8")) : {});
     const runner = join(root, "run.mjs");
     const specification = (profile) => ({ command: profile.command, cwd: profile.cwd, args: profile.args ?? [] });
     const names = receipt.$profile_names ?? {};
@@ -120,17 +120,17 @@ export function controllerInstall(request) {
       return `${profile.name} (${machineName})`;
     }
     profiles = profiles.map((profile) => {
-      const savedName = names[profile.id];
-      if (savedName !== undefined && (typeof savedName !== "string" || savedName.length > 128 || !receipt[savedName])) throw new Error("Invalid launcher profile-name receipt");
+      const savedName = Object.hasOwn(names, profile.id) ? names[profile.id] : undefined;
+      if (savedName !== undefined && (typeof savedName !== "string" || savedName.length > 128 || !Object.hasOwn(receipt, savedName))) throw new Error("Invalid launcher profile-name receipt");
       let name = savedName ?? profile.name, current = transaction.show(name);
-      const legacy = !receipt[name] && current?.command === join(root, "current/launchers/agent/scripts/treer-agent.sh") && current.cwd === cwd && JSON.stringify(current.args) === JSON.stringify(profile.args);
+      const legacy = !Object.hasOwn(receipt, name) && current?.command === join(root, "current/launchers/agent/scripts/treer-agent.sh") && current.cwd === cwd && JSON.stringify(current.args) === JSON.stringify(profile.args);
       // Workspace names are global: another machine's default must never be
       // overwritten. Once selected, persist the name with the same transaction
       // as its ownership receipt, so renaming a machine cannot redirect updates.
-      if (!savedName && current && !receipt[name] && !legacy) {
+      if (!savedName && current && !Object.hasOwn(receipt, name) && !legacy) {
         name = qualifiedName(profile);
         current = transaction.show(name);
-        if (current && !receipt[name]) {
+        if (current && !Object.hasOwn(receipt, name)) {
           const id = request.controller?.machine?.server_id;
           if (typeof id !== "string" || !/^srv_[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("Unable to verify launcher machine identity");
           name = `${profile.name} (${machineName}-${id})`;
@@ -145,7 +145,7 @@ export function controllerInstall(request) {
     for (const profile of profiles) {
       const current = originals.get(profile.name);
       if (!current) continue;
-      const previous = receipt[profile.name];
+      const previous = Object.hasOwn(receipt, profile.name) ? receipt[profile.name] : undefined;
       // A first takeover only adopts a known legacy launcher entry, never an
       // arbitrary owner's command. Any subsequent customization is protected.
       const legacy = !previous && current.command === join(root, "current/launchers/agent/scripts/treer-agent.sh") && current.cwd === cwd && JSON.stringify(current.args) === JSON.stringify(profile.args);

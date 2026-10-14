@@ -84,6 +84,30 @@ test("qualified-name conflicts use stable machine ID without overwriting any exi
   assert.deepEqual(f.call({ agents: ["codex"], operation: "update" }).profiles, [name]);
   for (const name of ["Codex + UI", "Codex + UI (win_native)"]) assert.equal(readFileSync(join(f.root, name + ".json"), "utf8"), foreign);
 });
+test("prototype property profile names are not mistaken for machine-owned receipts", (t) => {
+  for (const name of ["constructor", "__proto__", "toString"]) {
+    const f = fixture(t), path = join(f.bundle, "profiles.json"), profiles = JSON.parse(readFileSync(path, "utf8"));
+    profiles.profiles.find((p: any) => p.id === "codex").name = name;
+    writeFileSync(path, JSON.stringify(profiles));
+    const manifestPath = join(f.bundle, "bundle-manifest.json"), manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const entry = manifest.files.find((file: any) => file.path === "profiles.json"), bytes = readFileSync(path);
+    entry.size = bytes.length; entry.sha256 = digest(bytes); writeFileSync(manifestPath, JSON.stringify(manifest));
+    f.request.version = `sha256-${digest(readFileSync(manifestPath))}`;
+    const foreign = JSON.stringify({ command: "/owner/agent", cwd: ".", args: [] });
+    assert.deepEqual(f.call({ agents: ["codex"] }).profiles, [name]);
+    assert.deepEqual(f.call({ agents: ["codex"], operation: "update" }).profiles, [name]);
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(f.base, "profiles-receipt.json"), "utf8")), name), true);
+    // Model a fresh second-machine installation using the same verified bundle.
+    rmSync(f.base, { recursive: true });
+    writeFileSync(join(f.root, name + ".json"), foreign);
+    assert.deepEqual(f.call({ agents: ["codex"] }).profiles, [`${name} (win_native)`]);
+    assert.deepEqual(f.call({ agents: ["codex"], operation: "update" }).profiles, [`${name} (win_native)`]);
+    const receipt = JSON.parse(readFileSync(join(f.base, "profiles-receipt.json"), "utf8"));
+    assert.equal(Object.hasOwn(receipt, name), false);
+    assert.equal(Object.hasOwn(receipt, `${name} (win_native)`), true);
+    assert.equal(readFileSync(join(f.root, name + ".json"), "utf8"), foreign);
+  }
+});
 test("failed qualified-profile verification restores foreign profiles and removes new profiles", (t) => {
   const f = fixture(t), foreign = JSON.stringify({ command: "/another-machine/agent", cwd: ".", args: [] });
   for (const name of ["Codex + UI", "Claude + UI"]) writeFileSync(join(f.root, name + ".json"), foreign);
