@@ -1,26 +1,56 @@
-# Read-only diagnostic: how long does the first cmdlet take in a nested Windows
-# PowerShell 5.1 under the fixture's cleared environment, cold and warm? Timings
-# and booleans only; private temporary directory.
+# Read-only diagnostic: candidate detached-parent fixture shapes under the cleared
+# fixture environment. Private temporary directory; timings and booleans only.
+param([int]$Iterations = 3)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/update-machine.ps1"
-$shell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-$directory = Join-Path ([IO.Path]::GetTempPath()) ('treer-coldtime-' + [Guid]::NewGuid().ToString('N'))
-[IO.Directory]::CreateDirectory($directory) | Out-Null
-$cmdlet = Join-Path $directory 'cmdlet.ps1'
-[IO.File]::WriteAllText($cmdlet, 'param($Marker); $null = Join-Path "a" "b"; [IO.File]::WriteAllText($Marker, "x")')
-$cacheDirectory = Join-Path $env:LOCALAPPDATA 'Microsoft/Windows/PowerShell'
-Write-Output ('analysis-cache-dir-present-before=' + (Test-Path -LiteralPath $cacheDirectory) + ' analysis-cache-path-env-set=' + [bool]$env:PSModuleAnalysisCachePath + ' module-path-entry-count=' + @($env:PSModulePath -split ';').Count)
-try {
-    foreach ($run in 1..3) {
-        $marker = Join-Path $directory ('m' + $run)
-        $start = New-UpdateProcess $shell ('-NoProfile -NonInteractive -File "' + $cmdlet + '" -Marker "' + $marker + '"') $directory
-        $start.RedirectStandardError = $true
-        $watch = [Diagnostics.Stopwatch]::StartNew()
-        $process = [Diagnostics.Process]::Start($start)
-        $errorText = $process.StandardError.ReadToEndAsync()
-        $exited = $process.WaitForExit(180000); $elapsed = $watch.ElapsedMilliseconds
-        $code = if ($exited) { $process.ExitCode } else { -1 }
-        if (!$exited) { $process.Kill(); $process.WaitForExit() }; $process.Dispose()
-        Write-Output ('run=' + $run + ' exited=' + $exited + ' exit=' + $code + ' ms=' + $elapsed + ' marker=' + (Test-Path -LiteralPath $marker) + ' analysis-cache-dir-present-after=' + (Test-Path -LiteralPath $cacheDirectory) + ' stderr-first-line=' + $(if ($exited -and $errorText.Result) { (($errorText.Result -split "`r?`n")[0] -replace '[A-Za-z]:\\[^ ]*', '<path>') } else { '' }))
+$shell = [IO.Path]::Combine($env:SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe')
+$source = [IO.Path]::Combine($PSScriptRoot, 'update-machine.ps1')
+$currentParent = @'
+param($Source,$Directory,$Shell)
+. $Source
+$child = Join-Path $Directory 'detached-child.ps1'
+$marker = Join-Path $Directory 'detached-complete.txt'
+$start = New-UpdateProcess $Shell ('-NoProfile -NonInteractive -File "' + $child + '" -Marker "' + $marker + '"') $Directory
+$process = [Diagnostics.Process]::Start($start)
+$process.Dispose()
+'@
+$currentChild = 'param($Marker); Start-Sleep -Milliseconds 750; [IO.File]::WriteAllText($Marker, "passed")'
+$neutralParent = @'
+param($Source,$Directory,$Shell)
+. $Source
+$child = $Directory + '\detached-child.ps1'
+$marker = $Directory + '\detached-complete.txt'
+$start = New-UpdateProcess $Shell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $child + '" -Marker "' + $marker + '"') $Directory
+$process = [Diagnostics.Process]::Start($start)
+$process.Dispose()
+'@
+$neutralChild = 'param($Marker); [Threading.Thread]::Sleep(750); [IO.File]::WriteAllText($Marker, "passed")'
+$variants = @(
+    @{ Name = 'current-fixture'; Parent = $currentParent; Child = $currentChild; Policy = '' },
+    @{ Name = 'current-plus-policy-bypass'; Parent = $currentParent; Child = $currentChild; Policy = '-ExecutionPolicy Bypass ' },
+    @{ Name = 'cmdlet-free-with-policy-bypass'; Parent = $neutralParent; Child = $neutralChild; Policy = '-ExecutionPolicy Bypass ' }
+)
+$failed = $false
+foreach ($variant in $variants) {
+    foreach ($i in 1..$Iterations) {
+        $directory = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'treer-shape-' + [Guid]::NewGuid().ToString('N'))
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+        try {
+            [IO.File]::WriteAllText($directory + '\detached-child.ps1', $variant.Child)
+            [IO.File]::WriteAllText($directory + '\detached-parent.ps1', $variant.Parent)
+            $arguments = '-NoProfile -NonInteractive ' + $variant.Policy + '-File "' + $directory + '\detached-parent.ps1" -Source "' + $source + '" -Directory "' + $directory + '" -Shell "' + $shell + '"'
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $parent = [Diagnostics.Process]::Start((New-UpdateProcess $shell $arguments $directory))
+            $exited = $parent.WaitForExit(10000); $parentMs = $watch.ElapsedMilliseconds
+            $code = if ($exited) { $parent.ExitCode } else { -1 }
+            if (!$exited) { $parent.Kill(); $parent.WaitForExit() }; $parent.Dispose()
+            $marker = $directory + '\detached-complete.txt'
+            $end = [DateTime]::UtcNow.AddSeconds(10)
+            while (![IO.File]::Exists($marker) -and [DateTime]::UtcNow -lt $end) { [Threading.Thread]::Sleep(100) }
+            $ok = $exited -and $code -eq 0 -and [IO.File]::Exists($marker)
+            if (!$ok) { $failed = $true }
+            Write-Output ('variant=' + $variant.Name + ' iter=' + $i + ' ok=' + $ok + ' parent-exited=' + $exited + ' parent-exit=' + $code + ' parent-ms=' + $parentMs + ' worker-marker=' + [IO.File]::Exists($marker))
+        } finally { [IO.Directory]::Delete($directory, $true) }
     }
-} finally { Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue }
+}
+if ($failed) { exit 1 }
