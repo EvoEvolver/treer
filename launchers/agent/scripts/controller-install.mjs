@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path";
 import { compatibility, digest, regular, verifyBundle } from "./bundle-contract.mjs";
 import { profileTransaction } from "./profile-transaction.mjs";
 
@@ -32,10 +32,12 @@ function privateCopy(source, target) {
 export function controllerInstall(request) {
   if (request.schema !== "treer.launcher-install/v1" || !["install", "update", "status", "rollback"].includes(request.operation)) throw new Error("Unsupported Controller install request");
   if (!isAbsolute(request.root || "") || !isAbsolute(request.node || "") || !isAbsolute(request.treer || "") || !Array.isArray(request.agents || [])) throw new Error("Explicit absolute root/Node/Treer paths are required");
-  if (Number(process.versions.node.split(".")[0]) < 22 || realpathSync(request.node) !== realpathSync(process.execPath)) throw new Error("Installer requires the selected Node.js 22+ executable");
-  const physicalRoot = realpathSync(request.root);
-  if (physicalRoot !== resolve(request.root)) throw new Error("Machine root must be a physical path");
-  const cwd = request.cwd ?? ".", cwdInside = relative(physicalRoot, realpathSync(resolve(physicalRoot, cwd)));
+  // Rust canonical paths on Windows use the verbatim prefix. Node's JS
+  // realpath walker rejects those (EISDIR at C:); the native API handles them.
+  if (Number(process.versions.node.split(".")[0]) < 22 || realpathSync.native(request.node) !== realpathSync.native(process.execPath)) throw new Error("Installer requires the selected Node.js 22+ executable");
+  const physicalRoot = realpathSync.native(request.root);
+  if (toNamespacedPath(physicalRoot) !== toNamespacedPath(resolve(request.root))) throw new Error("Machine root must be a physical path");
+  const cwd = request.cwd ?? ".", cwdInside = relative(physicalRoot, realpathSync.native(resolve(physicalRoot, cwd)));
   if (isAbsolute(cwd) || cwdInside === ".." || cwdInside.startsWith(`..${sep}`)) throw new Error("Profile cwd must stay inside machine root");
   let root = physicalRoot;
   for (const name of [".treer", "launchers", "agent"]) { root = join(root, name); directory(root); }

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { isAbsolute, join, relative, win32 } from "node:path";
 import { test } from "node:test";
 import { providerCommand, spawnProvider, stopProcessTree } from "../scripts/process.mjs";
 import { hermeticEnv } from "./hermetic.mjs";
@@ -35,9 +35,13 @@ test("native exe paths remain argv vectors and ambiguous npm shims fail closed",
 });
 
 test("Windows provider search ignores relative PATH and npm shim traversal is rejected", t => {
-  const root = mkdtempSync(join(tmpdir(), "provider-bounds-")); t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Hosted Windows uses D: for the checkout and C: for TEMP. Cross-drive
+  // relative() returns an absolute path, which is correctly searchable.
+  const root = mkdtempSync(join(process.cwd(), "provider-bounds-")); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const relativePath = relative(process.cwd(), root);
+  assert.ok(relativePath.length > 0 && !isAbsolute(relativePath) && !win32.isAbsolute(relativePath), "fixture PATH must actually be relative on Windows and POSIX");
   writeFileSync(join(root, "codex.exe"), "not executed");
-  assert.throws(() => providerCommand("codex", [], { platform: "win32", env: { PATH: relative(process.cwd(), root) } }), /not on PATH/);
+  assert.throws(() => providerCommand("codex", [], { platform: "win32", env: { PATH: relativePath } }), /not on PATH/);
   mkdirSync(join(root, "node_modules"));
   writeFileSync(join(root, "outside.mjs"), "console.log('not executed')");
   const shim = join(root, "codex.cmd");

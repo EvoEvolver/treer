@@ -47,9 +47,16 @@ function install(operation, version) {
   if (options.controller) return JSON.parse(execFileSync(options.controller, ["launcher", "--node", process.execPath, "--treer", cli, operation, ...(version ? [version] : [])], { env, encoding: "utf8", stdio: "pipe", timeout: 360000 }));
   const manifest = readFileSync(join(options.bundle, "bundle-manifest.json"));
   const request = { schema: "treer.launcher-install/v1", operation, bundle_dir: options.bundle, version: `sha256-${digest(manifest)}`,
-    source_commit: JSON.parse(manifest).source_commit, root: machine, cwd: ".", agents: [], node: process.execPath, treer: cli, controller, allow_network: false, rollback_version: version };
+    source_commit: JSON.parse(manifest).source_commit, root: windows ? toNamespacedPath(machine) : machine, cwd: ".", agents: [], node: windows ? toNamespacedPath(process.execPath) : process.execPath, treer: cli, controller, allow_network: false, rollback_version: version };
   // Development-only JS mode is explicitly reported; not native embedded proof.
   protectDirectory(machine);
+  // Mirror the Controller's extract_payload prerequisite: it creates and
+  // protects these parents before handing its request to the JS installer.
+  // Inheriting a private parent's ACL does not set the child's protected bit.
+  let parent = machine;
+  for (const name of [".treer", "launchers", "agent"]) {
+    parent = join(parent, name); mkdirSync(parent, { recursive: true }); protectDirectory(parent);
+  }
   return JSON.parse(execFileSync(process.execPath, [join(launcher, "scripts/install.mjs"), "--controller-request"], { input: JSON.stringify(request), env, encoding: "utf8", stdio: "pipe" }));
 }
 async function until(check, label, milliseconds = 90000) {
@@ -99,7 +106,7 @@ try {
   const profile = JSON.parse(readFileSync(join(fixture, "Codex + UI.json")));
   // Rust's Windows canonical path may use the \\?\ prefix. Compare identities,
   // not spelling, while still requiring the installed profile's absolute Node.
-  assert.ok(isAbsolute(profile.command)); assert.equal(realpathSync(profile.command), realpathSync(process.execPath));
+  assert.ok(isAbsolute(profile.command)); assert.equal(realpathSync.native(profile.command), realpathSync.native(process.execPath));
   assert.equal(profile.args[0], join(installBase, "run.mjs"));
   if (windows) { assert.ok(join(installBase, installed.version, "runtime.mjs").length > 260); aclCheck(installBase); }
   writeFileSync(join(machine, "README.md"), "# Windows fixture\nLiteral <script> content\n");
