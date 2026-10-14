@@ -562,7 +562,7 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
             let text = String::from_utf8_lossy(bytes);
             text.chars().rev().take(700).collect::<String>().chars().rev().collect::<String>()
         };
-        bail!("launcher installer failed (diagnostic build); stderr_tail={:?}; stdout_tail={:?}", tail(&output.stderr), tail(&output.stdout));
+        bail!("launcher installer failed (diagnostic build); status={:?}; stdout_tail={:?}", output.status, tail(&output.stdout));
     }
     if output.stdout.len() > 4 * 1024 * 1024 {
         bail!("installer status exceeds limit");
