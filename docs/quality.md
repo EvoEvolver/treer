@@ -329,3 +329,25 @@ exit 0 and no timeout under the original 30s ceiling remain required. Per-probe
 durations record hosted-image behavior; CI green/red is not a performance
 guarantee. Keep Windows 11 evidence and the real Host/CLI/install/update/UI
 gates alongside this compensated unit test. Do not remove Utility/RNG coverage.
+
+Windows PowerShell coverage has two explicit layers. The in-process Controller
+unit fixture retains `Write-Output`/`New-Object` Utility/version/RNG cmdlet
+regressions, fixed initial PSModulePath equality, identity absence and the 30s
+limit; only that isolated fixture can opt into the hosted-image cache. Separate
+Windows 11 exact-test evidence runs without CI flags or cache compensation.
+The real-Host wrapper uses freshly compiled **production** Host/Controller
+binaries, with no test hook or cache injection. Its PS smoke uses CLR/Console
+APIs without automatic Utility-module loading, checks PS version, OS baseline,
+presence of the fixed system Modules directory and CLR RNG, then requires exit
+0/completion markers through machine exec and Host-owned Agent/App paths. Its
+30s exec ceiling remains strict. Since native PowerShell can append account
+directories, post-startup path presence is distinct from the Controller unit
+test's initial environment equality check.
+
+This is deliberate coverage separation, not a claim that hosted real-Host tests
+exercise cmdlet auto-loading or predict its latency. That regression remains
+covered at Controller level and on Windows 11; a deployment needing real
+production Host + Utility-module coverage needs the uncompensated native-machine
+acceptance result too. The wrapper retains process ownership, detached restart,
+stop, canonical root and parent-traversal rejection assertions. No production
+environment hook or change of platform is used to satisfy this gate.

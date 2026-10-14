@@ -307,11 +307,43 @@ async fn windows_check_process_paths(
 ) {
     use treer_host_protocol::HostResponse;
     let node_script = "const a=require('node:assert'); for(const k of ['SystemRoot','windir','USERPROFILE','USERNAME','APPDATA','LOCALAPPDATA','ProgramData','HOMEDRIVE','HOMEPATH']) a.ok(process.env[k],k); for(const k of ['TREER_MACHINE_TOKEN','TREER_OPERATOR_CREDENTIAL','TREER_ENROLLMENT_KEY','AGENT_UI_INSTANCE_ID']) a.ok(!process.env[k],k); console.log('node-os-ok')";
+    // Real Host/Controller are production binaries: no test-only cache hook.
+    // Exercise CLR/Console without Utility module auto-loading. The compensated
+    // Controller unit fixture and unmodified win_native smoke retain cmdlet
+    // coverage. PowerShell may append native account paths, so check the fixed
+    // system directory remains present, not equality after runtime startup.
+    let powershell_script = "if (!$PSVersionTable.PSVersion -or !$env:SystemRoot -or !$env:USERPROFILE) { exit 2 }; $expected=[IO.Path]::Combine($env:SystemRoot,'System32\\WindowsPowerShell\\v1.0\\Modules'); $present=$false; foreach($segment in $env:PSModulePath.Split(';')) { if([string]::Equals($segment,$expected,[StringComparison]::OrdinalIgnoreCase)) {$present=$true} }; if(!$present) {exit 3}; $bytes=[Array]::CreateInstance([byte],16); [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); [Console]::Out.WriteLine('powershell-os-ok'); exit 0";
     let commands: Vec<(String, Vec<String>, &str)> = vec![
-        ("node.exe".into(), vec!["-e".into(), node_script.into()], "node-os-ok"),
-        ("powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "if (!$env:SystemRoot -or !$env:USERPROFILE) { exit 2 }; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes((New-Object byte[] 16)); Write-Output 'powershell-os-ok'".into()], "powershell-os-ok"),
-        ("tasklist.exe".into(), vec!["/FI".into(), "PID eq 0".into(), "/NH".into()], ""),
-        (controller.display().to_string(), vec!["service".into(), "--workspace".into(), workspace.into(), "status".into()], "Manager: Detached"),
+        (
+            "node.exe".into(),
+            vec!["-e".into(), node_script.into()],
+            "node-os-ok",
+        ),
+        (
+            "powershell.exe".into(),
+            vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                powershell_script.into(),
+            ],
+            "powershell-os-ok",
+        ),
+        (
+            "tasklist.exe".into(),
+            vec!["/FI".into(), "PID eq 0".into(), "/NH".into()],
+            "",
+        ),
+        (
+            controller.display().to_string(),
+            vec![
+                "service".into(),
+                "--workspace".into(),
+                workspace.into(),
+                "status".into(),
+            ],
+            "Manager: Detached",
+        ),
     ];
     for (index, (command, args, expected)) in commands.iter().enumerate() {
         let output = runtime
@@ -323,6 +355,14 @@ async fn windows_check_process_paths(
             })
             .await
             .unwrap();
+        eprintln!(
+            "windows-real-host exec-smoke={index} duration_ms={} timeout={} exit={:?}",
+            output.duration_ms, output.timed_out, output.exit_code
+        );
+        assert!(
+            !output.timed_out,
+            "real Host exec smoke {index} timed out under the original 30s limit"
+        );
         assert_eq!(
             output.exit_code,
             Some(0),

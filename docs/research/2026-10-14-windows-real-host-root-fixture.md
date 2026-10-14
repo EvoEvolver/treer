@@ -52,3 +52,18 @@ the Windows-only branch. Run only the isolated wrapper, never service commands
 against an existing user enrollment or managed Agent. No user-machine service
 restart is part of this repair. Later failures must be investigated separately;
 repairing the root does not pre-approve the remaining native matrix or release.
+
+Native validation run 38489485150 confirmed raw-equals-canonical=false,
+raw-contains-canonical-cwd=false and canonical-contains-cwd=true. Parent traversal
+was rejected and the first exec/Agent/App Node matrix ran. The next PS exec
+failed with exit 1 after a 32.10s overall run: a separate hosted-image module
+slow-path blocker, not recurrence of root rejection. The original assertion
+did not record timed_out, so duration alone is not proof of that flag.
+
+Leader chose a second test-only repair: use Console/CLR for the real-Host PS
+smoke without Utility-module auto-loading, keeping PS version, OS baseline,
+system-module presence, CLR RNG, exit 0 and the original 30s limit. Explicit
+timeout and duration checks are added. Controller-level compensated tests and
+uncompensated Windows 11 evidence retain the original cmdlet regression.
+No production binary hook is added. See quality.md for the coverage distinction;
+new native confirmation is still required and no full release pass is claimed.
