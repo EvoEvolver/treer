@@ -13,13 +13,12 @@ does not attach to any real Agent or read its output.
 ## Fix and verification
 
 Chosen solution: B, parser handlers. Install handlers when `ready` declares
-replay chunks; swallow CSI c / > c, CSI 5 n / 6 n / ? 6 n and OSC 4/10/11/12
-commands containing a query (`?`). Remove them in the final replay write callback,
+replay chunks; swallow the source-audited query inventory below. Remove them in the final replay write callback,
 after parsing and before the following queued live write. Terminal disposal also
 removes handlers. Ordinary color setters continue through the default parser;
 mixed color setter/query commands are swallowed as a whole during history replay.
-This is deliberately scoped to these query families, not a universal guard for
-every possible terminal extension. No input-pattern filter, timeout, private xterm
+This covers built-in query responders in xterm 5.5.0, not arbitrary future terminal
+extensions or non-query focus/mouse event reports. No input-pattern filter, timeout, private xterm
 API or serialization of output writes is used.
 
 Browser regressions cover split queries across replay chunks, queued live queries,
@@ -29,6 +28,37 @@ replay, reconnect with/without reset, and page reload. Both desktop and 390px us
 the same component. A Managed App embedding regression switches from its human
 iframe to logs, verifies silent historical queries and unmodified user input.
 Existing output-burst/backpressure regressions cover batching and acknowledgements.
+
+## xterm 5.5.0 query inventory
+
+Confirmed the installed package version and audited all `triggerDataEvent` sites
+in `src/common/InputHandler.ts` and `src/browser/Terminal.ts`, including the
+indirect color, window-report and focus events. Parser registrations come from
+`InputHandler`'s constructor. The implementation is centralized in
+`src/lib/terminal-replay.ts`; browser tests instantiate the real xterm with window
+reports explicitly enabled, split every query across writes and queue the live
+copy before replay parsing finishes. Each row is tested for silent replay and
+unchanged live behavior.
+
+| Query | Source responder | Live behavior |
+| --- | --- | --- |
+| CSI c (DA1), CSI > c (DA2) | `sendDeviceAttributesPrimary/Secondary` | Device attributes |
+| CSI 5 n, CSI 6 n, CSI ? 6 n | `deviceStatus/Private` | Status and cursor position |
+| CSI ? 15/25/26/53 n | `deviceStatusPrivate` | **No reply in 5.5.0**: response calls are commented out; guarded defensively |
+| CSI Ps $ p, CSI ? Ps $ p (DECRQM) | `requestMode` | ANSI/private mode status, including unknown modes |
+| DCS $ q Pt ST (DECRQSS) | `requestStatusString` | SGR, margins, cursor style, protection, conformance; negative reply for unknown requests |
+| OSC 4;index;? | `setOrReportIndexedColor` → browser `_handleColorEvent` | Palette color(s) |
+| OSC 10/11/12;? | `_setOrReportSpecialColor` → browser `_handleColorEvent` | Foreground/background/cursor colors, including stacked queries |
+| CSI 14/16/18 t | `windowOptions` → browser `_reportWindowsOptions` or direct reply | Window/cell pixels and character dimensions; option-gated, disabled in console |
+
+CSI 14;2 t is unimplemented. Window/icon title reports (CSI 20/21 t) are listed
+in comments but have no responding switch branch in 5.5.0. OSC clipboard queries
+and DCS capability requests are not registered built-in responders. No ESC query
+registration emits a response. DECSET 1004 enables focus event reporting and can
+immediately report focus via `_reportFocus`; subsequent focus/blur and mouse
+reports are events, not queries, and remain outside this guard. Key/composition,
+paste and selection-generated input also remains unchanged. Re-audit this inventory
+when upgrading xterm rather than assuming future responder coverage.
 
 ## Client scope
 

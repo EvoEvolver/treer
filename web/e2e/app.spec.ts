@@ -1226,7 +1226,7 @@ test("terminal drains a burst of small output frames without stalling", async ({
 for (const mobile of [false, true]) {
   test.describe(`terminal replay queries on ${mobile ? '390px' : 'desktop'}`, () => {
     test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 } })
-    const queries = '\x1b]10;?\x07\x1b]11;?\x1b\\\x1b[c\x1b[>c\x1b[6n\x1b[?6n\x1b[5n\x1b]12;?\x07\x1b]4;1;?\x07'
+    const queries = '\x1b]10;?\x07\x1b]11;?\x1b\\\x1b[c\x1b[>c\x1b[6n\x1b[?6n\x1b[5n\x1b]12;?\x07\x1b]4;1;?\x07\x1b[4$p\x1b[?25$p\x1bP$qm\x1b\\\x1b[?15n\x1b[?25n\x1b[?26n\x1b[?53n'
     async function open(page: Page) {
       await page.goto('/')
       await page.getByRole('button', { name: /^api-server / }).click()
@@ -1251,7 +1251,7 @@ for (const mobile of [false, true]) {
       await open(page)
       await expect.poll(() => ack).toBe(Buffer.byteLength(history.join('') + live))
       await expect(page.locator('.xterm-rows')).toContainText('live-end')
-      expect(input).toHaveLength(9) // Exactly one response per live query, none for history.
+      expect(input).toHaveLength(12) // One per supported live query; private DSR no-ops stay silent.
       expect(input.join('')).toContain('10;rgb:d8d8/dcdc/dfdf')
       expect(input.join('')).toContain('11;rgb:0f0f/1212/1515')
       expect(input.join('')).toMatch(/\x1b\[\?[\d;]+c/)

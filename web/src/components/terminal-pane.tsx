@@ -3,6 +3,7 @@ import { Terminal, type IDisposable } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { websocketUrl } from "@/lib/api"
+import { suppressReplayQueries } from "@/lib/terminal-replay"
 
 type TerminalStatus = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
 
@@ -141,13 +142,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       // Replay is display history, not a new request from the running PTY.
       // Swallow queries in the parser rather than filtering onData: real keys
       // must still pass through, and terminal.write parses asynchronously.
-      replayQueryHandlers = [
-        terminal.parser.registerCsiHandler({ final: "c" }, () => true),
-        terminal.parser.registerCsiHandler({ prefix: ">", final: "c" }, () => true),
-        terminal.parser.registerCsiHandler({ final: "n" }, (params) => params[0] === 5 || params[0] === 6),
-        terminal.parser.registerCsiHandler({ prefix: "?", final: "n" }, (params) => params[0] === 6),
-        ...[4, 10, 11, 12].map((id) => terminal.parser.registerOscHandler(id, (data) => data.split(";").includes("?"))),
-      ]
+      replayQueryHandlers = suppressReplayQueries(terminal)
     }
 
     // Windows browsers (Chrome/Edge) auto-copy selected text to the clipboard;
