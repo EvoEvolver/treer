@@ -23,12 +23,12 @@ try {
         $marker = Join-Path $directory ($variant.Name + '.marker')
         $arguments = $variant.Args.Replace('{S}', $script).Replace('{M}', $marker)
         $start = New-UpdateProcess $shell $arguments $directory
-        if ($variant.ModulePath) { $start.EnvironmentVariables['PSModulePath'] = $variant.ModulePath }
-        if ($variant.Uncleared) { $start = New-Object Diagnostics.ProcessStartInfo; $start.FileName = $shell; $start.Arguments = $arguments; $start.WorkingDirectory = $directory; $start.UseShellExecute = $false; $start.CreateNoWindow = $true }
-        if ($variant.Stdin) { $start.RedirectStandardInput = $true }
+        if ($variant.ContainsKey('ModulePath')) { $start.EnvironmentVariables['PSModulePath'] = $variant.ModulePath }
+        if ($variant.ContainsKey('Uncleared')) { $start = New-Object Diagnostics.ProcessStartInfo; $start.FileName = $shell; $start.Arguments = $arguments; $start.WorkingDirectory = $directory; $start.UseShellExecute = $false; $start.CreateNoWindow = $true }
+        if ($variant.ContainsKey('Stdin')) { $start.RedirectStandardInput = $true }
         $watch = [Diagnostics.Stopwatch]::StartNew()
         $process = [Diagnostics.Process]::Start($start)
-        if ($variant.Stdin) { $process.StandardInput.Close() }
+        if ($variant.ContainsKey('Stdin')) { $process.StandardInput.Close() }
         $exited = $process.WaitForExit(30000); $elapsed = $watch.ElapsedMilliseconds
         $code = if ($exited) { $process.ExitCode } else { -1 }
         if (!$exited) { $process.Kill(); $process.WaitForExit() }; $process.Dispose()
