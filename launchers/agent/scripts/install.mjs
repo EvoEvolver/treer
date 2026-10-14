@@ -34,10 +34,10 @@ function main() {
   const identity = JSON.parse(run("treer", ["whoami"]));
   const machineRoot = identity.machine?.root;
   if (!machineRoot || !isAbsolute(machineRoot)) throw new Error("whoami must return an absolute machine.root");
-  const physicalRoot = realpathSync(machineRoot);
+  const physicalRoot = realpathSync.native(machineRoot);
   const cwd = options.cwd ?? identity.agent?.cwd ?? ".";
-  const inside = relative(physicalRoot, realpathSync(resolve(physicalRoot, cwd)));
-  if (isAbsolute(cwd) || inside === ".." || inside.startsWith(`..${sep}`)) throw new Error("Profile cwd must be relative and inside machine.root");
+  const inside = relative(physicalRoot, realpathSync.native(resolve(physicalRoot, cwd)));
+  if (isAbsolute(cwd) || isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`)) throw new Error("Profile cwd must be relative and inside machine.root");
   const root = join(physicalRoot, ".treer/launchers/agent");
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const lock = join(root, ".install-lock");
@@ -50,7 +50,7 @@ function main() {
     mkdirSync(checkout);
     let commit;
     if (options.source) {
-      const source = realpathSync(options.source);
+      const source = realpathSync.native(options.source);
       commit = run("git", ["-C", source, "rev-parse", `${options.ref ?? "HEAD"}^{commit}`]);
       const archive = execFileSync("git", ["-C", source, "archive", commit, "launchers/agent"], { maxBuffer: 32 * 1024 * 1024 });
       execFileSync("tar", ["-xf", "-", "-C", checkout], { input: archive });
@@ -78,7 +78,7 @@ function main() {
     // Read every original profile before activation or mutation. A later
     // verification/write error must not leave profiles on a missing entry point.
     const originals = new Map(profiles.map((profile) => [profile.name, show(profile.name)]));
-    previous = existsSync(join(root, "current")) ? realpathSync(join(root, "current")) : null;
+    previous = existsSync(join(root, "current")) ? realpathSync.native(join(root, "current")) : null;
     activate(root, commit);
     activated = true;
     const command = join(root, "current/launchers/agent/scripts/treer-agent.sh");

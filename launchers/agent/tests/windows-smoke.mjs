@@ -2,7 +2,7 @@
 // No provider credentials, network install, real Agent creation or restart.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve, toNamespacedPath } from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { hermeticEnv, localFetch } from "./hermetic.mjs";
@@ -107,12 +107,21 @@ try {
     mkdirSync(inside, { recursive: true }); mkdirSync(outside, { recursive: true });
     assert.ok(inside.length > 260 && outside.length > 260);
     symlinkSync(toNamespacedPath(outside), join(machine, "outside-cwd"), "junction");
+    // Legacy source mode discovers root through whoami, which may also return
+    // a Rust-canonical verbatim path. Validate it without git/npm/sh or network.
+    copyFileSync(cli, join(fixture, "treer.exe"));
+    const legacy = cwd => execFileSync(process.execPath, [join(launcher, "scripts/install.mjs"), "--agent", "codex", "--cwd", cwd,
+      "--source", join(fixture, "missing-legacy-source")], { env: { ...env, PATH: fixture }, stdio: "pipe" });
+    assert.throws(() => legacy("outside-cwd"), /Profile cwd must be relative and inside machine.root/);
     assert.throws(() => install("install", undefined, "outside-cwd"), options.controller ? /launcher installer failed/ : /Profile cwd must stay inside machine root/);
     assert.equal(existsSync(join(fixture, "Codex + UI.json")), false);
     const insideCwd = join(...longParts);
+    // Reaching source resolution proves the valid long cwd passed validation;
+    // this source-only installer is not the supported Windows installation path.
+    assert.throws(() => legacy(insideCwd), /ENOENT.*missing-legacy-source/s);
     assert.equal(install("install", undefined, insideCwd).profiles.length, 6);
     assert.equal(JSON.parse(readFileSync(join(fixture, "Codex + UI.json"))).cwd, insideCwd);
-    console.log("Long-path cwd: outside junction rejected; inside root accepted");
+    console.log("Long-path cwd: both installers reject outside junction; accept inside root (legacy validation only)");
   }
   const installed = install("install"); assert.equal(installed.portable, true); assert.equal(installed.profiles.length, 6);
   assert.equal(install("install").version, installed.version); assert.equal(install("update").version, installed.version);

@@ -744,7 +744,11 @@ running it on macOS is not Windows validation.
 Windows installation accepts the Controller's canonical `\\?\` Node/root paths
 using native filesystem resolution; symlink roots remain rejected. Profile cwd
 checks also reject absolute relative-path results (including prefix mismatches)
-and junctions escaping the machine root, while allowing long paths within it. Development
+and junctions escaping the machine root, while allowing long paths within it.
+The legacy source installer applies the same checks and native path resolution
+to `whoami` roots (which may also use `\\?\`). Controller requests bypass its
+source-install branch and use `controller-install.mjs`; Windows source installs
+still require the legacy shell/git/npm prerequisites. Development
 `--bundle` smoke also exercises these spellings and mirrors the Controller's
 private parent ACL setup, but reports `embedded_controller: false` and cannot
 substitute for the matching official Controller smoke.

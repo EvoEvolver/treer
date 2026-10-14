@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -117,5 +117,7 @@ test("invalid provider and cwd outside machine root fail before installing", (t)
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
   assert.throws(() => f.install(["--source", f.source, "--agent", "pi"]), /Unknown provider/);
   assert.throws(() => f.install(["--source", f.source, "--cwd", ".."]), /inside machine.root/);
+  symlinkSync(f.root, join(f.machine, "outside-cwd"), "dir");
+  assert.throws(() => f.install(["--source", f.source, "--cwd", "outside-cwd"]), /inside machine.root/);
   assert.equal(existsSync(f.base), false);
 });

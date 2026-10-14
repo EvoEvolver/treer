@@ -2,12 +2,13 @@
 // It never contacts Treer, enrolls a machine, or touches an existing Agent.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, toNamespacedPath } from "node:path";
 import { localFetch } from "./hermetic.mjs";
 const root = process.env.FIXTURE_ROOT, args = process.argv.slice(2);
 const json = name => JSON.parse(readFileSync(join(root, name), "utf8"));
 const save = (name, value) => writeFileSync(join(root, name), JSON.stringify(value), { mode: 0o600 });
 if (args.join(" ") === "interface contract") console.log(JSON.stringify(json("contract.json")));
+else if (args.join(" ") === "whoami") console.log(JSON.stringify({ machine: { root: toNamespacedPath(json("contract.json").machine.root) }, agent: { cwd: "." } }));
 else if (args.join(" ") === "status") console.log('{"agents":[]}');
 else if (args[0] === "interface" && args[1] === "clear") save("cleared.json", true);
 else if (args[0] === "interface" && args[1] === "register") {
