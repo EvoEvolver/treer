@@ -873,11 +873,39 @@ mod tests {
         }
         let old = std::time::SystemTime::now() - Duration::from_secs(172800);
         for path in [&stale, &version, &arbitrary] {
-            fs::File::open(path)
+            let mut options = fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // CreateFile needs BACKUP_SEMANTICS for directory handles;
+                // SetFileTime needs only WRITE_ATTRIBUTES, not file contents.
+                options.access_mode(0x0100).custom_flags(0x0200_0000);
+            }
+            options
+                .open(path)
                 .unwrap()
                 .set_times(fs::FileTimes::new().set_modified(old))
                 .unwrap();
+            assert!(
+                fs::metadata(path)
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+                    .elapsed()
+                    .unwrap()
+                    > Duration::from_secs(86400)
+            );
         }
+        assert!(
+            fs::metadata(&recent)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .elapsed()
+                .unwrap()
+                < Duration::from_secs(86400)
+        );
         cleanup_stale_payloads(&root).unwrap();
         assert!(!stale.exists());
         for path in [&recent, &version, &arbitrary] {
