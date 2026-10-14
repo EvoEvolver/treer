@@ -65,7 +65,7 @@ const runtime = createRuntime();
 const sockets = new Set<{ socket: WebSocket; historyLimit: number }>();
 if (agentId && !/^[A-Za-z0-9_-]+$/.test(agentId)) throw new Error("Invalid TREER_AGENT_ID for queue storage");
 const prompts = new PromptQueue(runtime, broadcast, {
-  file: join(realpathSync(cwd), ".treer", "agents", agentId || "standalone", "queue.json"),
+  file: join(realpathSync.native(cwd), ".treer", "agents", agentId || "standalone", "queue.json"),
   limit: Number(setting("QUEUE_LIMIT") ?? "256"),
   notify: notifySubmission,
 });

@@ -145,6 +145,13 @@ runner are specific to that machine, and Windows/POSIX provider entry points
 differ. Machine-relative command rewriting is outside this change. The legacy
 Git/source installer below does not gain this production multi-machine policy.
 
+Windows Controller cwd and provider paths can use the `\\?\` verbatim prefix.
+Runtime and installer synchronous canonicalization uses `realpathSync.native`;
+asynchronous canonicalization uses the native `fs/promises.realpath` API. Keep
+both sides of containment comparisons canonical and retain the absolute-relative
+escape checks. The Windows smoke starts the runtime with verbatim cwd and npm
+shim paths, including file preview, durable queue, prompt and session resume.
+
 `install.sh`, `apply.sh` and the Git bootstrap below are legacy/development
 entry points, deprecated for default production installation. They retain the
 shared profile save/readback/restoration code, but their Git source is not

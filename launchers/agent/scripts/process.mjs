@@ -17,12 +17,12 @@ export function providerCommand(command, args = [], options = {}) {
   if (platform === "win32" && /\.(cmd|bat)$/i.test(file)) {
     // Standard npm shims invoke one JS file beneath their own node_modules.
     // Do not execute arbitrary .cmd logic or invoke cmd.exe with untrusted argv.
-    const shim = realpathSync(file), source = readFileSync(shim, "utf8");
+    const shim = realpathSync.native(file), source = readFileSync(shim, "utf8");
     if (source.length > 65536) throw new Error("Provider npm shim is too large");
     const matches = [...source.matchAll(/"%(?:dp0%|~dp0)[\\/]((?:node_modules)[\\/][^"\r\n%]+\.(?:cjs|mjs|js))"/gi)];
     const entries = [...new Set(matches.map(match => resolve(dirname(shim), ...match[1].split(/[\\/]/))))];
     if (entries.length !== 1 || !statSync(entries[0], { throwIfNoEntry: false })?.isFile()) throw new Error("Unsupported provider .cmd/.bat shim; select its native .exe or JS entry explicitly");
-    const entry = realpathSync(entries[0]), inside = relative(join(dirname(shim), "node_modules"), entry);
+    const entry = realpathSync.native(entries[0]), inside = relative(join(dirname(shim), "node_modules"), entry);
     if (isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`)) throw new Error("Provider npm shim entry escapes its node_modules; select a trusted JS entry explicitly");
     return { command: process.execPath, args: [entry, ...args] };
   }

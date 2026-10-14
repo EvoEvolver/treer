@@ -86,7 +86,11 @@ async function start() {
   // Standard npm shim; never invokes cmd.exe. Keep fake fixture relative imports absent.
   writeFileSync(entry, readFileSync(join(launcher, "tests/fake-acp.mjs")));
   writeFileSync(shim, '@echo off\r\n"%dp0%\\node_modules\\fake-acp\\cli.mjs" %*\r\n');
-  child = spawnProvider(process.execPath, [join(installBase, "run.mjs"), "--harness", "acp", "--acp-command", windows ? shim : entry, "--cwd", machine], { cwd: machine, env, stdio: "pipe", detached: !windows });
+  // Rust supplies verbatim cwd paths. Merely testing long ordinary paths misses
+  // Node's JS realpathSync EISDIR failure; exercise both cwd and provider input.
+  const runtimeCwd = windows ? toNamespacedPath(machine) : machine;
+  const provider = windows ? toNamespacedPath(shim) : entry;
+  child = spawnProvider(process.execPath, [join(installBase, "run.mjs"), "--harness", "acp", "--acp-command", provider, "--cwd", runtimeCwd], { cwd: runtimeCwd, env, stdio: "pipe", detached: !windows });
   child.stdout.on("data", data => logs += data); child.stderr.on("data", data => logs += data);
   await until(() => {
     if (child.exitCode !== null) throw new Error(`Fixture launcher exited: ${logs}`);
@@ -177,7 +181,7 @@ try {
   const report = { platform: process.platform, embedded_controller: Boolean(options.controller), portable_install: true, profiles: 6,
     profile_scope: "machine-qualified; other machine profiles unchanged through install/update/rollback",
     registration: "exact manifest/CLI contract", prompt: "passed", transcript: "passed", session_save_resume: "passed", process_tree_cleanup: "passed",
-    windows_acl_and_long_paths: windows ? "passed" : "not tested on macOS/Linux", windows_cwd_junction_boundary: windows ? "outside rejected, inside accepted" : "not tested on macOS/Linux", provider: windows ? "npm .cmd via absolute Node" : "explicit JS via absolute Node",
+    windows_acl_and_long_paths: windows ? "passed" : "not tested on macOS/Linux", windows_verbatim_runtime: windows ? "cwd and npm shim; ready/files/queue/prompt/resume passed" : "not tested on macOS/Linux", windows_cwd_junction_boundary: windows ? "outside rejected, inside accepted" : "not tested on macOS/Linux", provider: windows ? "npm .cmd via absolute Node" : "explicit JS via absolute Node",
     runtime_path: "empty", real_agents_touched: 0, real_credentials: false };
   writeFileSync(join(options.screenshots, "windows-smoke.json"), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));
 } finally {

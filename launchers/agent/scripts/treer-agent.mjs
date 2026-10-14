@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { compatibility } from "./bundle-contract.mjs";
 import { runProviderSync, spawnProvider, stopProcessTree } from "./process.mjs";
 
-const root = realpathSync(join(dirname(fileURLToPath(import.meta.url)), ".."));
+const root = realpathSync.native(join(dirname(fileURLToPath(import.meta.url)), ".."));
 const env = { ...process.env, AGENT_UI_APP_ROOT: root };
 let harness = env.AGENT_UI_HARNESS || "codex", acpArgs = [];
 const mapping = { "--session-id": "AGENT_UI_SESSION_ID", "--thread-id": "AGENT_UI_SESSION_ID", "--cwd": "AGENT_UI_CWD", "--acp-command": "AGENT_UI_ACP_COMMAND", "--name": "AGENT_UI_NAME" };

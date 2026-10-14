@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, win32 } from "node:path";
+import { isAbsolute, join, relative, toNamespacedPath, win32 } from "node:path";
 import { test } from "node:test";
 import { providerCommand, spawnProvider, stopProcessTree } from "../scripts/process.mjs";
 import { hermeticEnv } from "./hermetic.mjs";
@@ -16,6 +16,9 @@ test("Windows npm cmd providers resolve to Node + JS without shell expansion", a
   writeFileSync(shim, '@ECHO off\r\n"%_prog%" "%dp0%\\node_modules\\provider\\bin\\cli.mjs" %*\r\n');
   const args = ["space value", "hello world $ &", '"quote" | ^ % !', "中文"];
   const resolved = providerCommand(shim, args, { platform: "win32" });
+  // On native Windows this is the Rust-canonical \\?\ spelling, not just a
+  // simulated platform option with an ordinary path on a POSIX runner.
+  assert.deepEqual(providerCommand(toNamespacedPath(shim), args, { platform: "win32" }), resolved);
   assert.equal(resolved.command, process.execPath); assert.deepEqual(resolved.args.slice(1), args);
   const child = spawnProvider(resolved.command, resolved.args, { env: hermeticEnv(), stdio: "pipe" });
   let output = ""; child.stdout.on("data", chunk => { output += chunk; });
