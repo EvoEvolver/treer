@@ -16,7 +16,8 @@ const mock = `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),root=process.env.FIXTURE_ROOT,args=process.argv.slice(2);
 fs.appendFileSync(path.join(root,'calls'),JSON.stringify(args)+'\\n');
 if(args.join(' ')==='interface contract'){console.log(fs.readFileSync(path.join(root,'controller.json'),'utf8'));process.exit();}
-if(args[0]==='whoami'){console.log(JSON.stringify({machine:JSON.parse(fs.readFileSync(path.join(root,'controller.json'),'utf8')).machine}));process.exit();}
+if(args[0]==='whoami'){console.error(JSON.stringify({error:{code:'cli_failed',message:'TREER_AGENT_ID is not set'}}));process.exit(1);}
+if(args.join(' ')==='machine list'){console.log(JSON.stringify([JSON.parse(fs.readFileSync(path.join(root,'controller.json'),'utf8')).machine]));process.exit();}
 if(args[0]==='interface'){console.log('{}');process.exit();}
 if(args.slice(0,3).join(' ')!=='agent admin profile')throw Error('Unexpected operation');
 const [action,name]=args.slice(3),file=path.join(root,name+'.json');
@@ -119,13 +120,17 @@ test("failed qualified-profile verification restores foreign profiles and remove
   assert.equal(existsSync(join(f.base, "current.json")), false);
   assert.equal(existsSync(join(f.base, "profiles-receipt.json")), false);
 });
-test("legacy local profiles retain their original names and old Controller contexts verify whoami", (t) => {
+test("legacy local profiles retain names and operator installs discover names without Agent-only whoami", (t) => {
   const f = fixture(t), profile = JSON.parse(readFileSync(join(f.bundle, "profiles.json"), "utf8")).profiles.find((p: any) => p.id === "codex");
   writeFileSync(join(f.root, profile.name + ".json"), JSON.stringify({ command: join(f.base, "current/launchers/agent/scripts/treer-agent.sh"), cwd: ".", args: profile.args }));
   assert.deepEqual(f.call({ agents: ["codex"] }).profiles, ["Codex + UI"]);
   const g = fixture(t); writeFileSync(join(g.root, "Codex + UI.json"), JSON.stringify({ command: "/foreign", cwd: ".", args: [] }));
   const oldContext = { ...g.request.controller, machine: { root: g.machine, server_id: "srv_fixture", workspace_id: "ws_fixture" } };
   assert.deepEqual(g.call({ agents: ["codex"], controller: oldContext }).profiles, ["Codex + UI (win_native)"]);
+  assert.deepEqual(g.call({ agents: ["codex"], operation: "update", controller: oldContext }).profiles, ["Codex + UI (win_native)"]);
+  const calls = readFileSync(join(g.root, "calls"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(calls.some((args) => args.join(" ") === "machine list"));
+  assert.ok(calls.every((args) => args[0] !== "whoami"));
 });
 test("invalid machine suffixes and identity disagreement fail before profile writes", (t) => {
   for (const name of ["../outside", "bad\nname", "x".repeat(65), "host name"]) {

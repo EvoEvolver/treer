@@ -35,7 +35,7 @@ const cli = join(fixture, windows ? "fake-treer.exe" : "fake-treer");
 execFileSync("rustc", [join(launcher, "tests/fake-treer.rs"), "-o", cli], { env: hermeticEnv(), stdio: "pipe" });
 const contract = JSON.parse(readFileSync(join(launcher, "interface-contract.json"), "utf8"));
 const controller = { git_commit: "a".repeat(40), protocol: contract.protocol, capabilities: contract.capabilities, features: contract.required_features,
-  minimum_launcher_security_epoch: contract.launcher_security_epoch, machine: { root: machine, name: "windows_smoke", server_id: "srv_smoke", workspace_id: "ws_smoke" } };
+  minimum_launcher_security_epoch: contract.launcher_security_epoch, machine: { root: machine, server_id: "srv_smoke", workspace_id: "ws_smoke" } };
 writeFileSync(join(fixture, "contract.json"), JSON.stringify(controller));
 const env = hermeticEnv({ HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, TEMP: temp, TMP: temp,
   FIXTURE_ROOT: fixture, FIXTURE_NODE: process.execPath, FIXTURE_TREER_SCRIPT: join(launcher, "tests/fake-treer.mjs"), PATH: "",
@@ -44,7 +44,8 @@ const env = hermeticEnv({ HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPP
 for (const name of Object.keys(env)) if (/^NODE_/i.test(name)) delete env[name];
 const installBase = join(machine, ".treer/launchers/agent");
 function install(operation, version, cwd = ".") {
-  if (options.controller) return JSON.parse(execFileSync(options.controller, ["launcher", "--node", process.execPath, "--treer", cli, operation, ...(version ? [version] : []), ...(["install", "update"].includes(operation) ? ["--cwd", cwd] : [])], { env, encoding: "utf8", stdio: "pipe", timeout: 360000 }));
+  const installEnv = { ...env }; delete installEnv.TREER_AGENT_ID;
+  if (options.controller) return JSON.parse(execFileSync(options.controller, ["launcher", "--node", process.execPath, "--treer", cli, operation, ...(version ? [version] : []), ...(["install", "update"].includes(operation) ? ["--cwd", cwd] : [])], { env: installEnv, encoding: "utf8", stdio: "pipe", timeout: 360000 }));
   const manifest = readFileSync(join(options.bundle, "bundle-manifest.json"));
   const request = { schema: "treer.launcher-install/v1", operation, bundle_dir: options.bundle, version: `sha256-${digest(manifest)}`,
     source_commit: JSON.parse(manifest).source_commit, root: windows ? toNamespacedPath(machine) : machine, cwd, agents: [], node: windows ? toNamespacedPath(process.execPath) : process.execPath, treer: cli, controller, allow_network: false, rollback_version: version };
@@ -57,7 +58,7 @@ function install(operation, version, cwd = ".") {
   for (const name of [".treer", "launchers", "agent"]) {
     parent = join(parent, name); mkdirSync(parent, { recursive: true }); protectDirectory(parent);
   }
-  return JSON.parse(execFileSync(process.execPath, [join(launcher, "scripts/install.mjs"), "--controller-request"], { input: JSON.stringify(request), env, encoding: "utf8", stdio: "pipe" }));
+  return JSON.parse(execFileSync(process.execPath, [join(launcher, "scripts/install.mjs"), "--controller-request"], { input: JSON.stringify(request), env: installEnv, encoding: "utf8", stdio: "pipe" }));
 }
 async function until(check, label, milliseconds = 90000) {
   const deadline = Date.now() + milliseconds;

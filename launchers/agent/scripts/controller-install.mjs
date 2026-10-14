@@ -109,7 +109,7 @@ export function controllerInstall(request) {
       if (!machineName) {
         let machine = request.controller?.machine;
         if (!machine?.name) {
-          const reported = transaction.machine();
+          const reported = transaction.machine(machine?.server_id);
           if (!machine?.server_id || reported?.server_id !== machine.server_id) throw new Error("Unable to verify launcher machine name");
           machine = reported;
         }

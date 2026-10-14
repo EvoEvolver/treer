@@ -131,8 +131,11 @@ such as `Codex + UI (win_native)` instead of replacing the existing one. If that
 name is also occupied, the suffix includes the full stable machine ID. Improving
 long ID suffix readability is deferred. Machine names must match
 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; complete profile names are
-limited to 128 characters. Names come from Controller metadata, or verified
-`whoami` metadata for older contracts, never from a guessed hostname or PATH.
+limited to 128 characters. Names come from Controller metadata, or the authenticated
+`treer machine list` record matching its enrolled server ID (operator installation
+does not require Agent-only `whoami`). Profile subprocess failures report bounded
+exit/spawn status and recognized error codes; arbitrary stderr, paths and secrets
+are withheld. Names never come from a guessed hostname or PATH.
 The private receipt records provider-to-name mappings atomically with ownership
 specifications. Updates and rollbacks reuse these exact names even after a
 machine rename; modifications to a receipted profile still require explicit

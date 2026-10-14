@@ -8,7 +8,11 @@ const root = process.env.FIXTURE_ROOT, args = process.argv.slice(2);
 const json = name => JSON.parse(readFileSync(join(root, name), "utf8"));
 const save = (name, value) => writeFileSync(join(root, name), JSON.stringify(value), { mode: 0o600 });
 if (args.join(" ") === "interface contract") console.log(JSON.stringify(json("contract.json")));
-else if (args.join(" ") === "whoami") console.log(JSON.stringify({ machine: { ...json("contract.json").machine, root: toNamespacedPath(json("contract.json").machine.root) }, agent: { cwd: "." } }));
+else if (args.join(" ") === "whoami") {
+  if (!process.env.TREER_AGENT_ID) { console.error(JSON.stringify({ error: { code: "cli_failed", message: "TREER_AGENT_ID is not set" } })); process.exit(1); }
+  console.log(JSON.stringify({ machine: { ...json("contract.json").machine, root: toNamespacedPath(json("contract.json").machine.root) }, agent: { cwd: "." } }));
+}
+else if (args.join(" ") === "machine list") console.log(JSON.stringify([{ name: "windows_smoke", ...json("contract.json").machine }]));
 else if (args.join(" ") === "status") console.log('{"agents":[]}');
 else if (args[0] === "interface" && args[1] === "clear") save("cleared.json", true);
 else if (args[0] === "interface" && args[1] === "register") {
