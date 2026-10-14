@@ -56,6 +56,9 @@ impl HostClient {
         tokio::spawn(async move {
             let mut reader = reader;
             loop {
+                // Dedicated reader: never race this multi-read frame future
+                // against event delivery/timeouts. Partial reads must survive
+                // until completion; any decode/length error closes this link.
                 let message = match read_frame::<_, HostMessage>(&mut reader).await {
                     Ok(Some(message)) => message,
                     Ok(None) | Err(_) => break,

@@ -145,6 +145,29 @@ async fn windows_isolated_host_fixture() {
     struct Cleanup(ServicePaths, ServiceConfig);
     impl Drop for Cleanup {
         fn drop(&mut self) {
+            if std::thread::panicking() {
+                let pid = self.0.state_dir.join(format!(
+                    "agent-host-{}.pid",
+                    component_key(&self.1.server_id)
+                ));
+                let identity = fs::read(pid)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                let alive = identity
+                    .as_ref()
+                    .and_then(|value| {
+                        Some((value["pid"].as_u64()? as u32, value["created_at"].as_u64()?))
+                    })
+                    .is_some_and(|(pid, created)| {
+                        treer_platform::process_created_at(pid).ok().flatten() == Some(created)
+                    });
+                let log = fs::read_to_string(self.0.state_dir.join(format!(
+                    "agent-server-{}.log",
+                    component_key(&self.1.server_id)
+                )))
+                .unwrap_or_default();
+                eprintln!("windows-real-host failure host-alive={alive} pipe-active={} log-present={} frame-error={} client-disconnected={} supervisor-restart={} socket-server-stopped={}", host_is_running(&self.1.host_socket), !log.is_empty(), log.contains("host frame") || log.contains("failed to read host request"), log.contains("host client disconnected"), log.contains("hot restarting controller"), log.contains("host socket server stopped"));
+            }
             let _ = platform::stop(&self.0, &self.1);
             let _ = fs::remove_dir_all(&self.0.state_dir);
         }
@@ -535,8 +558,12 @@ fn root_relocation_preserves_identity_and_rejects_live_hosts_or_partial_state() 
 async fn windows_wait_process(host: &crate::host_client::HostClient, id: &str, expected: &str) {
     use treer_host_protocol::{HostCommand, HostResponse};
     let deadline = Instant::now() + Duration::from_secs(30);
+    eprintln!("windows-real-host wait-process={id}");
     loop {
-        let HostResponse::Synced { processes, .. } = host.sync(Default::default()).await.unwrap()
+        let HostResponse::Synced { processes, .. } = host
+            .sync(Default::default())
+            .await
+            .unwrap_or_else(|error| panic!("wait-process={id} sync failed: {error}"))
         else {
             panic!("expected inventory")
         };

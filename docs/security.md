@@ -13,6 +13,15 @@ The Windows installer checks hashes supplied by the same artifact origin and
 matching binary build identities; this is not independent signature validation.
 Use a trusted HTTPS Proxy/artifact origin for public installation.
 
+Local Controller/Host framing preserves partial reads while process/output
+events are delivered. Invalid lengths, decoding and request protocol versions
+close the connection; payload bytes are never intentionally resynchronized as
+new commands. This is protocol integrity within the existing local socket/pipe
+trust boundary, not authentication of arbitrary same-account processes or a
+sandbox. The regression tests use isolated in-memory connections, including a
+fragmented malformed frame containing a nested restart request; no deployed
+Host is used for adversarial validation.
+
 ## Supported Claims
 
 - Controller hot updates authenticate the signed release channel and manifest

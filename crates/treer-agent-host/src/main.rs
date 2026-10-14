@@ -245,76 +245,84 @@ async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result
     let mut synced = false;
     let mut live_after = HashMap::<String, OutputCursor>::new();
 
-    loop {
-        tokio::select! {
-            request = read_frame::<_, HostRequest>(&mut reader) => {
-                let Some(request) = request.context("failed to read host request")? else {
-                    break;
-                };
-                if request.protocol != HOST_PROTOCOL_VERSION {
-                    send_response(
-                        &outgoing_tx,
-                        request.request_id,
-                        Err(HostError::new(
-                            "protocol_mismatch",
-                            format!("host protocol is {HOST_PROTOCOL_VERSION}"),
-                        )),
-                    );
-                    continue;
-                }
-                if let HostCommand::Sync { cursors } = &request.command {
-                    let _operation_guard = state.operation_gate.lock().await;
-                    let response = sync_runtime(&state.runtime, cursors)?;
-                    if let HostResponse::Synced { replay, .. } = &response {
-                        live_after = replay
-                            .iter()
-                            .map(|replay| {
-                                (
-                                    replay.process_id.clone(),
-                                    OutputCursor {
-                                        stream_epoch: replay.stream_epoch.clone(),
-                                        revision: replay.next_revision.saturating_sub(1),
-                                    },
-                                )
-                            })
-                            .collect();
-                    }
-                    synced = true;
-                    send_response(&outgoing_tx, request.request_id, Ok(response));
-                    continue;
-                }
-                let result = execute_request(&state, &request).await;
-                send_response(&outgoing_tx, request.request_id, result);
-            }
-            event = output_events.recv(), if synced => match event {
-                Ok(chunk) => {
-                    let should_send = live_after.get(&chunk.process_id).is_none_or(|cursor| {
-                        cursor.stream_epoch != chunk.stream_epoch || chunk.revision > cursor.revision
-                    });
-                    if should_send {
-                        live_after.insert(
-                            chunk.process_id.clone(),
-                            OutputCursor {
-                                stream_epoch: chunk.stream_epoch.clone(),
-                                revision: chunk.revision,
-                            },
+    'frames: loop {
+        // read_u32/read_exact consume bytes before returning Pending. Keep the
+        // same future across event branches so an event cannot discard a
+        // partially read frame and reinterpret its payload as another request.
+        let request = read_frame::<_, HostRequest>(&mut reader);
+        tokio::pin!(request);
+        loop {
+            tokio::select! {
+                request = &mut request => {
+                    let Some(request) = request.context("failed to read host request")? else {
+                        break 'frames;
+                    };
+                    if request.protocol != HOST_PROTOCOL_VERSION {
+                        send_response(
+                            &outgoing_tx,
+                            request.request_id,
+                            Err(HostError::new(
+                                "protocol_mismatch",
+                                format!("host protocol is {HOST_PROTOCOL_VERSION}"),
+                            )),
                         );
-                        let _ = outgoing_tx.send(HostMessage::Output { chunk });
+                        bail!("host protocol mismatch");
                     }
+                    if let HostCommand::Sync { cursors } = &request.command {
+                        let _operation_guard = state.operation_gate.lock().await;
+                        let response = sync_runtime(&state.runtime, cursors)?;
+                        if let HostResponse::Synced { replay, .. } = &response {
+                            live_after = replay
+                                .iter()
+                                .map(|replay| {
+                                    (
+                                        replay.process_id.clone(),
+                                        OutputCursor {
+                                            stream_epoch: replay.stream_epoch.clone(),
+                                            revision: replay.next_revision.saturating_sub(1),
+                                        },
+                                    )
+                                })
+                                .collect();
+                        }
+                        synced = true;
+                        send_response(&outgoing_tx, request.request_id, Ok(response));
+                        continue 'frames;
+                    }
+                    let result = execute_request(&state, &request).await;
+                    send_response(&outgoing_tx, request.request_id, result);
+                    continue 'frames;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                    return Err(anyhow!("host output subscriber lagged by {count} chunks"));
+                event = output_events.recv(), if synced => match event {
+                    Ok(chunk) => {
+                        let should_send = live_after.get(&chunk.process_id).is_none_or(|cursor| {
+                            cursor.stream_epoch != chunk.stream_epoch || chunk.revision > cursor.revision
+                        });
+                        if should_send {
+                            live_after.insert(
+                                chunk.process_id.clone(),
+                                OutputCursor {
+                                    stream_epoch: chunk.stream_epoch.clone(),
+                                    revision: chunk.revision,
+                                },
+                            );
+                            let _ = outgoing_tx.send(HostMessage::Output { chunk });
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        return Err(anyhow!("host output subscriber lagged by {count} chunks"));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'frames,
+                },
+                event = process_events.recv(), if synced => match event {
+                    Ok(process) => {
+                        let _ = outgoing_tx.send(HostMessage::Process { process });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        return Err(anyhow!("host process subscriber lagged by {count} events"));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'frames,
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            },
-            event = process_events.recv(), if synced => match event {
-                Ok(process) => {
-                    let _ = outgoing_tx.send(HostMessage::Process { process });
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                    return Err(anyhow!("host process subscriber lagged by {count} events"));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     }
@@ -562,6 +570,268 @@ mod tests {
     use super::*;
     use serde_json::json;
     use treer_host_protocol::HostSpawnRequest;
+
+    // Observe consumption, rather than relying on sleeps to interrupt a frame
+    // at its exact length/payload boundary.
+    struct ObservedStream {
+        stream: tokio::io::DuplexStream,
+        consumed: usize,
+        boundary: usize,
+        reached: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl AsyncRead for ObservedStream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let before = buf.filled().len();
+            let result = std::pin::Pin::new(&mut self.stream).poll_read(cx, buf);
+            self.consumed += buf.filled().len() - before;
+            if self.consumed >= self.boundary {
+                if let Some(reached) = self.reached.take() {
+                    let _ = reached.send(());
+                }
+            }
+            result
+        }
+    }
+
+    impl AsyncWrite for ObservedStream {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::pin::Pin::new(&mut self.stream).poll_write(cx, bytes)
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+        }
+    }
+
+    async fn fragmented_request_with_process_event(smuggled: bool) {
+        let root =
+            std::env::temp_dir().join(format!("treer-host-fragment-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (restart_controller, mut restarts) = mpsc::unbounded_channel();
+        let state = Arc::new(HostState {
+            runtime: HostRuntime::new(&root).unwrap(),
+            results: Mutex::new(ResultCache::new()),
+            operation_gate: Mutex::new(()),
+            restart_controller,
+        });
+        let sync = HostRequest {
+            protocol: HOST_PROTOCOL_VERSION,
+            request_id: "sync".into(),
+            operation_id: None,
+            command: HostCommand::Sync {
+                cursors: Default::default(),
+            },
+        };
+        let (mut client, stream) = tokio::io::duplex(4096);
+        let (reached, boundary) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(handle_connection(
+            Box::new(ObservedStream {
+                stream,
+                consumed: 0,
+                boundary: 4 + encode_message(&sync).unwrap().len() + 4,
+                reached: Some(reached),
+            }),
+            Arc::clone(&state),
+        ));
+        write_frame(&mut client, &sync).await.unwrap();
+        assert!(matches!(
+            read_frame::<_, HostMessage>(&mut client).await.unwrap(),
+            Some(HostMessage::Response {
+                response: Some(HostResponse::Synced { .. }),
+                ..
+            })
+        ));
+        let payload = if smuggled {
+            let forged = HostRequest {
+                protocol: HOST_PROTOCOL_VERSION,
+                request_id: "forged".into(),
+                operation_id: Some("forged-op".into()),
+                command: HostCommand::RestartController,
+            };
+            let encoded = encode_message(&forged).unwrap();
+            let mut nested = (encoded.len() as u32).to_be_bytes().to_vec();
+            nested.extend(encoded);
+            nested
+        } else {
+            encode_message(&sync).unwrap()
+        };
+        client.write_u32(payload.len() as u32).await.unwrap();
+        boundary.await.unwrap(); // the length has been consumed, payload withheld
+        #[cfg(unix)]
+        let (command, args) = ("/bin/sh", vec!["-c".into(), "printf fragment-event".into()]);
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd.exe",
+            vec!["/d".into(), "/c".into(), "echo fragment-event".into()],
+        );
+        state
+            .runtime
+            .spawn(HostSpawnRequest {
+                process_id: "event".into(),
+                command: command.into(),
+                args,
+                cwd: ".".into(),
+                env: Default::default(),
+                rows: 24,
+                cols: 80,
+                metadata: "{}".into(),
+            })
+            .unwrap();
+        // Receiving the event proves select chose another branch while the
+        // frame payload was incomplete; no timing/retry assumptions.
+        let (mut process_seen, mut output_seen) = (false, false);
+        while !process_seen || !output_seen {
+            match read_frame::<_, HostMessage>(&mut client)
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                HostMessage::Process { .. } => process_seen = true,
+                HostMessage::Output { .. } => output_seen = true,
+                other => panic!("unexpected message during partial frame: {other:?}"),
+            }
+        }
+        client.write_all(&payload).await.unwrap();
+        if smuggled {
+            let result = tokio::select! {
+                result = server => result.unwrap(),
+                _ = restarts.recv() => panic!("nested request executed from invalid outer frame"),
+            };
+            assert!(
+                result.is_err(),
+                "invalid outer payload must close the connection"
+            );
+            assert!(
+                restarts.try_recv().is_err(),
+                "nested request must never execute"
+            );
+        } else {
+            loop {
+                match read_frame::<_, HostMessage>(&mut client)
+                    .await
+                    .unwrap()
+                    .expect("connection remains open")
+                {
+                    HostMessage::Response {
+                        request_id,
+                        response: Some(HostResponse::Synced { .. }),
+                        ..
+                    } => {
+                        assert_eq!(request_id, "sync");
+                        break;
+                    }
+                    HostMessage::Output { .. } | HostMessage::Process { .. } => {}
+                    other => panic!("unexpected response: {other:?}"),
+                }
+            }
+            drop(client);
+            server.await.unwrap().unwrap();
+        }
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn partial_frame_survives_process_and_output_events() {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            fragmented_request_with_process_event(false),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_outer_frame_never_executes_embedded_request() {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            fragmented_request_with_process_event(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_length_decode_or_protocol_closes_without_parsing_next_frame() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for variant in 0..3 {
+                let root = std::env::temp_dir()
+                    .join(format!("treer-host-invalid-{}", Uuid::new_v4().simple()));
+                std::fs::create_dir_all(&root).unwrap();
+                let (restart_controller, mut restarts) = mpsc::unbounded_channel();
+                let state = Arc::new(HostState {
+                    runtime: HostRuntime::new(&root).unwrap(),
+                    results: Mutex::new(ResultCache::new()),
+                    operation_gate: Mutex::new(()),
+                    restart_controller,
+                });
+                let (mut client, stream) = tokio::io::duplex(4096);
+                let server = tokio::spawn(handle_connection(Box::new(stream), state));
+                match variant {
+                    0 => client
+                        .write_u32(MAX_HOST_FRAME_BYTES as u32 + 1)
+                        .await
+                        .unwrap(),
+                    1 => {
+                        client.write_u32(1).await.unwrap();
+                        client.write_all(&[255]).await.unwrap();
+                    }
+                    _ => write_frame(
+                        &mut client,
+                        &HostRequest {
+                            protocol: HOST_PROTOCOL_VERSION + 1,
+                            request_id: "bad-protocol".into(),
+                            operation_id: None,
+                            command: HostCommand::Sync {
+                                cursors: Default::default(),
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap(),
+                }
+                write_frame(
+                    &mut client,
+                    &HostRequest {
+                        protocol: HOST_PROTOCOL_VERSION,
+                        request_id: "following".into(),
+                        operation_id: Some("following-op".into()),
+                        command: HostCommand::RestartController,
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(
+                    server.await.unwrap().is_err(),
+                    "variant {variant} must close"
+                );
+                assert!(
+                    restarts.try_recv().is_err(),
+                    "variant {variant} executed trailing request"
+                );
+                let _ = std::fs::remove_dir_all(root);
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     fn test_command() -> (String, Vec<String>) {
         #[cfg(windows)]

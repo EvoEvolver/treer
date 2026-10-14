@@ -294,7 +294,12 @@ incompatibility fails explicitly, including in fail-open mode. See the
 
 Machines connect outward to the Proxy over an authenticated WebSocket. The
 Controller-to-Host protocol is a local length-prefixed bincode socket. The
-socket filename is a 16-hex FNV-1a hash of the machine id (`h-<hash>.sock`)
+Host keeps each frame-read future alive across asynchronous output/process
+events; the Controller uses a dedicated reader task. Neither direction may
+discard partial framing state. Frames remain bounded by `MAX_HOST_FRAME_BYTES`;
+invalid lengths, decoding or request protocol versions close the connection
+without interpreting residual bytes as another request.
+The socket filename is a 16-hex FNV-1a hash of the machine id (`h-<hash>.sock`)
 so the full path stays inside `sockaddr_un` limits on macOS, where the default
 runtime directory under `$TMPDIR` is already long. Browser terminal and service
 streams route through the Proxy. Registered service connections are multiplexed
