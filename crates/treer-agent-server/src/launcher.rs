@@ -233,16 +233,23 @@ fn extract(root: &Path) -> Result<Stage> {
             );
         }
     }
+    // Rust's filesystem APIs support long Windows paths, but the ACL Win32
+    // calls need the extended-length form. Check the supplied root for links
+    // before canonicalizing it; keep all appended components native-separated.
+    #[cfg(windows)]
+    let mut parent = fs::canonicalize(root).context("cannot canonicalize launcher machine root")?;
+    #[cfg(not(windows))]
     let mut parent = root.to_path_buf();
     for name in [".treer", "launchers", "agent"] {
         parent.push(name);
-        private_directory(&parent)?;
+        private_directory(&parent).context("cannot prepare private launcher directory")?;
     }
     cleanup_stale_payloads(&parent)?;
     let stage = Stage(parent.join(format!(".controller-payload-{}", uuid::Uuid::new_v4())));
     // create_dir (not create_dir_all) prevents accepting a pre-existing staging entry.
     fs::create_dir(&stage.0)?;
-    treer_platform::secure_directory(&stage.0)?;
+    treer_platform::secure_directory(&stage.0)
+        .context("cannot protect launcher extraction stage")?;
     for file in FILES {
         let mut directory = stage.0.clone();
         let components: Vec<_> = file.path.split('/').collect();
@@ -250,7 +257,7 @@ fn extract(root: &Path) -> Result<Stage> {
             directory.push(component);
             private_directory(&directory)?;
         }
-        let path = stage.0.join(file.path);
+        let path = payload_path(&stage.0, file.path);
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -258,11 +265,14 @@ fn extract(root: &Path) -> Result<Stage> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        let mut handle = options.open(&path)?;
+        let mut handle = options
+            .open(&path)
+            .with_context(|| format!("cannot create embedded launcher file {}", file.path))?;
         handle.write_all(file.bytes)?;
         handle.sync_all()?;
         drop(handle);
-        treer_platform::secure_file(&path)?;
+        treer_platform::secure_file(&path)
+            .with_context(|| format!("cannot protect embedded launcher file {}", file.path))?;
         #[cfg(unix)]
         if file.executable {
             use std::os::unix::fs::PermissionsExt;
@@ -279,7 +289,7 @@ fn extract(root: &Path) -> Result<Stage> {
     drop(manifest_handle);
     treer_platform::secure_file(&manifest_path)?;
     for file in FILES {
-        let path = stage.0.join(file.path);
+        let path = payload_path(&stage.0, file.path);
         let metadata = fs::symlink_metadata(&path)?;
         reject_link(&path, &metadata)?;
         if !metadata.is_file()
@@ -290,6 +300,15 @@ fn extract(root: &Path) -> Result<Stage> {
         }
     }
     Ok(stage)
+}
+
+fn payload_path(root: &Path, relative: &str) -> PathBuf {
+    // `relative` is checked by verify_payload before extraction. Joining the
+    // whole slash-delimited string preserves '/' under a verbatim Windows
+    // prefix, where Win32 deliberately disables normal slash conversion.
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
 fn trusted_file(path: &Path, executable: bool) -> Result<PathBuf> {
@@ -525,7 +544,7 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         "payload_manifest":manifest, "rollback_version":rollback});
     let mut install_cmd = command(&node);
     install_cmd
-        .arg(stage.0.join("scripts/install.mjs"))
+        .arg(payload_path(&stage.0, "scripts/install.mjs"))
         .arg("--controller-request");
     let output = bounded_output(install_cmd, Some(serde_json::to_vec(&request)?), 360).await?;
     if !output.status.success() {
@@ -731,6 +750,57 @@ mod tests {
         );
     }
     #[test]
+    #[cfg(windows)]
+    fn windows_embedded_extraction_accepts_long_and_verbatim_roots() {
+        use std::os::windows::ffi::OsStrExt;
+        let base =
+            std::env::temp_dir().join(format!("treer-launcher-long-{}", uuid::Uuid::new_v4()));
+        // Secure the short parent first; append enough ordinary components to
+        // exceed MAX_PATH, including spaces/Unicode. fs supports that path even
+        // when direct ACL APIs do not accept its non-verbatim representation.
+        treer_platform::secure_directory(&base).unwrap();
+        let mut root = base.join("machine space 中文");
+        while root.as_os_str().encode_wide().count() < 300 {
+            root.push("long-component-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        }
+        fs::create_dir_all(&root).unwrap();
+        let canonical = fs::canonicalize(&root).unwrap();
+        for supplied in [&root, &canonical] {
+            let stage = extract(supplied).unwrap();
+            assert!(stage.0.to_string_lossy().starts_with(r"\\?\"));
+            for file in FILES {
+                let path = payload_path(&stage.0, file.path);
+                assert!(!path.as_os_str().to_string_lossy().contains('/'));
+                assert_eq!(fs::read(&path).unwrap(), file.bytes);
+                // Exercise the same ACL operation on every extracted asset,
+                // not just std::fs (which normalizes names independently).
+                treer_platform::secure_file(&path).unwrap();
+            }
+        }
+        // Canonicalizing for Win32 spelling must not turn a supplied junction
+        // into an accepted physical root. Keep the pre-canonical link check.
+        let target = base.join("junction-target");
+        fs::create_dir(&target).unwrap();
+        let junction = base.join("junction-root");
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "native junction fixture creation failed"
+        );
+        assert!(
+            extract(&junction).is_err(),
+            "junction root must not be adopted"
+        );
+        fs::remove_dir(&junction).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn extraction_is_private_and_rejects_managed_links() {
         let root =
             std::env::temp_dir().join(format!("treer-launcher-test-{}", uuid::Uuid::new_v4()));
@@ -738,7 +808,7 @@ mod tests {
         {
             let stage = extract(&root).unwrap();
             assert_eq!(
-                fs::read(stage.0.join("scripts/install.mjs")).unwrap(),
+                fs::read(payload_path(&stage.0, "scripts/install.mjs")).unwrap(),
                 FILES
                     .iter()
                     .find(|f| f.path == "scripts/install.mjs")
