@@ -311,6 +311,28 @@ fn payload_path(root: &Path, relative: &str) -> PathBuf {
         .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
+/// Node cannot start an entry script whose path has the `\\?\` prefix (its CommonJS
+/// loader fails before any JavaScript runs), so the argument handed to it uses the
+/// equivalent drive-letter form; extraction itself keeps the verbatim path.
+fn node_entry_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        // Do not round-trip an OS filename through lossy UTF-8. Preserve every
+        // remaining UTF-16 unit, including Unicode and trailing separators.
+        if units.len() > 7
+            && units.starts_with(&[92, 92, 63, 92])
+            && matches!(units[4], 65..=90 | 97..=122)
+            && units[5] == 58
+            && units[6] == 92
+        {
+            return PathBuf::from(std::ffi::OsString::from_wide(&units[4..]));
+        }
+    }
+    path
+}
+
 fn trusted_file(path: &Path, executable: bool) -> Result<PathBuf> {
     if !path.is_absolute() {
         bail!("executable must be an explicit absolute path");
@@ -543,9 +565,17 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         "allow_network":install.is_some_and(|options| options.allow_network),"controller":controller.unwrap_or(Value::Null),
         "payload_manifest":manifest, "rollback_version":rollback});
     let mut install_cmd = command(&node);
-    install_cmd
-        .arg(payload_path(&stage.0, "scripts/install.mjs"))
-        .arg("--controller-request");
+    let verified_entry = payload_path(&stage.0, "scripts/install.mjs");
+    let node_entry = node_entry_path(verified_entry.clone());
+    #[cfg(windows)]
+    if fs::canonicalize(&node_entry).context("Node installer entry is unavailable")?
+        != fs::canonicalize(&verified_entry).context("verified installer entry is unavailable")?
+    {
+        // Dropping verbatim spelling must not select a different file (e.g.
+        // machine roots with trailing dots/spaces or device-name semantics).
+        bail!("Node installer entry does not resolve to the verified payload");
+    }
+    install_cmd.arg(node_entry).arg("--controller-request");
     let output = bounded_output(install_cmd, Some(serde_json::to_vec(&request)?), 360).await?;
     if !output.status.success() {
         let code = serde_json::from_slice::<Value>(&output.stdout)
@@ -751,6 +781,53 @@ mod tests {
     }
     #[test]
     #[cfg(windows)]
+    fn node_entry_path_drops_only_the_drive_verbatim_prefix() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        assert_eq!(
+            node_entry_path(PathBuf::from(r"\\?\C:\a\b.mjs")),
+            PathBuf::from(r"C:\a\b.mjs")
+        );
+        assert_eq!(
+            node_entry_path(PathBuf::from(r"C:\a\b.mjs")),
+            PathBuf::from(r"C:\a\b.mjs")
+        );
+        assert_eq!(
+            node_entry_path(PathBuf::from(r"\\?\UNC\host\share\b.mjs")),
+            PathBuf::from(r"\\?\UNC\host\share\b.mjs")
+        );
+        for unchanged in [
+            r"\\host\share\b.mjs",
+            r"\\?\Volume{00000000}\b.mjs",
+            r"\\.\C:\b.mjs",
+            r"\\?\C:",
+            r"\\?\C:\",
+            r"\\?\C:/b.mjs",
+        ] {
+            let path = PathBuf::from(unchanged);
+            assert_eq!(
+                node_entry_path(path.clone()).into_os_string(),
+                path.into_os_string()
+            );
+        }
+        for (input, expected) in [
+            (r"\\?\z:\space 中文\b.mjs", r"z:\space 中文\b.mjs"),
+            (r"\\?\C:\a\", r"C:\a\"),
+        ] {
+            assert_eq!(
+                node_entry_path(PathBuf::from(input)).into_os_string(),
+                std::ffi::OsString::from(expected)
+            );
+        }
+        let mut non_unicode: Vec<u16> = r"\\?\C:\a\".encode_utf16().collect();
+        non_unicode.extend([0xd800, 46, 109, 106, 115]);
+        let converted = node_entry_path(PathBuf::from(std::ffi::OsString::from_wide(&non_unicode)));
+        assert_eq!(
+            converted.as_os_str().encode_wide().collect::<Vec<_>>(),
+            non_unicode[4..]
+        );
+    }
+    #[test]
+    #[cfg(windows)]
     fn windows_embedded_extraction_accepts_long_and_verbatim_roots() {
         use std::os::windows::ffi::OsStrExt;
         let base =
@@ -768,6 +845,13 @@ mod tests {
         for supplied in [&root, &canonical] {
             let stage = extract(supplied).unwrap();
             assert!(stage.0.to_string_lossy().starts_with(r"\\?\"));
+            let entry = payload_path(&stage.0, "scripts/install.mjs");
+            let node_entry = node_entry_path(entry.clone());
+            assert!(!node_entry.to_string_lossy().starts_with(r"\\?\"));
+            assert_eq!(
+                fs::canonicalize(node_entry).unwrap(),
+                fs::canonicalize(entry).unwrap()
+            );
             for file in FILES {
                 let path = payload_path(&stage.0, file.path);
                 assert!(!path.as_os_str().to_string_lossy().contains('/'));
