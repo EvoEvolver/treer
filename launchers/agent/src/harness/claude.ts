@@ -3,7 +3,7 @@ import { spawnProvider, stopProcessTree } from "../../scripts/process.mjs";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createReadStream } from "node:fs";
-import { readFile, readdir, realpath } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { readGoalState, writeGoalState } from "../goal-storage.js";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
@@ -64,6 +64,8 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   readonly harness: HarnessInfo = { id: "claude", name: "Claude", capabilities: { steer: true, backgroundTasks: true, goal: { pause: false, budget: true }, sessionTransfer: { export: true, import: true } } };
   private goal: Goal | null = null;
   private goalKey = "";
+  private nativeGoalCleared = false;
+  private goalHistoryStamp = "";
   private goalHistoryPath = "";
   private goalHistorySeen = new Set<string>();
   private goalHookSeen = new Set<string>();
@@ -138,18 +140,15 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       if (resumed) await this.loadHistory(resumed);
       if (resumed && this.options.stateFile) {
         const saved = record(readGoalState(this.options.stateFile + ".goal-usage.json"));
-        if (saved.sessionId === this.sessionId && saved.goalKey === this.goalKey) {
+        if (saved.sessionId === this.sessionId && saved.goalKey === this.goalKey && this.goal && record(saved.goal).objective === this.goal.objective && record(saved.goal).status === this.goal.status) {
           const legacyUsage = typeof saved.resultTokens !== "number";
-          const nativeObjective = this.goal?.objective;
-          if (saved.goal && record(saved.goal).status === "active" && (record(saved.goal).syncStatus === "desynced" || this.goal?.status === "active" && (legacyUsage || record(saved.goal).objective === this.goal.objective))) {
-            this.goal = { ...saved.goal as unknown as Goal };
-            if (legacyUsage && nativeObjective !== this.goal.objective) {
-              this.goal.syncStatus = "desynced"; this.goal.nativeObjective = nativeObjective;
-              this.goal.syncError = "Legacy launcher record differs from the native goal; realigning at idle";
-            }
+          // Checkpoints supply budgets/usage only for the same native goal.
+          // They must never resurrect a cleared goal or replay a cached edit.
+          this.goal = { ...saved.goal as unknown as Goal, objective: this.goal.objective, status: this.goal.status };
+          if (this.goal.syncStatus === "desynced") {
+            this.goal.syncStatus = "synced"; this.goal.syncError = undefined;
+            this.goal.nativeObjective = this.goal.objective;
           }
-          else if (saved.pendingExit && this.goal?.status === "cleared") this.goal = saved.pendingExit as unknown as Goal;
-          else if (saved.goal && ["blocked", "stale", "done", "cleared"].includes(text(record(saved.goal).status))) this.goal = saved.goal as unknown as Goal;
           if (this.goal) {
             this.goal.tokensUsed = typeof saved.tokensUsed === "number" ? saved.tokensUsed : null;
             this.goal.timeUsedSeconds = typeof saved.timeUsedSeconds === "number" ? saved.timeUsedSeconds : null;
@@ -168,9 +167,11 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
               this.goal.reason = "Legacy per-goal usage could not be verified; counters restarted during launcher upgrade.";
               await this.saveGoalUsage();
             }
-            if (this.goal.syncStatus === "desynced" && this.goal.status === "active") this.deferredGoal = this.goal.objective;
           }
         }
+        // Preserve a crash-interrupted exit notification, not a phantom goal.
+        if (saved.sessionId === this.sessionId && saved.goalKey === this.goalKey && !this.goal && this.nativeGoalCleared && saved.pendingExit) this.emit("goal-exit", saved.pendingExit);
+        await this.saveGoalUsage();
       }
       const args = [...(this.options.args ?? []), "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json",
         "--include-partial-messages", "--dangerously-skip-permissions", ...(this.options.model ? ["--model", this.options.model] : []),
@@ -195,11 +196,13 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       const initialized = await this.control({ subtype: "initialize" });
       if (Array.isArray(initialized.commands) && !initialized.commands.some((command) => record(command).name === "goal")) this.harness.capabilities.goal = null;
       this.goalPoll = setInterval(() => {
-        if (this.goalPolling || this.goal?.status !== "active") return;
+        if (this.goalPolling) return;
         this.goalPolling = true;
-        this.goal.timeUsedSeconds = Math.max(0, (Date.now() - this.goalClock) / 1000);
-        this.publish();
-        const reason = this.goalGuard.limit(); if (reason) this.blockGoal(reason);
+        if (this.goal?.status === "active") {
+          this.goal.timeUsedSeconds = Math.max(0, (Date.now() - this.goalClock) / 1000);
+          this.publish();
+          const reason = this.goalGuard.limit(); if (reason) this.blockGoal(reason);
+        }
         void this.refreshGoalHistory().catch((error) => this.emit("log", `Goal monitor: ${error instanceof Error ? error.message : "read failed"}`)).finally(() => { this.goalPolling = false; });
       }, 500);
       this.goalPoll.unref();
@@ -329,7 +332,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
         if (version !== this.goalMutationVersion) return;
         goal.syncStatus = "synced"; goal.syncError = undefined;
         goal.timeUsedSeconds = Math.max(0, (Date.now() - this.goalClock) / 1000);
-        this.goal = goal;
+        this.goal = null;
         this.pendingGoalExit = null;
         await this.saveGoalUsage(); this.publish(); this.emit("goal-exit", goal);
       };
@@ -378,9 +381,9 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   private async applyClearGoal() {
-    const previous = this.goal;
     await this.goalCommand("clear");
-    if (previous) { this.goal = { ...previous, status: "cleared", syncStatus: "synced", syncError: undefined, reason: "Goal cleared by user" }; await this.saveGoalUsage(); this.publish(); }
+    this.forgetNativeGoal();
+    await this.saveGoalUsage(); this.publish();
   }
 
   private async goalCommand(args: string) {
@@ -707,10 +710,13 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private goalEvent(event: RecordValue, historical = false) {
     if (event.isSidechain || event.parent_tool_use_id) return;
     const attachment = record(event.attachment);
-    if (event.type === "attachment" && attachment.type === "goal_status" && this.goal?.status === "active" && (!attachment.condition || attachment.condition === (this.goal.nativeObjective || this.goal.objective))) {
+    if (event.type === "attachment" && attachment.type === "goal_status" && attachment.status === "cleared") {
+      this.forgetNativeGoal();
+      if (!historical) { void this.saveGoalUsage(); this.publish(); }
+    } else if (event.type === "attachment" && attachment.type === "goal_status" && this.goal?.status === "active" && (!attachment.condition || attachment.condition === (this.goal.nativeObjective || this.goal.objective))) {
       const state = text(attachment.status) || (attachment.failed === true ? "failed" : attachment.met === true && attachment.sentinel !== true ? "met" : "");
-      if (["impossible", "failed", "met", "achieved", "cleared"].includes(state)) {
-        this.goal = { ...this.goal, status: ["impossible", "failed"].includes(state) ? "blocked" : state === "cleared" ? "cleared" : "done", reason: text(attachment.reason) || `Native evaluator reported ${state}` };
+      if (["impossible", "failed", "met", "achieved"].includes(state)) {
+        this.goal = { ...this.goal, status: ["impossible", "failed"].includes(state) ? "blocked" : "done", reason: text(attachment.reason) || `Native evaluator reported ${state}` };
         if (!historical && this.goal.status === "blocked") this.emit("goal-exit", this.goal);
       }
     }
@@ -731,6 +737,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
         return;
       }
       if (set) {
+        this.nativeGoalCleared = false;
         this.pendingGoalExit = null;
         // stdout and JSONL use different envelopes for the same native command.
         // Re-observing its acknowledgement must not reset budgets or usage.
@@ -740,7 +747,10 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
         }
         this.goal.syncStatus = "synced"; this.goal.nativeObjective = set[1]; this.goal.syncError = undefined;
         this.goalKey = key || this.goalKey;
-      } else if (/^(?:Goal cleared|No goal set)/.test(value) && text(command.args).trim() === "clear" && this.goal) this.goal = { ...this.goal, status: "cleared", syncStatus: "synced", syncError: undefined, reason: "Native goal cleared" };
+      } else if (/^(?:Goal cleared(?:[.:]|$)|No goal set(?:[.:]|$))/.test(value.trim())) {
+        this.forgetNativeGoal();
+        if (!historical) { void this.saveGoalUsage(); this.publish(); }
+      }
       if (!historical) this.emit("goal-command", text(command.args).trim());
     }
     if (event.type === "system" && event.subtype === "stop_hook_summary") {
@@ -786,24 +796,39 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   private async refreshGoalHistory() {
+    const metadata = await stat(this.goalHistoryPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+    if (!metadata) return;
+    const stamp = `${metadata.ino}:${metadata.size}:${metadata.mtimeMs}`;
+    if (stamp === this.goalHistoryStamp) return;
     const history = await readFile(this.goalHistoryPath, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
+    this.goalHistoryStamp = stamp;
     // Consume only newly appended complete records, never replay old goal sets
     // over a newer UI edit. A partial final line is retried after its newline.
     if (history.length < this.goalHistoryOffset) { if (this.goal) { this.goal.syncStatus = "desynced"; this.goal.syncError = "Native history was truncated; reconcile the goal"; } return; }
     const end = history.lastIndexOf("\n") + 1;
     const added = history.slice(this.goalHistoryOffset, end);
     this.goalHistoryOffset = end;
+    if (!added) return;
     for (const line of added.split("\n")) {
       let event: RecordValue; try { event = record(JSON.parse(line)); } catch { continue; }
       // Live usage comes only from result, never replay assistant usage twice.
-      if (event.type === "system" || event.type === "attachment") this.goalEvent(event);
+      if (event.type === "system" || event.type === "attachment" || event.type === "assistant") this.goalEvent(event);
     }
+    await this.saveGoalUsage(); this.publish();
+  }
+
+  private forgetNativeGoal() {
+    this.nativeGoalCleared = true;
+    this.goal = null;
+    this.deferredGoal = null;
+    if (this.deferredRetry) { clearTimeout(this.deferredRetry); this.deferredRetry = undefined; }
+    this.goalUsageSeen.clear();
   }
 
   private async saveGoalUsage() {
-    if (!this.options.stateFile || !this.goal) return;
+    if (!this.options.stateFile) return;
     const path = this.options.stateFile + ".goal-usage.json";
-    writeGoalState(path, { sessionId: this.sessionId, goalKey: this.goalKey, goal: this.goal, pendingExit: this.pendingGoalExit, tokensUsed: this.goal.tokensUsed, timeUsedSeconds: this.goal.timeUsedSeconds, resultTokens: this.resultTokens });
+    writeGoalState(path, { sessionId: this.sessionId, goalKey: this.goalKey, goal: this.goal, pendingExit: this.pendingGoalExit, tokensUsed: this.goal?.tokensUsed ?? null, timeUsedSeconds: this.goal?.timeUsedSeconds ?? null, resultTokens: this.resultTokens });
   }
 
   private blockGoal(reason: string) {

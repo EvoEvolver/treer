@@ -35,25 +35,26 @@ for (const [objective, env, reason] of [
   ["token-loop", { AGENT_UI_GOAL_TOKEN_BUDGET: "100" }, /token budget/],
   ["impossible-loop", { FAKE_CLAUDE_OLD_GOAL: "1" }, /Owner must create environment/],
 ] as const) {
-  test(`Claude ${objective} clears the real fake native hook and persists blocked state`, async () => {
+  test(`Claude ${objective} clears the real fake native hook and notifies blocked outcome`, async () => {
     const cwd = temp(), stateFile = join(cwd, "state");
     const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
     Object.assign(process.env, env);
     const runtime = new ClaudeRuntime(join(root, "tests/fake-claude.mjs"), cwd, { stateFile });
-    let exits = 0; runtime.on("goal-exit", () => { exits++; });
+    let exits = 0; let receipt: any; runtime.on("goal-exit", goal => { exits++; receipt = goal; });
     try {
       await runtime.start(); await runtime.updateGoal({ objective });
-      await until(() => runtime.snapshot().goal?.status === "blocked" && exits === 1);
-      assert.match(runtime.snapshot().goal!.reason!, reason);
+      await until(() => exits === 1);
+      assert.equal(runtime.snapshot().goal, null); assert.equal(receipt.status, "blocked");
+      assert.match(receipt.reason, reason);
       assert.equal(exits, 1);
       await until(() => runtime.snapshot().thread?.status === "idle");
       assert.ok(runtime.snapshot().thread?.turns.some((turn) => turn.items.some((item) => item.text.startsWith("Goal cleared"))));
-      assert.equal(JSON.parse(readFileSync(stateFile + ".goal-usage.json", "utf8")).goal.status, "blocked");
+      assert.equal(JSON.parse(readFileSync(stateFile + ".goal-usage.json", "utf8")).goal, null);
     } finally { await runtime.stop(); for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
   });
 }
 
-test("Claude explicit exits cite user closure, persist across resume, and never parse closure prose automatically", async () => {
+test("Claude explicit exits notify user closure without resurrecting a cleared native goal on resume", async () => {
   const cwd = temp(), configDir = join(cwd, "claude"), stateFile = join(cwd, "state");
   process.env.FAKE_CLAUDE_CONFIG = configDir;
   const create = () => new ClaudeRuntime(join(root, "tests/fake-claude.mjs"), cwd, { stateFile, configDir });
@@ -63,11 +64,12 @@ test("Claude explicit exits cite user closure, persist across resume, and never 
     await until(() => runtime.snapshot().thread?.status === "idle");
     await runtime.prompt("按现状结案"); await until(() => runtime.snapshot().thread?.status === "idle");
     assert.equal(runtime.snapshot().goal?.status, "active");
+    let receipt: any; runtime.on("goal-exit", goal => { receipt = goal; });
     await runtime.updateGoal({ status: "done", reason: 'User said "按现状结案"' });
-    assert.equal(runtime.snapshot().goal?.status, "done");
+    assert.equal(runtime.snapshot().goal, null); assert.equal(receipt.status, "done"); assert.match(receipt.reason, /按现状结案/);
   } finally { await runtime.stop(); }
   const resumed = create();
-  try { await resumed.start(); assert.equal(resumed.snapshot().goal?.status, "done"); assert.match(resumed.snapshot().goal!.reason!, /按现状结案/); }
+  try { await resumed.start(); assert.equal(resumed.snapshot().goal, null); }
   finally { await resumed.stop(); delete process.env.FAKE_CLAUDE_CONFIG; }
 });
 
@@ -104,23 +106,28 @@ for (const harness of ["codex", "claude"] as const) for (const replacement of [f
       adapter.goalCommand = async (args: string) => { await command(args); if (args === "clear") throw new Error("crash after native clear"); };
     }
     await assert.rejects(runtime.updateGoal(input), /crash after native clear/);
-    if (replacement) await runtime.updateGoal({ objective: "hold replacement goal" });
+    if (replacement) {
+      await runtime.updateGoal({ objective: "hold replacement goal" });
+      if (harness === "claude") await until(() => runtime.snapshot().goal?.syncStatus === "synced" && runtime.snapshot().goal?.nativeObjective === "hold replacement goal");
+    }
     await runtime.stop();
-    const resumed = create(); await resumed.start();
+    const resumed = create(); let recovered: any; resumed.on("goal-exit", goal => { recovered = goal; }); await resumed.start();
     const requests = new GoalExitRequests(requestFile, resumed, () => {});
     try {
       await until(() => JSON.parse(readFileSync(requestFile, "utf8")).length === 0);
       if (replacement) {
         assert.equal(resumed.snapshot().goal?.status, "active"); assert.equal(resumed.snapshot().goal?.objective, "hold replacement goal");
       } else {
-        assert.equal(resumed.snapshot().goal?.status, "blocked");
-        assert.equal(resumed.snapshot().goal?.reason, input.reason);
-        assert.equal(resumed.snapshot().goal?.requiredAction, input.requiredAction);
+        const receipt = harness === "claude" ? recovered : resumed.snapshot().goal;
+        if (harness === "claude") assert.equal(resumed.snapshot().goal, null);
+        assert.equal(receipt?.status, "blocked");
+        assert.equal(receipt?.reason, input.reason);
+        assert.equal(receipt?.requiredAction, input.requiredAction);
         let notices = 0;
         const notifications = new GoalNotifications(join(cwd, "notices.json"), () => {}, async (_to, _key, body) => {
           assert.equal(JSON.parse(body).required_action, input.requiredAction); notices++;
         }, async () => ["user_fixture"]);
-        notifications.enqueue(resumed.snapshot().goal!); await until(() => notices === 1); notifications.close();
+        notifications.enqueue(receipt!); await until(() => notices === 1); notifications.close();
       }
     } finally { requests.close(); await resumed.stop(); }
   } finally { await runtime.stop(); if (oldConfig === undefined) delete process.env.FAKE_CLAUDE_CONFIG; else process.env.FAKE_CLAUDE_CONFIG = oldConfig; }
@@ -136,7 +143,7 @@ for (const harness of ["codex", "claude"] as const) test(`${harness} serializes 
     await assert.rejects(runtime.updateGoal({ objective: "Replacement" }), /already pending/);
     if (harness === "claude") {
       await runtime.clearGoal(); await exit.catch(() => {});
-      assert.equal(runtime.snapshot().goal?.status, "cleared");
+      assert.equal(runtime.snapshot().goal, null);
     } else {
       await assert.rejects(runtime.clearGoal(), /already pending/);
       await exit; assert.equal(runtime.snapshot().goal?.status, "blocked");
@@ -148,6 +155,7 @@ test("Claude budget edits still release the goal after the mutation lock complet
   // The ordinary fixture previously reported no usage. Relying on incidental
   // /goal command usage made this assertion depend on native-ack scheduling.
   const runtime = new ClaudeRuntime(process.execPath, temp(), { args: [join(root, "tests/fake-claude.mjs"), "--zero-goal-usage"] });
+  const receipts: any[] = []; runtime.on("goal-exit", goal => receipts.push(goal));
   try {
     await runtime.start(); await runtime.updateGoal({ objective: "hold external condition" });
     await until(() => runtime.snapshot().thread?.status === "idle");
@@ -158,8 +166,8 @@ test("Claude budget edits still release the goal after the mutation lock complet
     await runtime.updateGoal({ tokenBudget: 1 });
     assert.equal(runtime.snapshot().goal?.tokensUsed, 0, "budget edit starts a fresh usage epoch");
     await runtime.prompt("Report current state with usage");
-    await until(() => runtime.snapshot().goal?.status === "blocked");
-    assert.match(runtime.snapshot().goal!.reason!, /token budget/);
+    await until(() => receipts.length === 1);
+    assert.equal(runtime.snapshot().goal, null); assert.match(receipts[0].reason, /token budget/);
   } finally { await runtime.stop(); }
 });
 
@@ -210,6 +218,7 @@ for (const disabled of [false, true]) test(`Agent goal command ${disabled ? "res
     await exit;
     await until(() => { try { return JSON.parse(readFileSync(log, "utf8")).status === "blocked"; } catch { return false; } });
     const state = await (await localFetch(base + "/v1/state")).json();
-    assert.equal(state.goal.status, "blocked"); assert.equal(state.goal.requiredAction, "Owner: create environment");
+    assert.equal(state.goal, null);
+    assert.equal(JSON.parse(readFileSync(log, "utf8")).required_action, "Owner: create environment");
   } finally { if (child.exitCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; } }
 });

@@ -72,11 +72,11 @@ test("Claude native goal acknowledgements, JSONL completion, usage checkpoint, r
     await resumed.start();
     assert.equal(resumed.snapshot().goal!.status, "done"); assert.equal(resumed.snapshot().goal!.tokensUsed, 17);
     assert.ok(resumed.snapshot().goal!.timeUsedSeconds! > 0);
-    await resumed.clearGoal(); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal?.status, "cleared");
+    await resumed.clearGoal(); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal, null);
     // A stop-hook block-cap override (hasOutput true) must not fake completion.
     await resumed.prompt("/goal hold condition"); await until(() => resumed.snapshot().thread?.status === "idle");
     assert.equal(resumed.snapshot().goal!.objective, "hold condition"); assert.equal(resumed.snapshot().goal!.status, "active");
-    await resumed.prompt("/goal clear"); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal?.status, "cleared");
+    await resumed.prompt("/goal clear"); await until(() => resumed.snapshot().thread?.status === "idle"); assert.equal(resumed.snapshot().goal, null);
   } finally { await resumed.stop(); delete process.env.FAKE_CLAUDE_CONFIG; }
 });
 

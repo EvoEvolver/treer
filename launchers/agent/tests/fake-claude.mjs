@@ -66,7 +66,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       // interrupt control request must release it first.
       if (hold && process.argv.includes("--real-goal-wire")) continue;
     } else if (hold && process.argv.includes("--real-goal-wire")) message("assistant", [{ type: "text", text: "[Request interrupted by user]" }]);
-    const output = args === "clear" ? process.env.FAKE_CLAUDE_OLD_GOAL ? "Goal cleared: old condition" : "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
+    const output = args === "clear" ? process.argv.includes("--clear-no-goal") ? "No goal set" : process.env.FAKE_CLAUDE_OLD_GOAL ? "Goal cleared: old condition" : "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
     const uuid = `goal-${randomUUID()}`;
     persist({ type: "system", subtype: "local_command", uuid, content: `<local-command-stdout>${output}</local-command-stdout>`, commandRun: { command: "goal", args } });
     send({ type: "assistant", uuid, message: { model: "<synthetic>", id: uuid, content: [{ type: "text", text: output }] }, local_command_source: `<local-command-stdout>${output}</local-command-stdout>`, local_command_run: { command: "goal", args } });

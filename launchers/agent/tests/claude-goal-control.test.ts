@@ -38,7 +38,7 @@ test("user clear preempts the Agent's unacknowledged exit and clears its durable
   const receipt = exits.enqueue({ status: "done", reason: "Work complete" }); assert.equal(receipt.status, "pending");
   await until(() => f.calls().filter(call => call.message?.content?.[0]?.text === "/goal clear").length === 1);
   await f.runtime.clearGoal();
-  assert.equal(f.runtime.snapshot().goal?.status, "cleared");
+  assert.equal(f.runtime.snapshot().goal, null);
   assert.deepEqual(JSON.parse(readFileSync(journal, "utf8")), []);
   assert.ok(f.calls().some(call => call.request?.subtype === "interrupt"), "clear must not wait for an impossible Stop hook to finish");
 });
@@ -77,10 +77,11 @@ test("native hook's snake_case condition rejects three times then interrupt-clea
   const f = await fixture(t);
   const notices: any[] = []; f.runtime.on("goal-exit", goal => notices.push(goal));
   await f.runtime.updateGoal({ objective: "reject-loop native shape" });
-  await until(() => f.runtime.snapshot().goal?.status === "blocked");
-  assert.equal(f.runtime.snapshot().goal?.rejectionCount, 3);
-  assert.equal(f.runtime.snapshot().goal?.consecutiveRejections, 3);
-  assert.match(f.runtime.snapshot().goal!.reason!, /without new/);
+  await until(() => notices.length === 1);
+  assert.equal(f.runtime.snapshot().goal, null);
+  assert.equal(notices[0].rejectionCount, 3);
+  assert.equal(notices[0].consecutiveRejections, 3);
+  assert.match(notices[0].reason, /without new/);
   assert.equal(notices.length, 1);
   assert.ok(f.calls().some(call => call.request?.subtype === "interrupt"));
 });
@@ -108,10 +109,12 @@ test("session-cumulative usage baseline is excluded; edit resets epoch and reach
   await f.runtime.prompt("usage 50"); await f.idle(); assert.equal(f.runtime.snapshot().goal?.tokensUsed, 50);
   await f.runtime.updateGoal({ objective: "hold edited condition", tokenBudget: 100000 }); await f.idle();
   assert.equal(f.runtime.snapshot().goal?.tokensUsed, 0);
-  await f.runtime.prompt("usage 100001"); await until(() => f.runtime.snapshot().goal?.status === "blocked");
-  assert.equal(f.runtime.snapshot().goal?.tokensUsed, 100001);
-  assert.match(f.runtime.snapshot().goal!.reason!, /token budget/);
-  assert.ok(f.runtime.snapshot().goal!.timeUsedSeconds! > 0);
+  const receipts: any[] = []; f.runtime.on("goal-exit", goal => receipts.push(goal));
+  await f.runtime.prompt("usage 100001"); await until(() => receipts.length === 1);
+  assert.equal(f.runtime.snapshot().goal, null);
+  assert.equal(receipts[0].tokensUsed, 100001);
+  assert.match(receipts[0].reason, /token budget/);
+  assert.ok(receipts[0].timeUsedSeconds > 0);
 });
 
 test("JSONL old goal acknowledgement cannot overwrite a newer deferred edit", async t => {
@@ -149,7 +152,7 @@ test("resume migrates an old checkpoint without session usage baseline from nati
 test("HTTP user DELETE preempts an accepted Agent exit instead of returning mutation conflict", async t => {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-goal-http-"))), root = resolve(import.meta.dirname, ".."), calls = join(cwd, "calls"), portFile = join(cwd, "port");
   const provider = join(cwd, "provider.mjs");
-  writeFileSync(provider, `process.argv.push(...${JSON.stringify(["--real-goal-wire", "--zero-goal-usage", "--drop-first-clear", "--calls-file", calls])}); await import(${JSON.stringify(pathToFileURL(fake).href)});\n`);
+  writeFileSync(provider, `process.argv.push(...${JSON.stringify(["--real-goal-wire", "--zero-goal-usage", "--drop-first-clear", "--clear-no-goal", "--calls-file", calls])}); await import(${JSON.stringify(pathToFileURL(fake).href)});\n`);
   const server = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], { cwd: root, stdio: "pipe", env: hermeticEnv({
     HOME: cwd, AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: portFile, AGENT_UI_HARNESS: "claude", CLAUDE_BIN: provider,
     TREER_AGENT_ID: "ag_goal_http_fixture", AGENT_UI_MESSAGE_WATCH: "0", AGENT_UI_GOAL_AGENT_EXIT: "1",
@@ -167,7 +170,7 @@ test("HTTP user DELETE preempts an accepted Agent exit instead of returning muta
   await until(() => readFileSync(calls, "utf8").includes('"text":"/goal clear"'));
   response = await request("/api/goal", "DELETE"); assert.equal(response.status, 200, logs);
   const state = await (await request("/v1/state", "GET")).json();
-  assert.equal(state.goal.status, "cleared"); assert.equal(state.goal.syncStatus, "synced");
+  assert.equal(state.goal, null);
 });
 
 test("resume preserves active budgets and an unconfirmed exit without retrying it forever", async t => {
@@ -202,7 +205,7 @@ test("a second edit during deferred native delivery is applied without manual re
   assert.equal(f.calls().filter(call => call.message?.content?.[0]?.text === "/goal second edited objective").length, 1);
 });
 
-test("upgrade resets polluted legacy usage and aligns the saved desired goal instead of silently adopting the old native goal", async t => {
+test("resume adopts the native objective instead of reapplying a mismatched cached edit", async t => {
   const f = await fixture(t); await f.runtime.updateGoal({ objective: "hold old native condition", tokenBudget: 100000, roundBudget: 20 }); await f.idle();
   await f.runtime.stop();
   const checkpoint = join(f.cwd, "state.goal-usage.json"), saved = JSON.parse(readFileSync(checkpoint, "utf8"));
@@ -214,10 +217,8 @@ test("upgrade resets polluted legacy usage and aligns the saved desired goal ins
   t.after(() => resumed.stop()); await resumed.start();
   await until(() => resumed.snapshot().goal?.syncStatus === "synced");
   const goal = resumed.snapshot().goal!;
-  assert.equal(goal.objective, "hold newer user objective"); assert.equal(goal.nativeObjective, goal.objective);
-  assert.equal(goal.tokensUsed, 0); assert.equal(goal.roundsUsed, 0);
-  assert.equal(goal.tokenBudget, 100000); assert.equal(goal.roundBudget, 20);
-  assert.match(goal.reason!, /counters restarted during launcher upgrade/);
+  assert.equal(goal.objective, "hold old native condition"); assert.equal(goal.nativeObjective, goal.objective);
+  assert.notEqual(goal.tokensUsed, 9090000);
 });
 
 test("cancelled exit cannot resurrect after user-clear timeout and late native clear (Core regression)", async t => {
@@ -237,5 +238,51 @@ test("cancelled exit cannot resurrect after user-clear timeout and late native c
   appendFileSync(path, JSON.stringify({ type: "system", subtype: "local_command", uuid: "late-user-clear", content: "<local-command-stdout>Goal cleared</local-command-stdout>", commandRun: { command: "goal", args: "clear" } }) + "\n");
   const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir, args: [fake, "--fixture-config", f.configDir] });
   t.after(() => resumed.stop()); await resumed.start();
-  assert.equal(resumed.snapshot().goal?.status, "cleared");
+  assert.equal(resumed.snapshot().goal, null);
+});
+
+test("native No goal set acknowledges UI clear, removes the residual goal and persists null", async t => {
+  const f = await fixture(t, ["--clear-no-goal"]);
+  await f.runtime.updateGoal({ objective: "hold residual goal" }); await f.idle();
+  await f.runtime.clearGoal();
+  assert.equal(f.runtime.snapshot().goal, null);
+  const saved = JSON.parse(readFileSync(join(f.cwd, "state.goal-usage.json"), "utf8"));
+  assert.equal(saved.goal, null); assert.equal(saved.tokensUsed, null);
+  await f.idle();
+  await f.runtime.updateGoal({ objective: "hold another residual goal" }); await f.idle();
+  // /goal without arguments also authoritatively reports that no native hook
+  // exists; it is not limited to acknowledgements of our own clear command.
+  await f.runtime.prompt("/goal"); await f.idle();
+  assert.equal(f.runtime.snapshot().goal, null);
+});
+
+for (const cachedStatus of ["active", "cleared", "blocked"] as const) test(`resume ignores ${cachedStatus} cache when latest native event reports absence`, async t => {
+  const f = await fixture(t); await f.runtime.updateGoal({ objective: "hold stale cache" }); await f.idle(); await f.runtime.stop();
+  const checkpoint = join(f.cwd, "state.goal-usage.json"), saved = JSON.parse(readFileSync(checkpoint, "utf8"));
+  saved.goal.status = cachedStatus; saved.goal.syncStatus = "desynced";
+  writeFileSync(checkpoint, JSON.stringify(saved));
+  const path = join(f.configDir, "projects", f.cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${f.runtime.snapshot().thread!.id}.jsonl`);
+  appendFileSync(path, JSON.stringify({ type: "system", subtype: "local_command", uuid: "authoritative-absence", content: "<local-command-stdout>No goal set</local-command-stdout>", commandRun: { command: "goal", args: "clear" } }) + "\n");
+  const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir,
+    args: [fake, "--fixture-config", f.configDir, "--calls-file", join(f.cwd, "resumed-calls")] });
+  t.after(() => resumed.stop()); await resumed.start();
+  assert.equal(resumed.snapshot().goal, null);
+  assert.equal(JSON.parse(readFileSync(checkpoint, "utf8")).goal, null);
+  assert.ok(!readFileSync(join(f.cwd, "resumed-calls"), "utf8").includes("/goal hold stale cache"));
+});
+
+test("JSONL clear is observed after completion; ordinary assistant absence claims have no authority", async t => {
+  const f = await fixture(t); await f.runtime.updateGoal({ objective: "hold completed goal" }); await f.idle();
+  (f.runtime as any).goalEvent({ type: "attachment", attachment: { type: "goal_status", met: true, condition: "hold completed goal" } });
+  assert.equal(f.runtime.snapshot().goal?.status, "done");
+  (f.runtime as any).goalEvent({ type: "assistant", message: { model: "real-model", content: [{ type: "text", text: "No goal set" }] } });
+  assert.equal(f.runtime.snapshot().goal?.status, "done");
+  const path = join(f.configDir, "projects", f.cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${f.runtime.snapshot().thread!.id}.jsonl`);
+  appendFileSync(path, JSON.stringify({ type: "system", subtype: "local_command", uuid: "external-clear", content: "<local-command-stdout>No goal set</local-command-stdout>", commandRun: { command: "goal", args: "clear" } }) + "\n");
+  await until(() => f.runtime.snapshot().goal === null);
+  assert.equal(JSON.parse(readFileSync(join(f.cwd, "state.goal-usage.json"), "utf8")).goal, null);
+  await f.runtime.updateGoal({ objective: "hold attachment goal" }); await f.idle();
+  (f.runtime as any).goalEvent({ type: "attachment", attachment: { type: "goal_status", condition: "hold attachment goal", met: true } });
+  (f.runtime as any).goalEvent({ type: "attachment", attachment: { type: "goal_status", status: "cleared" } });
+  assert.equal(f.runtime.snapshot().goal, null);
 });

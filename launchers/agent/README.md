@@ -460,19 +460,24 @@ objective, status, usage/budgets, `reason`, `requiredAction`, `rejectionCount`,
 (`synced|desynced|exit_unconfirmed`), `nativeObjective` and `syncError`.
 Lifecycle outcomes are
 `active|blocked|stale|done|cleared`; Codex also supports `paused` and native limit
-statuses. Native `complete` maps to `done`. Clearing retains a visible cleared
-record until replacement; a session that has never had a goal returns null.
+statuses. Native `complete` maps to `done`. Claude native clear confirmations
+(including `No goal set`, also from `/goal` without arguments) remove the goal
+bar and persist `goal: null`; Codex retains its native cleared lifecycle record.
 Unsupported adapters return 501 and hide goal controls.
 
 The launcher wraps native goals, not a second evaluator. Claude uses `/goal
 <condition>` and `/goal clear`; successful matching Stop-hook summaries produce
 `done`. Native clear local-command output (including older `Goal cleared: ...`)
-produces `cleared`; explicit impossible goal-status/evaluator results produce
+produces `null`; explicit impossible goal-status/evaluator results produce
 `blocked`. Stream events are consumed immediately and the session JSONL is polled
-while a goal is active, so a rejection loop need not end in `result` to be caught.
+even after completion, so external clears are observed. A rejection loop need
+not end in `result` to be caught.
 Ordinary assistant claims of success are not parsed as completion. Codex uses
-`thread/goal/set|get|clear` and its update notifications. Both retain formal exit
-reasons beside `agent-ui.json` across resume.
+`thread/goal/set|get|clear` and its update notifications. Claude formal exit
+reasons are sent through the durable notification outbox, not kept as a phantom
+native goal. Resume rebuilds Claude goal existence/objective/status from native
+JSONL; checkpoints supplement usage/budgets only for the same goal generation,
+objective and status. A mismatched cached edit is discarded rather than replayed.
 
 Managed Agents have a formal exit command, automatically described to Claude:
 
@@ -580,8 +585,8 @@ allowance. For checkpoints without a cumulative-usage baseline,
 active token/time/round/rejection counters restart (budgets are retained), with a
 visible reason explaining that old per-goal usage could not be verified. We do
 not relabel old session-wide totals as accurate goal usage. If its saved desired
-objective differs from the native goal, the UI marks desync and alignment runs
-at idle. Subsequent restarts retain the new counters and baseline normally.
+objective differs from the native goal, native history wins and the incompatible
+checkpoint is discarded. Subsequent restarts retain verified counters normally.
 Existing Claude sessions acquire this exit only when their saved session is
 resumed by the updated launcher: leader should restart that Agent, preserving
 its session ID/startup command. This supplies `AGENT_UI_URL`,
@@ -590,7 +595,8 @@ existing active goal merely on restart. No live Agents were restarted here.
 
 Before native clear, the adapter checkpoints the requested outcome and its
 thread/session generation. Resume reconciles a cleared native goal with that
-intent, retaining the reason/action and retrying its notification; a replacement
+intent, retrying its reason/action notification without resurrecting the UI goal;
+a replacement
 goal invalidates the old intent. Overlapping ordinary mutations return 409 for
 retry; user clear preempts them. Claude wire summaries use `hook_infos`,
 `prompt_text`, and `prevented_continuation`, whereas JSONL can use camelCase.
