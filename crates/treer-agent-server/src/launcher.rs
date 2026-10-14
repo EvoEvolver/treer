@@ -311,6 +311,23 @@ fn payload_path(root: &Path, relative: &str) -> PathBuf {
         .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
+/// Node cannot start an entry script whose path has the `\\?\` prefix (its CommonJS
+/// loader fails before any JavaScript runs), so the argument handed to it uses the
+/// equivalent drive-letter form; extraction itself keeps the verbatim path.
+fn node_entry_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            let bytes = rest.as_bytes();
+            if bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    path
+}
+
 fn trusted_file(path: &Path, executable: bool) -> Result<PathBuf> {
     if !path.is_absolute() {
         bail!("executable must be an explicit absolute path");
@@ -544,7 +561,7 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         "payload_manifest":manifest, "rollback_version":rollback});
     let mut install_cmd = command(&node);
     install_cmd
-        .arg(payload_path(&stage.0, "scripts/install.mjs"))
+        .arg(node_entry_path(payload_path(&stage.0, "scripts/install.mjs")))
         .arg("--controller-request");
     let output = bounded_output(install_cmd, Some(serde_json::to_vec(&request)?), 360).await?;
     if !output.status.success() {
