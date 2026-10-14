@@ -92,7 +92,7 @@ function Get-UpdateArtifact($Uri, $Destination, $Limit) {
     }
 }
 function New-UpdateProcess($Executable, $Arguments, $WorkingDirectory) {
-    $start = New-Object Diagnostics.ProcessStartInfo
+    $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Executable; $start.Arguments = $Arguments
     $start.WorkingDirectory = $WorkingDirectory; $start.UseShellExecute = $false
     $start.CreateNoWindow = $true

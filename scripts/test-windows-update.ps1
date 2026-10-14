@@ -144,18 +144,21 @@ try {
         $childScript = Join-Path $temporary 'detached-child.ps1'
         $parentScript = Join-Path $temporary 'detached-parent.ps1'
         $marker = Join-Path $temporary 'detached-complete.txt'
-        [IO.File]::WriteAllText($childScript, 'param($Marker); Start-Sleep -Milliseconds 750; [IO.File]::WriteAllText($Marker, "passed")')
+        # Neither fixture script calls a cmdlet: a nested Windows PowerShell 5.1 started
+        # with the cleared update environment spends seconds in module discovery on
+        # the first cmdlet, which would measure runner speed instead of lifetime.
+        [IO.File]::WriteAllText($childScript, 'param($Marker); [Threading.Thread]::Sleep(750); [IO.File]::WriteAllText($Marker, "passed")')
         [IO.File]::WriteAllText($parentScript, @'
 param($Source,$Directory,$Shell)
 . $Source
-$child = Join-Path $Directory 'detached-child.ps1'
-$marker = Join-Path $Directory 'detached-complete.txt'
-$start = New-UpdateProcess $Shell ('-NoProfile -NonInteractive -File "' + $child + '" -Marker "' + $marker + '"') $Directory
+$child = $Directory + '\detached-child.ps1'
+$marker = $Directory + '\detached-complete.txt'
+$start = New-UpdateProcess $Shell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $child + '" -Marker "' + $marker + '"') $Directory
 $process = [Diagnostics.Process]::Start($start)
 $process.Dispose()
 '@)
         $shell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        $parentStart = New-UpdateProcess $shell ('-NoProfile -NonInteractive -File "' + $parentScript + '" -Source "' + $PSScriptRoot + '/update-machine.ps1" -Directory "' + $temporary + '" -Shell "' + $shell + '"') $temporary
+        $parentStart = New-UpdateProcess $shell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $parentScript + '" -Source "' + $PSScriptRoot + '/update-machine.ps1" -Directory "' + $temporary + '" -Shell "' + $shell + '"') $temporary
         $parent = [Diagnostics.Process]::Start($parentStart)
         try { Assert-UpdateTest ($parent.WaitForExit(10000) -and $parent.ExitCode -eq 0) 'detached-parent-exits' }
         finally { if (!$parent.HasExited) { $parent.Kill(); $parent.WaitForExit() }; $parent.Dispose() }
