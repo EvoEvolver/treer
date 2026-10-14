@@ -58,6 +58,23 @@ Handlers remain active until the last replay write has parsed, then are disposed
 before queued live output parses. Live queries still respond; user input is never
 filtered by this replay guard. See the [reproduction and impact report](terminal-replay-report.md).
 
+## Live Managed App discovery
+
+The console refreshes its authoritative Core App list after App-like runtime
+creation/update, known App rename/delete, workspace snapshots and machine events.
+`kind: app` and the legacy `app:` name prefix are refresh hints, never an App
+identity or URL source. Requests are debounced for 200ms; there is no polling.
+Returning to a visible/focused page also refreshes the list, including hostname,
+public URL and status. Pure metadata changes without runtime events become visible
+on this foreground refresh. Stale requests cannot overwrite newer workspace data
+or local rename/delete events.
+
+A selected runtime first discovered as an App switches from its terminal to the
+App interface automatically. An explicit **Show logs** choice made after App
+recognition stays with that workspace/runtime/App identity across metadata and
+status refreshes. Mobile uses the same component and its existing full-screen
+interface and workload **Logs** menu.
+
 ## Trusted Policy publication settings
 
 Workspace settings → Policy Provider shows the Core-confirmed `publish_authority`.

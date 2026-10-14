@@ -52,7 +52,7 @@ import {
   Upload,
   X
 } from "lucide-react"
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react"
 import { useLocation, useNavigate, useParams } from "react-router"
 
 export function WorkspaceApp() {
@@ -90,7 +90,7 @@ function WorkspaceAppContent() {
   const [loadedSnapshot, setSnapshot] = useState<Snapshot | null>(null)
   const snapshot = loadedSnapshot?.workspace.workspace_id === workspaceId ? loadedSnapshot : null
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
-  const [showWorkloadLogs, setShowWorkloadLogs] = useState(false)
+  const [logsTarget, setLogsTarget] = useState<{ workspaceId: string | null; agentId: string | null; appId: string | null } | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
@@ -146,7 +146,17 @@ function WorkspaceAppContent() {
   const [agentCwd, setAgentCwd] = useState(".")
   const [agentCommandLine, setAgentCommandLine] = useState("")
   const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
-  const [apps, setApps] = useState<AppDeployment[]>([])
+  const [apps, setAppsState] = useState<AppDeployment[]>([])
+  const appsRef = useRef(apps)
+  appsRef.current = apps
+  // Local rename/delete must win over requests that started before the event.
+  const appsMutation = useRef(0)
+  const appsRequest = useRef(0)
+  const appsRefreshTimer = useRef<number | undefined>(undefined)
+  const setApps = useCallback((value: SetStateAction<AppDeployment[]>) => {
+    appsMutation.current += 1
+    setAppsState(value)
+  }, [])
   const [appsLoading, setAppsLoading] = useState(false)
   const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
@@ -245,6 +255,47 @@ function WorkspaceAppContent() {
     void syncWorkspaces().catch(showError)
   }, [organizationId, preview, syncWorkspaces, showError])
 
+  const loadApps = useCallback(async () => {
+    const request = ++appsRequest.current
+    const mutation = appsMutation.current
+    if (preview || !workspaceId) {
+      setApps([])
+      return
+    }
+    setAppsLoading(true)
+    const requestedWorkspaceId = workspaceId
+    try {
+      const data = await api<{ apps: AppDeployment[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/apps`)
+      if (workspaceIdRef.current !== requestedWorkspaceId || request !== appsRequest.current || mutation !== appsMutation.current) return
+      setAppsState(data.apps)
+    } catch (reason) {
+      if (workspaceIdRef.current === requestedWorkspaceId && request === appsRequest.current) throw reason
+    } finally {
+      if (workspaceIdRef.current === requestedWorkspaceId && request === appsRequest.current) setAppsLoading(false)
+    }
+  }, [preview, workspaceId, setApps])
+
+  // App mutations are audit events, not dedicated workspace broadcasts. Coalesce
+  // runtime/snapshot hints and foreground checks; only Core lists establish mapping.
+  const scheduleAppsRefresh = useCallback(() => {
+    if (preview || !workspaceId) return
+    window.clearTimeout(appsRefreshTimer.current)
+    appsRefreshTimer.current = window.setTimeout(() => {
+      if (workspaceIdRef.current === workspaceId) void loadApps().catch(showError)
+    }, 200)
+  }, [preview, workspaceId, loadApps, showError])
+
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === "visible") scheduleAppsRefresh() }
+    window.addEventListener("focus", refresh)
+    document.addEventListener("visibilitychange", refresh)
+    return () => {
+      window.clearTimeout(appsRefreshTimer.current)
+      window.removeEventListener("focus", refresh)
+      document.removeEventListener("visibilitychange", refresh)
+    }
+  }, [scheduleAppsRefresh])
+
   const refreshSnapshot = useCallback(async () => {
     if (preview || !workspaceId) return
     const requestedWorkspaceId = workspaceId
@@ -277,13 +328,16 @@ function WorkspaceAppContent() {
           if (next.workspace.workspace_id !== workspaceId) return
           setSnapshot(next)
           setWorkspaces((items) => replaceWorkspace(items, next.workspace))
+          scheduleAppsRefresh()
         } else if (message.event === "workspace.renamed" && message.data) {
           const updated = message.data as Workspace
           setWorkspaces((items) => replaceWorkspace(items, updated))
           setSnapshot((current) => current?.workspace.workspace_id === updated.workspace_id ? { ...current, workspace: updated } : current)
-        } else if (message.event === "agent.updated" && message.data) {
+        } else if ((message.event === "agent.updated" || message.event === "agent.renamed") && message.data) {
           const updated = message.data as Agent
-          setApps((current) => current.map((app) => app.runtime_agent_id === updated.agent_id || app.app_id === updated.agent_id ? { ...app, name: updated.name === `app:${app.name}` ? app.name : updated.name } : app))
+          const knownApp = appsRef.current.find((app) => (app.runtime_agent_id ?? app.app_id) === updated.agent_id)
+          if (updated.kind === "app" || updated.name.startsWith("app:") || knownApp) scheduleAppsRefresh()
+          if (knownApp && updated.name !== knownApp.name && updated.name !== `app:${knownApp.name}`) setApps((current) => current.map((app) => app.runtime_agent_id === updated.agent_id || app.app_id === updated.agent_id ? { ...app, name: updated.name === `app:${app.name}` ? app.name : updated.name } : app))
           setSnapshot((current) => {
             if (!current || current.workspace.workspace_id !== workspaceId) return current
             const agents = current.agents.some((agent) => agent.agent_id === updated.agent_id)
@@ -293,7 +347,10 @@ function WorkspaceAppContent() {
           })
         } else if (message.event === "agent.deleted" && message.data) {
           const removed = message.data as Agent
-          setApps((current) => current.filter((app) => app.runtime_agent_id !== removed.agent_id && app.app_id !== removed.agent_id))
+          if (appsRef.current.some((app) => (app.runtime_agent_id ?? app.app_id) === removed.agent_id)) {
+            scheduleAppsRefresh()
+            setApps((current) => current.filter((app) => app.runtime_agent_id !== removed.agent_id && app.app_id !== removed.agent_id))
+          }
           setSnapshot((current) => {
             if (!current || current.workspace.workspace_id !== workspaceId) return current
             return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents: current.agents.filter((agent) => agent.agent_id !== removed.agent_id) }
@@ -309,7 +366,10 @@ function WorkspaceAppContent() {
             void syncWorkspaces().catch(showError)
           }
         }
-        else refreshSnapshot().catch(showError)
+        else {
+          if (message.event.startsWith("server.")) scheduleAppsRefresh()
+          refreshSnapshot().catch(showError)
+        }
       }
       socket.onclose = () => {
         if (disposed || workspaceIdRef.current !== workspaceId) return
@@ -318,7 +378,16 @@ function WorkspaceAppContent() {
     }
     connect()
     return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
-  }, [preview, workspaceId, refreshSnapshot, syncWorkspaces, showError])
+  }, [preview, workspaceId, refreshSnapshot, syncWorkspaces, showError, scheduleAppsRefresh, setApps])
+
+  const appRuntimeSignature = useRef("")
+  useEffect(() => {
+    const runtimes = snapshot?.agents.filter((agent) => agent.kind === "app" || agent.name.startsWith("app:") || appsRef.current.some((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id)) ?? []
+    const signature = JSON.stringify([workspaceId, runtimes.map(({ agent_id, name, status }) => [agent_id, name, status])])
+    if (signature === appRuntimeSignature.current) return
+    appRuntimeSignature.current = signature
+    if (runtimes.length) scheduleAppsRefresh()
+  }, [snapshot, workspaceId, scheduleAppsRefresh])
 
   useEffect(() => {
     const agents = snapshot?.agents ?? []
@@ -326,6 +395,7 @@ function WorkspaceAppContent() {
   }, [snapshot, apps])
 
   const selectedAgentApp = apps.find((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
+  const showWorkloadLogs = Boolean(logsTarget && logsTarget.workspaceId === workspaceId && logsTarget.agentId === selectedAgentId && logsTarget.appId === (selectedAgentApp?.app_id ?? null))
   const selectedRuntimeAgent = snapshot?.agents.find((agent) => agent.agent_id === selectedAgentId) ?? (selectedAgentApp ? { agent_id: selectedAgentApp.runtime_agent_id ?? selectedAgentApp.app_id, server_id: selectedAgentApp.server_id, name: selectedAgentApp.name, kind: "app", status: selectedAgentApp.status } : undefined)
   const selectedAgent = selectedRuntimeAgent && selectedAgentApp ? { ...selectedRuntimeAgent, name: selectedAgentApp.name } : selectedRuntimeAgent
   const selectedAgentPath = selectedAgent ? agentPath(selectedAgent, workloadTree) : ""
@@ -451,9 +521,13 @@ function WorkspaceAppContent() {
 
   function showAgentTerminal(agentId: string, logs = false) {
     setSelectedAgentId(agentId)
-    setShowWorkloadLogs(logs)
+    setShowWorkloadLogs(logs, agentId)
     setMainView("terminal")
     if (isMobile) setMobileTerminalOpen(true)
+  }
+
+  function setShowWorkloadLogs(logs: boolean, agentId = selectedAgentId) {
+    setLogsTarget(logs ? { workspaceId, agentId, appId: apps.find((app) => (app.runtime_agent_id ?? app.app_id) === agentId)?.app_id ?? null } : null)
   }
 
   function selectOrganization(value: string) {
@@ -655,25 +729,10 @@ function WorkspaceAppContent() {
     if (mainView === "workspace") loadLaunchProfiles().catch(showError)
   }, [mainView, loadLaunchProfiles, showError])
 
-  const loadApps = useCallback(async () => {
-    if (preview || !workspaceId) {
-      setApps([])
-      return
-    }
-    setAppsLoading(true)
-    const requestedWorkspaceId = workspaceId
-    try {
-      const data = await api<{ apps: AppDeployment[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/apps`)
-      if (workspaceIdRef.current !== requestedWorkspaceId) return
-      setApps(data.apps)
-    } finally {
-      if (workspaceIdRef.current === requestedWorkspaceId) setAppsLoading(false)
-    }
-  }, [preview, workspaceId])
-
   useEffect(() => {
+    setApps([])
     loadApps().catch(showError)
-  }, [loadApps, showError])
+  }, [loadApps, showError, setApps])
 
   useEffect(() => {
     if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("terminal")
@@ -1182,7 +1241,7 @@ function WorkspaceAppContent() {
             <span className="hidden truncate sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
           {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface || showAppUi ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
-            {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs((value) => !value)}>{showWorkloadLogs ? "Show App" : "Show logs"}</Button>}
+            {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs(!showWorkloadLogs)}>{showWorkloadLogs ? "Show App" : "Show logs"}</Button>}
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
             <IconButton label="Upload file" disabled={!selectedAgent || !selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton>
             <IconButton label={selectedAgentInterface || showAppUi ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>

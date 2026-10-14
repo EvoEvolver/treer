@@ -770,6 +770,8 @@ test("shared App rename and delete update metadata without resurrecting a placeh
 })
 
 test("remote App rename and delete events keep tree metadata synchronized", async ({ page }) => {
+  let remoteApps = [managedApp]
+  await page.route('**/api/workspaces/ws-1/apps', (route) => ok(route, { apps: remoteApps }))
   // The mock server sees a connection before the browser's OPEN event. Wait
   // for that event rather than sending into a connecting/StrictMode socket.
   await page.addInitScript(() => {
@@ -790,9 +792,11 @@ test("remote App rename and delete events keep tree metadata synchronized", asyn
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
   await expect.poll(() => Boolean(events)).toBe(true)
   await expect.poll(() => page.evaluate(() => (window as Window & { workspaceEvents?: WebSocket }).workspaceEvents?.readyState)).toBe(1)
+  remoteApps = [{ ...managedApp, name: 'Remote Archive' }]
   events!.send(JSON.stringify({ event: "agent.updated", revision: 2, data: { ...appRuntimeAgent, name: "Remote Archive" } }))
   await expect(page.getByRole("treeitem", { name: "Remote Archive", exact: true })).toBeVisible()
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(0)
+  remoteApps = []
   events!.send(JSON.stringify({ event: "agent.deleted", revision: 3, data: appRuntimeAgent }))
   await expect(page.getByRole("treeitem", { name: "Remote Archive", exact: true })).toHaveCount(0)
   await expect(page.getByRole("treeitem")).toHaveCount(2)

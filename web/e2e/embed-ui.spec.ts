@@ -170,6 +170,125 @@ test.beforeEach(async ({ page }) => {
   await mockInterfaceUiContent(page)
 })
 
+for (const mobile of [false, true]) {
+  test.describe(`live Managed App discovery on ${mobile ? '390px' : 'desktop'}`, () => {
+    test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 } })
+    async function fixture(page: Page) {
+      let apps: typeof managedApp[] = []
+      let requests = 0
+      let hold: Promise<void> | null = null
+      let release = () => {}
+      const app = { ...managedApp, app_id: 'late-app', runtime_agent_id: 'late-runtime', name: 'Late App' }
+      const runtime = { ...agentPlain, agent_id: 'late-runtime', path: '/Late App', name: 'app:Late App', kind: 'app', status: 'idle' }
+      await page.addInitScript(() => {
+        const Native = WebSocket
+        window.WebSocket = class extends Native { constructor(url: string | URL, protocols?: string | string[]) {
+          super(url, protocols)
+          if (String(url).endsWith('/events')) (window as Window & { liveEvents?: WebSocket }).liveEvents = this
+        } }
+      })
+      await page.route('**/api/workspaces/ws-1/apps', async (route) => {
+        requests += 1
+        const captured = [...apps]
+        if (hold) await hold
+        return ok(route, { apps: captured })
+      })
+      await page.route('**/api/workspaces/ws-1/apps/late-app/ui/**', (route) => route.fulfill({ contentType: 'text/html', body: '<h1>Late human interface</h1>' }))
+      await page.goto('/')
+      await expect.poll(() => requests).toBeGreaterThan(0)
+      await expect.poll(() => page.evaluate(() => (window as Window & { liveEvents?: WebSocket }).liveEvents?.readyState)).toBe(1)
+      return {
+        app, runtime, requests: () => requests,
+        setApps(next: typeof managedApp[]) { apps = next },
+        hold() { hold = new Promise<void>((resolve) => { release = resolve }) },
+        release() { hold = null; release() },
+        send(event: string, data: unknown) { workspaceEvents!.send(JSON.stringify({ event, revision: requests + 2, data })) },
+      }
+    }
+    test('CLI-created runtime becomes an App without reload; explicit logs survive status and metadata refresh', async ({ page }, testInfo) => {
+      const backend = await fixture(page)
+      backend.setApps([backend.app]); backend.hold()
+      backend.send('agent.updated', backend.runtime)
+      await expect(page.getByRole('treeitem', { name: 'app:Late App', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'Actions for app:Late App', exact: true }).click()
+      await page.getByRole('menuitem', { name: 'Logs', exact: true }).click()
+      await expect(page.locator('.xterm')).toBeVisible()
+      backend.release()
+      const frame = page.locator("iframe[title='/Late App interface']")
+      await expect(frame).toBeVisible()
+      if (!mobile) await expect(page.getByRole('button', { name: 'Show logs', exact: true })).toBeVisible()
+      await expect(page.frameLocator("iframe[title='/Late App interface']").getByRole('heading', { name: 'Late human interface' })).toBeVisible()
+      if (mobile) await page.getByRole('button', { name: 'Close full-screen interface', exact: true }).click()
+      if (mobile) {
+        await page.getByRole('button', { name: 'Actions for Late App', exact: true }).click()
+        await page.getByRole('menuitem', { name: 'Logs', exact: true }).click()
+      } else await page.getByRole('button', { name: 'Show logs', exact: true }).click()
+      await expect(page.locator('.xterm')).toBeVisible()
+      backend.setApps([{ ...backend.app, hostname: 'changed.internal', public_url: 'https://changed.apps.example.com/', restart_count: 1 }])
+      const metadataResponse = page.waitForResponse((item) => item.url().endsWith('/workspaces/ws-1/apps'))
+      backend.send('agent.updated', { ...backend.runtime, status: 'working' })
+      await metadataResponse
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+      if (mobile) await expect(page.locator('.xterm')).toBeVisible()
+      else await expect(page.getByRole('button', { name: 'Show App', exact: true })).toBeVisible()
+      await expect(frame).toHaveCount(0)
+      if (mobile) {
+        await page.getByRole('button', { name: 'Close full-screen terminal', exact: true }).click()
+        await page.getByRole('button', { name: /^Late App app / }).click()
+      } else await page.getByRole('button', { name: 'Show App', exact: true }).click()
+      await expect(frame).toBeVisible()
+      backend.setApps([{ ...backend.app, status: 'exited' }])
+      backend.send('agent.updated', { ...backend.runtime, status: 'exited' })
+      await expect(frame).toHaveCount(0)
+      await expect(page.getByText('App is not running', { exact: true })).toBeVisible()
+      backend.setApps([backend.app])
+      backend.send('agent.updated', backend.runtime)
+      await expect(frame).toBeVisible()
+      await page.screenshot({ path: testInfo.outputPath('live-app-discovery.png') })
+      backend.setApps([{ ...backend.app, name: 'Renamed App' }])
+      backend.send('agent.renamed', { ...backend.runtime, name: 'Renamed App', path: '/Renamed App' })
+      if (mobile) await page.getByRole('button', { name: 'Close full-screen interface', exact: true }).click()
+      if (!mobile) await expect(page.getByRole('button', { name: 'Show logs', exact: true })).toBeVisible()
+      await expect(page.getByRole('treeitem', { name: 'Renamed App', exact: true })).toBeVisible()
+      backend.setApps([]); backend.send('agent.deleted', backend.runtime)
+      await expect(page.getByRole('treeitem', { name: 'Renamed App', exact: true })).toHaveCount(0)
+    })
+    test('a delayed App list cannot resurrect a deleted runtime', async ({ page }) => {
+      const backend = await fixture(page)
+      backend.setApps([backend.app])
+      backend.send('agent.updated', backend.runtime)
+      await expect(page.getByRole('treeitem', { name: 'Late App', exact: true })).toBeVisible()
+      backend.hold()
+      const before = backend.requests()
+      await page.evaluate(() => dispatchEvent(new Event('focus')))
+      await expect.poll(() => backend.requests()).toBe(before + 1)
+      backend.setApps([])
+      backend.send('agent.deleted', backend.runtime)
+      await expect(page.getByRole('treeitem', { name: 'Late App', exact: true })).toHaveCount(0)
+      const response = page.waitForResponse((item) => item.url().endsWith('/workspaces/ws-1/apps'))
+      backend.release()
+      await response
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+      expect(await page.getByRole('treeitem', { name: 'Late App', exact: true }).count()).toBe(0)
+      await expect.poll(() => backend.requests()).toBeGreaterThan(before + 1)
+      await expect(page.getByRole('treeitem', { name: 'Late App', exact: true })).toHaveCount(0)
+    })
+    test('snapshot fallback and foreground refresh update App metadata without polling', async ({ page }) => {
+      const backend = await fixture(page)
+      backend.setApps([backend.app])
+      backend.send('workspace.snapshot', { ...snapshot, agents: [...snapshot.agents, { ...backend.runtime, kind: 'command' }] })
+      await expect(page.getByRole('treeitem', { name: 'Late App', exact: true })).toBeVisible()
+      backend.setApps([{ ...backend.app, hostname: 'foreground.internal', public_url: 'https://foreground.apps.example.com/' }])
+      const before = backend.requests()
+      await page.evaluate(() => { dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')) })
+      await expect.poll(() => backend.requests()).toBe(before + 1)
+      await page.getByRole('button', { name: 'Actions for Late App', exact: true }).click()
+      await page.getByRole('menuitem', { name: 'App settings', exact: true }).click()
+      await expect(page.getByText('https://foreground.apps.example.com/', { exact: true })).toBeVisible()
+    })
+  })
+}
+
 for (const runtimeId of ["app-runtime", "app-1"]) {
   test(`selecting a Managed App embeds its human root and retains logs (${runtimeId})`, async ({ page }) => {
     await mockApp(page, "running", runtimeId)
