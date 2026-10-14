@@ -310,6 +310,19 @@ later versions from `/admin`. See [Self-hosted Compose](../deploy/README.md).
 Hosted Railway continues to rebuild the Proxy from the promoted commit in each
 environment. The frontend artifact is already byte-identical across promotion.
 
+### Re-running the Windows UI smoke alone
+
+Diagnostic branch workflow (not yet part of the release gate): the Windows
+launcher/UI smoke can run without the five-platform build and without the
+Windows unit tests. Dispatch it from the branch with
+`gh workflow run build-release-artifacts.yml --ref <branch> -f revision=<sha>`.
+Without `artifact_run_id` it builds the Windows binaries from `<sha>` (embedding
+a freshly prepared launcher payload) and runs the smoke against that official
+Controller. With `-f artifact_run_id=<run>` it reuses the Windows artifact of an
+earlier run, which takes minutes but exercises only the harness and that
+artifact's embedded payload, so a payload fix needs the build mode. Neither mode
+produces release bytes or replaces the full native gate.
+
 ### Windows manual machine update gate
 
 `scripts/update-machine.ps1` is the operator-reviewed Canary checksum workflow,
