@@ -93,15 +93,55 @@ export function controllerInstall(request) {
     const profilesManifest = json(join(versionRoot, "profiles.json"));
     if (profilesManifest.schema !== "treer.launcher-profiles/v1" || !Array.isArray(profilesManifest.profiles)) throw new Error("Invalid profile manifest");
     const selected = request.agents?.length ? [...new Set(request.agents)] : profilesManifest.profiles.map((profile) => profile.id);
-    const profiles = selected.map((id) => profilesManifest.profiles.find((profile) => profile.id === id));
+    let profiles = selected.map((id) => profilesManifest.profiles.find((profile) => profile.id === id));
     if (profiles.some((profile) => !profile || typeof profile.name !== "string" || !Array.isArray(profile.args))) throw new Error("Unknown launcher provider");
     const transaction = profileTransaction(request.treer, (message) => console.error(message));
-    const originals = new Map(profiles.map((profile) => [profile.name, transaction.show(profile.name)]));
     const receiptPath = join(root, "profiles-receipt.json");
     const originalReceipt = present(receiptPath) ? regular(receiptPath) : null;
     const receipt = originalReceipt ? JSON.parse(originalReceipt.toString("utf8")) : {};
     const runner = join(root, "run.mjs");
     const specification = (profile) => ({ command: profile.command, cwd: profile.cwd, args: profile.args ?? [] });
+    const names = receipt.$profile_names ?? {};
+    if (!names || typeof names !== "object" || Array.isArray(names)) throw new Error("Invalid launcher profile-name receipt");
+    const originals = new Map();
+    let machineName;
+    function qualifiedName(profile) {
+      if (!machineName) {
+        let machine = request.controller?.machine;
+        if (!machine?.name) {
+          const reported = transaction.machine();
+          if (!machine?.server_id || reported?.server_id !== machine.server_id) throw new Error("Unable to verify launcher machine name");
+          machine = reported;
+        }
+        const name = machine.name;
+        if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) throw new Error("Launcher machine name must be 1-64 ASCII letters, digits, dots, underscores or hyphens");
+        machineName = name;
+      }
+      return `${profile.name} (${machineName})`;
+    }
+    profiles = profiles.map((profile) => {
+      const savedName = names[profile.id];
+      if (savedName !== undefined && (typeof savedName !== "string" || savedName.length > 128 || !receipt[savedName])) throw new Error("Invalid launcher profile-name receipt");
+      let name = savedName ?? profile.name, current = transaction.show(name);
+      const legacy = !receipt[name] && current?.command === join(root, "current/launchers/agent/scripts/treer-agent.sh") && current.cwd === cwd && JSON.stringify(current.args) === JSON.stringify(profile.args);
+      // Workspace names are global: another machine's default must never be
+      // overwritten. Once selected, persist the name with the same transaction
+      // as its ownership receipt, so renaming a machine cannot redirect updates.
+      if (!savedName && current && !receipt[name] && !legacy) {
+        name = qualifiedName(profile);
+        current = transaction.show(name);
+        if (current && !receipt[name]) {
+          const id = request.controller?.machine?.server_id;
+          if (typeof id !== "string" || !/^srv_[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("Unable to verify launcher machine identity");
+          name = `${profile.name} (${machineName}-${id})`;
+          if (name.length > 128) throw new Error("Launcher profile name exceeds 128 characters");
+          current = transaction.show(name);
+        }
+      }
+      if (name.length > 128) throw new Error("Launcher profile name exceeds 128 characters");
+      originals.set(name, current);
+      return { ...profile, name };
+    });
     for (const profile of profiles) {
       const current = originals.get(profile.name);
       if (!current) continue;
@@ -124,6 +164,7 @@ export function controllerInstall(request) {
         transaction.saveProfile({ ...profile, args: [runner, ...profile.args] }, request.node, cwd, originals.get(profile.name));
         receipt[profile.name] = { command: request.node, cwd, args: [runner, ...profile.args] };
       }
+      receipt.$profile_names = { ...names, ...Object.fromEntries(profiles.map((profile) => [profile.id, profile.name])) };
       atomic(receiptPath, JSON.stringify(receipt) + "\n");
     } catch (error) {
       let failed = false;

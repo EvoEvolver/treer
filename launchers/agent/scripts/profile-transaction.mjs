@@ -37,5 +37,5 @@ export function profileTransaction(treer, log = console.log) {
         ...(args.length ? args.flatMap((arg) => ["--arg", arg]) : ["--clear-args"])]);
     } catch { throw new Error("Unable to restore launcher profile"); }
   }
-  return { show, saveProfile, restoreProfile };
+  return { show, saveProfile, restoreProfile, machine: () => JSON.parse(run(["whoami"])).machine };
 }

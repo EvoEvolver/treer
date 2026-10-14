@@ -124,6 +124,23 @@ requiring explicit operator review rather than silent overwrite. The stable
 trampoline is hash-compared with verified candidate bytes and atomically repaired
 on update; status exposes its integrity separately from immutable version assets.
 
+Profiles live in the workspace, while installations live on individual machines.
+The official Controller installer preserves existing local/legacy profile names.
+If an unowned default name belongs to another machine, it saves a new profile
+such as `Codex + UI (win_native)` instead of replacing the existing one. If that
+name is also occupied, the suffix includes the full stable machine ID. Machine
+names must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; complete profile names are
+limited to 128 characters. Names come from Controller metadata, or verified
+`whoami` metadata for older contracts, never from a guessed hostname or PATH.
+The private receipt records provider-to-name mappings atomically with ownership
+specifications. Updates and rollbacks reuse these exact names even after a
+machine rename; modifications to a receipted profile still require explicit
+operator review. Existing profiles on other machines remain untouched.
+Commands remain absolute: the trusted Node executable and version-independent
+runner are specific to that machine, and Windows/POSIX provider entry points
+differ. Machine-relative command rewriting is outside this change. The legacy
+Git/source installer below does not gain this production multi-machine policy.
+
 `install.sh`, `apply.sh` and the Git bootstrap below are legacy/development
 entry points, deprecated for default production installation. They retain the
 shared profile save/readback/restoration code, but their Git source is not
