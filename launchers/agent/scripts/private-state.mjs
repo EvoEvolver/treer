@@ -19,7 +19,7 @@ export function protectDirectory(directory) {
   const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || process.env.windir;
   if (!systemRoot || !isAbsolute(systemRoot)) throw new Error("SystemRoot is required to protect Windows Agent state");
   env.TREER_PRIVATE_STATE_PATH = toNamespacedPath(directory);
-  const script = "$ErrorActionPreference='Stop'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $acl=New-Object Security.AccessControl.DirectorySecurity; $acl.SetSecurityDescriptorSddlForm(('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;'+$sid+')')); [IO.Directory]::SetAccessControl($env:TREER_PRIVATE_STATE_PATH,$acl)";
+  const script = "$ErrorActionPreference='Stop'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetSecurityDescriptorSddlForm(('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;'+$sid+')')); [IO.Directory]::SetAccessControl($env:TREER_PRIVATE_STATE_PATH,$acl)";
   try {
     execFileSync(join(systemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe"), ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, stdio: "ignore", windowsHide: true, timeout: 15000 });
   } catch { throw new Error("Unable to apply current-user/SYSTEM-only ACL to Windows Agent state"); }
